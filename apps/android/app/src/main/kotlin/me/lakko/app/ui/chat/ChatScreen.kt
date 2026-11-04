@@ -35,6 +35,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.filled.Close
@@ -68,6 +70,12 @@ import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.semantics.customActions
+import me.lakko.app.chat.toFfiAllowed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.TopAppBar
@@ -129,11 +137,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
-import android.text.format.DateFormat
 import java.time.ZoneId
 import java.util.Locale
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -163,10 +168,12 @@ import me.lakko.app.chat.Direction
 import me.lakko.app.chat.GroupPollOutcome
 import me.lakko.app.chat.UploadStage
 import uniffi.lakko_ffi_uniffi.AttachmentRef
-import uniffi.lakko_ffi_uniffi.GroupInfoCapabilities
+import uniffi.lakko_ffi_uniffi.ConversationInfoCapabilities
+import uniffi.lakko_ffi_uniffi.ConversationInfoKind
+import uniffi.lakko_ffi_uniffi.ConversationRole
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.callHoldsCapture
-import uniffi.lakko_ffi_uniffi.groupInfoSections
+import uniffi.lakko_ffi_uniffi.conversationInfoSections
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
@@ -206,6 +213,9 @@ public fun ChatScreen(
      *  on the back stack, so Back (and the screen's `Message`) return here. */
     onOpenContact: (contactKey: String) -> Unit,
     modifier: Modifier = Modifier,
+    /** docs/ux/conversation-info.md section 2.4 — the people search the Add
+     *  members screen asks the network with; `null` shows contacts only. */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     /** The group's title (local name or member-derived) for a group chat;
      *  a 1x1 chat names the other person itself. Never a hex id. */
     groupTitle: String? = null,
@@ -233,6 +243,27 @@ public fun ChatScreen(
     // The state is TERMINAL, so nothing here needs invalidating on a timer.
     val membership by viewModel.membership.collectAsStateWithLifecycle()
     val membershipEnded = me.lakko.app.chat.membershipEnded(membership)
+
+    // ADR-0087 section 9 — this account is out of the group: the dialog when
+    // the person is told, straight back to Chats when they asked for it.
+    val endDialog by viewModel.endDialog.collectAsStateWithLifecycle()
+    val conversationGone by viewModel.conversationGone.collectAsStateWithLifecycle()
+    LaunchedEffect(conversationGone) { if (conversationGone) onNavigateBack() }
+    // The wipe behind the dialog deletes what a title is made from. The screen
+    // keeps the title it had while the conversation was whole.
+    val ending = endDialog != null || viewModel.conversationEnding()
+    var heldGroupTitle by remember(viewModel) { mutableStateOf<String?>(null) }
+    val shownGroupTitle = me.lakko.app.chat.titleBehindEnd(groupTitle, heldGroupTitle, ending)
+    SideEffect {
+        if (me.lakko.app.chat.holdsTitle(state.threadKnown, ending)) heldGroupTitle = groupTitle
+    }
+    endDialog?.let { dialog ->
+        MembershipEndDialog(
+            dialog = dialog,
+            shownTitle = shownGroupTitle,
+            onOk = viewModel::onEndNoticeAcknowledged,
+        )
+    }
 
     // 1.19c4 — preview-attachment sheet state. When the user
     // taps "Open" on an image chip we resolve the bytes off
@@ -332,9 +363,10 @@ public fun ChatScreen(
     // ADR-0061: dates and times in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
-    val timeline = remember(state.messages, zone, use24h, strings) {
-        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings)
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
+    val timeline = remember(state.messages, zone, use24h, strings, isGroupChat) {
+        // UX second-device.md section 4 — a group draws its membership rows.
+        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings, isGroup = isGroupChat)
     }
     // ADR-0052 decision 3 / UX 4.1 — the pins. The bar is DERIVED from the two
     // stores and the held messages, never stored: a pin whose message this
@@ -413,6 +445,18 @@ public fun ChatScreen(
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
     }
+    // The author a reply quote or a forward attribution CARRIES: the same
+    // person, but never a placeholder (every receiver would show it forever);
+    // with no real name the snapshot carries none.
+    val snapshotAuthorLabel: (ChatMessage) -> String? = { msg ->
+        me.lakko.app.chat.snapshotAuthorOf(
+            message = msg,
+            youLabel = strings["chat.author.you"],
+            isOneToOne = !isGroupChat,
+            authorName = viewModel.snapshotNameOf(msg.authorKey),
+            peerName = viewModel.oneToOnePeerSnapshotName(),
+        )
+    }
     // docs/ux/feed.md section 5 — Reply chosen on a feed item: arm the reply
     // strip once the timeline holds the row. A row this timeline never shows
     // spends the request the first time the timeline is non-empty.
@@ -421,7 +465,7 @@ public fun ChatScreen(
         if (state.messages.isEmpty()) return@LaunchedEffect
         me.lakko.app.chat.PendingReplyArm.take(state.groupIdHex)
         state.messages.firstOrNull { it.messageId == pending }?.let { msg ->
-            viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
+            viewModel.onReplyToMessage(msg, snapshotAuthorLabel(msg).orEmpty())
         }
     }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
@@ -626,9 +670,48 @@ public fun ChatScreen(
     // UX spec §4 — the picker: composer mode (insert, stays open) or reaction
     // mode for one message (react, closes). `null` when closed.
     var picker by remember { mutableStateOf<PickerRequest?>(null) }
+    // reactions-and-emoji — what every bubble needs to draw and answer
+    // reactions, and the open reactions list (section 8.1).
+    var reactorsFor by remember { mutableStateOf<Pair<Long, String?>?>(null) }
+    val capNoticeId by viewModel.reactionCapNotice.collectAsStateWithLifecycle()
+    val quickChosen by me.lakko.app.chat.QuickReaction.chosen.collectAsStateWithLifecycle()
+    val settingsVersion by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
+    val allowedReactions = remember(state.groupIdHex, settingsVersion) { viewModel.allowedReactions() }
+    val reactionContext = remember(allowedReactions, quickChosen, capNoticeId, conversationKind, nameVersion) {
+        BubbleReactionContext(
+            allowed = allowedReactions,
+            quick = viewModel.quickReaction(),
+            recent = mediaHub.prefs.recentEmoji,
+            chipConversation = if (conversationKind == ConversationKind.Group) {
+                uniffi.lakko_ffi_uniffi.FfiChipConversation.GROUP
+            } else {
+                uniffi.lakko_ffi_uniffi.FfiChipConversation.ONE_TO_ONE
+            },
+            capNoticeId = capNoticeId,
+            onQuickReact = { id -> viewModel.onQuickReact(id) },
+            onShowReactors = { id, emoji -> reactorsFor = id to emoji },
+            nameOf = { key -> viewModel.nameOf(key) },
+        )
+    }
+    reactorsFor?.let { (id, emoji) ->
+        val target = state.messages.firstOrNull { it.messageId == id }
+        if (target == null || target.reactions.isEmpty()) {
+            reactorsFor = null
+        } else {
+            ReactorsSheet(
+                reactions = target.reactions,
+                ownIdentity = ownIdentity,
+                initialEmoji = emoji,
+                nameOf = { key -> viewModel.nameOf(key) },
+                onDismiss = { reactorsFor = null },
+            )
+        }
+    }
     var emojiDataset by remember { mutableStateOf<me.lakko.app.media.EmojiDataset?>(null) }
-    LaunchedEffect(picker != null) {
-        if (picker != null && emojiDataset == null) {
+    // reactions-and-emoji section 13 — also read for the `:` strip, so loaded
+    // with the screen rather than with the picker.
+    LaunchedEffect(Unit) {
+        if (emojiDataset == null) {
             emojiDataset = withContext(Dispatchers.IO) { me.lakko.app.media.EmojiAssets.load(context) }
         }
     }
@@ -661,19 +744,57 @@ public fun ChatScreen(
     }
 
     val headerTitle = if (isGroupChat) {
-        groupTitle ?: peerName ?: t("chat.group.fallback_name")
+        shownGroupTitle ?: peerName ?: t("chat.group.fallback_name")
     } else {
-        peerName ?: groupTitle ?: t("chat.group.fallback_name")
+        peerName ?: shownGroupTitle ?: t("chat.group.fallback_name")
     }
+    // ADR-0050 — people, not leaves: this device's other phone is not a member.
+    val peopleCount by viewModel.peopleCount.collectAsStateWithLifecycle()
+    val callControls = me.lakko.app.chat.showsCallControls(isGroupChat, peopleCount)
     // UX 5.2 — "typing..." while a typing indicator is live (ADR-0024; never on
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val typingLine = state.typingText?.text()
     val headerSubtitle = when {
         typingLine != null && !membershipEnded -> typingLine
-        isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (otherMembers.size + 1).toULong()))
+        isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (peopleCount ?: (otherMembers.size + 1)).toULong()))
         peerUsername != null -> "@$peerUsername"
         else -> null
     }
+    // docs/ux/conversation-info.md section 3 — a group's info is a SCREEN
+    // pushed over the conversation, not a layer on it: while it (or a screen
+    // pushed over it) is up it takes the conversation's place. The
+    // conversation's state outlives it — the timeline's scroll position is
+    // `listState` above and the draft is the view model's — so its back
+    // control returns to the conversation as it was left.
+    //
+    // Gated on the conversation's KIND, not on the flag alone: a conversation
+    // between two people has no group info, and no caller of
+    // `toggleMembersPanel` may put one in front of them (section 0).
+    val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
+    val addMembersOpen by viewModel.addMembersOpen.collectAsStateWithLifecycle()
+    val transferStepOpen by viewModel.transferStepOpen.collectAsStateWithLifecycle()
+    val infoLayer = me.lakko.app.chat.groupInfoLayer(
+        infoOpen = membersPanelOpen,
+        isGroup = conversationInfo == ConversationInfo.Group,
+        addMembersOpen = addMembersOpen,
+        transferOpen = transferStepOpen,
+    )
+    if (infoLayer == me.lakko.app.chat.GroupInfoLayer.ADD_MEMBERS) {
+        AddMembersScreen(
+            viewModel = viewModel,
+            contactsRepository = contactsRepository,
+            peopleSearch = peopleSearch,
+            modifier = modifier,
+        )
+    } else if (infoLayer != me.lakko.app.chat.GroupInfoLayer.CONVERSATION) {
+        MembersSheet(
+            viewModel = viewModel,
+            onChatDeleted = onNavigateBack,
+            onOpenContact = onOpenContact,
+            contactsRepository = contactsRepository,
+            modifier = modifier,
+        )
+    } else
     Scaffold(
         modifier = modifier.fillMaxSize(),
         // Edge-to-edge: the top bar takes the status bar, the composer sits
@@ -699,9 +820,10 @@ public fun ChatScreen(
             // per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`
             // and now raises, so they fail closed — which is correct, and is not
             // enough: a call control asserts a live E2EE session, and there is
-            // not one. Folded into `callActive` because the two reasons to hide
-            // them are the same rendering decision.
-            callActive = callOccupant != null || membershipEnded,
+            // not one. Folded into `callActive` because the reasons to hide
+            // them are the same rendering decision; a group of one is the third
+            // (docs/ux/group-and-channel-privacy.md section 10).
+            callActive = callOccupant != null || membershipEnded || !callControls,
             onNavigateBack = onNavigateBack,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
@@ -873,30 +995,11 @@ public fun ChatScreen(
             )
         }
 
-        // The GROUP's info: the roster, the name, the invite link, the roles
-        // and the exit, as a Dialog over the conversation while
-        // `membersPanelOpen` is true.
-        //
-        // The second half of that condition is the guard, not a nicety: this
-        // sheet is about a group, and a conversation between two people has
-        // none. Gating the render on the conversation's kind rather than on
-        // the flag alone means no future caller of `toggleMembersPanel` can
-        // put `Group name`, `Create invite link`, `Make admin` and `Transfer
-        // ownership` in front of somebody chatting with one other person,
-        // which is the defect docs/ux/conversation-info.md section 0 records.
-        val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
-        if (membersPanelOpen && conversationInfo == ConversationInfo.Group) {
-            MembersSheet(
-                viewModel = viewModel,
-                onChatDeleted = onNavigateBack,
-            )
-        }
-
         // No call is drawn here: the 1x1, group and call-link in-call screens
         // are mounted app-wide by `MainActivity`, so leaving this chat never
         // hides or ends a call and returning to it shows the live call.
 
-        if (!state.threadKnown) {
+        if (me.lakko.app.chat.showsSettingUpLine(state.threadKnown, ending)) {
             // The chat list opened this screen for a group that
             // the repository doesn't know about yet (post-restart
             // before snapshot rehydrate built the handle, or a
@@ -920,8 +1023,18 @@ public fun ChatScreen(
                 // and once the membership has ended that is an invitation the
                 // bar below can no longer accept. The terminal row carries the
                 // whole of what there is to say.
-                if (!membershipEnded) EmptyTimelineHint()
+                if (!membershipEnded) {
+                    if (isGroupChat) {
+                        SoloGroupBlock(
+                            viewModel = viewModel,
+                            onAddMembers = viewModel::toggleMembersPanel,
+                            alone = otherMembers.isEmpty(),
+                        )
+                    }
+                    if (!isGroupChat || otherMembers.isNotEmpty()) EmptyTimelineHint()
+                }
             } else {
+                androidx.compose.runtime.CompositionLocalProvider(LocalBubbleReactions provides reactionContext) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -929,6 +1042,17 @@ public fun ChatScreen(
                         vertical = 8.dp,
                     ),
                 ) {
+                    // ADR-0087 section 10 — a group of one opens with its
+                    // creation row and the two ways to bring people in.
+                    if (isGroupChat && !membershipEnded) {
+                        item(key = "solo-group") {
+                            SoloGroupBlock(
+                                viewModel = viewModel,
+                                onAddMembers = viewModel::toggleMembersPanel,
+                                alone = otherMembers.isEmpty(),
+                            )
+                        }
+                    }
                     items(items = timeline, key = { it.key }) { item ->
                         if (item is TimelineItem.DateSeparator) {
                             DateSeparatorPill(item.label)
@@ -939,6 +1063,13 @@ public fun ChatScreen(
                         ) {
                         val row = item as TimelineItem.Row
                         val msg = row.message
+                        // reactions-and-emoji section 12 — an own message with
+                        // reactions on screen is seen.
+                        if (msg.direction == Direction.Outgoing && msg.reactions.isNotEmpty()) {
+                            LaunchedEffect(msg.messageId, msg.reactions.size) {
+                                me.lakko.app.chat.UnseenReactions.seen(state.groupIdHex, msg.messageId)
+                            }
+                        }
                         val pinMenu = me.lakko.app.chat.pinMenuFor(
                             sharedPinned = sharedPins[msg.messageId]?.pinned == true,
                             personalPinned = msg.messageId in personalPins,
@@ -975,8 +1106,10 @@ public fun ChatScreen(
                             // calls back, through the same permission gate and
                             // the same routing as the header buttons.
                             onCallBack = { video ->
-                                callPermissions.request(video = video) { granted ->
-                                    viewModel.onCallButton(video = granted)
+                                if (callControls) {
+                                    callPermissions.request(video = video) { granted ->
+                                        viewModel.onCallButton(video = granted)
+                                    }
                                 }
                             },
                             ownIdentity = ownIdentity,
@@ -985,6 +1118,16 @@ public fun ChatScreen(
                             // read so the label updates in place.
                             authorName = if (isGroupChat && msg.direction == Direction.Incoming) {
                                 nameVersion.let { msg.authorKey?.let(viewModel::nameOf) }
+                            } else {
+                                null
+                            },
+                            // UX second-device.md section 4 — "VG3 joined",
+                            // names resolved now; `nameVersion` is read so the
+                            // row updates in place.
+                            systemLine = if (isGroupChat) {
+                                nameVersion.let {
+                                    me.lakko.app.chat.membershipRowText(msg, viewModel::nameOf, strings)
+                                }
                             } else {
                                 null
                             },
@@ -1045,7 +1188,7 @@ public fun ChatScreen(
                             // resolved name otherwise.
                             onReply = {
                                 editTarget = null
-                                viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
+                                viewModel.onReplyToMessage(msg, snapshotAuthorLabel(msg).orEmpty())
                             },
                             onJumpToReply = jumpToMessage,
                             // ADR-0052 decision 2 / UX 5.1 — Forward hands the
@@ -1058,7 +1201,7 @@ public fun ChatScreen(
                                     ForwardRequest(
                                         sourceGroupIdHex = state.groupIdHex,
                                         message = msg,
-                                        authorLabel = timelineAuthorLabel(msg),
+                                        authorLabel = snapshotAuthorLabel(msg),
                                         // ADR-0053 section 6 — no origin out of a one-to-one.
                                         sourceIsOneToOne = viewModel.conversationKind() ==
                                             me.lakko.app.chat.ConversationKind.Chat,
@@ -1111,6 +1254,41 @@ public fun ChatScreen(
                         }
                     }
                 }
+                }
+                // reactions-and-emoji section 12 — the unseen-reactions
+                // button: a heart and a count; a tap scrolls to the oldest
+                // such message and lights it.
+                val unseenVersion by me.lakko.app.chat.UnseenReactions.version.collectAsStateWithLifecycle()
+                val unseen = remember(unseenVersion, state.groupIdHex) {
+                    me.lakko.app.chat.UnseenReactions.of(state.groupIdHex)
+                }
+                if (unseen.isNotEmpty()) {
+                    val unseenLabel = strings.format(
+                        "chat.reaction.unseen_a11y",
+                        counts = mapOf("count" to unseen.size.toULong()),
+                    )
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                        shadowElevation = 4.dp,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp)
+                            .semantics { contentDescription = unseenLabel }
+                            .clickable {
+                                val first = unseen.first()
+                                me.lakko.app.chat.UnseenReactions.seen(state.groupIdHex, first)
+                                jumpToMessage(first)
+                            },
+                    ) {
+                        Text(
+                            text = "\u2764\uFE0F ${unseen.size}",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                    }
+                }
             }
         }
 
@@ -1127,7 +1305,7 @@ public fun ChatScreen(
         // `ChatMessage`: nothing produced it on the wire (the removing commit
         // returns the same content-less `Commit` as any other), and the state
         // is terminal, so "after everything" is the only place it can be.
-        me.lakko.app.chat.terminalRow(membership)?.let { row ->
+        me.lakko.app.chat.terminalRowBehindEnd(membership, ending)?.let { row ->
             TerminalMembershipRow(row)
         }
         // ADR-0024 — the typing indicator lives in the header's second line
@@ -1148,7 +1326,7 @@ public fun ChatScreen(
                         ForwardRequest(
                             sourceGroupIdHex = state.groupIdHex,
                             message = msg,
-                            authorLabel = timelineAuthorLabel(msg),
+                            authorLabel = snapshotAuthorLabel(msg),
                             // ADR-0053 section 6 — no origin out of a one-to-one.
                             sourceIsOneToOne = viewModel.conversationKind() ==
                                 me.lakko.app.chat.ConversationKind.Chat,
@@ -1164,8 +1342,15 @@ public fun ChatScreen(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
                 onEmojiInserted = { pendingEmojiInsert = null },
+                colonSuggest = { word ->
+                    val data = emojiDataset ?: return@Composer emptyList()
+                    val found = me.lakko.app.media.searchEmoji(data, word).map { it.emoji }
+                    val recent = mediaHub.prefs.recentEmoji.filter { it in found }
+                    (recent + found).distinct()
+                },
                 onOpenPicker = { picker = PickerRequest(PickerMode.COMPOSER, null) },
                 draft = state.draft,
+                draftRevision = state.draftRevision,
                 sending = state.sending,
                 sendError = state.sendError,
                 pendingAttachments = state.pendingAttachments,
@@ -1239,6 +1424,20 @@ public fun ChatScreen(
             onDismiss = {
                 viewModel.gifPicker.close()
                 picker = null
+            },
+            only = if (request.mode == PickerMode.REACTION) {
+                (allowedReactions as? me.lakko.app.chat.AllowedReactions.Only)?.emoji
+            } else {
+                null
+            },
+            // reactions-and-emoji section 10 — with 3 held, the picker opens
+            // with the same rule as the row.
+            capOwn = if (request.mode == PickerMode.REACTION) {
+                state.messages.firstOrNull { it.messageId == request.messageId }
+                    ?.let { me.lakko.app.chat.ownReactionEmoji(it.reactions, ownIdentity).toSet() }
+                    ?.takeIf { it.size >= MAX_OWN_REACTIONS }
+            } else {
+                null
             },
         )
     }
@@ -1315,7 +1514,14 @@ private fun Header(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.clickable(onClick = onShowInfo),
             ) {
-                LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup, personKey = personKey)
+                LakkoAvatar(
+                    name = title,
+                    seed = avatarSeed,
+                    size = 32.dp,
+                    group = isGroup,
+                    personKey = personKey,
+                    groupIdHex = avatarSeed.takeIf { isGroup },
+                )
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Text(
@@ -1422,6 +1628,9 @@ private fun MessageRow(
     /** ADR-0048 — the resolved author name for an incoming group bubble, else
      *  `null` (no label). */
     authorName: String?,
+    /** UX second-device.md section 4 — the drawn line of a membership row
+     *  (`VG3 joined`), else `null` and a system row shows its own text. */
+    systemLine: String? = null,
     /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
      *  `false` once this device's membership has ended: all three compose an
      *  application message, so all three are refused by the same core gate
@@ -1613,7 +1822,7 @@ private fun MessageRow(
                         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     ) {
                         Text(
-                            text = msg.text,
+                            text = systemLine ?: msg.text,
                             style = MaterialTheme.typography.labelMedium,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1642,8 +1851,7 @@ private fun CallHistoryRow(
     time: String?,
     onCallBack: (video: Boolean) -> Unit,
 ) {
-    val missed = entry.outcome == me.lakko.app.calls.CallOutcome.MISSED ||
-        entry.outcome == me.lakko.app.calls.CallOutcome.DECLINED
+    val missed = me.lakko.app.calls.callHistoryIsUnanswered(entry.outcome)
     val tint = if (missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val strings = me.lakko.app.l10n.LocalStrings.current
     val spoken = remember(entry, strings) { me.lakko.app.calls.callRowSpokenLabel(entry, strings) }
@@ -1903,7 +2111,29 @@ internal fun Bubble(
         // second row below the bubble).
         val metaSlot = me.lakko.app.media.bubbleMetaSlot(soleBubble)
         val mediaOnly = metaSlot == me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
-        val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
+        // reactions-and-emoji section 13 — one to three emoji and nothing
+        // else (no attachment, quote or forward line) are drawn large, with
+        // no bubble behind them. The count is the core's rule.
+        val emojiOnly = remember(msg.text, msg.deleted, msg.attachments.size, msg.reply, msg.forward) {
+            if (msg.deleted || msg.attachments.isNotEmpty() || msg.reply != null || msg.forward != null) {
+                0
+            } else {
+                try {
+                    uniffi.lakko_ffi_uniffi.emojiOnlyCount(msg.text).toInt()
+                } catch (_: Throwable) {
+                    0
+                }
+            }
+        }
+        val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly || emojiOnly > 0
+        val reactionCtx = LocalBubbleReactions.current
+        val ownEmoji = remember(msg.reactions, ownIdentity) {
+            me.lakko.app.chat.ownReactionEmoji(msg.reactions, ownIdentity).toSet()
+        }
+        // Section 6 — a double tap sends the quick reaction; nothing on a
+        // message not sent, failed, deleted, ended, or while selecting.
+        val quickReactable = actionsAvailable && hasId && !msg.deleted && !msg.isHistory &&
+            msg.ack == Ack.SENT && msg.unsupportedVersion == null && reactionCtx != null
         // ADR-0061 section 6 — a newer-version row has no content this build
         // can read, so nothing to copy, edit, quote or forward: no menu.
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
@@ -1923,7 +2153,7 @@ internal fun Bubble(
                 // UX section 4 — radius 18 for bubbles.
                 shape = RoundedCornerShape(18.dp),
                 color = if (chromeless) Color.Transparent else background,
-                contentColor = contentColor,
+                contentColor = if (emojiOnly > 0) MaterialTheme.colorScheme.onSurfaceVariant else contentColor,
                 modifier = Modifier
                     .widthIn(max = maxBubbleWidth)
                     .onGloballyPositioned {
@@ -1937,10 +2167,32 @@ internal fun Bubble(
                         // membership has ended: the menu it opens offers
                         // three ops the core now refuses, permanently.
                         if (menuAvailable) {
-                            Modifier.combinedClickable(
-                                onClick = {},
-                                onLongClick = { menuOpen = true },
+                            val quickLabel = me.lakko.app.l10n.LocalStrings.current.format(
+                                "chat.message.react_with",
+                                mapOf("emoji" to (reactionCtx?.quick ?: "")),
                             )
+                            Modifier
+                                .combinedClickable(
+                                    onClick = {},
+                                    onLongClick = { menuOpen = true },
+                                    onDoubleClick = if (quickReactable) {
+                                        { reactionCtx?.onQuickReact?.invoke(msg.messageId) }
+                                    } else {
+                                        null
+                                    },
+                                )
+                                .semantics {
+                                    // Section 6 — TalkBack keeps its own double
+                                    // tap; the quick reaction is a named action.
+                                    if (quickReactable) {
+                                        customActions = listOf(
+                                            androidx.compose.ui.semantics.CustomAccessibilityAction(quickLabel) {
+                                                reactionCtx?.onQuickReact?.invoke(msg.messageId)
+                                                true
+                                            },
+                                        )
+                                    }
+                                }
                         } else {
                             Modifier
                         },
@@ -2021,12 +2273,23 @@ internal fun Bubble(
                                 onLongPress = openMenu,
                                 onJoin = { openCallLink?.invoke(callInvite.argument) },
                             )
-                        } else if (msg.text.isNotEmpty()) {
+                        } else if (emojiOnly > 0) {
                             Text(
+                                text = msg.text.trim(),
+                                fontSize = largeEmojiSize(emojiOnly),
+                                lineHeight = largeEmojiSize(emojiOnly) * 1.15f,
+                            )
+                        } else if (msg.text.isNotEmpty()) {
+                            // docs/ux/message-links.md section 1 — the accent on
+                            // an incoming bubble; on an outgoing one the accent
+                            // is the background, so the bubble's own text colour.
+                            me.lakko.app.ui.components.MessageLinkText(
                                 // Translation UX 3.2 — the translation takes the
                                 // place of the text inside the same bubble.
                                 text = tr.shownText,
                                 style = MaterialTheme.typography.bodyMedium,
+                                linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
+                                onLongPress = openMenu,
                             )
                             tr.captionLine?.let { line ->
                                 me.lakko.app.ui.translation.TranslateQuietLine(
@@ -2162,7 +2425,11 @@ internal fun Bubble(
                             translateLabel = tr.menuLabel,
                         )
                     },
-                    reactions = if (msg.isHistory) emptyList() else REACTION_EMOJIS,
+                    reactions = if (msg.isHistory) emptyList() else reactionCtx?.rowFor(msg.reactions) ?: REACTION_EMOJIS,
+                    ownReactions = ownEmoji,
+                    capReached = ownEmoji.size >= MAX_OWN_REACTIONS,
+                    showExpand = reactionCtx?.showExpand ?: true,
+                    showRow = !msg.isHistory && reactionCtx?.allowed != me.lakko.app.chat.AllowedReactions.Off,
                     onReact = { emoji ->
                         menuOpen = false
                         onReact(emoji)
@@ -2227,6 +2494,18 @@ internal fun Bubble(
                 ownIdentity = ownIdentity,
                 onToggle = { emoji -> if (actionsAvailable && hasId) onReact(emoji) },
                 interactive = actionsAvailable,
+                onShowReactors = { emoji -> reactionCtx?.onShowReactors?.invoke(msg.messageId, emoji) },
+            )
+        }
+        // Sections 6, 7 and 10 — the 3-reactions line, about three seconds.
+        if (reactionCtx != null && reactionCtx.capNoticeId == msg.messageId) {
+            Text(
+                text = t("chat.reaction.cap_reached"),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
 
@@ -2526,9 +2805,62 @@ private fun MediaMetaPill(
     }
 }
 
-/** ADR-0023 — aggregate reactions into `emoji ×count` chips. A
- *  chip the local user contributed is tinted + tappable to
- *  toggle off. */
+/** reactions-and-emoji sections 5-10 — what a bubble needs to draw and
+ *  answer reactions, provided once by the chat screen. */
+internal class BubbleReactionContext(
+    /** What the conversation takes (section 9). */
+    val allowed: me.lakko.app.chat.AllowedReactions,
+    /** The account's quick reaction (section 6). */
+    val quick: String,
+    /** The picker's Recent list, newest first (section 5). */
+    val recent: List<String>,
+    /** One-to-one, group (avatars) or channel (counts). */
+    val chipConversation: uniffi.lakko_ffi_uniffi.FfiChipConversation,
+    /** The message whose 3-reactions line is showing, or `null`. */
+    val capNoticeId: Long?,
+    val onQuickReact: (Long) -> Unit,
+    /** Open the reactions list on a message, on a tab (`null` = All). */
+    val onShowReactors: (Long, String?) -> Unit,
+    /** A person's display name, by account key (base64). */
+    val nameOf: (me.lakko.app.chat.MemberIdentity) -> String,
+) {
+    /** Section 5 — whether the row ends with the expand control. */
+    val showExpand: Boolean = try {
+        uniffi.lakko_ffi_uniffi.rowHasExpand(allowed.toFfiAllowed())
+    } catch (_: Throwable) {
+        true
+    }
+
+    /** Section 5 — the six of the row for a message holding [held]. */
+    fun rowFor(held: List<me.lakko.app.chat.Reaction>): List<String> = try {
+        uniffi.lakko_ffi_uniffi.quickReactionRow(
+            quick,
+            recent,
+            allowed.toFfiAllowed(),
+            me.lakko.app.chat.reactionKinds(held),
+        )
+    } catch (_: Throwable) {
+        REACTION_EMOJIS
+    }
+}
+
+/** Provided by [ChatScreen]; `null` outside a chat (no reactions offered). */
+internal val LocalBubbleReactions = androidx.compose.runtime.staticCompositionLocalOf<BubbleReactionContext?> { null }
+
+/** Section 10 — reactions one person gives one message. */
+internal const val MAX_OWN_REACTIONS: Int = 3
+
+/** Section 13 — 56 / 44 / 36 for one / two / three emoji (chosen). */
+internal fun largeEmojiSize(count: Int): androidx.compose.ui.unit.TextUnit = when (count) {
+    1 -> 56.sp
+    2 -> 44.sp
+    else -> 36.sp
+}
+
+/** reactions-and-emoji section 7 — the chips under a message, decided by the
+ *  core (`reactionChips`: order, face, the 11-kind cap and `+N`). Own chip:
+ *  accent-soft fill and a 1 dp accent border. Tap adds or takes off; a long
+ *  press opens the reactions list. */
 @Composable
 private fun ReactionChips(
     reactions: List<me.lakko.app.chat.Reaction>,
@@ -2537,45 +2869,98 @@ private fun ReactionChips(
     /** ADR-0045 UX §6.2.5 — `false` once the membership has ended: the chip
      *  still renders its count and stops being a control. */
     interactive: Boolean = true,
+    onShowReactors: (String?) -> Unit = {},
 ) {
-    // Aggregate by emoji preserving first-seen order; track whether WE are in
-    // each bucket — by signature key, so a newcomer taking a slot we once held
-    // never lights the "mine" highlight on their reaction.
-    val mineKey = ownIdentity ?: me.lakko.app.chat.OWN_REACTION_SENTINEL
-    val order = ArrayList<String>()
-    val counts = LinkedHashMap<String, Int>()
-    val mine = HashSet<String>()
-    for (r in reactions) {
-        if (!counts.containsKey(r.emoji)) order.add(r.emoji)
-        counts[r.emoji] = (counts[r.emoji] ?: 0) + 1
-        if (r.reactor == mineKey) mine.add(r.emoji)
+    val ctx = LocalBubbleReactions.current
+    val strings = LocalStrings.current
+    // The own reactor's circle: the person's own photo, else the initials of
+    // their own name (a contact directory never holds the own profile).
+    val ownAvatar = me.lakko.app.ui.components.rememberOwnAvatar()
+    val ownAvatarName = me.lakko.app.ui.components.rememberOwnAvatarName(
+        ownIdentity?.let { ctx?.nameOf?.invoke(it) } ?: "?",
+    )
+    val row = remember(reactions, ownIdentity, ctx?.allowed, ctx?.chipConversation) {
+        chipRowOf(reactions, ownIdentity, ctx)
     }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        for (emoji in order) {
-            val count = counts[emoji] ?: 0
-            val isMine = mine.contains(emoji)
+        for (chip in row.chips) {
+            val label = if (chip.mine) {
+                strings.format("chat.reaction.chip_yours_a11y", mapOf("emoji" to chip.emoji))
+            } else {
+                strings.format("chat.reaction.chip_a11y", mapOf("emoji" to chip.emoji), mapOf("count" to chip.count.toULong()))
+            }
             Surface(
                 shape = RoundedCornerShape(10.dp),
-                color = if (isMine) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                color = if (chip.mine) {
+                    MaterialTheme.colorScheme.primaryContainer
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant
                 },
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                modifier = if (interactive) {
-                    Modifier.combinedClickable(
-                        onClick = { onToggle(emoji) },
-                        onLongClick = {},
-                    )
+                border = if (chip.mine) {
+                    androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
                 } else {
-                    Modifier
+                    null
                 },
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .semantics { contentDescription = label }
+                    .then(
+                        if (interactive) {
+                            Modifier.combinedClickable(
+                                onClick = { onToggle(chip.emoji) },
+                                onLongClickLabel = strings["chat.reaction.show_who_a11y"],
+                                onLongClick = { onShowReactors(chip.emoji) },
+                            )
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                ) {
+                    Text(text = chip.emoji, style = MaterialTheme.typography.labelMedium)
+                    when (val face = chip.face) {
+                        is uniffi.lakko_ffi_uniffi.FfiChipFace.Count ->
+                            Text(text = face.count.toString(), style = MaterialTheme.typography.labelMedium)
+                        is uniffi.lakko_ffi_uniffi.FfiChipFace.Avatars -> Row {
+                            face.reactors.forEachIndexed { i, key ->
+                                val b64 = java.util.Base64.getEncoder().encodeToString(key)
+                                val mine = b64 == ownIdentity
+                                LakkoAvatar(
+                                    name = if (mine) ownAvatarName else ctx?.nameOf?.invoke(b64) ?: "?",
+                                    seed = b64,
+                                    size = 16.dp,
+                                    personKey = key,
+                                    avatar = if (mine) ownAvatar else null,
+                                    // A 1 dp ring in the surface colour, as on
+                                    // iOS: the circle stays visible on the own
+                                    // chip's accent fill and where avatars overlap.
+                                    modifier = Modifier
+                                        .offset(x = (-4 * i).dp)
+                                        .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape),
+                                )
+                            }
+                        }
+                        uniffi.lakko_ffi_uniffi.FfiChipFace.EmojiOnly -> Unit
+                    }
+                }
+            }
+        }
+        if (row.overflowKinds > 0u) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.combinedClickable(onClick = { onShowReactors(null) }),
             ) {
                 Text(
-                    text = "$emoji $count",
+                    text = "+${row.overflowKinds}",
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
@@ -2584,33 +2969,130 @@ private fun ReactionChips(
     }
 }
 
+/** The core's chip row, or a plain tally when the core is unavailable. */
+private fun chipRowOf(
+    reactions: List<me.lakko.app.chat.Reaction>,
+    ownIdentity: me.lakko.app.chat.MemberIdentity?,
+    ctx: BubbleReactionContext?,
+): uniffi.lakko_ffi_uniffi.FfiChipRow {
+    val ownKey = ownIdentity?.let {
+        try {
+            java.util.Base64.getDecoder().decode(it)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    } ?: ByteArray(32)
+    return try {
+        val held = reactions.mapNotNull { r ->
+            val person = try {
+                java.util.Base64.getDecoder().decode(r.reactor)
+            } catch (_: IllegalArgumentException) {
+                null
+            }?.takeIf { it.size == 32 } ?: return@mapNotNull null
+            uniffi.lakko_ffi_uniffi.FfiHeldReaction(person = person, emoji = r.emoji, at = r.at)
+        }
+        val sources = uniffi.lakko_ffi_uniffi.chipSourcesFromHeld(held, ownKey)
+        uniffi.lakko_ffi_uniffi.reactionChips(
+            sources,
+            ctx?.chipConversation ?: uniffi.lakko_ffi_uniffi.FfiChipConversation.GROUP,
+            (ctx?.allowed ?: me.lakko.app.chat.AllowedReactions.All).toFfiAllowed(),
+        )
+    } catch (_: Throwable) {
+        val order = reactions.map { it.emoji }.distinct()
+        uniffi.lakko_ffi_uniffi.FfiChipRow(
+            chips = order.map { e ->
+                val n = reactions.count { it.emoji == e }
+                uniffi.lakko_ffi_uniffi.FfiReactionChip(
+                    emoji = e,
+                    count = n.toUInt(),
+                    mine = reactions.any { it.emoji == e && it.reactor == ownIdentity },
+                    face = uniffi.lakko_ffi_uniffi.FfiChipFace.Count(n.toUInt()),
+                )
+            },
+            overflowKinds = 0u,
+        )
+    }
+}
+
 /**
- * ADR-0045 UX §6 — the `Remove this member?` confirmation.
- *
- * Same idiom as [LeaveGroupDialog] deliberately: the two sit in the same panel
- * and a user reading one after the other should be answering the same kind of
- * question. The copy comes from `me.lakko.app.chat.removeMemberConfirmation`
- * rather than being inlined, so the three clients cannot drift on the sentence
- * that tells a user whether the person they are removing can still read their
- * messages.
- *
- * The body is absent on a direct-commit group, where §6's sentence would be
- * false — see the module for why it is dropped rather than reworded.
+ * reactions-and-emoji section 8.1 — who reacted: a bottom sheet with a tab row
+ * (`All n`, then one per emoji in chip order, hidden with one emoji) and one
+ * row per reaction; the person's own row reads `You` and comes first. Built
+ * from what the device holds; nothing is fetched.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RemoveMemberDialog(
-    usesProposalPath: Boolean,
-    onCancel: () -> Unit,
-    onRemove: () -> Unit,
+internal fun ReactorsSheet(
+    reactions: List<me.lakko.app.chat.Reaction>,
+    ownIdentity: me.lakko.app.chat.MemberIdentity?,
+    initialEmoji: String?,
+    nameOf: (me.lakko.app.chat.MemberIdentity) -> String,
+    onDismiss: () -> Unit,
 ) {
-    val copy = me.lakko.app.chat.removeMemberConfirmation(usesProposalPath)
-    LakkoDialog(
-        onDismissRequest = onCancel,
-        title = copy.title.text(),
-        body = copy.body?.text(),
-        confirm = LakkoDialogAction(copy.confirmLabel.text(), LakkoDialogTone.Danger, onClick = onRemove),
-        cancel = LakkoDialogAction(copy.cancelLabel.text(), LakkoDialogTone.Ghost, onClick = onCancel),
+    val ownAvatar = me.lakko.app.ui.components.rememberOwnAvatar()
+    val ownAvatarName = me.lakko.app.ui.components.rememberOwnAvatarName(
+        ownIdentity?.let(nameOf) ?: "?",
     )
+    val strings = LocalStrings.current
+    val kinds = remember(reactions) {
+        reactions.groupBy { it.emoji }.entries
+            .sortedWith(compareByDescending<Map.Entry<String, List<me.lakko.app.chat.Reaction>>> { it.value.size }
+                .thenBy { e -> e.value.minOf { it.at } })
+            .map { it.key }
+    }
+    var tab by remember { mutableStateOf(initialEmoji?.takeIf { it in kinds }) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+            Text(
+                text = strings["chat.reaction.list_title"],
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp).semantics { heading() },
+            )
+            if (kinds.size > 1) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = tab == null,
+                        onClick = { tab = null },
+                        label = { Text(strings.format("chat.reaction.list_all", counts = mapOf("count" to reactions.size.toULong()))) },
+                    )
+                    for (k in kinds) {
+                        FilterChip(
+                            selected = tab == k,
+                            onClick = { tab = k },
+                            label = { Text("$k ${reactions.count { it.emoji == k }}") },
+                        )
+                    }
+                }
+            }
+            val rows = reactions
+                .filter { tab == null || it.emoji == tab }
+                .sortedWith(compareBy<me.lakko.app.chat.Reaction>({ it.reactor != ownIdentity }, { it.at }))
+            for (r in rows) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                ) {
+                    val mine = r.reactor == ownIdentity
+                    val name = if (mine) strings["chat.author.you"] else nameOf(r.reactor)
+                    // The own row's circle is the person's own photo or
+                    // initials, never the "Y" of the "You" label.
+                    LakkoAvatar(
+                        name = if (mine) ownAvatarName else name,
+                        seed = r.reactor,
+                        size = 32.dp,
+                        personKey = me.lakko.app.ui.components.personKeyBytes(r.reactor),
+                        avatar = if (mine) ownAvatar else null,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(text = name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    if (tab == null) Text(text = r.emoji, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+    }
 }
 
 /** ADR-0023 — the pre-filled edit dialog (Save / Cancel). */
@@ -2746,6 +3228,8 @@ internal fun Composer(
     onEmojiInserted: () -> Unit,
     onOpenPicker: () -> Unit,
     draft: String,
+    /** Moves when something other than the person's typing changed [draft]. */
+    draftRevision: Int = 0,
     sending: Boolean,
     sendError: UiText?,
     pendingAttachments: List<AttachmentRef>,
@@ -2765,20 +3249,23 @@ internal fun Composer(
     replyStrip: ReplyArmed? = null,
     /** The strip's close control. */
     onCancelReply: () -> Unit = {},
+    /** reactions-and-emoji section 13 — the emoji matching a `:word`, Recent
+     *  first. Empty when the emoji data is not loaded. */
+    colonSuggest: (String) -> List<String> = { emptyList() },
 ) {
     // The caret has to be known to insert an emoji AT it (UX spec §4), which a
     // bare `String` value cannot carry. The view model still owns the text;
     // this mirrors it and follows an external change (a cleared draft after
     // Send) without losing the caret on the user's own edits.
     //
-    // Only a CHANGE of `draft` resets the field — the same rule the `String`
-    // overload of the text field applies internally. Comparing against the
-    // field's own text instead would reset it to a stale draft whenever the
-    // view model's state lags one keystroke behind, dropping what was typed.
+    // Only [draftRevision] resets the field. The draft itself reaches this
+    // screen late while the person types, so treating a change of it as an
+    // outside edit put an older text back over what was just typed and the
+    // letters after it were lost.
     var field by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
-    var lastDraft by remember { mutableStateOf(draft) }
-    if (draft != lastDraft) {
-        lastDraft = draft
+    var lastRevision by remember { mutableStateOf(draftRevision) }
+    if (draftRevision != lastRevision) {
+        lastRevision = draftRevision
         if (field.text != draft) field = TextFieldValue(draft, TextRange(draft.length))
     }
     LaunchedEffect(emojiInsert) {
@@ -2841,6 +3328,44 @@ internal fun Composer(
         if (replyStrip != null && !recording) {
             ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply)
         }
+        // reactions-and-emoji section 13 — the `:` suggestions strip.
+        val colonQuery = me.lakko.app.chat.colonQueryAt(
+            field.text,
+            field.selection.end,
+            collapsed = field.selection.collapsed,
+        )
+        val colonEmoji = remember(colonQuery?.word) {
+            colonQuery?.let { colonSuggest(it.word).take(me.lakko.app.chat.COLON_SUGGESTIONS_MAX) }.orEmpty()
+        }
+        if (colonQuery != null && colonEmoji.isNotEmpty() && !recording) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                for (emoji in colonEmoji) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clickable(onClickLabel = emoji) {
+                                val (text, caret) = me.lakko.app.chat.applyColonPick(
+                                    field.text,
+                                    field.selection.end,
+                                    colonQuery,
+                                    emoji,
+                                )
+                                field = TextFieldValue(text, TextRange(caret))
+                                onDraftChange(text)
+                            },
+                    ) {
+                        Text(text = emoji, style = MaterialTheme.typography.titleLarge)
+                    }
+                }
+            }
+        }
         // 1.19c4 — pending-attachments tray. Horizontal scroll
         // of chips above the text field; each chip shows
         // `name · size` with a × to drop it. Plus an
@@ -2901,8 +3426,9 @@ internal fun Composer(
                 OutlinedTextField(
                     value = field,
                     onValueChange = { next ->
+                        val changed = next.text != field.text
                         field = next
-                        if (next.text != draft) onDraftChange(next.text)
+                        if (changed) onDraftChange(next.text)
                     },
                     placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = false,
@@ -3217,15 +3743,50 @@ private fun LeaveGroupDialog(
  * ADR-0045 (UX §6.2.4) — the `Delete this chat` confirmation.
  *
  * The only protection there is, which is why the body is exact rather than
- * sweeping: **the messages really are gone, and the dead MLS handle is not.**
- * `Group` exposes no delete, so the inactive group's state stays in the
- * provider snapshot as inert bytes — inert in the strong sense (it cannot send,
- * decrypt, export or process) but not nothing.
+ * sweeping.
  *
  * Copy from [me.lakko.app.chat.DELETE_CHAT_TITLE] /
  * [me.lakko.app.chat.DELETE_CHAT_BODY] rather than inline, so the three clients
  * cannot drift on the one string that describes an irreversible deletion.
  */
+/**
+ * ADR-0087 UX 9.1 — this account is out of the group the person has open. One
+ * button, which goes back to Chats; it never says who. What the composer held
+ * is shown selectable: the conversation it was typed in is gone.
+ */
+@Composable
+private fun MembershipEndDialog(
+    dialog: me.lakko.app.chat.EndDialog,
+    /** The title on screen, for a group with no shared name. */
+    shownTitle: String?,
+    onOk: () -> Unit,
+) {
+    val fallback = shownTitle ?: t("chat.group.fallback_name")
+    LakkoDialog(
+        onDismissRequest = {},
+        title = me.lakko.app.chat.endNoticeLine(dialog.name, fallback).text(),
+        body = t("chat.ended.notice_body"),
+        confirm = LakkoDialogAction(t("common.ok"), LakkoDialogTone.Primary, onClick = onOk),
+        cancel = null,
+        content = dialog.draft?.let { draft ->
+            {
+                val clipboard = LocalClipboardManager.current
+                Text(
+                    text = t("chat.ended.unsent_draft"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(text = draft, style = MaterialTheme.typography.bodyMedium)
+                }
+                TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(draft)) }) {
+                    Text(t("common.copy"))
+                }
+            }
+        },
+    )
+}
+
 /** ADR-0045 UX 6.2.4 — `internal` so the person layer raises the same one. */
 @Composable
 internal fun DeleteChatDialog(
@@ -3532,15 +4093,30 @@ private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
     }
 }
 
+/**
+ * The group's info (`docs/ux/conversation-info.md` sections 2.2 and 3): a
+ * screen pushed over the conversation with a back arrow in its top bar, and
+ * the system back doing the same. The transfer step is pushed over it the
+ * same way (its own back returns here).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MembersSheet(
     viewModel: ChatViewModel,
     /** ADR-0045 UX §6.2.4 — invoked after `Delete this chat` has removed the
      *  registry row, so the screen leaves a thread it can no longer open. */
     onChatDeleted: () -> Unit,
+    /** Section 2.2 — a member who is a contact opens the contact screen,
+     *  pushed over this one; its back returns here. */
+    onOpenContact: (contactKey: String) -> Unit,
+    contactsRepository: me.lakko.app.contacts.ContactsRepository,
+    modifier: Modifier = Modifier,
 ) {
     val members by viewModel.members.collectAsStateWithLifecycle()
-    val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
+    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    val contactKeysB64 = remember(contactsState.accepted) {
+        contactsState.accepted.map { me.lakko.app.chat.outboxB64(it.request.fromPubkey) }.toSet()
+    }
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
@@ -3573,6 +4149,13 @@ private fun MembersSheet(
     val transferOutgoing by viewModel.transferOutgoing.collectAsStateWithLifecycle()
     // ADR-0045 UX §6.2 — has this device's membership ended?
     val membershipEnded by viewModel.membershipEnded.collectAsStateWithLifecycle()
+    // ADR-0087 section 9 — under "You are no longer in {name}" this screen keeps
+    // the name and the members and nothing that acts.
+    val infoEndDialog by viewModel.endDialog.collectAsStateWithLifecycle()
+    val behindEnd = me.lakko.app.chat.infoBehindEnd(
+        ending = infoEndDialog != null || viewModel.conversationEnding(),
+        membershipEnded = membershipEnded,
+    )
     // ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Local to the
     // sheet, like `confirmingLeave`: it is a presentation concern, and nothing
     // outside this composable may open it.
@@ -3582,7 +4165,6 @@ private fun MembersSheet(
     // nullable leaf rather than a boolean because the confirmation names WHICH
     // member: a shared boolean plus a separately-stored target is how a
     // confirmation ends up removing somebody the user did not look at.
-    var confirmingRemove by remember { mutableStateOf<UInt?>(null) }
 
     // docs/ux/conversation-info.md section 2.2 — WHAT this panel holds is
     // asked, never decided here. The one copy of the rule is
@@ -3610,18 +4192,6 @@ private fun MembersSheet(
     // this client and web both overrode it in their own view - which is a
     // rule nobody was following.
     val canLeave = roleTable != null && ownLeaf != null
-    val sections = remember(canManage, isOwner, canLeave, membershipEnded) {
-        groupInfoSections(
-            GroupInfoCapabilities(
-                canManageMembers = canManage,
-                canRename = canManage,
-                canMintInvite = canManage,
-                isOwner = isOwner,
-                canLeave = canLeave,
-                membershipEnded = membershipEnded,
-            ),
-        )
-    }
 
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
@@ -3631,6 +4201,30 @@ private fun MembersSheet(
         ?: emptySet()
     val transferCandidates = remember(rosterViews, ownerKeyB64, adminKeysB64) {
         me.lakko.app.chat.transferCandidates(rosterViews, ownerKeyB64, adminKeysB64)
+    }
+    // ADR-0087 / group-and-channel-privacy section 18 — the sections come from
+    // `lakko_ui_rules::conversation_info_sections`: `Handle`, `GroupType` and
+    // `DeleteGroup` included; `alone` and `can_transfer` are inputs. An ended
+    // membership is answered as a plain member who cannot leave, which takes
+    // every editing and exit section away and leaves the name readable.
+    val settingsVersionForInfo by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
+    val hasHandle = remember(settingsVersionForInfo) { viewModel.groupHandle() != null }
+    val sections = remember(canManage, isOwner, canLeave, membershipEnded, transferCandidates, hasHandle) {
+        conversationInfoSections(
+            ConversationInfoCapabilities(
+                kind = ConversationInfoKind.GROUP,
+                role = when {
+                    membershipEnded -> ConversationRole.MEMBER
+                    isOwner -> ConversationRole.OWNER
+                    canManage -> ConversationRole.ADMIN
+                    else -> ConversationRole.MEMBER
+                },
+                alone = transferCandidates.isEmpty(),
+                canTransfer = transferCandidates.isNotEmpty(),
+                canLeave = canLeave && !membershipEnded,
+                hasHandle = hasHandle,
+            ),
+        )
     }
     // §6.1.6 / §6.1.8 — the role change already WAITING to apply, if any.
     // `waiting` and not merely pending is the whole point: below the quiet window
@@ -3658,7 +4252,8 @@ private fun MembersSheet(
                 },
             )
         }
-    val exit = me.lakko.app.chat.exitBlock(
+    // Behind the end's dialog there is no exit to offer: the group is gone.
+    val exit = if (!behindEnd.exitBlock) me.lakko.app.chat.ExitBlock.Hidden else me.lakko.app.chat.exitBlock(
         me.lakko.app.chat.ExitBlockInput(
             usesProposalPath = roleTable != null,
             isOwner = isOwner,
@@ -3685,17 +4280,6 @@ private fun MembersSheet(
         )
     }
 
-    confirmingRemove?.let { leaf ->
-        RemoveMemberDialog(
-            usesProposalPath = roleTable != null,
-            onCancel = { confirmingRemove = null },
-            onRemove = {
-                confirmingRemove = null
-                viewModel.onRemoveMember(leaf)
-            },
-        )
-    }
-
     if (confirmingDelete) {
         DeleteChatDialog(
             onCancel = { confirmingDelete = false },
@@ -3711,21 +4295,83 @@ private fun MembersSheet(
         )
     }
 
-    Dialog(
-        onDismissRequest = viewModel::toggleMembersPanel,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())),
-                    style = MaterialTheme.typography.titleMedium,
+    // Section 3 / ADR-0045 UX §6.1.5 — the transfer step is pushed over the
+    // info; its back control (and the system back) cancels it and returns
+    // here, which is what its Cancel button does.
+    if (transferOpen && exit is me.lakko.app.chat.ExitBlock.Owner) {
+        BackHandler { viewModel.cancelTransferStep() }
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets.safeDrawing,
+            topBar = {
+                TopAppBar(
+                    title = { Text(t("chat.transfer.action")) },
+                    navigationIcon = {
+                        IconButton(onClick = viewModel::cancelTransferStep) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        }
+                    },
                 )
+            },
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            ) {
+                TransferOwnershipStep(
+                    candidates = transferCandidates,
+                    pickedKeyB64 = transferPick,
+                    outgoing = transferOutgoing,
+                    busy = busy,
+                    onPick = viewModel::setTransferPick,
+                    onOutgoing = viewModel::setTransferOutgoing,
+                    onCancel = viewModel::cancelTransferStep,
+                    onTransfer = { successor ->
+                        viewModel.onTransferOwnership(successor, transferOutgoing)
+                    },
+                )
+                // A refusal keeps the step open with the pick intact, so its
+                // sentence shows here, where the person is.
+                error?.let { message ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = message.text(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    BackHandler { viewModel.toggleMembersPanel() }
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())))
+                },
+                navigationIcon = {
+                    IconButton(onClick = viewModel::toggleMembersPanel) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                    }
+                },
+            )
+        },
+    ) { scaffoldPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(scaffoldPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
                 // ADR-0045 (UX §6.1.9) — tell the new owner they are the new
                 // owner. Panel level, dismissible, rendered once.
                 //
@@ -3755,44 +4401,46 @@ private fun MembersSheet(
                 // an ended membership leaves the name READABLE and takes the
                 // editing away rather than removing both.
                 if (InfoSection.GROUP_NAME in sections) {
+                    // ADR-0087 4.5.2 — the 96 dp header photo; the owner and
+                    // admins (the people who rename) set it here.
+                    val headerName by viewModel.groupName.collectAsStateWithLifecycle()
+                    GroupPhotoHeader(
+                        viewModel = viewModel,
+                        title = headerName.ifBlank { t("chat.group.fallback_name") },
+                        canSet = InfoSection.RENAME_GROUP in sections,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // Section 4 — the header line and the @name row
+                    // (`Handle`), the owner's Who can join (`GroupType`).
+                    GroupHandleRow(
+                        viewModel = viewModel,
+                        memberCount = members.size,
+                        isOwner = InfoSection.GROUP_TYPE in sections,
+                        showHandle = InfoSection.HANDLE in sections,
+                    )
                     GroupNameRow(
                         viewModel = viewModel,
                         canRename = InfoSection.RENAME_GROUP in sections,
                     )
+                    // reactions-and-emoji section 9 — the core's `Reactions`
+                    // section (owner and admins of a group).
+                    if (InfoSection.REACTIONS in sections) {
+                        GroupReactionsRow(viewModel = viewModel)
+                    }
                     Spacer(Modifier.height(12.dp))
                     // docs/ux/who-can-find-me.md section 5 — this group's
                     // `Members can find me` switch (absent unless the setting
                     // includes groups).
-                    me.lakko.app.ui.settings.MembersCanFindMeRow(
-                        reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
-                        kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
-                        idHex = viewModel.groupIdHex,
-                    )
+                    if (behindEnd.membersCanFindMe) {
+                        me.lakko.app.ui.settings.MembersCanFindMeRow(
+                            reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                            kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
+                            idHex = viewModel.groupIdHex,
+                        )
+                    }
                 }
                 // ADR-0082 / translation UX 3.7 — this device only.
                 me.lakko.app.ui.translation.AutoTranslateRow(viewModel.groupIdHex)
-                // ADR-0022 — only owner/admin (or an open/legacy group) sees the
-                // add affordance; a plain member's add would be refused by peers.
-                if (InfoSection.ADD_MEMBER in sections) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = input,
-                            onValueChange = viewModel::setAddMemberInput,
-                            label = { Text(t("chat.members.add.placeholder")) },
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            onClick = viewModel::onAddMember,
-                            enabled = !busy && input.trim().isNotEmpty(),
-                        ) { Text(t("chat.members.add.submit")) }
-                    }
-                }
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
                 // Mints a /g/<slug> link conveying this group's id; a non-member
                 // opens it to request to join, approved via the pending list.
@@ -3894,7 +4542,9 @@ private fun MembersSheet(
                             // ADR-0084 — the person's photo beside their name.
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 LakkoAvatar(
-                                    name = addName,
+                                    // Initials from the name alone, never
+                                    // the ` · @username` label.
+                                    name = viewModel.avatarNameOfKeyB64(request.addSignatureKeyB64),
                                     seed = request.addSignatureKeyB64 ?: addName,
                                     size = 24.dp,
                                     personKey = me.lakko.app.ui.components.personKeyBytes(request.addSignatureKeyB64),
@@ -3970,11 +4620,45 @@ private fun MembersSheet(
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit &
                 // Welcome rendezvous; Reject drops the retained proposal.
-                if (canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest)) {
-                    Text(
-                        text = t("chat.members.join.heading", emptyMap(), mapOf("count" to pendingJoins.size.toULong())),
-                        style = MaterialTheme.typography.titleSmall,
-                    )
+                val queueFull = remember(pendingJoins, unkeptJoinRequest) { viewModel.knockQueueFull() }
+                if (canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest || queueFull)) {
+                    var confirmRejectAll by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = if (queueFull || pendingJoins.size >= 64) {
+                                t("chat.members.join.heading_full")
+                            } else {
+                                t("chat.members.join.heading", emptyMap(), mapOf("count" to pendingJoins.size.toULong()))
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        // ADR-0087 section 5 — Reject all, behind a confirmation.
+                        TextButton(
+                            onClick = { confirmRejectAll = true },
+                            enabled = !busy,
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) { Text(t("chat.members.join.reject_all")) }
+                    }
+                    if (queueFull) {
+                        Text(
+                            text = t("chat.members.join.more_waiting"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (confirmRejectAll) {
+                        LakkoDialog(
+                            onDismissRequest = { confirmRejectAll = false },
+                            title = t("chat.members.join.reject_all_title"),
+                            body = t("chat.members.join.reject_all_body"),
+                            confirm = LakkoDialogAction(t("chat.members.join.reject_all"), LakkoDialogTone.Danger) {
+                                confirmRejectAll = false
+                                viewModel.onRejectAllJoins()
+                            },
+                            cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost) { confirmRejectAll = false },
+                        )
+                    }
                     // ADR-0027 / UX §7.1 — a request the quarantine turned
                     // away. It is in no row below, because the core never kept
                     // it, and it gets no Approve for the same reason: there is
@@ -3998,7 +4682,7 @@ private fun MembersSheet(
                             // ADR-0084 — the joiner's photo, through the same
                             // key their name resolves by.
                             LakkoAvatar(
-                                name = viewModel.pendingJoinLabel(ref),
+                                name = viewModel.pendingJoinAvatarName(ref),
                                 seed = java.util.Base64.getEncoder().encodeToString(ref),
                                 size = 28.dp,
                                 personKey = viewModel.pendingJoinPersonKey(ref),
@@ -4015,37 +4699,36 @@ private fun MembersSheet(
                                     text = viewModel.pendingJoinLabel(ref),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                // ADR-0028 OQ2 — which member's `/g/` link this
-                                // request arrived on + whether they are still in
-                                // the roster (advisory).
+                                // group-and-channel-privacy.md section 8 — one
+                                // line: `Asked 2 hours ago`, or from a link
+                                // `Invited by Anna · 2 hours ago`. The sealed
+                                // knock row gave both; an older attribution
+                                // envelope names the issuer only.
                                 val attr = joinAttributions[
                                     ref.joinToString("") { "%02x".format(it.toInt() and 0xff) },
                                 ]
-                                if (attr != null) {
+                                val strings = LocalStrings.current
+                                val settingsVersion by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
+                                val origin = remember(ref.contentHashCode(), settingsVersion) {
+                                    viewModel.joinRequestOrigin(ref)
+                                }
+                                val line = me.lakko.app.chat.joinRequestLine(
+                                    origin = origin,
+                                    attributionIssuerB64 = attr?.issuerKeyB64,
+                                    nameOf = viewModel::nameOf,
+                                    whenOf = { at ->
+                                        me.lakko.app.ui.channels.relativeTimeLabel(
+                                            at,
+                                            System.currentTimeMillis(),
+                                            java.time.ZoneId.systemDefault(),
+                                            java.util.Locale.getDefault(),
+                                            strings,
+                                        )
+                                    },
+                                )
+                                if (line != null) {
                                     Text(
-                                        text = t(
-                                            if (attr.issuerInRoster) {
-                                                "chat.members.join.via_member"
-                                            } else {
-                                                "chat.members.join.via_former"
-                                            },
-                                            mapOf(
-                                                "name" to (
-                                                    attr.issuerKeyB64?.let(viewModel::nameOf)
-                                                        ?: attr.issuerFingerprint.take(11)
-                                                    ),
-                                            ),
-                                        ),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (attr.issuerInRoster) {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        } else {
-                                            MaterialTheme.colorScheme.error
-                                        },
-                                    )
-                                } else {
-                                    Text(
-                                        text = t("chat.members.join.link_unknown"),
+                                        text = line.text(),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -4080,7 +4763,7 @@ private fun MembersSheet(
                 // frozen at the removing epoch and never moves again) rather
                 // than a euphemism for it, and it is deliberately neutral
                 // between having left and having been removed.
-                if (membershipEnded) {
+                if (behindEnd.frozenRosterLine) {
                     Text(
                         text = me.lakko.app.chat.FROZEN_ROSTER_HEADER.text(),
                         style = MaterialTheme.typography.bodySmall,
@@ -4097,18 +4780,59 @@ private fun MembersSheet(
                 // a section, because the rule names the LIST and says nothing
                 // about what a row carries.
                 if (InfoSection.MEMBER_LIST in sections) {
-                    // The roster gives up height while the transfer step is open, so
-                    // the step's action button cannot be pushed off a small screen.
-                    // The alternative — a second `Dialog` with its own scroll — is
-                    // the stacking [TransferOwnershipStep]'s doc rejects.
-                    LazyColumn(
-                        modifier = Modifier.heightIn(max = if (transferOpen) 140.dp else 360.dp),
-                    ) {
-                        items(members) { member ->
+                    // Section 2.4 — the one way to add people: the FIRST row of
+                    // the members list, for whoever may add (the same section the
+                    // rule grants the add to).
+                    if (InfoSection.ADD_MEMBER in sections) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !busy, onClick = viewModel::openAddMembers)
+                                .padding(vertical = 8.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.PersonAdd,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(32.dp).padding(4.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = t("chat.members.add.action"),
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                    // The whole screen scrolls, so the roster is a plain column
+                    // (a group's roster is bounded by MLS, and a lazy list inside
+                    // a scrolling column would need a fixed height).
+                    Column {
+                        members.forEach { member ->
+                            // Section 2.2 — a member who is a contact (and not
+                            // this account) opens the contact screen.
+                            val memberKeyB64 = me.lakko.app.chat.outboxB64(member.signaturePublicKey)
+                            val opensContact = me.lakko.app.chat.memberOpensContact(
+                                memberKeyB64 = memberKeyB64,
+                                ownRow = ownLeaf == member.leafIndex,
+                                contactKeysB64 = contactKeysB64,
+                            )
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .then(
+                                        if (opensContact) {
+                                            Modifier.clickable {
+                                                onOpenContact(
+                                                    me.lakko.app.ui.contacts.contactRouteKey(member.signaturePublicKey),
+                                                )
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
                                     .padding(vertical = 4.dp),
                             ) {
                                 // ADR-0045 — NO optimistic update: a member with a
@@ -4129,7 +4853,9 @@ private fun MembersSheet(
                                 val memberName = viewModel.memberLabel(member)
                                 val isOwnRow = ownLeaf == member.leafIndex
                                 LakkoAvatar(
-                                    name = memberName,
+                                    // Initials from the name alone, never
+                                    // the ` · @username` label.
+                                    name = viewModel.memberAvatarName(member),
                                     seed = java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey),
                                     size = 32.dp,
                                     personKey = if (isOwnRow) null else member.signaturePublicKey,
@@ -4172,11 +4898,11 @@ private fun MembersSheet(
                                 // (owner / admin / open group) and not our own leaf.
                                 if (canManage && ownLeaf != member.leafIndex) {
                                     TextButton(
-                                        // ADR-0045 UX §6 — the confirmation is the
-                                        // LAST exit: a published request cannot be
-                                        // withdrawn, and a direct commit lands at
-                                        // once. Never remove on a single tap.
-                                        onClick = { confirmingRemove = member.leafIndex },
+                                        // proposal-based-membership.md section 6,
+                                        // "No confirmation" (2026-11-04): Remove
+                                        // acts on the tap; a removal that waits for
+                                        // another committer says so on the row.
+                                        onClick = { viewModel.onRemoveMember(member.leafIndex) },
                                         // UX §5.3 — a member with a pending removal keeps
                                         // Remove VISIBLE but DISABLED. Hiding it would read
                                         // as the permission having vanished; the annotation
@@ -4280,7 +5006,12 @@ private fun MembersSheet(
                             ),
                         ) { Text(me.lakko.app.chat.DELETE_CHAT_CONTROL.text()) }
                     }
-                    is me.lakko.app.chat.ExitBlock.Owner -> {
+                    is me.lakko.app.chat.ExitBlock.Owner -> if (InfoSection.DELETE_GROUP in sections) {
+                        // ADR-0087 section 10 — an owner alone deletes the
+                        // group instead of transferring and leaving.
+                        Spacer(Modifier.height(12.dp))
+                        DeleteGroupControl(viewModel = viewModel)
+                    } else {
                         Spacer(Modifier.height(12.dp))
                         TextButton(
                             onClick = viewModel::openTransferStep,
@@ -4336,33 +5067,8 @@ private fun MembersSheet(
                 // ADR-0045 (UX §6.1.4 / §6.1.5) — the transfer step, inline
                 // beneath the control that opened it. See
                 // [TransferOwnershipStep] for why it is not a second `Dialog`.
-                if (transferOpen && exit is me.lakko.app.chat.ExitBlock.Owner) {
-                    Spacer(Modifier.height(8.dp))
-                    TransferOwnershipStep(
-                        candidates = transferCandidates,
-                        pickedKeyB64 = transferPick,
-                        outgoing = transferOutgoing,
-                        busy = busy,
-                        onPick = viewModel::setTransferPick,
-                        onOutgoing = viewModel::setTransferOutgoing,
-                        onCancel = viewModel::cancelTransferStep,
-                        // The role choice is passed EXPLICITLY rather than read
-                        // back inside the action, so the required-argument
-                        // property the core protects with a type survives all
-                        // the way to the tap: there is no call site here that
-                        // can omit it.
-                        onTransfer = { successor ->
-                            viewModel.onTransferOwnership(successor, transferOutgoing)
-                        },
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = viewModel::toggleMembersPanel) { Text(t("common.done")) }
-                }
+                Spacer(Modifier.height(16.dp))
             }
-        }
     }
 }
 

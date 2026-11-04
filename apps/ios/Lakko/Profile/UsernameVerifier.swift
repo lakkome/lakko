@@ -209,6 +209,20 @@ final class UsernameVerifier {
         return record(verdict, key: key)
     }
 
+    /// Record that this device already verified the pair (a search showed the
+    /// username for this key), asking nothing. A definitive verdict held
+    /// stands.
+    func noteVerified(signatureKeyB64: String, username: String) {
+        let key = Self.cacheKey(signatureKeyB64, username)
+        switch verdicts[key] {
+        case .verified?, .mismatch?:
+            return
+        case .failed?, nil:
+            failures[key] = nil
+            _ = record(.verified, key: key)
+        }
+    }
+
     /// Try a failed pair again by itself once its wait is over; the screen
     /// re-renders through ``onChange`` when the verdict changes.
     private func scheduleRetry(signatureKeyB64: String, username: String, delayMs: Int64) {

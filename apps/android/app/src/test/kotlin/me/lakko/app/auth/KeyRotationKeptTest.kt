@@ -53,6 +53,59 @@ class KeyRotationKeptTest {
     private fun http(code: String?, status: Int = 401, body: String = "{}") =
         AuthHttpError(status, "/auth/session/refresh", body, code = code)
 
+    // --- ADR-0074 section 3.7: the conversation link -------------------------
+
+    private fun predecessor(tag: Int) =
+        OwnPredecessor(ByteArray(32) { tag.toByte() }, ByteArray(64) { tag.toByte() }, tag * 1_000L)
+
+    /** Stand-in for `Identity.fromSeed(seed).ed25519Seed()`. */
+    private val edOf: (ByteArray) -> ByteArray = { seed -> seed.copyOf(32) }
+
+    @Test
+    fun `a rotation's link is signed by the oldest predecessor and the current key`() {
+        val current = ByteArray(64) { 9 }
+        val seen = mutableListOf<Triple<ByteArray, ByteArray, Long>>()
+        val link = conversationLinkOf(
+            rows = listOf(predecessor(1), predecessor(2)),
+            currentSeed = current,
+            nowSecs = 77L,
+            ed25519Of = edOf,
+            sign = { conversation, now, at ->
+                seen += Triple(conversation.copyOf(), now.copyOf(), at)
+                ByteArray(201) { 3 }
+            },
+        )
+        assertEquals(201, link?.size)
+        val (conversation, now, at) = seen.single()
+        assertEquals("not the key just left", 1.toByte(), conversation[0])
+        assertEquals(9.toByte(), now[0])
+        assertEquals(77L, at)
+    }
+
+    @Test
+    fun `a first rotation links the key just left and no predecessor links nothing`() {
+        var conversation: Byte? = null
+        val link = conversationLinkOf(listOf(predecessor(4)), ByteArray(64) { 9 }, 1L, edOf) { c, _, _ ->
+            conversation = c[0]
+            ByteArray(201)
+        }
+        assertEquals(201, link?.size)
+        assertEquals(4.toByte(), conversation)
+        assertNull(conversationLinkOf(emptyList(), ByteArray(64), 1L, edOf) { _, _, _ -> ByteArray(201) })
+    }
+
+    @Test
+    fun `the seeds a link was signed with are zeroed`() {
+        val handed = mutableListOf<ByteArray>()
+        conversationLinkOf(listOf(predecessor(1)), ByteArray(64) { 9 }, 1L, edOf) { c, n, _ ->
+            handed += c
+            handed += n
+            ByteArray(201)
+        }
+        assertEquals(2, handed.size)
+        assertTrue(handed.all { seed -> seed.all { it == 0.toByte() } })
+    }
+
     // --- the store ----------------------------------------------------------
 
     @Test

@@ -83,6 +83,58 @@ class RecoveryEmailClientTest {
     }
 
     @Test
+    fun `the phrase status is a bearer GET of its own`() = runTest {
+        val seen = mutableListOf<Captured>()
+        val status = client(seen, HttpStatusCode.OK to """{"saved":false,"rotation_needed":true}""")
+            .use { it.accountPhraseStatus("tok") }
+        assertEquals(AccountPhraseStatus(saved = false, rotationNeeded = true), status)
+        assertEquals(HttpMethod.Get, seen.single().method)
+        assertTrue(seen.single().url.endsWith("/account/phrase"))
+        assertEquals("Bearer tok", seen.single().authorization)
+    }
+
+    @Test
+    fun `a phrase status without rotation_needed is a failure, not a guess`() = runTest {
+        val failed = try {
+            client(mutableListOf(), HttpStatusCode.OK to """{"saved":false}""").use { it.accountPhraseStatus("tok") }
+            false
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            // Whatever the client threw: the screen's failed state.
+            true
+        }
+        assertTrue("an answer with no path must not decide one", failed)
+    }
+
+    @Test
+    fun `marking the phrase saved sends the grant and reads the refusals`() = runTest {
+        val seen = mutableListOf<Captured>()
+        client(seen, HttpStatusCode.NoContent to "").use { it.markPhraseSaved("tok", "grant") }
+        assertEquals(HttpMethod.Post, seen.single().method)
+        assertTrue(seen.single().url.endsWith("/account/phrase/saved"))
+        assertEquals("Bearer tok", seen.single().authorization)
+        assertEquals("grant", seen.single().body!!["fresh_grant"]!!.jsonPrimitive.content)
+        assertEquals(1, seen.single().body!!.size)
+
+        suspend fun refusal(status: HttpStatusCode, body: String): Throwable = try {
+            client(mutableListOf(), status to body).use { it.markPhraseSaved("tok", "grant") }
+            error("refused")
+        } catch (err: AuthHttpError) {
+            err
+        }
+        assertEquals(
+            PhraseSavedOutcome.NeedsRotation,
+            phraseSavedOutcomeOf(refusal(HttpStatusCode.Conflict, """{"error":"phrase-save-needs-rotation"}""")),
+        )
+        assertEquals(
+            PhraseSavedOutcome.ProofRequired,
+            phraseSavedOutcomeOf(refusal(HttpStatusCode.Forbidden, """{"error":"fresh-auth-required"}""")),
+        )
+        assertEquals(PhraseSavedOutcome.Failed, phraseSavedOutcomeOf(refusal(HttpStatusCode.InternalServerError, "{}")))
+    }
+
+    @Test
     fun `enrol start sends the grant, the handle as base64url and the language, and reads the salt`() = runTest {
         val seen = mutableListOf<Captured>()
         val salt = ByteArray(EMAIL_VAULT_SALT_LEN) { (0xFB + it % 5).toByte() }

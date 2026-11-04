@@ -137,4 +137,96 @@ class WelcomeGrantFallbackTest {
         }
         assertEquals(listOf<String?>("a"), tried)
     }
+
+    // ---- a person found in Everyone (ADR-0060 section 6, 2026-10-29) ------
+
+    @Test
+    fun `a held grant that is refused never falls back to an unsigned write and stays owed`() = runTest {
+        var asked = false
+        val tried = mutableListOf<String?>()
+        try {
+            writeWelcomeWithGrants(
+                candidates = listOf({ "held-grant" }, { null }),
+                write = { auth ->
+                    tried += auth
+                    throw refused()
+                },
+                isRefusal = { it is DsReachRefusedError },
+                requireGrant = true,
+                accountKeyHex = "aa",
+                openFallback = { asked = true; "open-mailbox" },
+            )
+            fail("expected WelcomeUndeliverable")
+        } catch (e: WelcomeUndeliverable) {
+            assertEquals("aa", e.accountKeyHex)
+        }
+        assertEquals(listOf<String?>("held-grant"), tried)
+        assertTrue("the open path was not consulted", !asked)
+    }
+
+    @Test
+    fun `candidates that yield nothing count as none, and the open mailbox is written`() = runTest {
+        val tried = mutableListOf<String?>()
+        val id = writeWelcomeWithGrants(
+            // The continuity no-op and a delegation lookup that finds none.
+            candidates = listOf({ null }, { null }),
+            write = { auth -> tried += auth; 9L },
+            isRefusal = { it is DsReachRefusedError },
+            requireGrant = true,
+            accountKeyHex = "aa",
+            openFallback = { "open-mailbox" },
+        )
+        assertEquals(9L, id)
+        assertEquals(listOf<String?>("open-mailbox"), tried)
+    }
+
+    @Test
+    fun `a grant that is accepted never reaches the open mailbox`() = runTest {
+        var asked = false
+        val tried = mutableListOf<String?>()
+        writeWelcomeWithGrants(
+            candidates = listOf({ "contact-key" }),
+            write = { auth -> tried += auth; 1L },
+            isRefusal = { it is DsReachRefusedError },
+            requireGrant = true,
+            accountKeyHex = "aa",
+            openFallback = { asked = true; "open-mailbox" },
+        )
+        assertEquals(listOf<String?>("contact-key"), tried)
+        assertTrue("the open path was not even consulted", !asked)
+    }
+
+    @Test
+    fun `with no grant the open mailbox named for this person is written`() = runTest {
+        val tried = mutableListOf<String?>()
+        writeWelcomeWithGrants<String, Long>(
+            candidates = emptyList(),
+            write = { auth -> tried += auth; 2L },
+            isRefusal = { it is DsReachRefusedError },
+            requireGrant = true,
+            accountKeyHex = "aa",
+            openFallback = { "open-mailbox" },
+        )
+        assertEquals(listOf<String?>("open-mailbox"), tried)
+    }
+
+    @Test
+    fun `a person with no record and no no-delegation envelope stays owed`() = runTest {
+        val tried = mutableListOf<String?>()
+        try {
+            writeWelcomeWithGrants<String, Long>(
+                candidates = emptyList(),
+                write = { auth -> tried += auth; 1L },
+                isRefusal = { it is DsReachRefusedError },
+                requireGrant = true,
+                accountKeyHex = "aa",
+                // The fallback names nothing for this person.
+                openFallback = { null },
+            )
+            fail("expected WelcomeUndeliverable")
+        } catch (e: WelcomeUndeliverable) {
+            assertEquals("aa", e.accountKeyHex)
+        }
+        assertTrue("nothing was written, unsigned least of all", tried.isEmpty())
+    }
 }

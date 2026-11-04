@@ -48,3 +48,26 @@ public fun isWelcomeForAnotherDevice(error: Throwable): Boolean {
 
 /** The OpenMLS `WelcomeError` variant the core formats into its message. */
 internal const val NO_MATCHING_KEY_PACKAGE: String = "NoMatchingKeyPackage"
+
+/** What became of one Welcome from the account mailbox, for the log line
+ *  (no identifiers). */
+public enum class WelcomeOutcome {
+    /** Joined (or rejoined) its group. */
+    JOINED,
+
+    /** Sealed to another device of the account: no matching KeyPackage here. */
+    FOR_ANOTHER_DEVICE,
+
+    /** Refused for a group this device still holds as active: kept, tried again. */
+    HELD_GROUP_STILL_ACTIVE,
+
+    /** Refused for any other reason. */
+    REFUSED,
+}
+
+/** The outcome of a join attempt that threw [error]. */
+public fun welcomeOutcomeOf(error: Throwable): WelcomeOutcome = when {
+    isWelcomeForAnotherDevice(error) -> WelcomeOutcome.FOR_ANOTHER_DEVICE
+    groupStillActiveHex(error) != null -> WelcomeOutcome.HELD_GROUP_STILL_ACTIVE
+    else -> WelcomeOutcome.REFUSED
+}

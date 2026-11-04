@@ -10,6 +10,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -21,12 +22,23 @@ import kotlinx.serialization.json.put
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import me.lakko.app.profile.toFfi
 
 /**
  * ADR-0050 section 2.9 — the state bundle a pairing hands to the new device
  * beside the history bundle: accepted contacts (with their local renames), the
  * per-contact identity pins and rotation markers, and the ids of the groups the
  * old device knows.
+ *
+ * Version 3 (flag day, v2 refused) adds what a new device of an existing
+ * member cannot learn from the groups themselves, since joining is not
+ * membership growth and nobody re-sends: the shared group names (ADR-0051,
+ * `groupNames`, each the name envelope with its ORIGINAL stamp), the profiles
+ * this device holds for other people (ADR-0048, `profiles`, keyed by person
+ * key), and the pending contacts added through an invite link (ADR-0079
+ * section 5, `pendingContacts`) with what was written to them
+ * (`heldMessages`, shown on the new device as display-only copies and never
+ * sent from it).
  *
  * Mirror of `apps/web/src/devices/state-bundle.ts`. The JSON shape, the row
  * magic and the exporter label are byte-identical so a web scanner and an
@@ -85,6 +97,47 @@ public object StateBundle {
         override fun toString(): String = "CarriedOwnPredecessor(<redacted>)"
     }
 
+    /** v3 — a group's shared name: the ADR-0051 envelope composed from the
+     *  stored name and its ORIGINAL stamp (standard base64), so a later rename
+     *  still wins on the new device. */
+    public data class CarriedGroupName(
+        val groupIdB64: String,
+        val envelopeB64: String,
+    )
+
+    /** v3 — a person's profile: the ADR-0048 envelope composed from the
+     *  stored profile with its ORIGINAL stamp, under the 32-byte person key. */
+    public data class CarriedProfile(
+        val personKeyB64: String,
+        val envelopeB64: String,
+    )
+
+    /** v3 — one message written to a pending contact, in queue order.
+     *  [attachments] is the writing client's own form of the held refs (this
+     *  client's pending queue holds text only and writes `[]`); a receiving
+     *  Android device keeps only their count. */
+    public data class CarriedHeldMessage(
+        val text: String,
+        val attachments: JsonArray = JsonArray(emptyList()),
+        val replyTo: Long? = null,
+        val heldAtMs: Long,
+    )
+
+    /** v3 — a person added through their invite link whose app has not
+     *  answered yet (field names of the iOS `PendingContact`). */
+    public data class CarriedPendingContact(
+        /** 16-byte account id, 32 lower-case hex characters. */
+        val accountIdHex: String,
+        val signaturePubkeyB64: String,
+        val x25519PubkeyB64: String,
+        val displayName: String,
+        val username: String,
+        val addedAtMs: Long,
+        /** The 16-byte invite link id, standard base64. */
+        val linkIdB64: String,
+        val heldMessages: List<CarriedHeldMessage> = emptyList(),
+    )
+
     /** The bundle; `v` is always [VERSION]. */
     public data class Bundle(
         val contacts: List<CarriedContact>,
@@ -93,11 +146,29 @@ public object StateBundle {
         /** This account's earlier keys, OLDEST FIRST; empty when the account
          *  never rotated. At most [MAX_PREDECESSORS]. */
         val ownPredecessors: List<CarriedOwnPredecessor> = emptyList(),
+        /** v3: at most [MAX_GROUP_NAMES], one per group id. */
+        val groupNames: List<CarriedGroupName> = emptyList(),
+        /** v3: at most [MAX_PROFILES], one per person key, never this
+         *  account's own. */
+        val profiles: List<CarriedProfile> = emptyList(),
+        /** v3: at most [MAX_PENDING_CONTACTS]. */
+        val pendingContacts: List<CarriedPendingContact> = emptyList(),
     )
 
-    /** The one bundle version this build writes and reads (ADR-0074: flag
-     *  day, a bundle of any other version is refused). */
-    public const val VERSION: Long = 2L
+    /** The one bundle version this build writes and reads (flag day: a
+     *  bundle of any other version is refused). */
+    public const val VERSION: Long = 3L
+
+    /** Decode bounds of the v3 arrays (chosen, not measured). Over a bound
+     *  the whole bundle is refused; the builder keeps the first N. */
+    public const val MAX_GROUP_NAMES: Int = 1000
+    public const val MAX_PROFILES: Int = 2000
+    public const val MAX_PENDING_CONTACTS: Int = 500
+    public const val MAX_HELD_MESSAGES: Int = 200
+
+    private const val ACCOUNT_ID_LEN: Int = 16
+    private const val LINK_ID_LEN: Int = 16
+    private val ACCOUNT_ID_HEX = Regex("^[0-9a-f]{32}$")
 
     /** The bound on `ownPredecessors` and on each pin's
      *  `provenPredecessorsB64`. */
@@ -155,6 +226,65 @@ public object StateBundle {
                             buildJsonObject {
                                 put("seedB64", o.seedB64)
                                 put("adoptedAtMs", o.adoptedAtMs)
+                            },
+                        )
+                    }
+                },
+            )
+            put(
+                "groupNames",
+                buildJsonArray {
+                    for (g in bundle.groupNames) {
+                        add(
+                            buildJsonObject {
+                                put("groupIdB64", g.groupIdB64)
+                                put("envelopeB64", g.envelopeB64)
+                            },
+                        )
+                    }
+                },
+            )
+            put(
+                "profiles",
+                buildJsonArray {
+                    for (p in bundle.profiles) {
+                        add(
+                            buildJsonObject {
+                                put("personKeyB64", p.personKeyB64)
+                                put("envelopeB64", p.envelopeB64)
+                            },
+                        )
+                    }
+                },
+            )
+            put(
+                "pendingContacts",
+                buildJsonArray {
+                    for (c in bundle.pendingContacts) {
+                        add(
+                            buildJsonObject {
+                                put("accountIdHex", c.accountIdHex)
+                                put("signaturePubkeyB64", c.signaturePubkeyB64)
+                                put("x25519PubkeyB64", c.x25519PubkeyB64)
+                                put("displayName", c.displayName)
+                                put("username", c.username)
+                                put("addedAtMs", c.addedAtMs)
+                                put("linkIdB64", c.linkIdB64)
+                                put(
+                                    "heldMessages",
+                                    buildJsonArray {
+                                        for (m in c.heldMessages) {
+                                            add(
+                                                buildJsonObject {
+                                                    put("text", m.text)
+                                                    put("attachments", m.attachments)
+                                                    put("replyTo", m.replyTo?.let { JsonPrimitive(it) } ?: JsonNull)
+                                                    put("heldAtMs", m.heldAtMs)
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
                             },
                         )
                     }
@@ -225,8 +355,85 @@ public object StateBundle {
             if (!p.isString) return null
             groups += p.content
         }
-        return Bundle(contacts, pins, groups, own)
+        val groupNames = decodeGroupNames(root["groupNames"] as? JsonArray ?: return null) ?: return null
+        val profiles = decodeProfiles(root["profiles"] as? JsonArray ?: return null) ?: return null
+        val pending = decodePendingContacts(root["pendingContacts"] as? JsonArray ?: return null) ?: return null
+        return Bundle(contacts, pins, groups, own, groupNames, profiles, pending)
     }
+
+    private fun decodeGroupNames(arr: JsonArray): List<CarriedGroupName>? {
+        if (arr.size > MAX_GROUP_NAMES) return null
+        val out = ArrayList<CarriedGroupName>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val id = r.string("groupIdB64") ?: return null
+            val env = r.string("envelopeB64") ?: return null
+            val idBytes = nonEmptyStandardBase64(id) ?: return null
+            if (nonEmptyStandardBase64(env) == null) return null
+            // One entry per group id: a repeat refuses the bundle.
+            if (!seen.add(hexOf(idBytes))) return null
+            out += CarriedGroupName(id, env)
+        }
+        return out
+    }
+
+    private fun decodeProfiles(arr: JsonArray): List<CarriedProfile>? {
+        if (arr.size > MAX_PROFILES) return null
+        val out = ArrayList<CarriedProfile>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val key = r.string("personKeyB64") ?: return null
+            val env = r.string("envelopeB64") ?: return null
+            val keyBytes = standardBase64OfLength(key, KEY_LEN) ?: return null
+            if (nonEmptyStandardBase64(env) == null) return null
+            // One entry per person key: a repeat refuses the bundle.
+            if (!seen.add(hexOf(keyBytes))) return null
+            out += CarriedProfile(key, env)
+        }
+        return out
+    }
+
+    private fun decodePendingContacts(arr: JsonArray): List<CarriedPendingContact>? {
+        if (arr.size > MAX_PENDING_CONTACTS) return null
+        val out = ArrayList<CarriedPendingContact>(arr.size)
+        val seen = HashSet<String>()
+        for (el in arr) {
+            val r = el as? JsonObject ?: return null
+            val accountIdHex = r.string("accountIdHex")?.takeIf { ACCOUNT_ID_HEX.matches(it) } ?: return null
+            // One entry per pending account: a repeat refuses the bundle.
+            if (!seen.add(accountIdHex)) return null
+            val sig = r.string("signaturePubkeyB64")?.takeIf { standardBase64OfLength(it, KEY_LEN) != null } ?: return null
+            val x = r.string("x25519PubkeyB64")?.takeIf { standardBase64OfLength(it, KEY_LEN) != null } ?: return null
+            val name = r.string("displayName") ?: return null
+            val username = r.string("username") ?: return null
+            val addedAt = r.integer("addedAtMs") ?: return null
+            val link = r.string("linkIdB64")?.takeIf { standardBase64OfLength(it, LINK_ID_LEN) != null } ?: return null
+            val heldArr = r["heldMessages"] as? JsonArray ?: return null
+            if (heldArr.size > MAX_HELD_MESSAGES) return null
+            val held = ArrayList<CarriedHeldMessage>(heldArr.size)
+            for (m in heldArr) {
+                val o = m as? JsonObject ?: return null
+                val text = o.string("text") ?: return null
+                val attachments = o["attachments"] as? JsonArray ?: return null
+                val replyEl = o["replyTo"] ?: return null
+                val replyTo = if (replyEl is JsonNull) null else (o.integer("replyTo") ?: return null)
+                val heldAt = o.integer("heldAtMs") ?: return null
+                held += CarriedHeldMessage(text, attachments, replyTo, heldAt)
+            }
+            out += CarriedPendingContact(accountIdHex, sig, x, name, username, addedAt, link, held)
+        }
+        return out
+    }
+
+    /** [b64] decoded as non-empty STANDARD base64, else `null`. */
+    private fun nonEmptyStandardBase64(b64: String): ByteArray? =
+        try {
+            Base64.getDecoder().decode(b64).takeIf { it.isNotEmpty() }
+        } catch (_: IllegalArgumentException) {
+            null
+        }
 
     /** [b64] decoded as STANDARD base64 when it is exactly [length] bytes,
      *  else `null`. */
@@ -275,12 +482,57 @@ public object StateBundle {
         } catch (_: Throwable) {
             emptyList()
         }
+        val ownKeys = HashSet<String>()
         val own = try {
+            ownRows.forEach { ownKeys += Base64.getEncoder().encodeToString(it.signaturePubkey) }
             carriedOwnPredecessors(ownRows)
         } finally {
             ownRows.forEach { it.zero() }
         }
-        return build(context, accountIdB64, knownGroupIdsHex, own, links)
+        currentAccountKeyB64(context, owner)?.let { ownKeys += it }
+        val pending = try {
+            me.lakko.app.contacts.PendingContactsFiles.onDevice(context).load(owner)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val held = try {
+            me.lakko.app.chat.SealedHeldSendBackend(context).load(owner)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val copies = try {
+            me.lakko.app.chat.HeldCopyStore.onDevice(context).load(owner)
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+        return build(
+            context = context,
+            accountIdB64 = accountIdB64,
+            knownGroupIdsHex = knownGroupIdsHex,
+            ownPredecessors = own,
+            links = links,
+            ownKeysB64 = ownKeys,
+            pendingContacts = pending,
+            heldSends = held,
+            heldCopies = copies,
+        )
+    }
+
+    /** The account key of [accountIdB64] on this device, standard base64, or
+     *  `null` when its seed is not held (or cannot be read). */
+    private fun currentAccountKeyB64(context: Context, accountIdB64: String): String? {
+        val seed = try {
+            me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, accountIdB64)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+        return try {
+            uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { Base64.getEncoder().encodeToString(it.signaturePublicKey()) }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            seed.fill(0)
+        }
     }
 
     /** [build] over the own predecessors and proven steps already read (the
@@ -291,6 +543,11 @@ public object StateBundle {
         knownGroupIdsHex: Collection<String>,
         ownPredecessors: List<CarriedOwnPredecessor>,
         links: List<me.lakko.app.contacts.ProvenLink>,
+        ownKeysB64: Set<String> = emptySet(),
+        pendingContacts: List<me.lakko.app.contacts.PendingContact> = emptyList(),
+        heldSends: List<me.lakko.app.chat.PersistedHeldSend> = emptyList(),
+        heldCopies: Map<String, List<me.lakko.app.chat.HeldCopy>> = emptyMap(),
+        codecs: EnvelopeCodecs = FfiEnvelopeCodecs,
     ): Bundle {
         val accepted = me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
         val pinStore = me.lakko.app.contacts.PeerPinStore(
@@ -322,8 +579,343 @@ public object StateBundle {
             )
         }
         val groups = knownGroupIdsHex.mapNotNull { bytesOfHex(it)?.let { b -> enc.encodeToString(b) } }
-        return Bundle(contacts, pins, groups, ownPredecessors)
+        val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val groupNames = carriedGroupNames(
+            knownGroupIdsHex,
+            load = { hex -> me.lakko.app.chat.GroupNameStore.load(context, accountIdB64, hex) },
+            compose = codecs.composeGroupName,
+        )
+        val storedProfiles = try {
+            me.lakko.app.profile.SharedPrefsProfilePersistence(context).loadProfiles(owner)
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+        val profiles = carriedProfiles(
+            storedProfiles,
+            ownKeysB64 = ownKeysB64,
+            ownAccountIdHex = accountIdHexOf(owner),
+            compose = codecs.composeProfile,
+        )
+        val pending = carriedPendingContacts(pendingContacts, heldSends, heldCopies)
+        return fitToSizeCap(Bundle(contacts, pins, groups, ownPredecessors, groupNames, profiles, pending))
     }
+
+    /** The encoded bundle size the decoder accepts. Visible for tests. */
+    internal const val SIZE_CAP_BYTES: Int = MAX_BUNDLE_BYTES
+
+    /**
+     * Keep the encoded [bundle] within [cap] bytes (the decoder's own cap),
+     * so a big account is not refused whole. Trimmed in this order until it
+     * fits: profiles from the end, then group names from the end, then the
+     * held messages of the pending contacts (the last contact's last message
+     * first). Contacts, pins, group ids and keys are never trimmed. Mirror of
+     * the web `fitToSizeCap`.
+     */
+    internal fun fitToSizeCap(bundle: Bundle, cap: Int = MAX_BUNDLE_BYTES): Bundle {
+        var size = encode(bundle).size
+        if (size <= cap) return bundle
+        // A comma and the entry's JSON text: what dropping it saves.
+        fun nameBytes(x: CarriedGroupName) = 32 + x.groupIdB64.length + x.envelopeB64.length
+        fun profileBytes(x: CarriedProfile) = 34 + x.personKeyB64.length + x.envelopeB64.length
+        fun heldBytes(x: CarriedHeldMessage) =
+            60 + x.text.toByteArray(Charsets.UTF_8).size * 2 + x.attachments.toString().length
+        val profiles = bundle.profiles.toMutableList()
+        val names = bundle.groupNames.toMutableList()
+        val pending = bundle.pendingContacts.map { it to it.heldMessages.toMutableList() }
+        fun current() = bundle.copy(
+            profiles = profiles.toList(),
+            groupNames = names.toList(),
+            pendingContacts = pending.map { (c, held) -> c.copy(heldMessages = held.toList()) },
+        )
+        while (true) {
+            var over = size - cap
+            if (over <= 0) break
+            var trimmed = false
+            while (over > 0 && profiles.isNotEmpty()) {
+                over -= profileBytes(profiles.removeAt(profiles.lastIndex)); trimmed = true
+            }
+            while (over > 0 && names.isNotEmpty()) {
+                over -= nameBytes(names.removeAt(names.lastIndex)); trimmed = true
+            }
+            for ((_, held) in pending.asReversed()) {
+                while (over > 0 && held.isNotEmpty()) {
+                    over -= heldBytes(held.removeAt(held.lastIndex)); trimmed = true
+                }
+            }
+            size = encode(current()).size
+            if (!trimmed) break
+        }
+        return current()
+    }
+
+    // ---- v3: group names, profiles, pending contacts (pure) ---------------
+
+    /** The envelope codecs the v3 arrays need. The FFI ones in production;
+     *  a host test injects its own (the JVM suite has no native library). */
+    internal class EnvelopeCodecs(
+        val composeGroupName: (me.lakko.app.chat.StoredGroupName) -> ByteArray?,
+        val decodeGroupName: (ByteArray) -> me.lakko.app.chat.StoredGroupName?,
+        val groupNameIsNewer: (ULong, ULong) -> Boolean,
+        val composeProfile: (me.lakko.app.profile.PeerProfile) -> ByteArray?,
+        val decodeProfile: (ByteArray) -> me.lakko.app.profile.PeerProfile?,
+    )
+
+    internal val FfiEnvelopeCodecs: EnvelopeCodecs = EnvelopeCodecs(
+        composeGroupName = { stored ->
+            try {
+                uniffi.lakko_ffi_uniffi.composeGroupNameEnvelope(
+                    uniffi.lakko_ffi_uniffi.FfiGroupName(name = stored.name, updatedAtMs = stored.updatedAtMs),
+                )
+            } catch (_: Throwable) {
+                null
+            }
+        },
+        decodeGroupName = { bytes ->
+            try {
+                uniffi.lakko_ffi_uniffi.decodeGroupNameEnvelope(bytes)
+                    .let { me.lakko.app.chat.StoredGroupName(name = it.name, updatedAtMs = it.updatedAtMs) }
+            } catch (_: Throwable) {
+                null
+            }
+        },
+        groupNameIsNewer = { a, b -> uniffi.lakko_ffi_uniffi.groupNameIsNewer(a, b) },
+        composeProfile = ::composeProfileOrNull,
+        decodeProfile = { bytes ->
+            try {
+                me.lakko.app.profile.peerProfileOf(uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(bytes))
+            } catch (_: Throwable) {
+                null
+            }
+        },
+    )
+
+    /** A stored profile as the ADR-0048 envelope, with its ORIGINAL stamp;
+     *  without the certificate when the composer refuses it with one, and
+     *  `null` when it refuses the profile. No reach grants are carried. */
+    private fun composeProfileOrNull(p: me.lakko.app.profile.PeerProfile): ByteArray? {
+        fun ffi(withCertificate: Boolean) = uniffi.lakko_ffi_uniffi.FfiProfile(
+            displayName = p.displayName,
+            username = p.username,
+            updatedAtMs = p.updatedAtMs,
+            accountId = p.accountIdHex?.let { bytesOfHex(it) }?.takeIf { it.size == ACCOUNT_ID_LEN },
+            usernameCertificate = if (withCertificate && p.username != null) {
+                p.usernameCertificateHex?.let { bytesOfHex(it) }
+            } else {
+                null
+            },
+            grants = emptyList(),
+            avatar = p.avatar?.toFfi(),
+        )
+        return try {
+            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = true))
+        } catch (_: Throwable) {
+            try {
+                uniffi.lakko_ffi_uniffi.composeProfileEnvelope(ffi(withCertificate = false))
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+
+    /** The group names to carry: one per known group this device holds a
+     *  stored name row for (a cleared name too, so its stamp orders), in a
+     *  stable order (by group id), at most [MAX_GROUP_NAMES]. */
+    internal fun carriedGroupNames(
+        knownGroupIdsHex: Collection<String>,
+        load: (String) -> me.lakko.app.chat.StoredGroupName?,
+        compose: (me.lakko.app.chat.StoredGroupName) -> ByteArray?,
+    ): List<CarriedGroupName> {
+        val enc = Base64.getEncoder()
+        val out = ArrayList<CarriedGroupName>()
+        for (hex in knownGroupIdsHex.map { it.lowercase() }.distinct().sorted()) {
+            if (out.size >= MAX_GROUP_NAMES) break
+            val id = bytesOfHex(hex)?.takeIf { it.isNotEmpty() } ?: continue
+            val stored = try {
+                load(hex)
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            val envelope = compose(stored) ?: continue
+            out += CarriedGroupName(enc.encodeToString(id), enc.encodeToString(envelope))
+        }
+        return out
+    }
+
+    /** The profiles to carry: every stored profile under a 32-byte person
+     *  key that is not this account's own (by key, or by the account id the
+     *  profile names), in a stable order (by key), at most [MAX_PROFILES].
+     *  A name a search found goes as the name alone
+     *  ([me.lakko.app.profile.PeerProfile.forStateBundle]). */
+    internal fun carriedProfiles(
+        stored: Map<String, me.lakko.app.profile.PeerProfile>,
+        ownKeysB64: Set<String>,
+        ownAccountIdHex: String?,
+        compose: (me.lakko.app.profile.PeerProfile) -> ByteArray?,
+    ): List<CarriedProfile> {
+        val enc = Base64.getEncoder()
+        val out = ArrayList<CarriedProfile>()
+        val seen = HashSet<String>()
+        for ((rawKey, profile) in stored.entries.sortedBy { it.key }) {
+            if (out.size >= MAX_PROFILES) break
+            val keyBytes = standardBase64OfLength(rawKey, KEY_LEN) ?: continue
+            val key = enc.encodeToString(keyBytes)
+            if (key in ownKeysB64 || !seen.add(key)) continue
+            if (ownAccountIdHex != null && profile.accountIdHex == ownAccountIdHex) continue
+            val carried = profile.forStateBundle ?: continue
+            val envelope = compose(carried) ?: continue
+            out += CarriedProfile(key, enc.encodeToString(envelope))
+        }
+        return out
+    }
+
+    /** The pending contacts to carry, each with what was written to it: this
+     *  device's own held messages for its queue key and the display copies it
+     *  holds there itself, in held order, at most [MAX_HELD_MESSAGES] each. A
+     *  record whose link id is not 16 bytes is left out (nothing is
+     *  invented). This client's pending queue holds text only, so the
+     *  attachments are always `[]` and `replyTo` is `null`. */
+    internal fun carriedPendingContacts(
+        pending: List<me.lakko.app.contacts.PendingContact>,
+        heldSends: List<me.lakko.app.chat.PersistedHeldSend>,
+        heldCopies: Map<String, List<me.lakko.app.chat.HeldCopy>>,
+    ): List<CarriedPendingContact> {
+        val enc = Base64.getEncoder()
+        val out = ArrayList<CarriedPendingContact>()
+        for (c in pending) {
+            if (out.size >= MAX_PENDING_CONTACTS) break
+            if (!ACCOUNT_ID_HEX.matches(c.accountIdHex)) continue
+            if (standardBase64OfLength(c.signaturePubkeyB64, KEY_LEN) == null) continue
+            if (standardBase64OfLength(c.x25519PubkeyB64, KEY_LEN) == null) continue
+            val link = bytesOfHex(c.linkIdHex)?.takeIf { it.size == LINK_ID_LEN } ?: continue
+            val own = heldSends
+                .filter { it.conversationHex == c.queueKey && it.text.isNotEmpty() }
+                .map { CarriedHeldMessage(text = it.text, heldAtMs = it.heldAtMs) }
+            val copies = heldCopies[c.queueKey].orEmpty()
+                .filter { it.attachmentCount == 0 }
+                .map { CarriedHeldMessage(text = it.text, replyTo = it.replyTo, heldAtMs = it.heldAtMs) }
+            out += CarriedPendingContact(
+                accountIdHex = c.accountIdHex,
+                signaturePubkeyB64 = c.signaturePubkeyB64,
+                x25519PubkeyB64 = c.x25519PubkeyB64,
+                displayName = c.displayName,
+                username = c.username,
+                addedAtMs = c.addedAtMs,
+                linkIdB64 = enc.encodeToString(link),
+                heldMessages = (own + copies).sortedBy { it.heldAtMs }.take(MAX_HELD_MESSAGES),
+            )
+        }
+        return out
+    }
+
+    /** The receiving half of `groupNames`: each name through the group-name
+     *  store's own entry, strictly newer only; a name that does not decode is
+     *  skipped. No authority check (the bundle is this account's own device's,
+     *  sealed under the DeviceGroup exporter) and nothing is posted. Returns
+     *  how many were stored. */
+    internal fun applyGroupNames(
+        entries: List<CarriedGroupName>,
+        decode: (ByteArray) -> me.lakko.app.chat.StoredGroupName?,
+        isNewer: (ULong, ULong) -> Boolean,
+        load: (String) -> me.lakko.app.chat.StoredGroupName?,
+        save: (String, me.lakko.app.chat.StoredGroupName) -> Unit,
+    ): Int {
+        var stored = 0
+        for (e in entries) {
+            val id = nonEmptyStandardBase64(e.groupIdB64) ?: continue
+            val bytes = nonEmptyStandardBase64(e.envelopeB64) ?: continue
+            val name = decode(bytes) ?: continue
+            val hex = hexOf(id)
+            val held = load(hex)
+            if (held != null && !isNewer(name.updatedAtMs, held.updatedAtMs)) continue
+            save(hex, name)
+            stored += 1
+        }
+        return stored
+    }
+
+    /** The receiving half of `profiles`: each through the profile store's
+     *  strictly-newer offer under its person key, never under one of
+     *  [ownKeysB64] or naming [ownAccountIdHex]; a profile that does not
+     *  decode is skipped. Returns how many were stored. */
+    internal fun applyProfiles(
+        entries: List<CarriedProfile>,
+        ownKeysB64: Set<String>,
+        ownAccountIdHex: String?,
+        decode: (ByteArray) -> me.lakko.app.profile.PeerProfile?,
+        offer: (String, me.lakko.app.profile.PeerProfile) -> me.lakko.app.profile.ProfileOffer,
+    ): Int {
+        val enc = Base64.getEncoder()
+        var stored = 0
+        for (e in entries) {
+            val key = standardBase64OfLength(e.personKeyB64, KEY_LEN)?.let { enc.encodeToString(it) } ?: continue
+            if (key in ownKeysB64) continue
+            val bytes = nonEmptyStandardBase64(e.envelopeB64) ?: continue
+            val profile = decode(bytes) ?: continue
+            if (ownAccountIdHex != null && profile.accountIdHex == ownAccountIdHex) continue
+            if (offer(key, profile) == me.lakko.app.profile.ProfileOffer.STORED) stored += 1
+        }
+        return stored
+    }
+
+    /** The carried pending contacts this device holds neither as an accepted
+     *  contact nor as a pending one (by account key or account id), as
+     *  records, in order. */
+    public fun freshPendingContacts(
+        carried: List<me.lakko.app.contacts.PendingContact>,
+        accepted: List<me.lakko.app.contacts.AcceptedContact>,
+        pending: List<me.lakko.app.contacts.PendingContact>,
+    ): List<me.lakko.app.contacts.PendingContact> {
+        val enc = Base64.getEncoder()
+        val keys = HashSet<String>()
+        val ids = HashSet<String>()
+        for (a in accepted) {
+            keys += enc.encodeToString(a.request.fromPubkey)
+            a.request.fromAccountId?.let { ids += hexOf(it) }
+        }
+        for (p in pending) {
+            keys += p.signaturePubkeyB64
+            ids += p.accountIdHex
+        }
+        val out = ArrayList<me.lakko.app.contacts.PendingContact>()
+        for (c in carried) {
+            if (c.signaturePubkeyB64 in keys || c.accountIdHex in ids) continue
+            keys += c.signaturePubkeyB64
+            ids += c.accountIdHex
+            out += c
+        }
+        return out
+    }
+
+    /** A carried pending contact as this client's record. */
+    internal fun pendingRecordOf(c: CarriedPendingContact): me.lakko.app.contacts.PendingContact? {
+        val link = standardBase64OfLength(c.linkIdB64, LINK_ID_LEN) ?: return null
+        return me.lakko.app.contacts.PendingContact(
+            accountIdHex = c.accountIdHex,
+            signaturePubkeyB64 = c.signaturePubkeyB64,
+            x25519PubkeyB64 = c.x25519PubkeyB64,
+            displayName = c.displayName,
+            username = c.username,
+            addedAtMs = c.addedAtMs,
+            linkIdHex = hexOf(link),
+        )
+    }
+
+    /** A carried held message as a display-only copy. */
+    internal fun heldCopyOf(m: CarriedHeldMessage): me.lakko.app.chat.HeldCopy =
+        me.lakko.app.chat.HeldCopy(
+            text = m.text,
+            attachmentCount = m.attachments.size,
+            replyTo = m.replyTo,
+            heldAtMs = m.heldAtMs,
+        )
+
+    /** The account id of [accountIdB64] as lower-case hex, or `null`. */
+    private fun accountIdHexOf(accountIdB64: String): String? =
+        try {
+            Base64.getDecoder().decode(accountIdB64).takeIf { it.size == ACCOUNT_ID_LEN }?.let { hexOf(it) }
+        } catch (_: IllegalArgumentException) {
+            null
+        }
 
     // ---- ADR-0074: predecessors (pure) ---------------------------------------
 
@@ -401,15 +993,61 @@ public object StateBundle {
         pubkeyOfSeed: (ByteArray) -> ByteArray,
         nowMs: Long = System.currentTimeMillis(),
     ): OwnPredecessorReceipt? {
+        val seeds = decodedOwnPredecessors(carried) ?: return null
+        return try {
+            receiveOwnPredecessorSeeds(store, links, accountIdB64, seeds, currentAccountKey, pubkeyOfSeed, nowMs)
+        } finally {
+            seeds.forEach { it.seed.fill(0) }
+        }
+    }
+
+    /** One of this account's earlier keys as it arrived, the seed raw. */
+    public class OwnPredecessorSeed(
+        public val seed: ByteArray,
+        /** When the account adopted the key that replaced it (unix ms). */
+        public val adoptedAtMs: Long,
+    ) {
+        override fun toString(): String = "OwnPredecessorSeed(<redacted>)"
+    }
+
+    /** [carried] decoded, or `null` when one of them is not a seed. */
+    private fun decodedOwnPredecessors(carried: List<CarriedOwnPredecessor>): List<OwnPredecessorSeed>? {
+        val seeds = ArrayList<OwnPredecessorSeed>()
+        for (c in carried.take(MAX_PREDECESSORS)) {
+            val seed = standardBase64OfLength(c.seedB64, SEED_LEN)
+            if (seed == null) {
+                seeds.forEach { it.seed.fill(0) }
+                return null
+            }
+            seeds += OwnPredecessorSeed(seed, c.adoptedAtMs)
+        }
+        return seeds
+    }
+
+    /**
+     * [receiveOwnPredecessors] over raw seeds: what a pairing bundle and a
+     * restored backup (ADR-0074 section 3.7) both end in. [seeds] stay the
+     * caller's to zero.
+     */
+    internal fun receiveOwnPredecessorSeeds(
+        store: me.lakko.app.auth.OwnPredecessorStore,
+        links: me.lakko.app.contacts.ProvenLinkStore,
+        accountIdB64: String,
+        seeds: List<OwnPredecessorSeed>,
+        currentAccountKey: ByteArray?,
+        pubkeyOfSeed: (ByteArray) -> ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): OwnPredecessorReceipt? {
         val held = store.load(accountIdB64)
-        if (carried.isEmpty()) {
+        if (seeds.isEmpty()) {
             held.forEach { it.zero() }
             return OwnPredecessorReceipt(held.size, conversationKeyChanged = false)
         }
         val rows = ArrayList<me.lakko.app.auth.OwnPredecessor>()
         try {
-            for (c in carried.take(MAX_PREDECESSORS)) {
-                val seed = standardBase64OfLength(c.seedB64, SEED_LEN) ?: return null
+            for (c in seeds.take(MAX_PREDECESSORS)) {
+                if (c.seed.size != SEED_LEN) return null
+                val seed = c.seed.copyOf()
                 rows += me.lakko.app.auth.OwnPredecessor(pubkeyOfSeed(seed), seed, c.adoptedAtMs)
             }
             val merged = mergedOwnPredecessors(held, rows)
@@ -485,6 +1123,15 @@ public object StateBundle {
     @Volatile
     public var contactsSink: ((String, List<me.lakko.app.contacts.AcceptedContact>) -> Int?)? = null
 
+    /**
+     * v3 — the receiving half for pending contacts, set like [contactsSink]
+     * by the process-lived contacts repository so they reach its live list.
+     * Returns how many were added, or `null` when the repository is not bound
+     * to that account (the bundle then writes that account's store directly).
+     */
+    @Volatile
+    public var pendingContactsSink: ((String, List<me.lakko.app.contacts.PendingContact>) -> Int?)? = null
+
     /** What [apply] did. Destructures as `(contacts, pins)`. */
     public data class Applied(
         val contacts: Int,
@@ -494,6 +1141,12 @@ public object StateBundle {
         /** ADR-0074: the key the conversation leaves are bound to changed;
          *  a chat layer already loaded must be rebuilt under it. */
         val conversationKeyChanged: Boolean = false,
+        /** v3: group names stored (strictly newer than what was held). */
+        val groupNames: Int = 0,
+        /** v3: profiles stored (strictly newer than what was held). */
+        val profiles: Int = 0,
+        /** v3: pending contacts added. */
+        val pendingContacts: Int = 0,
     )
 
     /**
@@ -505,6 +1158,38 @@ public object StateBundle {
      */
     @Volatile
     public var conversationKeySink: (suspend (String) -> Unit)? = null
+
+    /**
+     * Store [seeds] on this device for [accountIdB64]: the one place a bundle
+     * and a restored backup do it. The step to the current key is recorded
+     * when the account's seed is on the device. `null` when not stored.
+     */
+    public fun storeOwnPredecessorSeeds(
+        context: Context,
+        accountIdB64: String,
+        seeds: List<OwnPredecessorSeed>,
+    ): OwnPredecessorReceipt? {
+        val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        return try {
+            val current = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, owner)
+            val currentKey = try {
+                current?.let { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } }
+            } finally {
+                current?.fill(0)
+            }
+            receiveOwnPredecessorSeeds(
+                store = me.lakko.app.auth.OwnPredecessorStore.onDevice(context),
+                links = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context),
+                accountIdB64 = owner,
+                seeds = seeds,
+                currentAccountKey = currentKey,
+                pubkeyOfSeed = { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "own predecessors not stored: ${cause.javaClass.simpleName}")
+            null
+        }
+    }
 
     /** Tell [conversationKeySink] when [applied] moved the conversation key.
      *  Best-effort: a device whose chat layer is not loaded reads the
@@ -524,7 +1209,21 @@ public object StateBundle {
      *  not here yet, pins through the monotone setter, the known group ids
      *  for the chat list, and (ADR-0074) this account's earlier keys and each
      *  contact's proven predecessors. */
-    public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Applied {
+    public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Applied =
+        apply(context, accountIdB64, bundle, FfiEnvelopeCodecs, ownKeysOverride = null, profileOffer = null)
+
+    /** [apply] with the envelope codecs, this account's own keys, the profile
+     *  store and the pending stores injected (the seams a host test drives). */
+    internal fun apply(
+        context: Context,
+        accountIdB64: String,
+        bundle: Bundle,
+        codecs: EnvelopeCodecs,
+        ownKeysOverride: Set<String>?,
+        profileOffer: ((String, me.lakko.app.profile.PeerProfile) -> me.lakko.app.profile.ProfileOffer)?,
+        pendingStore: me.lakko.app.contacts.PendingContactsStore? = null,
+        copyStore: me.lakko.app.chat.HeldCopyStore? = null,
+    ): Applied {
         val owner = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
         val linkStore = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context)
         // The own predecessors FIRST: nothing below may leave the device
@@ -532,24 +1231,12 @@ public object StateBundle {
         val receipt = if (bundle.ownPredecessors.isEmpty()) {
             null
         } else {
-            try {
-                val current = me.lakko.app.auth.AccountIdentitySeedStore.getAccountIdentitySeed(context, owner)
-                val currentKey = try {
-                    current?.let { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } }
+            decodedOwnPredecessors(bundle.ownPredecessors)?.let { seeds ->
+                try {
+                    storeOwnPredecessorSeeds(context, owner, seeds)
                 } finally {
-                    current?.fill(0)
+                    seeds.forEach { it.seed.fill(0) }
                 }
-                receiveOwnPredecessors(
-                    store = me.lakko.app.auth.OwnPredecessorStore.onDevice(context),
-                    links = linkStore,
-                    accountIdB64 = owner,
-                    carried = bundle.ownPredecessors,
-                    currentAccountKey = currentKey,
-                    pubkeyOfSeed = { seed -> uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { it.signaturePublicKey() } },
-                )
-            } catch (cause: Throwable) {
-                android.util.Log.w("StateBundle", "own predecessors not stored: ${cause.javaClass.simpleName}")
-                null
             }
         }
         val dec = Base64.getDecoder()
@@ -624,12 +1311,129 @@ public object StateBundle {
                 }
             },
         )
+        // v3 — the pending contacts, after the accepted ones (a person carried
+        // as both is an accepted contact), with what was written to them as
+        // display-only copies.
+        val pendingApplied = try {
+            applyPendingContacts(
+                context = context,
+                accountIdB64 = owner,
+                carried = bundle.pendingContacts,
+                store = pendingStore,
+                copies = copyStore,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "pending contacts not stored: ${cause.javaClass.simpleName}")
+            0
+        }
+        // v3 — the shared group names, through the group-name store.
+        val namesApplied = try {
+            applyGroupNames(
+                entries = bundle.groupNames,
+                decode = codecs.decodeGroupName,
+                isNewer = codecs.groupNameIsNewer,
+                load = { hex -> me.lakko.app.chat.GroupNameStore.load(context, accountIdB64, hex) },
+                save = { hex, value -> me.lakko.app.chat.GroupNameStore.save(context, accountIdB64, hex, value) },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "group names not stored: ${cause.javaClass.simpleName}")
+            0
+        }
+        // v3 — the profiles, never under this account's own key.
+        val profilesApplied = try {
+            val ownKeys = ownKeysOverride ?: ownKeysOnDevice(context, owner, bundle.ownPredecessors)
+            applyProfiles(
+                entries = bundle.profiles,
+                ownKeysB64 = ownKeys,
+                ownAccountIdHex = accountIdHexOf(owner),
+                decode = codecs.decodeProfile,
+                offer = profileOffer ?: { key, profile ->
+                    me.lakko.app.profile.ProfileDirectory.get(context).offerForAccount(owner, key, profile)
+                },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("StateBundle", "profiles not stored: ${cause.javaClass.simpleName}")
+            0
+        }
         return Applied(
             contacts = contactsApplied,
             pins = pins,
             ownPredecessors = receipt?.held ?: 0,
             conversationKeyChanged = receipt?.conversationKeyChanged == true,
+            groupNames = namesApplied,
+            profiles = profilesApplied,
+            pendingContacts = pendingApplied,
         )
+    }
+
+    /** This account's own keys as this device knows them: the current key
+     *  (when its seed is held), the earlier keys it holds, and the earlier
+     *  keys the bundle carried. Each part best-effort. */
+    private fun ownKeysOnDevice(context: Context, owner: String, carried: List<CarriedOwnPredecessor>): Set<String> {
+        val enc = Base64.getEncoder()
+        val out = HashSet<String>()
+        currentAccountKeyB64(context, owner)?.let { out += it }
+        try {
+            val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(context).load(owner)
+            try {
+                rows.forEach { out += enc.encodeToString(it.signaturePubkey) }
+            } finally {
+                rows.forEach { it.zero() }
+            }
+        } catch (_: Throwable) {
+            // not readable: the carried ones and the current key remain
+        }
+        for (c in carried) {
+            val seed = standardBase64OfLength(c.seedB64, SEED_LEN) ?: continue
+            try {
+                out += uniffi.lakko_ffi_uniffi.Identity.fromSeed(seed).use { enc.encodeToString(it.signaturePublicKey()) }
+            } catch (_: Throwable) {
+                // skipped
+            } finally {
+                seed.fill(0)
+            }
+        }
+        return out
+    }
+
+    /** The receiving half of `pendingContacts`: the records this device holds
+     *  neither as accepted nor as pending go through the contacts
+     *  repository's add (or that account's store when it is not bound); the
+     *  messages written to a pending contact that is not an accepted contact
+     *  here become display-only copies under its queue key. */
+    private fun applyPendingContacts(
+        context: Context,
+        accountIdB64: String,
+        carried: List<CarriedPendingContact>,
+        store: me.lakko.app.contacts.PendingContactsStore?,
+        copies: me.lakko.app.chat.HeldCopyStore?,
+    ): Int {
+        if (carried.isEmpty()) return 0
+        val records = carried.mapNotNull { c -> pendingRecordOf(c)?.let { it to c } }
+        val accepted = me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
+        val incoming = records.map { it.first }
+        val added = (if (store == null) pendingContactsSink?.invoke(accountIdB64, incoming) else null) ?: run {
+            val pendingStore = store ?: me.lakko.app.contacts.PendingContactsFiles.onDevice(context)
+            val held = pendingStore.load(accountIdB64)
+            val fresh = freshPendingContacts(incoming, accepted, held)
+            if (fresh.isNotEmpty()) {
+                pendingStore.save(accountIdB64, fresh.fold(held) { acc, c -> me.lakko.app.contacts.PendingContacts.adding(c, acc) })
+            }
+            fresh.size
+        }
+        val copyStore = copies ?: me.lakko.app.chat.HeldCopyStore.onDevice(context)
+        val acceptedKeys = accepted.map { Base64.getEncoder().encodeToString(it.request.fromPubkey) }.toHashSet()
+        val acceptedIds = accepted.mapNotNull { a -> a.request.fromAccountId?.let { hexOf(it) } }.toHashSet()
+        for ((record, c) in records) {
+            if (c.heldMessages.isEmpty()) continue
+            if (record.signaturePubkeyB64 in acceptedKeys || record.accountIdHex in acceptedIds) continue
+            try {
+                copyStore.addCarried(accountIdB64, record.queueKey, c.heldMessages.map(::heldCopyOf))
+            } catch (_: Throwable) {
+                // best-effort: the original device still sends them
+            }
+        }
+        return added
     }
 
     private const val BUNDLE_ID_BASE: Long = 1L shl 40

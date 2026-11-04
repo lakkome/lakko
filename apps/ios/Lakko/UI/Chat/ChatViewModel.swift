@@ -103,11 +103,10 @@ public final class ChatViewModel: ObservableObject {
     /// Live MLS roster for this group at the current epoch — refreshed by
     /// ``refreshMembers()`` and after every add / remove.
     @Published public private(set) var members: [GroupMember] = []
-    /// `true` while the conversation's info is presented over the chat
-    /// (`docs/ux/conversation-info.md` sections 1 and 3).
-    @Published public var conversationInfoOpen: Bool = false
-    /// `@username` typed into the add-member field.
-    @Published public var addMemberInput: String = ""
+    /// `true` while the group's info screen is on top of the stack
+    /// (`docs/ux/conversation-info.md` section 3): the roster and the pending
+    /// set are refreshed for it then.
+    @Published public private(set) var conversationInfoOpen: Bool = false
     /// `true` while an add or remove commit is in flight (disables the form).
     @Published public private(set) var membershipBusy: Bool = false
     /// Last add/remove error surfaced to the sheet, else `nil`.
@@ -155,8 +154,11 @@ public final class ChatViewModel: ObservableObject {
     public var membershipHasEnded: Bool { membershipEnded(membership) }
 
     /// §6.2.5 — the two lines of the terminal timeline row, or `nil` while the
-    /// membership holds.
-    public var terminalRowCopy: TerminalRowCopy? { terminalRow(membership) }
+    /// membership holds. Not over a conversation that went from under this
+    /// screen: the row says the messages are still here, and they are not.
+    public var terminalRowCopy: TerminalRowCopy? {
+        endedTitle == nil ? terminalRow(membership) : nil
+    }
 
     /// §6.2.5 — what occupies the composer's slot. The draft is read live so a
     /// commit landing mid-sentence preserves what was actually typed.
@@ -176,6 +178,35 @@ public final class ChatViewModel: ObservableObject {
         messageActionsState(membership) == .available
     }
 
+    // MARK: - ADR-0087 section 9 — the conversation goes
+
+    /// UX 9.1 — the dialog over the open conversation. `draft`: what the
+    /// composer held, shown selectable, since it has nowhere else to go.
+    public struct EndDialog: Equatable, Identifiable {
+        public let name: String
+        public let draft: String?
+        public var id: String { name }
+    }
+
+    /// Set once when the group went from under an open conversation.
+    @Published public var endDialog: EndDialog?
+    /// The conversation is gone and nothing is left to say: back to Chats.
+    @Published public private(set) var conversationGone = false
+    /// A thread was seen, so its absence is an end and not a chat not yet
+    /// loaded.
+    private var sawThread = false
+    /// The end of this conversation was answered here.
+    private var endAnswered = false
+    /// UX 9.1 — the conversation went from under this screen, and this is the
+    /// name it had. The group and its stores are wiped while the dialog stands,
+    /// so nothing else can say what it was called or that it ended: a group
+    /// that is no longer held reads like one still being set up.
+    @Published public private(set) var endedTitle: String?
+    /// `Delete this chat` is running: the screen goes through its own path.
+    private var deletingChat = false
+    /// No more draft writes: the conversation's draft register was cleared.
+    private var draftClosed = false
+
     /// §6.2.8 — which one-shot teardown steps have already been claimed. A
     /// `Set` on the `@MainActor` view model rather than a lock, because
     /// ``claimTeardownSteps(_:alreadyRun:)`` takes what it hands out in the same
@@ -191,7 +222,13 @@ public final class ChatViewModel: ObservableObject {
     /// and published. Distinct from ``membershipError`` because a request is not
     /// an outcome: the change has NOT happened yet, and the copy must not
     /// suggest it has.
-    @Published public private(set) var membershipNotice: UiText?
+    @Published public private(set) var membershipNotice: UiText? {
+        // Any new notice (or none) is not the leave notice until the leave
+        // path says so, right after setting it.
+        didSet { leaveNoticeShown = false }
+    }
+    /// The notice on screen is the leave request's (``MembershipActionNotice``).
+    private var leaveNoticeShown = false
     /// The group's current role table (owner + admins), or `nil` for an open
     /// group — drives the per-member admin labelling.
     @Published public private(set) var roleTable: RoleTable?
@@ -268,11 +305,6 @@ public final class ChatViewModel: ObservableObject {
     /// refuse, fail-closed); the composition root passes
     /// `{ authRepository.identitySecrets?.sessionToken }`.
     private let sessionTokenProvider: () -> String?
-    /// Resolves `@username -> (accountId, signaturePubkey)` through the
-    /// G-4-verified contacts path for the add-member flow. Defaults to a
-    /// fail-closed stub (add-member then refuses); the composition root
-    /// passes `{ try await contactsClient.resolveVerifiedRecipient(...) }`.
-    private let resolveRecipient: (String) async throws -> (accountId: Data, signaturePubkey: Data)
     private var cancellables: Set<AnyCancellable> = []
     /// Drives ``trackGroupCallFreshness``; cancelled when the record goes away
     /// and on teardown.
@@ -298,13 +330,7 @@ public final class ChatViewModel: ObservableObject {
         groupIdHex: String,
         callHost: CallHost? = nil,
         groupCallHost: GroupCallHost? = nil,
-        sessionTokenProvider: @escaping () -> String? = { nil },
-        resolveRecipient: @escaping (String) async throws
-            -> (accountId: Data, signaturePubkey: Data) = { _ in
-                throw ChatError.argument(
-                    "no @username resolver wired — add-member unavailable"
-                )
-            }
+        sessionTokenProvider: @escaping () -> String? = { nil }
     ) {
         self.repository = repository
         // The route may name the conversation or ANY of its groups (a link
@@ -322,7 +348,6 @@ public final class ChatViewModel: ObservableObject {
         self.groupCallHost = groupCallHost
             ?? GroupCallHost.live(repository: repository, sessionTokenProvider: sessionTokenProvider)
         self.sessionTokenProvider = sessionTokenProvider
-        self.resolveRecipient = resolveRecipient
         sync(state: repository.state)
         repository.$state
             .receive(on: RunLoop.main)
@@ -422,6 +447,23 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        repository.$unseenReactionsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // ADR-0087 — the group's photo or allowed reactions changed.
+        repository.$groupSettingsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // Reactions-and-emoji spec section 6 — the quick reaction (synced).
+        QuickReactionSetting.shared.$chosen
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -443,7 +485,12 @@ public final class ChatViewModel: ObservableObject {
                 // ask the group to introduce itself (the core's rule decides,
                 // at most once a day per group; nothing is sent otherwise).
                 requestProfilesIfDue()
+                // UX 9.1 — the group went while another screen was on top.
+                noteConversationEnd(threadPresent: threadKnown)
             } else {
+                // The read position goes out now rather than 1.5 s later: an
+                // app closed right after reading came back with the badge.
+                flushPendingReadCursor()
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
                 // ADR-0052 — and drop an armed reply: "a reply is not a draft
@@ -810,13 +857,21 @@ public final class ChatViewModel: ObservableObject {
         )
     }
 
+    /// Whether anyone else is here to call (`docs/ux/group-and-channel-privacy.md`
+    /// section 10). Without it the toolbar has no call buttons.
+    var hasSomeoneToCall: Bool {
+        GroupCallHostRules.hasSomeoneToCall(
+            isGroup: isGroupChat, people: repository.memberCount(groupIdHex: groupIdHex))
+    }
+
     /// What the toolbar call buttons do right now.
     var chatCallAction: GroupCallHostRules.ChatCallAction {
         GroupCallHostRules.chatCallAction(
             membershipEnded: membershipHasEnded,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
-            isGroup: isGroupChat
+            isGroup: isGroupChat,
+            someoneToCall: hasSomeoneToCall
         )
     }
 
@@ -859,23 +914,93 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Group membership actions (A4)
 
-    /// Open this conversation's info (`docs/ux/conversation-info.md`
-    /// section 1). Refreshes the roster when what opens is the group's.
+    /// The group's info is being opened from the conversation
+    /// (`docs/ux/conversation-info.md` sections 1 and 3). A notice or an error
+    /// describes one action's outcome, so it does not outlive the visit that
+    /// produced it: the pending row annotation is the durable signal.
     func openConversationInfo() {
-        conversationInfoOpen = true
         membershipError = nil
-        // A notice describes one action's outcome, so it must not outlive
-        // the panel that produced it: the pending row annotation is the
-        // durable signal, not this.
         membershipNotice = nil
-        // A conversation between two people opens the other person, which has
-        // no roster to read.
-        if presentsAsGroup { refreshMembers() }
     }
 
-    /// Close the info layer. The conversation is still behind it (section 3).
-    func closeConversationInfo() {
+    /// The info screen is on top of the stack (pushed, or uncovered by a
+    /// back from a screen above it).
+    func groupInfoAppeared() {
+        conversationInfoOpen = true
+        refreshMembers()
+    }
+
+    /// The info screen is covered or gone.
+    func groupInfoDisappeared() {
         conversationInfoOpen = false
+    }
+
+    // MARK: - Add members (`docs/ux/conversation-info.md` section 2.4)
+
+    /// The people in the group, by person (account) key.
+    var memberPersonKeys: Set<Data> { Set(members.map(\.signaturePublicKey)) }
+
+    /// ADR-0060 section 6 — keeps a grant a search read for the person with
+    /// the given account key. Injectable for tests.
+    var foundGrantKeeper: @MainActor (_ grant: FfiReachGrant, _ accountKey: Data) -> Void = { grant, key in
+        ReachCenter.shared.keepFoundGrant(grant, accountKey: key)
+    }
+
+    /// The people with an add waiting for the sweep: not listed again.
+    var pendingAddPersonKeys: Set<Data> {
+        repository.pendingAddPersonKeys(groupIdHex: groupIdHex)
+    }
+
+    /// Add the people picked on the Add members screen: each through the
+    /// conversation's add path (the same call New group makes for its later
+    /// picks), one after another, then one sweep. No notice on success; the
+    /// people who could not be added are named once, in place, in the info.
+    func onAddMembers(_ picks: [AddMembersPick]) {
+        guard !picks.isEmpty, !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        membershipNotice = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            let failed = await AddMembersRun.run(
+                picks: picks,
+                add: { [self] pick in
+                    // ADR-0060 section 6 — a person the search found through
+                    // a grant they handed out: the grant is kept first, so
+                    // the committer delegations are signed with it and the
+                    // sweep's Welcome can be written with it. A grant that
+                    // cannot be kept is logged and the add goes on (the
+                    // Welcome then waits for another grant).
+                    if let grant = pick.foundGrant {
+                        foundGrantKeeper(grant, pick.personKey)
+                    }
+                    // ADR-0045 UX §7 — armed against the person's key and
+                    // account id, so a queue-full refusal re-sends by itself.
+                    _ = try await withMembershipRetry(
+                        .add(
+                            subjectKeyB64: base64Encode(pick.personKey),
+                            subjectAccountIdB64: base64Encode(pick.accountId))
+                    ) {
+                        try await repository.addMemberToGroup(
+                            groupIdHex: groupIdHex,
+                            recipientAccountId: pick.accountId,
+                            recipientSignaturePubkey: pick.personKey,
+                            openMailbox: pick.openMailbox)
+                    }
+                },
+                sweep: { [self] in
+                    _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
+                })
+            refreshMembers()
+            if !failed.isEmpty {
+                let names = failed.map(\.name)
+                membershipError = UiText {
+                    Localization.text(
+                        "chat.members.add.error.some_failed",
+                        texts: ["names": Localization.joinList(names)])
+                }
+            }
+        }
     }
 
     /// The person on the other side of a conversation between two people, as
@@ -929,34 +1054,19 @@ public final class ChatViewModel: ObservableObject {
         return .key(fallbackKey)
     }
 
-    /// The add-member form's failure: a name that does not resolve and a
-    /// person who has not finished setting up say so; the rest as any action.
-    /// A name that does not resolve reads the neutral search answer
-    /// (ADR-0060, `docs/ux/who-can-find-me.md` 6.1): the same whether the
-    /// account does not exist or does not let this person find it, never
-    /// claiming which and never echoing the name back. `username` is kept
-    /// for the callers; nothing here renders it.
-    nonisolated static func addMemberErrorText(for error: Error, username: String) -> UiText {
-        switch error as? ContactsError {
-        case .usernameUnknown?:
-            return .key("search.people.not_found")
-        case .noIdentityBundle?:
-            return .key("chat.members.add.error.no_bundle")
-        default:
-            if AnonTokenUnavailable.isQuotaExhausted(error), membershipRefusalReason(of: error) == nil {
-                return .key("tokens.lookup_allowance_used")
-            }
-            return errorText(for: error, fallbackKey: "chat.error.add_member")
-        }
-    }
-
     func refreshMembers() {
         // ADR-0045 UX §6.2 — FIRST, because every gate below depends on it.
         // A panel open is one of the paths that can be the first thing to
         // observe the terminal state (the poll that carried the commit may
         // have landed while the sheet was closed).
         refreshMembership()
-        members = repository.members(groupIdHex: groupIdHex) ?? []
+        // The last roster stands behind the end dialog: once the group is
+        // wiped there is none to read, and an empty list reads "0 members".
+        if let roster = repository.members(groupIdHex: groupIdHex) {
+            members = roster
+        } else if endedTitle == nil {
+            members = []
+        }
         let role = repository.ownRole(groupIdHex: groupIdHex)
         // ADR-0045 UX §6.2.7 — and NOBODY may manage members once their own
         // membership has ended. Gating here rather than at each of the six
@@ -1209,10 +1319,9 @@ public final class ChatViewModel: ObservableObject {
         // Stand down while a MANUAL membership operation is in flight.
         //
         // The disarm-on-tap covers every handler that knows its descriptor up
-        // front, but `onAddMember` cannot: the request only becomes nameable
-        // once the typed handle has resolved, so between the tap and the
-        // resolution there is a window in which a retry for the same person
-        // could fire behind the user's own attempt. Standing down costs at
+        // front, but an Add members run covers several people one after
+        // another, so while it is in flight a retry for one of them could
+        // fire behind the user's own attempt. Standing down costs at
         // most one refresh — the roster refresh that follows the manual
         // operation, or the beacon tick, re-evaluates.
         if membershipBusy { return }
@@ -1447,11 +1556,40 @@ public final class ChatViewModel: ObservableObject {
     }
 
     func pendingJoinLabel(_ ref: Data) -> String {
-        Self.pendingJoinLabel(
+        // UX section 8 — a contact shows their contact name; otherwise the
+        // name the request carries (a claim, unverified, no mark).
+        let carried = AcceptedContactsStore.boundAccountIdB64.flatMap {
+            repository.groupSettingsStore.requestNames(accountIdB64: $0, groupIdHex: groupIdHex)[base64Encode(ref)]
+        }
+        return Self.pendingJoinLabel(
             accountKeyName: repository
                 .pendingExternalJoinAccountKey(groupIdHex: groupIdHex, joinerSignatureKey: ref)
                 .map { ProfileDirectory.shared.resolve(signatureKey: $0) },
-            leafName: personName(signatureKeyB64: base64Encode(ref)))
+            leafName: carried ?? personName(signatureKeyB64: base64Encode(ref)))
+    }
+
+    /// UX section 8 — the one line under a join request: `Asked 2 hours ago`,
+    /// or from a link `Invited by Anna · 2 hours ago`. `nil` when this device
+    /// holds nothing about when the request came.
+    func pendingJoinLine(_ ref: Data) -> String? {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64,
+              let meta = repository.groupSettingsStore
+                .requestMeta(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[base64Encode(ref)]
+        else { return nil }
+        let when = ChannelsFormatting.relativeLabel(
+            ms: meta.askedAtMs, nowMs: ChatRepository.nowMs(), calendar: .current,
+            locale: Localization.currentLocale)
+        guard let inviter = meta.inviterKey else {
+            return Localization.text("chat.members.join.asked", texts: ["when": when])
+        }
+        let directory = ProfileDirectory.shared
+        let name: String
+        if base64Encode(inviter) == ownIdentity {
+            name = directory.ownProfile?.displayName ?? directory.ownUsername ?? directory.resolve(signatureKey: inviter).name
+        } else {
+            name = directory.resolve(signatureKey: inviter).name
+        }
+        return Localization.text("chat.members.join.invited_by", texts: ["name": name, "when": when])
     }
 
     /// Pure rule behind ``pendingJoinLabel(_:)``: a name the account key
@@ -1485,11 +1623,14 @@ public final class ChatViewModel: ObservableObject {
     /// 1x1 chat; in a group the shared group name (ADR-0051 §5), else the
     /// members' names. Never the group id.
     var conversationTitle: String {
+        if let endedTitle { return endedTitle }
         // ADR-0051 §5 — a shared name wins for ANY conversation that has one,
         // whatever its kind or member count: a two-person conversation renamed
         // from another client is still keyed as a chat here.
         if let shared = groupName { return shared }
         if !presentsAsGroup, let peer = oneToOnePeerName { return peer }
+        // ADR-0087 / UX 4.3 — a solo group with no name is titled `@name`.
+        if isAloneInGroup, let handle = groupHandle { return "@" + handle.handle }
         return ConversationTitle.groupTitle(
             otherMemberNames: ChatListViewModel.otherMemberNames(
                 repository: repository, groupIdHex: groupIdHex))
@@ -1502,8 +1643,14 @@ public final class ChatViewModel: ObservableObject {
     /// envelope re-titles in place (``ChatRepository/groupNameRevision`` drives
     /// the re-render).
     var groupName: String? {
-        repository.groupName(groupIdHex: groupIdHex)
+        // UX 9.1 — the store is wiped while the end dialog stands; the name
+        // the group had stays on the screen behind it.
+        endedTitle ?? repository.groupName(groupIdHex: groupIdHex)
     }
+
+    /// UX 9.1 — the conversation went from under this screen (``endedTitle``).
+    /// Its screens keep what they showed and offer nothing to act on.
+    public var endedUnderScreen: Bool { endedTitle != nil }
 
     /// ADR-0051 §3 — may this device rename the group? The owner and admins
     /// (or any member of a legacy group with no role table), read from the LIVE
@@ -1511,6 +1658,108 @@ public final class ChatViewModel: ObservableObject {
     /// plain member sees the name read-only.
     var canRenameGroup: Bool {
         repository.ownRole(groupIdHex: groupIdHex) != .member && !membershipHasEnded
+    }
+
+    // MARK: - ADR-0087 section 18 — the group photo
+
+    /// UX 4.5.2 — the header states after `Use` or `Remove`.
+    enum GroupPhotoStatus: Equatable {
+        case idle
+        case uploading
+        case failed
+        case limited
+        case owed
+        case notAllowed
+    }
+
+    @Published var groupPhotoStatus: GroupPhotoStatus = .idle
+    /// The photo or video being uploaded, kept for `Try again`.
+    private var groupPhotoRetry: PendingAvatarMedia?
+
+    /// UX 4.5.1 — the same people who rename it.
+    var canSetGroupPhoto: Bool { canRenameGroup }
+
+    /// The photo this device holds (initials when `nil`).
+    var groupPhoto: ProfileAvatar? { repository.groupPhoto(groupIdHex: groupIdHex) }
+
+    /// UX 4.5.2 — `Use` on the crop screen: upload, then send.
+    func useGroupPhoto(_ media: PendingAvatarMedia) {
+        guard canSetGroupPhoto else {
+            groupPhotoStatus = .notAllowed
+            return
+        }
+        groupPhotoRetry = media
+        groupPhotoStatus = .uploading
+        Task { @MainActor in
+            let avatar: ProfileAvatar
+            do {
+                avatar = try await ProfileAvatarUpload.upload(media)
+            } catch AttachmentBridgeError.uploadLimited {
+                groupPhotoStatus = .limited
+                return
+            } catch {
+                groupPhotoStatus = .failed
+                return
+            }
+            // Demoted while the crop screen was open: nothing is sent.
+            guard canSetGroupPhoto else {
+                BlobLifecycle.shared.delete([avatar.still.blobId] + (avatar.video.map { [$0.blobId] } ?? []))
+                groupPhotoStatus = .notAllowed
+                return
+            }
+            do {
+                try await repository.setGroupPhoto(groupIdHex: groupIdHex, avatar: avatar)
+                groupPhotoStatus = .idle
+                groupPhotoRetry = nil
+            } catch {
+                // Uploaded and recorded as owed: sent when the device is back.
+                groupPhotoStatus = repository.groupPhotoOwed(groupIdHex: groupIdHex) ? .owed : .failed
+            }
+        }
+    }
+
+    /// `Try again` after a failed upload.
+    func retryGroupPhoto() {
+        if let media = groupPhotoRetry { useGroupPhoto(media) }
+    }
+
+    /// UX 4.5.2 — `Remove` after the confirmation.
+    func removeGroupPhoto() {
+        guard canSetGroupPhoto else {
+            groupPhotoStatus = .notAllowed
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await repository.setGroupPhoto(groupIdHex: groupIdHex, avatar: nil)
+                groupPhotoStatus = .idle
+            } catch {
+                groupPhotoStatus = repository.groupPhotoOwed(groupIdHex: groupIdHex) ? .owed : .failed
+            }
+        }
+    }
+
+    // MARK: - Reactions-and-emoji spec section 9 — allowed reactions
+
+    /// Section 9 — the Info row's value.
+    var allowedReactionsSummary: String {
+        switch allowedReactions {
+        case .all: return Localization.text("group_reactions.value.all")
+        case .off: return Localization.text("group_reactions.value.off")
+        case .only(let list):
+            return Localization.text("group_reactions.value.count", counts: ["count": UInt64(list.count)])
+        }
+    }
+
+    /// Section 9 — save the group's reactions setting.
+    func saveAllowedReactions(_ value: FfiAllowedReactions) async -> Bool {
+        do {
+            try await repository.setAllowedReactions(groupIdHex: groupIdHex, value)
+            return true
+        } catch {
+            NSLog("allowed reactions save failed: %@", error.localizedDescription)
+            return false
+        }
     }
 
     /// ADR-0051 §3 — send the new name (an empty string clears it). The store
@@ -1537,6 +1786,7 @@ public final class ChatViewModel: ObservableObject {
     /// The header's second line: "@username" in a 1x1 chat when the other
     /// person's username is verified, "N members" in a group, else nothing.
     var conversationSubtitle: String? {
+        if endedTitle != nil { return nil }
         // ADR-0051 — under a shared name the peer's handle is not the second
         // line (the title is no longer the peer); the member count is.
         if !presentsAsGroup, groupName == nil,
@@ -1548,57 +1798,6 @@ public final class ChatViewModel: ObservableObject {
         }
         guard let count = repository.memberCount(groupIdHex: groupIdHex) else { return nil }
         return ConversationTitle.memberCountLabel(count)
-    }
-
-    /// Resolve the typed `@username` (G-4-verified) and add it to this group:
-    /// publish the add commit to the journal (own-marked) + ferry the Welcome.
-    /// Fail-closed — a resolve / verify / publish failure surfaces an error and
-    /// leaves the group untouched.
-    func onAddMember() {
-        // ADR-0048 §4 — no lookup for a name that fails the username rule; the
-        // reason is already on screen under the field.
-        guard case .valid(let username) = checkUsername(addMemberInput) else {
-            let typed = addMemberInput
-            if checkUsername(typed).inlineMessage != nil {
-                membershipError = UiText { checkUsername(typed).inlineMessage ?? "" }
-            }
-            return
-        }
-        guard !membershipBusy else { return }
-        membershipBusy = true
-        membershipError = nil
-        Task { @MainActor in
-            defer { membershipBusy = false }
-            do {
-                let resolved = try await resolveRecipient(username)
-                // ADR-0045 UX §7 — the descriptor is only knowable once the
-                // typed handle has resolved, which is why it is built here and
-                // not before: re-resolving a username later could name a
-                // different account if the handle has since been
-                // re-registered, and adding the wrong person is not a retry.
-                let outcome = try await withMembershipRetry(
-                    .add(
-                        subjectKeyB64: base64Encode(resolved.signaturePubkey),
-                        subjectAccountIdB64: base64Encode(resolved.accountId))
-                ) {
-                    try await repository.addMemberToGroup(
-                        groupIdHex: groupIdHex,
-                        recipientAccountId: resolved.accountId,
-                        recipientSignaturePubkey: resolved.signaturePubkey
-                    )
-                }
-                addMemberInput = ""
-                // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
-                // been added yet. `refreshMembers` re-reads the roster (which is
-                // unchanged) AND the pending set (which now holds the request),
-                // so the sheet shows a request rather than a member.
-                _ = outcome
-                refreshMembers()
-            } catch {
-                membershipError = Self.addMemberErrorText(for: error, username: username)
-                NSLog("onAddMember failed: %@", error.localizedDescription)
-            }
-        }
     }
 
     /// Remove a member by leaf index: publish the removal commit to the journal
@@ -1733,8 +1932,15 @@ public final class ChatViewModel: ObservableObject {
                 // in the same call. Fail-safe when absent — the fallback string
                 // is true either way.
                 repository.noteLeaveRequested(groupIdHex: groupIdHex)
-                membershipNotice = .key("chat.leave.requested")
+                // UX §2 — decided from the group read after the attempt: a
+                // leave that already landed (a sweep committed it) says
+                // nothing; one still waiting says so until it lands
+                // (``refreshMembers()`` clears it then).
                 refreshMembers()
+                if let key = MembershipActionNotice.after(.leave, inEffect: membershipHasEnded) {
+                    membershipNotice = .key(key)
+                    leaveNoticeShown = true
+                }
             } catch {
                 reportMembershipFailure(error, op: "onLeaveGroup", key: "chat.error.leave")
             }
@@ -1812,7 +2018,10 @@ public final class ChatViewModel: ObservableObject {
     /// §6.1.1 — the exit block: which of the two role-disjoint controls this
     /// reader gets, and why the other one is disabled.
     var exitBlockState: ExitBlock {
-        exitBlock(
+        // UX 9.1 — behind the end dialog there is no exit left to take: the
+        // group is gone, and `Delete this chat` would name nothing.
+        if endedTitle != nil { return .hidden }
+        return exitBlock(
             ExitBlockInput(
                 usesProposalPath: usesProposalPath,
                 isOwner: isOwner,
@@ -1901,16 +2110,10 @@ public final class ChatViewModel: ObservableObject {
                 }
                 transferStepOpen = false
                 transferPick = nil
-                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
-                let landed: Bool
-                if case .committed = swept { landed = true } else { landed = false }
-                let successorLabel = successor.label
-                membershipNotice = UiText {
-                    transferOutcomeNotice(
-                        outcome: landed ? .committed : .proposed,
-                        successorLabel: successorLabel,
-                        outgoing: outgoing)
-                }
+                // Applied at once when this device is the committer; whether
+                // it landed or not, no notice (UX §2 amendment): the panel
+                // changes in place, or the transfer control shows it pending.
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onTransferOwnership", key: "chat.error.transfer")
@@ -2012,24 +2215,10 @@ public final class ChatViewModel: ObservableObject {
                         proposalRef: proposalRef
                     )
                 }
-                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
-                if case .committed = swept {
-                    membershipNotice = .key("chat.members.join.approved_added")
-                } else {
-                    // ADR-0045 S7 residual 2 — an approve that did not apply has
-                    // grown a queue only a sweep drains, and the core's own
-                    // feedback (its cap refusal) lands on whoever proposes NEXT.
-                    // Naming the depth here puts it in front of the person who
-                    // caused it. Read from the core, not from `pendingRequests`,
-                    // which has not been refreshed yet.
-                    let depth = repository.pendingProposals(groupIdHex: groupIdHex).count
-                    membershipNotice = UiText {
-                        let approved = Localization.text("chat.members.join.approved_requested")
-                        guard let queue = waitingQueueLine(depth) else { return approved }
-                        return Localization.text(
-                            "common.sentence_pair", texts: ["first": approved, "second": queue])
-                    }
-                }
+                // Applied at once when this device is the committer. No
+                // notice either way (UX §2 amendment, 2026-10-29): the request
+                // row goes and the person appears in the roster when it lands.
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 // Acting on the queue is what may have made room for the
                 // request the quarantine turned away, so the notice about it
                 // stops being current.
@@ -2065,6 +2254,104 @@ public final class ChatViewModel: ObservableObject {
             refreshMembers()
         } catch {
             reportMembershipFailure(error, op: "onRejectJoin", key: "chat.error.reject_join")
+        }
+    }
+
+    /// This device's role in the group (`nil` with no role table).
+    var ownRole: Role? { repository.ownRole(groupIdHex: groupIdHex) }
+
+    /// UX section 10 — this account created the group here.
+    var createdHere: Bool {
+        guard presentsAsGroup, let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return false }
+        return repository.groupSettingsStore.createdHere(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0087 section 10 — nobody else is in this group.
+    var isAloneInGroup: Bool { !membershipHasEnded && repository.isAloneInGroup(groupIdHex: groupIdHex) }
+
+    /// ADR-0087 section 10 — `Copy invite link` on the solo block: mint (or
+    /// reuse) a link and hand it back for the clipboard.
+    func mintInviteLinkForCopy() async -> String? {
+        if let inviteLink { return inviteLink }
+        do {
+            let link = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
+            inviteLink = link
+            return link
+        } catch {
+            reportMembershipFailure(error, op: "mintInviteLinkForCopy", key: "chat.error.create_link")
+            return nil
+        }
+    }
+
+    /// ADR-0087 section 11 — `Delete group` after its confirmation. The
+    /// @name is retired first; offline, nothing changes and the error shows.
+    func onDeleteAloneGroup(onDone: @escaping () -> Void) {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                if try await repository.deleteAloneGroupRetiringName(groupIdHex: groupIdHex) { onDone() }
+            } catch {
+                membershipError = .key("group_handle.error.offline")
+            }
+        }
+    }
+
+    /// UX 4.1 — a flag change is still owed.
+    var groupTypeOwed: Bool { repository.groupTypeOwed(groupIdHex: groupIdHex) }
+
+    /// UX 4.1 — save the Group type screen; `nil` when it applied, else the
+    /// catalog key of the line the screen shows.
+    func saveGroupType(handle: String, isPublic: Bool) async -> String? {
+        do {
+            switch try await repository.saveGroupType(groupIdHex: groupIdHex, handle: handle, isPublic: isPublic) {
+            case .applied: return nil
+            case .owed: return "group_photo.owed"
+            }
+        } catch let refusal as DiscoveryClient.HandleWriteError {
+            if refusal.code == "name-taken" {
+                HandleTakenCheck.note(handle, .taken)
+                return "group_handle.error.held"
+            }
+            // A 429 is discovery's rate limit, not the day's allowance.
+            if refusal.status == 429 { return "common.error.too_many_attempts" }
+            return "group_handle.error.failed"
+        } catch let DiscoveryClientError.network(_, _) {
+            return "group_handle.error.offline"
+        } catch {
+            return "group_handle.error.failed"
+        }
+    }
+
+    /// ADR-0087 section 4 — `@name` and the header line of group info.
+    var groupHandle: StoredGroupHandle? { repository.groupHandle(groupIdHex: groupIdHex) }
+
+    /// Section 4 — "Private group · 12 members" / "Public group · ...".
+    var groupHeaderLine: String {
+        let count = UInt64(max(1, repository.peopleCount(groupIdHex: groupIdHex)))
+        return Localization.text(
+            groupHandle?.isPublic == true ? "group_info.header.public" : "group_info.header.private",
+            counts: ["count": count])
+    }
+
+    /// UX section 8 — `Reject all` after its confirmation.
+    func onRejectAllJoins() {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                for ref in pendingJoins { disarmRetry(.approveJoin(subjectKeyB64: base64Encode(ref))) }
+                try await repository.rejectAllExternalJoins(groupIdHex: groupIdHex)
+                repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
+                refreshMembers()
+            } catch {
+                refreshMembers()
+                reportMembershipFailure(error, op: "onRejectAllJoins", key: "chat.error.reject_join")
+            }
         }
     }
 
@@ -2182,6 +2469,15 @@ public final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// The debounced read-cursor write, run now (a screen left, the app going
+    /// to the background). Nothing when none is waiting.
+    func flushPendingReadCursor() {
+        guard let work = readCursorWork, !work.isCancelled else { return }
+        readCursorWork = nil
+        work.perform()
+        work.cancel()
+    }
+
     private func scheduleReadCursorBroadcast(
         messages: [ChatMessage],
         groupIdBytes: Data
@@ -2231,8 +2527,11 @@ public final class ChatViewModel: ObservableObject {
     }
 
     private func scheduleDraftBroadcast(text: String, groupIdBytes: Data) {
-        if text == lastBroadcastDraft { return }
+        // Cancelled first: a message sent within the debounce leaves the
+        // composer where the last write left it, and the pending write would
+        // save what was sent.
         draftBroadcastWork?.cancel()
+        if draftClosed || text == lastBroadcastDraft { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self = self,
                   let sync = self.deviceGroupSync else { return }
@@ -2299,15 +2598,54 @@ public final class ChatViewModel: ObservableObject {
         // the one place that sees every path into the terminal state. It is a
         // cheap synchronous read of a boolean the core already maintains.
         refreshMembership()
-        // ADR-0027 (G-3) — a poll may have retained a fresh external-join
-        // request; refresh the pending list live while the members sheet is
-        // open (cheap in-memory read of the group's retained set).
-        if conversationInfoOpen {
-            pendingJoins = refreshedPendingJoins()
-            unkeptJoinRequest =
-                !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
-            refreshJoinAttributions()
+        // ADR-0087 section 9 — the thread leaves the state the moment an end
+        // is recorded.
+        noteConversationEnd(threadPresent: thread != nil)
+        // The info screen follows the group while it is open: a sweep that
+        // landed, a role that changed, a person who left, a fresh external-join
+        // request. This state publishes whichever poll carried the change (the
+        // chat's own, or the app-wide one while the chat is covered).
+        if conversationInfoOpen { refreshMembers() }
+    }
+
+    /// UX 9.1, 9.4 — the conversation left from under this screen. Answered
+    /// only while the person is looking at it: otherwise the banner tells them,
+    /// and this runs again if they come back to the route.
+    private func noteConversationEnd(threadPresent: Bool) {
+        if threadPresent {
+            sawThread = true
+            endAnswered = false
+            endedTitle = nil
+            conversationGone = false
+            draftClosed = false
+            return
         }
+        // No thread alone is not an end: a lineage that arrived can move the
+        // conversation under another id while the group stays held.
+        guard sawThread, !endAnswered, !deletingChat,
+              !repository.hasGroup(groupIdHex: groupIdHex) || repository.isEnding(groupIdHex: groupIdHex),
+              screenVisible || conversationInfoOpen else { return }
+        endAnswered = true
+        draftBroadcastWork?.cancel()
+        draftClosed = true
+        let held = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keptDraft = held.isEmpty ? nil : draft
+        draft = ""
+        let notice = repository.claimEndNotice(groupIdHex: groupIdHex)
+        endedTitle = notice?.name ?? conversationTitle
+        refreshMembership()
+        if let notice {
+            endDialog = EndDialog(name: notice.name, draft: keptDraft)
+        } else {
+            // The person left: the row goes with no notice.
+            conversationGone = true
+        }
+    }
+
+    /// `OK` on the dialog: back to Chats.
+    public func endDialogClosed() {
+        endDialog = nil
+        conversationGone = true
     }
 
     // MARK: - ADR-0045 UX §6.2 — detecting the end, and tearing down after it
@@ -2330,7 +2668,25 @@ public final class ChatViewModel: ObservableObject {
     /// (`membershipRotationDecision`'s `selfEvicted`) and the exporter-backed
     /// call buttons (`ChatScreen`'s toolbar).
     private func refreshMembership() {
-        membership = repository.membershipStateNow(groupIdHex: groupIdHex)
+        let read = repository.membershipStateNow(groupIdHex: groupIdHex)
+        // Once the group is wiped there is no handle, and no handle reads as
+        // still a member. The state this screen reached does not reverse.
+        membership = endedTitle != nil && !membershipEnded(read) ? .ended(left: false) : read
+        // UX §2 — the leave notice goes the moment the leave lands. Here, not
+        // in `refreshMembers()`: a poll is what usually sees the landing, and
+        // the screen read "Leave requested" beside the frozen list until
+        // reopened.
+        if MembershipActionNotice.leaveNoticeClears(
+            shown: leaveNoticeShown, membershipEnded: membershipHasEnded) {
+            membershipNotice = nil
+            leaveNoticeShown = false
+        }
+        // A retired leaf came back (ADR-0050): the group is live again, and
+        // a later end must find its teardown owed, not already claimed.
+        if !membershipHasEnded, !teardownClaimed.isEmpty {
+            teardownClaimed = []
+            if screenVisible { startBeaconTicker() }
+        }
         let owed = claimTeardownSteps(membership, alreadyRun: &teardownClaimed)
         guard !owed.isEmpty else { return }
         for step in owed {
@@ -2372,6 +2728,8 @@ public final class ChatViewModel: ObservableObject {
     /// this method is past it.
     func onDeleteChat() -> Bool {
         membershipError = nil
+        deletingChat = true
+        defer { deletingChat = false }
         let deleted = repository.deleteChat(groupIdHex: groupIdHex)
         if !deleted {
             // Only reachable if the gate went stale between draw and tap.
@@ -3022,22 +3380,95 @@ public final class ChatViewModel: ObservableObject {
         case notLanded
     }
 
-    /// React to `message` with `emoji` — toggles on the receive
-    /// side + locally. Available on any message with a messageId.
+    // MARK: - Reactions (reactions-and-emoji spec)
+
+    /// Section 10 — the message whose "You can add up to 3 reactions" line
+    /// shows under its chips, for about three seconds.
+    @Published public private(set) var capLineMessageId: Int64?
+    private var capLineTask: Task<Void, Never>?
+
+    /// Section 9 — what this conversation takes.
+    var allowedReactions: FfiAllowedReactions { repository.allowedReactions(groupIdHex: groupIdHex) }
+
+    /// Section 7 — the chip shape for this conversation.
+    var chipConversation: FfiChipConversation { presentsAsGroup ? .group : .oneToOne }
+
+    /// Section 5 — the row the menu offers for `message`.
+    func reactionRow(for message: ChatMessage) -> ReactionRowModel {
+        ReactionRules.row(
+            message: message, own: ownIdentity, quick: QuickReactionSetting.shared.chosen,
+            recent: RecentReactions.load(accountIdB64: AcceptedContactsStore.boundAccountIdB64),
+            allowed: allowedReactions)
+    }
+
+    /// Section 7 — the chips under `message`.
+    func reactionChips(for message: ChatMessage) -> FfiChipRow {
+        ReactionRules.chips(
+            message: message, own: ownIdentity, conversation: chipConversation, allowed: allowedReactions)
+    }
+
+    /// Sections 5, 7 — press `emoji` on `message` (the row, a chip, the
+    /// picker): the shared rule decides add, remove, or nothing.
     func react(to message: ChatMessage, emoji: String) {
         let target = message.messageId
-        guard target > 0, !emoji.isEmpty else { return }
+        guard target > 0, !emoji.isEmpty, !message.deleted else { return }
+        let verdict = ReactionRules.verdict(
+            emoji: emoji, message: message, own: ownIdentity, allowed: allowedReactions)
+        let add: Bool
+        switch verdict {
+        case .add: add = true
+        case .remove: add = false
+        case .capReached:
+            showCapLine(messageId: message.id)
+            return
+        case .notAllowed, .kindLimit:
+            return
+        }
+        if add { RecentReactions.push(emoji, accountIdB64: AcceptedContactsStore.boundAccountIdB64) }
         Task { @MainActor in
             do {
                 try await repository.reactToMessage(
                     groupIdHex: groupIdHex,
                     target: target,
-                    emoji: emoji
+                    emoji: emoji,
+                    add: add,
+                    targetAuthorB64: message.authorKeyB64
                 )
             } catch {
                 sendError = Self.errorText(for: error, fallbackKey: "chat.error.react")
                 NSLog("reaction failed: %@", error.localizedDescription)
             }
+        }
+    }
+
+    /// Section 6 — a double tap on the bubble: the quick reaction, or nothing,
+    /// silently, when it does not apply.
+    func quickReact(to message: ChatMessage) {
+        guard messageActionsAvailable, message.messageId > 0, !message.deleted,
+              message.direction != .system else { return }
+        react(to: message, emoji: QuickReactionSetting.shared.current)
+    }
+
+    /// Section 12 — own messages with unseen reactions, oldest first.
+    var unseenReactionIds: [Int64] { repository.unseenReactionIds(groupIdHex: groupIdHex) }
+
+    func repositoryMarkSeen(_ messageId: Int64) {
+        repository.markReactionsSeen(groupIdHex: groupIdHex, messageId: messageId)
+    }
+
+    /// Section 12 — a row was on screen.
+    func noteRowShown(_ message: ChatMessage) {
+        guard message.direction == .outgoing, message.messageId > 0 else { return }
+        repository.markReactionsSeen(groupIdHex: groupIdHex, messageId: message.messageId)
+    }
+
+    private func showCapLine(messageId: Int64) {
+        capLineMessageId = messageId
+        capLineTask?.cancel()
+        capLineTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, self?.capLineMessageId == messageId else { return }
+            self?.capLineMessageId = nil
         }
     }
 

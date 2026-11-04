@@ -213,16 +213,27 @@ function msg(id: number, body: Record<string, unknown>) {
 const resent = (id: number, text: string) =>
   msg(id, { kind: "chat", text, attachmentCount: 0, resendOriginGroupB64: ORIGIN_B64, resendOriginMessageId: 7 });
 
-function deps(messages: ReturnType<typeof msg>[], overrides: Record<string, unknown> = {}) {
+/**
+ * `senderAccount` is the account byte of the sender's leaf: a peer (0xbb) by
+ * default, since a message from this device's own account (0xaa) is never a
+ * notification (`push-decrypt-own-wake.test.ts`).
+ */
+function deps(
+  messages: ReturnType<typeof msg>[],
+  overrides: Record<string, unknown> = {},
+  senderAccount = 0xbb,
+) {
   const forbidden = { saveSnapshot: vi.fn(), saveMessageLog: vi.fn(), advanceCursor: vi.fn() };
   const members = [
     { leafIndex: 0, signaturePublicKey: new Uint8Array(32).fill(1), accountKey: new Uint8Array(32).fill(0xaa) },
-    { leafIndex: 1, signaturePublicKey: new Uint8Array(32).fill(2), accountKey: new Uint8Array(32).fill(0xaa) },
+    { leafIndex: 1, signaturePublicKey: new Uint8Array(32).fill(2), accountKey: new Uint8Array(32).fill(senderAccount) },
   ];
   return {
     forbidden,
     deps: {
       readWakeBinding: async () => ({ accountId: ACCOUNT_ID }),
+      // A sender always has a name on this device (the mirror the app writes).
+      lookupSenderName: async () => "Test Sender",
       lookupRoute: async () => ({ accountId: ACCOUNT_ID, groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
@@ -258,7 +269,7 @@ const wake = { subHex: "dd".repeat(16), groupHex: SECOND_HEX, pointer: 42 };
 describe("decryptPushPreview and a re-sent message", () => {
   it("a re-send whose original this device holds posts nothing", async () => {
     const lookupResendHeld = vi.fn(async () => true);
-    const d = deps([resent(42, "said before")], { lookupResendHeld });
+    const d = deps([resent(42, "said before")], { lookupResendHeld }, 0xaa);
     await expect(decryptPushPreview(wake, d.deps)).resolves.toBeNull();
     // Asked about exactly this message, with the PERSON keys of the sender
     // and of this account (two leaves of one account here).

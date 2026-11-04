@@ -83,6 +83,9 @@ public final class ProfileDirectory: ObservableObject {
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
         // This account's own names for its contacts, never the previous one's.
         setRenames(from: AcceptedContactsStore.load(accountIdB64: accountIdB64))
+        // ADR-0079 — and this account's pending contacts, the names their
+        // invite links stated. ``ContactsRepository`` keeps them current.
+        setPendingContacts(PendingContactStore.load(accountIdB64: accountIdB64))
         // ADR-0074 section 3.5 — the proven-predecessor map of this account's
         // contacts, re-read whenever the pin gate records a proven rotation.
         provenPredecessors = ProvenPredecessorStore(ownerAccountIdB64: accountIdB64).load()
@@ -120,13 +123,23 @@ public final class ProfileDirectory: ObservableObject {
 
     /// The other key of the same person, across a proven rotation, that
     /// something is known under: a local rename first, then a received
-    /// profile. `nil` when `keyB64` itself is known, or nothing is.
+    /// profile, then a pending contact's link statement. `nil` when `keyB64`
+    /// itself is known, or nothing is.
     private func provenAlias(of keyB64: String) -> String? {
-        guard !provenPredecessors.isEmpty,
-              renames[keyB64] == nil, received.profile(signatureKeyB64: keyB64) == nil else { return nil }
+        guard !provenPredecessors.isEmpty, !knowsSomething(keyB64) else { return nil }
         let others = provenPredecessors.allKeys(of: keyB64).filter { $0 != keyB64 }
         return others.first { renames[$0] != nil }
             ?? others.first { received.profile(signatureKeyB64: $0) != nil }
+            ?? others.first { pendingClaims[$0] != nil }
+    }
+
+    /// `true` when the viewer knows SOMETHING about `keyB64` itself: a local
+    /// rename, a received profile, or the name a pending contact's invite
+    /// link stated (ADR-0079).
+    private func knowsSomething(_ keyB64: String) -> Bool {
+        renames[keyB64] != nil
+            || received.profile(signatureKeyB64: keyB64) != nil
+            || pendingClaims[keyB64] != nil
     }
 
     /// No active account (logout). Stored data stays on disk.
@@ -135,6 +148,7 @@ public final class ProfileDirectory: ObservableObject {
         ownUsername = nil
         ownProfile = nil
         setRenames(from: [])
+        setPendingContacts([])
         received.activate(accountIdB64: nil)
         verifier.activate(accountIdB64: nil)
         bump()
@@ -179,6 +193,8 @@ public final class ProfileDirectory: ObservableObject {
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
         let saved = ownStore.save(
             displayName: normalized, avatar: avatar, accountIdB64: account, nowMs: nowMs)
+        // The backup carries the name and the photo.
+        AutoBackupStore.markDirty(accountIdB64: account, nowMs: Int64(nowMs))
         gate.leave()
         if account == self.accountIdB64 {
             ownProfile = saved
@@ -277,6 +293,59 @@ public final class ProfileDirectory: ObservableObject {
         ownStore.store(adopted, accountIdB64: accountIdB64)
         ownProfile = adopted
         bump()
+        return .adopted
+    }
+
+    /// The own profile as the envelope a backup carries for `accountIdB64`,
+    /// stored stamp and all, or `nil` when it was never set. Read from the
+    /// store, so a baseline sent before the session mounted carries it too;
+    /// the username and its certificate go along when this account is the
+    /// active one. No grants: they belong to a conversation.
+    func backupProfileEnvelope(accountIdB64: String) -> Data? {
+        guard let own = ownStore.load(accountIdB64: accountIdB64), own.updatedAtMs > 0 else { return nil }
+        let username = accountIdB64 == self.accountIdB64 ? ownUsername : nil
+        let profile = FfiProfile(
+            displayName: own.displayName,
+            username: username,
+            updatedAtMs: own.updatedAtMs,
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: username == nil ? nil : ReachCenter.shared.ownUsernameCertificate,
+            grants: [],
+            avatar: own.avatar?.ffi
+        )
+        do {
+            return try composeProfileEnvelope(profile: profile)
+        } catch {
+            NSLog("ADR-0048 own profile backup envelope refused: \(error)")
+            return nil
+        }
+    }
+
+    /// The own profile a restored backup carried, for `accountIdB64`, which
+    /// may not be the active account yet (a route restores before its session
+    /// lands). Fail closed: bytes the core refuses, or a profile of another
+    /// account, change nothing. Kept only when the store holds nothing newer,
+    /// stamp as received.
+    @discardableResult
+    func adoptRestoredOwnProfile(envelope: Data, accountIdB64: String) -> OwnProfileAdoption {
+        guard let incoming = try? decodeProfileEnvelope(plaintext: envelope) else {
+            return .notAProfile
+        }
+        if let claimed = incoming.accountId, claimed != Data(base64Encoded: accountIdB64) {
+            return .foreignAccount
+        }
+        guard profileIsNewer(
+            incomingUpdatedAtMs: incoming.updatedAtMs,
+            storedUpdatedAtMs: ownStore.load(accountIdB64: accountIdB64)?.updatedAtMs ?? 0)
+        else { return .notNewer }
+        let adopted = OwnProfile(
+            displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs,
+            avatar: ProfileAvatar(incoming.avatar))
+        ownStore.store(adopted, accountIdB64: accountIdB64)
+        if accountIdB64 == self.accountIdB64 {
+            ownProfile = adopted
+            bump()
+        }
         return .adopted
     }
 
@@ -383,6 +452,71 @@ public final class ProfileDirectory: ObservableObject {
         return outcome
     }
 
+    /// `docs/ux/who-can-find-me.md` section 6.1 — file the name a person was
+    /// found under for the key that just became a contact, so the new row is
+    /// never a stand-in. Any profile of their own replaces it. Kept like a
+    /// received profile, and only while `receivedFor` is the active account.
+    ///
+    /// A username here was shown by the search, which verified it: its verdict
+    /// is written with it. The check a stored username otherwise gets reads
+    /// the certificate a profile carried, and this claim has none, so it would
+    /// refuse the pair for good.
+    @discardableResult
+    func fileFoundName(
+        _ claim: ProfileClaim, signatureKeyB64: String, accountIdB64 receivedFor: String?
+    ) -> ProfileAcceptance {
+        guard let receivedFor, receivedFor == accountIdB64 else { return .inactive }
+        let outcome = received.accept(claim, signatureKeyB64: signatureKeyB64)
+        guard outcome == .stored else { return outcome }
+        if let username = claim.username {
+            verifier.noteVerified(signatureKeyB64: signatureKeyB64, username: username)
+        }
+        bump()
+        return outcome
+    }
+
+    /// Whether the person still counts as unnamed for the profile request
+    /// (ADR-0048 section 2, trigger 4): the placeholder, or a name this device
+    /// found for them, which stands in for a profile it has not got. Counting
+    /// that one as a name would stop the asking that brings the real one.
+    func countsAsUnnamed(signatureKey: Data) -> Bool {
+        let resolved = resolve(signatureKey: signatureKey)
+        if resolved.isPlaceholder { return true }
+        return resolved.source != .localRename
+            && received.profile(signatureKeyB64: base64Encode(signatureKey))?.isFoundName == true
+    }
+
+    /// ADR-0050 section 2.9, bundle v3 — the profiles a pairing state bundle
+    /// carries to a new device of `accountIdB64`: every received profile kept
+    /// for that account (the caller leaves out the account's own keys).
+    func profilesForBundle(accountIdB64: String) -> [String: ProfileClaim] {
+        received.all(accountIdB64: accountIdB64).compactMapValues(\.forStateBundle)
+    }
+
+    /// ADR-0050 section 2.9, bundle v3 — store the profiles a pairing state
+    /// bundle carried, each under its person key, through the store a
+    /// received profile lands in (strictly newer wins: a newer profile held
+    /// here is kept). Works whether or not `accountIdB64` is the active
+    /// account (a join by name stores before its session starts). Returns how
+    /// many were stored.
+    @discardableResult
+    func adoptCarriedProfiles(
+        _ claims: [(personKeyB64: String, claim: ProfileClaim)], accountIdB64: String
+    ) -> Int {
+        var stored = 0
+        for entry in claims {
+            let outcome = received.accept(
+                entry.claim.withoutGrants, signatureKeyB64: entry.personKeyB64, intoAccount: accountIdB64)
+            guard outcome == .stored else { continue }
+            stored += 1
+            if accountIdB64 == self.accountIdB64, let username = entry.claim.username {
+                startVerification(signatureKeyB64: entry.personKeyB64, username: username)
+            }
+        }
+        if stored > 0, accountIdB64 == self.accountIdB64 { bump() }
+        return stored
+    }
+
     /// Every received profile, by signature key (b64): what local people
     /// search reads (ADR-0060 section 3).
     func receivedProfiles() -> [String: ProfileClaim] {
@@ -428,6 +562,41 @@ public final class ProfileDirectory: ObservableObject {
     /// reset this device accepted; see ``setRenames(from:)``.
     private var aliases: [String: String] = [:]
 
+    // MARK: - Pending contacts (ADR-0079)
+
+    /// base64 account key -> what a pending contact's invite link stated about
+    /// them, as a profile claim (stamp 0). The link statement is the
+    /// inviter's own, inside the capability their account key signed, so it
+    /// ranks with a received profile; a received profile still wins because
+    /// it is the person's current statement.
+    private var pendingClaims: [String: ProfileClaim] = [:]
+
+    /// Refresh the pending-contact names from this account's pending contacts
+    /// (added, removed, or handed over to a real contact).
+    func setPendingContacts(_ pending: [PendingContact]) {
+        var next: [String: ProfileClaim] = [:]
+        for contact in pending {
+            guard let claim = Self.pendingClaim(contact) else { continue }
+            next[base64Encode(contact.signaturePubkey)] = claim
+        }
+        guard next != pendingClaims else { return }
+        pendingClaims = next
+        bump()
+    }
+
+    /// What a pending contact's link states, as a claim the resolver reads
+    /// like a profile, or `nil` when it states neither a name nor a username.
+    /// The username stays a claim: it is shown only with a verdict.
+    static func pendingClaim(_ contact: PendingContact) -> ProfileClaim? {
+        let name = contact.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = contact.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty || !username.isEmpty else { return nil }
+        return ProfileClaim(
+            displayName: name.isEmpty ? nil : name,
+            username: username.isEmpty ? nil : username,
+            updatedAtMs: 0)
+    }
+
     // MARK: - Resolving
 
     /// The resolved name for the person holding `signatureKey`. Starts a
@@ -446,11 +615,21 @@ public final class ProfileDirectory: ObservableObject {
         if let alias = provenAlias(of: keyB64), let aliasKey = Data(base64Encoded: alias) {
             return resolve(signatureKey: aliasKey)
         }
-        let profile = received.profile(signatureKeyB64: keyB64)
+        // Precedence: local rename > received profile > a pending contact's
+        // link statement (ADR-0079) > the placeholder.
+        let receivedProfile = received.profile(signatureKeyB64: keyB64)
+        let profile = receivedProfile ?? pendingClaims[keyB64]
         var state: UsernameVerificationState?
         if let username = profile?.username {
             state = verifier.state(signatureKeyB64: keyB64, username: username)
-            if verifier.needsVerification(signatureKeyB64: keyB64, username: username) {
+            // A verification is started for a received profile only. The
+            // check (ADR-0060 section 5) reads the certificate the received
+            // profile carried; a link carries none, so starting one for a
+            // pending contact's username would record a refusal for the pair
+            // that a later profile with a certificate could not undo. A link
+            // username is therefore shown only with a verdict already held.
+            if receivedProfile != nil,
+               verifier.needsVerification(signatureKeyB64: keyB64, username: username) {
                 startVerification(signatureKeyB64: keyB64, username: username)
             }
         }
@@ -538,6 +717,17 @@ public final class ProfileDirectory: ObservableObject {
         return (try? verifyUsernameBinding(
             certificate: certificate, verifyingKey: key, expectedOprfHash: lookupKey,
             expectedAccountId: accountId)) != nil
+    }
+
+    /// ADR-0087 section 3 — the handle key a group or channel `@name`
+    /// certificate binds to the name whose lookup key is `lookupKey`, or
+    /// `nil` when the certificate does not verify under discovery's key.
+    func handleWriteKey(certificate: Data, lookupKey: Data) async -> Data? {
+        guard let key = try? await usernameCertKey(),
+              let cert = try? verifyHandleBinding(
+                  certificate: certificate, verifyingKey: key, expectedLookupKey: lookupKey)
+        else { return nil }
+        return cert.writePk
     }
 
     private func usernameCertKey() async throws -> Data {

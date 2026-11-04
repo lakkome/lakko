@@ -164,6 +164,13 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     }
   };
   globalThis.document?.addEventListener("keydown", onKey);
+  // A permission prompt takes the focus, and the pointer-up may then land
+  // outside the window: losing focus while the stream is awaited counts as
+  // the pointer coming up, so a grant after a prompt never starts a take.
+  const onWindowBlur = (): void => {
+    if (state().phase === "requesting") dispatch({ type: "release", at: Date.now() });
+  };
+  globalThis.addEventListener?.("blur", onWindowBlur);
 
   const mode = (): CaptureKind => (cameraPresent() === false ? "voice" : recordMode());
 
@@ -505,6 +512,7 @@ export function createRecorder(opts: RecorderOptions): Recorder {
       pendingStream = null;
       if (noticeTimer !== null) clearTimeout(noticeTimer);
       globalThis.document?.removeEventListener("keydown", onKey);
+      globalThis.removeEventListener?.("blur", onWindowBlur);
     },
   };
 }

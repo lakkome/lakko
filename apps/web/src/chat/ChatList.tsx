@@ -16,6 +16,9 @@
  * the cross-device sync runtime; unread, preview and time from the persisted
  * message log, which the open chat and the background receive both write.
  */
+import { dropRequestSent, requestsSent } from "./requests-sent";
+import { RequestsSentScreen } from "./RequestsSentScreen";
+import { unseenReactionIds } from "./unseen-reactions";
 import {
   createEffect,
   createMemo,
@@ -24,17 +27,28 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
   type JSX,
 } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
+import { isDesktop } from "../platform";
+import {
+  clearListCommand,
+  folderTabIndexFor,
+  neighbourHref,
+  noteConversationListMounted,
+  pendingListCommand,
+  type ListCommand,
+} from "../platform/shortcuts";
 
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { ownPersonKeyB64, personKeysOf } from "./person-key";
+import { oneToOnePeerKey, ownPersonKeyB64, personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
+import { useLineage } from "./use-lineage";
 import { uiRules } from "./ui-rules";
 import { badgeText } from "../feed/feed-marks";
 import { formatListTime } from "./list-time";
@@ -49,9 +63,10 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
-import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import { MembershipEndBanners } from "./MembershipEndNotices";
+import { RestoredNotice, useRestoredList } from "./RestoredNotice";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
@@ -83,6 +98,8 @@ import {
   shownPendingContacts,
   type PendingContact,
 } from "../contacts/pending-contacts";
+import { displayLocale } from "../l10n/display-locale";
+import { channelsState } from "../state/channels-state";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -213,6 +230,11 @@ function ChannelRow(props: {
 
 export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Element {
   const chats = useChats();
+  const [requestsOpen, setRequestsOpen] = createSignal(false);
+  // ADR-0087 UX 6.2 — a request leaves the list once its group is in Chats.
+  createEffect(() => {
+    for (const r of requestsSent()) if (chats.get(r.idB64) !== undefined) dropRequestSent(r.idB64);
+  });
   const sync = useDeviceGroupSync();
   const navigate = useNavigate();
   const callHost = useCallHost();
@@ -233,6 +255,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     conversationIdB64Of,
     readPositionBytes,
   } = createConversationRows();
+  const lineageView = useLineage();
 
   // ----- chat folders (`docs/ux/chat-folders.md`) ------------------------
 
@@ -284,7 +307,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const visibleRows = (): readonly ConversationRow[] => {
     const q = query();
     if (!searching()) return tabRows();
-    return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview));
+    return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview, row.handle));
   };
 
   /** The bar's tabs with their counts. */
@@ -334,12 +357,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   }
 
   // Ctrl+1..9 (Cmd on macOS) select the first nine tabs, All chats being 1.
+  // Never with Shift: Mod+Shift+1..5 are the desktop destinations.
   onMount(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (e.key < "1" || e.key > "9") return;
+      const index = folderTabIndexFor(e);
+      if (index === null) return;
       if (folders().length === 0) return;
-      const t = tabs()[Number(e.key) - 1];
+      const t = tabs()[index];
       if (t === undefined) return;
       e.preventDefault();
       selectTab(accountId(), t.id);
@@ -347,6 +371,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
+
+  // docs/ux/identity-recovery.md 7.2: what a restored device says while its
+  // conversations are on their way back.
+  const restoredList = useRestoredList(() => orderedRows().length);
 
   /** The people in this device's groups, as base64 account keys - what the
    *  people half of the search field (`search/PeopleSearch.tsx`) matches
@@ -357,11 +385,54 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return [...out];
   });
 
+  /** The other person of a one-to-one, or `null`. */
+  const chatPeerOf = (g: ActiveGroup): string | null =>
+    kindOf(g) === "chat" ? oneToOnePeerKey(personKeysOf(g.group), ownPersonKeyB64(chats.identity())) : null;
+
+  /** The people whose one-to-one is among the matching conversations. */
+  /** The ids of the conversation rows the local filter shows (a group's
+   *  conversation id, a channel's hex id), so a directory result for one of
+   *  them is not listed twice (one conversation, one row). */
+  const visibleRowIds = (): ReadonlySet<string> => new Set(visibleRows().map((row) => row.id));
+  const visibleChatPeers = (): ReadonlySet<string> => {
+    const out = new Set<string>();
+    for (const row of visibleRows()) {
+      const g = groupById().get(row.id);
+      const peer = g === undefined ? null : chatPeerOf(g);
+      if (peer !== null) out.add(peer);
+    }
+    return out;
+  };
+
+  /** The people added through their link whose row is on screen. */
+  const listedInvited = (): ReadonlySet<string> => new Set(invitedRows().map((p) => p.signaturePubkeyB64));
+
+  /** The route of the one-to-one with a person, whatever the list shows. */
+  const chatHrefOf = (personKeyB64: string): string | null => {
+    const g = chats.groups().find((candidate) => chatPeerOf(candidate) === personKeyB64);
+    return g === undefined ? null : hrefOf(g);
+  };
+
+  /** The name of a channel this device already knows (a subscription or its
+   *  own); a channel it does not know has only its handle to show. */
+  const channelNameOf = (channelIdHex: string): string | null => {
+    const shared = channelsState.metaByChannel().get(channelIdHex)?.name?.trim() ?? "";
+    if (shared.length > 0) return shared;
+    const local =
+      channelsState.channels().find((c) => c.id === channelIdHex)?.localName.trim() ?? "";
+    return local.length > 0 ? local : null;
+  };
+
   /** A channel the people search found by its handle opens its subscribe
    *  page. */
-  const openFoundChannel = (channelIdHex: string, handle: string): void => {
+  /** A channel from search: its Subscribe subscribes in one step and the
+   *  channel opens under its name (`docs/ux/group-and-channel-privacy.md`
+   *  section 5.1); a channel this account follows just opens. */
+  const openFoundChannel = (channelIdHex: string, handle: string, name?: string, subscribe?: boolean): void => {
     setQuery("");
-    navigate(paths.channelSubscribe(channelIdHex), { state: { handle } });
+    navigate(paths.channelSubscribe(channelIdHex), {
+      state: { handle, ...(name !== undefined ? { name } : {}), ...(subscribe === true ? { subscribe: true } : {}) },
+    });
   };
 
   /** ADR-0050 section 2.9 — a device added through another device was
@@ -440,6 +511,41 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   };
 
+  // docs/ux/desktop.md section 5 - the desktop shortcuts this list carries
+  // out (`platform/shortcuts.ts`): focus the search field, open the create
+  // menu, open the previous / next conversation in the list's own order.
+  let searchInput: HTMLInputElement | undefined;
+  const location = useLocation();
+  const rowHref = (row: ConversationRow): string | null => {
+    if (row.kind === "channel") return paths.channel(row.id);
+    const g = groupById().get(row.id);
+    return g === undefined ? null : hrefOf(g);
+  };
+  const runListCommand = (cmd: ListCommand): void => {
+    if (cmd === "search") {
+      searchInput?.focus();
+      searchInput?.select();
+    } else if (cmd === "create") {
+      setCreateOpen(true);
+    } else {
+      const hrefs = visibleRows()
+        .map(rowHref)
+        .filter((h): h is string => h !== null);
+      const to = neighbourHref(hrefs, location.pathname, cmd);
+      if (to !== null) navigate(to);
+    }
+  };
+  if (isDesktop()) {
+    onMount(() => onCleanup(noteConversationListMounted()));
+    createEffect(() => {
+      const cmd = pendingListCommand();
+      if (cmd === null) return;
+      clearListCommand();
+      // After mount: the search field's ref is set by then.
+      queueMicrotask(() => untrack(() => runListCommand(cmd)));
+    });
+  }
+
   return (
     <aside class="lk-pane" aria-label={copy().aria()}>
       <div class="lk-pane-head">
@@ -477,6 +583,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <label class="lk-search lk-pane-search">
         <Icon name="search" size={16} />
         <input
+          ref={searchInput}
           type="search"
           placeholder={t("chats.search.placeholder")}
           aria-label={t("chats.search.label")}
@@ -484,11 +591,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
-      {/* docs/ux/identity-recovery.md 17.5: a device joined the account. */}
-      <DeviceAddedBanner />
+      <MembershipEndBanners activeSlug={props.activeGroupIdB64} />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />
+      <Show when={restoredList() === "banner"}>
+        <RestoredNotice state="banner" />
+      </Show>
       {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
           exists. Hidden while searching - a search covers everything. */}
       <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>
@@ -505,24 +614,43 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <Show
         when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
         fallback={
-          <div class="lk-empty">
-            <Icon name="chat" size={40} strokeWidth={1.4} />
-            <strong>{copy().emptyTitle()}</strong>
-            {/* The SAME menu the compose button opens, not a different set
-                of choices in a different place. */}
-            <button
-              type="button"
-              class="primary"
-              aria-haspopup="menu"
-              aria-expanded={createOpen()}
-              onClick={() => setCreateOpen((open) => !open)}
-            >
-              {copy().emptyAction()}
-            </button>
-          </div>
+          <Show when={restoredList() !== "card"} fallback={<RestoredNotice state="card" />}>
+            <div class="lk-empty">
+              <Icon name="chat" size={40} strokeWidth={1.4} />
+              <strong>{copy().emptyTitle()}</strong>
+              {/* The SAME menu the compose button opens, not a different set
+                  of choices in a different place. */}
+              <button
+                type="button"
+                class="primary"
+                aria-haspopup="menu"
+                aria-expanded={createOpen()}
+                onClick={() => setCreateOpen((open) => !open)}
+              >
+                {copy().emptyAction()}
+              </button>
+            </div>
+          </Show>
         }
       >
         <div class="lk-pane-body">
+          {/* ADR-0087 UX 6.2 — the Requests sent row, at the top, while one is open. */}
+          <Show when={currentFolder() === null && !searching() && requestsSent().length > 0}>
+            <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
+              <span class="lk-avatar" aria-hidden="true">
+                <Icon name="groups" size={18} />
+              </span>
+              <div class="lk-row-body">
+                <div class="lk-row-line">
+                  <span class="lk-row-title">{t("requests_sent.title")}</span>
+                </div>
+              </div>
+              <span class="lk-row-trail">
+                <span class="lk-badge muted">{requestsSent().length}</span>
+              </span>
+            </button>
+          </Show>
+          <RequestsSentScreen open={requestsOpen()} onBack={() => setRequestsOpen(false)} />
           {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
           <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
             <div class="lk-folder-empty">
@@ -588,7 +716,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
               const label = (): string => chatLabel(g);
               const sub = (): string => subOf(g);
-              const time = (): string => formatListTime(summary().lastAt, clock(), currentLanguage());
+              const time = (): string => formatListTime(summary().lastAt, clock(), displayLocale());
               /**
                * A call from this conversation, arriving while it is muted
                * (`docs/ux/calls.md` section 2.1.1, second surface).
@@ -626,7 +754,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     press.swallowClick(e);
                   }}
                 >
-                  <Avatar label={label()} id={conversationIdB64Of(g)} personKey={row.personKey} />
+                  <Avatar
+                    label={label()}
+                    id={conversationIdB64Of(g)}
+                    personKey={row.personKey}
+                    conversationKey={row.personKey === undefined ? g.groupIdB64 : undefined}
+                  />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
@@ -649,13 +782,21 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <Show when={pinnedHere(row)}>
                           <Icon name="pin" size={14} title={t("chats.row.pinned")} />
                         </Show>
+                        {/* Reactions section 12 — a small heart beside the
+                            badge while others' reactions to the person's
+                            own messages here are unseen. */}
+                        <Show when={unseenReactionIds(accountId(), g.groupIdB64).length > 0}>
+                          <span class="lk-list-unseen-reactions" title={t("chats.row.unseen_reactions")}>
+                            <Icon name="heart" size={14} />
+                          </span>
+                        </Show>
                         <Show when={unread() > 0}>
                           <span
                             class="lk-badge"
                             classList={{ muted: flags().muted }}
                             title={t("chats.row.unread", { count: unread() })}
                           >
-                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(currentLanguage())}
+                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(displayLocale())}
                           </span>
                         </Show>
                       </span>
@@ -780,6 +921,17 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               conversationMatches={() => visibleRows().length}
               groupPeopleKeys={groupPeopleKeys}
               onOpenChannel={openFoundChannel}
+              listedB64={listedInvited}
+              standingAboveB64={visibleChatPeers}
+              standingConversationIds={visibleRowIds}
+              chatHrefOf={chatHrefOf}
+              channelNameOf={channelNameOf}
+              onOpenConversation={(idB64) => {
+                const g = chats.get(idB64) ?? lineageView.resolve(idB64)?.head;
+                if (g === undefined) return;
+                setQuery("");
+                navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
+              }}
             />
           </Show>
         </div>

@@ -98,6 +98,16 @@ public struct ContactsScreen: View {
         return accepted + invited
     }
 
+    /// The account keys the list shows for this text: contacts and the people
+    /// added through their link. A contact whose name has not arrived is not
+    /// among them: they stand under People meanwhile.
+    private var listedKeys: Set<Data> {
+        ContactRowId.listedKeys(
+            shown: items.map(\.id),
+            accepted: viewModel.repositoryState.accepted,
+            invited: viewModel.shownInvited)
+    }
+
     private var sections: [ContactListPresentation.LetterSection<ContactRowId>] {
         ContactListPresentation.sections(items)
     }
@@ -116,6 +126,13 @@ public struct ContactsScreen: View {
             && viewModel.shownInvited.isEmpty
             && viewModel.repositoryState.pending.isEmpty
             && viewModel.repositoryState.sent.isEmpty
+    }
+
+    /// The line when the text matches no contact, for a list that has some.
+    private var noMatchText: String? {
+        guard items.isEmpty, !viewModel.repositoryState.accepted.isEmpty || !viewModel.shownInvited.isEmpty
+        else { return nil }
+        return l10n.t("contacts.list.no_match")
     }
 
     private var showsIndex: Bool {
@@ -139,8 +156,17 @@ public struct ContactsScreen: View {
                     if isSearching, let peopleSearch {
                         Section {
                             PeopleSearchSection(
-                                model: peopleSearch, includesChannels: false, showsLocalContacts: false,
+                                model: peopleSearch, includesChannels: false, showsLocalContacts: true,
+                                listShowsRows: !items.isEmpty,
+                                listed: listedKeys,
                                 onOpenPerson: onOpenPerson)
+                        }
+                        .listRowSeparator(.hidden)
+                    } else if isSearching, let noMatchText {
+                        Section {
+                            Text(noMatchText)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                                .frame(maxWidth: .infinity)
                         }
                         .listRowSeparator(.hidden)
                     }
@@ -163,12 +189,6 @@ public struct ContactsScreen: View {
                     } actions: {
                         Button(l10n.t("contacts.add.share_invite")) { inviteLinksPresented = true }
                             .buttonStyle(.borderedProminent)
-                    }
-                } else if isSearching && items.isEmpty {
-                    if let peopleSearch {
-                        ContactsSearchEmpty(model: peopleSearch, query: query)
-                    } else {
-                        ContentUnavailableView.search(text: query)
                     }
                 }
             }
@@ -259,6 +279,8 @@ public struct ContactsScreen: View {
                 ForEach(incoming, id: \.messageId) { request in
                     IncomingRequestRow(
                         request: request,
+                        failed: viewModel.acceptFailed.contains(request.messageId),
+                        accepting: viewModel.accepting.contains(request.messageId),
                         onAccept: { viewModel.onAcceptClicked(messageId: request.messageId) },
                         onDecline: { viewModel.onDeclineClicked(messageId: request.messageId) }
                     )
@@ -275,14 +297,9 @@ public struct ContactsScreen: View {
             Section {
                 DisclosureGroup(isExpanded: $sentExpanded) {
                     ForEach(sent, id: \.messageId) { row in
-                        HStack {
-                            Text("@\(row.recipientUsername)")
-                                .foregroundStyle(Color.lakkoText)
-                            Spacer()
-                            Text(l10n.t("contacts.list.sent_waiting"))
-                                .font(.footnote)
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
+                        SentRequestRow(
+                            request: row,
+                            onDismiss: { viewModel.onDismissSentClicked(row) })
                     }
                 } label: {
                     Text(l10n.t("contacts.list.sent", texts: ["count": sent.count.formatted(.number.locale(l10n.locale))]))
@@ -320,28 +337,64 @@ public struct ContactsScreen: View {
     }
 }
 
-/// The search's empty overlay: "No results" only while the field has nothing
-/// of its own to show. A text that asks the network never gets it, because
-/// the People part answers (found, not found, or why it could not search).
-private struct ContactsSearchEmpty: View {
-    @ObservedObject var model: PeopleSearchModel
-    let query: String
+// MARK: - Rows
+
+/// A request waiting for an answer: the person's name and avatar as found,
+/// `@username` under it, Waiting, and **Dismiss**.
+private struct SentRequestRow: View {
+    @ObservedObject private var l10n = Localization.shared
+    let request: SentContactRequest
+    let onDismiss: () -> Void
 
     var body: some View {
-        if !PeopleSearch.asksNetwork(query),
-           !model.showsAnything(includesChannels: false, showsLocalContacts: false) {
-            ContentUnavailableView.search(text: query)
+        let line = ContactListPresentation.sentRow(request)
+        HStack(spacing: 12) {
+            InitialsAvatar(
+                name: line.name ?? "",
+                identity: request.recipientAccountIdB64,
+                size: 40,
+                placeholderSymbol: "person.fill",
+                photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) }
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.name ?? l10n.t("contacts.request.someone"))
+                    .foregroundStyle(Color.lakkoText)
+                if let username = line.username {
+                    Text(username)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
+                Text(l10n.t("contacts.list.sent_waiting"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            Spacer()
+            Button(l10n.t("common.dismiss"), action: onDismiss)
+                .buttonStyle(.borderless)
+                .accessibilityLabel(l10n.t("contacts.list.sent_dismiss"))
         }
     }
 }
-
-// MARK: - Rows
 
 /// A row of the contact list: an accepted contact, or a person added through
 /// their invite link whose app has not answered yet (ADR-0079).
 enum ContactRowId: Hashable {
     case contact(Int64)
     case invited(String)
+
+    /// The account keys of the people the rows `shown` stand for.
+    static func listedKeys(
+        shown: [ContactRowId], accepted: [AcceptedContact], invited: [PendingContact]
+    ) -> Set<Data> {
+        let shown = Set(shown)
+        let contacts = accepted
+            .filter { shown.contains(.contact($0.request.messageId)) }
+            .map(\.request.fromPubkey)
+        let added = invited
+            .filter { shown.contains(.invited($0.accountIdHex)) }
+            .map(\.signaturePubkey)
+        return Set(contacts + added)
+    }
 }
 
 /// ADR-0079 — a person added through their invite link, before their app has
@@ -415,6 +468,9 @@ private struct ContactRow: View {
 private struct IncomingRequestRow: View {
     @ObservedObject private var l10n = Localization.shared
     let request: IncomingContactRequest
+    /// The last Accept failed: the row says so, and Accept works again.
+    let failed: Bool
+    let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
 
@@ -448,13 +504,21 @@ private struct IncomingRequestRow: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .disabled(accepting)
                         Button(action: onDecline) {
                             Text(l10n.t("contacts.request.decline")).frame(minWidth: 72)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(accepting)
                     }
                     .padding(.top, 2)
+                    if failed {
+                        Text(l10n.t("contacts.request.accept_failed"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoDanger)
+                            .accessibilityAddTraits(.updatesFrequently)
+                    }
                 }
             }
             .padding(.vertical, 4)

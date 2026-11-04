@@ -94,6 +94,9 @@ public enum DeviceGroupCommits {
                 NotificationCenter.default.post(
                     name: .lakkoDeviceGroupChangedHere, object: nil,
                     userInfo: ["accountIdB64": accountIdB64])
+                // The snapshot is current (`makeCurrent` ran first), whether
+                // or not the sync runtime is up to reopen it.
+                DeviceRosterChanges.note(accountIdB64: accountIdB64)
             },
             deliverWelcome: { entry in
                 guard let welcome = entry.welcomeB64.flatMap({ Data(base64Encoded: $0) }),

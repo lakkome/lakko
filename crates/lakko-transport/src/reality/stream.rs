@@ -31,7 +31,7 @@
 //! buffering more than 16 MiB by claiming a giant
 //! length.
 
-use std::io::{self, Cursor, Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -153,22 +153,25 @@ where
                 // without sending the full frame.
                 return Err(Error::PeerClosed);
             }
-            // Feed the freshly-read bytes to rustls. The
-            // sync Cursor adapter is the canonical
-            // bridge from async I/O to rustls's
-            // read_tls(&mut dyn io::Read).
-            let mut cur = Cursor::new(&chunk[..n]);
-            self.conn
-                .read_tls(&mut cur)
-                .map_err(|e| Error::Io(format!("read_tls: {e}")))?;
-            self.conn
-                .process_new_packets()
-                .map_err(|e| Error::Io(format!("process_new_packets: {e}")))?;
-            // Drain whatever plaintext rustls decoded.
-            self.pump_decrypt()?;
-            // rustls may also have new pending writes
-            // (e.g. an ack / alert in response). Flush
-            // them so we don't deadlock the peer.
+            // rustls takes at most 4096 bytes per `read_tls`, so
+            // one call would drop the rest of a larger socket
+            // read and corrupt the record stream. Feed all of
+            // it, draining between calls so its buffers stay
+            // below their limits.
+            let mut rest = &chunk[..n];
+            while !rest.is_empty() {
+                let taken = self
+                    .conn
+                    .read_tls(&mut rest)
+                    .map_err(|e| Error::Io(format!("read_tls: {e}")))?;
+                self.conn
+                    .process_new_packets()
+                    .map_err(|e| Error::Io(format!("process_new_packets: {e}")))?;
+                self.pump_decrypt()?;
+                if taken == 0 {
+                    break;
+                }
+            }
             self.flush_writes().await?;
         }
         Ok(())

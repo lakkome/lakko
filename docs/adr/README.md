@@ -85,3 +85,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0078](0078-servers-cannot-link-accounts.md) | Proposed | Lakko's servers cannot link accounts: sealed senders, anonymous admission, unlinkable ids |
 | [0082](0082-on-device-translation-and-transcription.md) | Accepted | Translation and transcription happen on the device that shows the message, or not at all |
 | [0083](0083-screen-share.md) | Accepted | Screen sharing: one share per call, ordered the same on every device |
+| [0085](0085-desktop-client.md) | Proposed | The desktop client is a Tauri host that keeps the keys and talks to the network; the web client's code runs inside it |

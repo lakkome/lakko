@@ -16,6 +16,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import me.lakko.app.l10n.EnglishForTests
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -28,6 +30,11 @@ import org.junit.Test
  * no write method, like the interface.
  */
 class SilentWakeTest {
+
+    @Before
+    fun english() {
+        EnglishForTests.install()
+    }
     private val accountId = "acct-1"
     private val oldHex = "0a".repeat(32)
     private val newHex = "0b".repeat(32)
@@ -89,7 +96,7 @@ class SilentWakeTest {
         WakeGroupFacts(ConversationKind.Group, listOf(me) + people, owner, me)
 
     private fun chat(text: String, sender: String?, resend: ResendOrigin? = null) =
-        ProcessedRow(ProcessedKind.CHAT, text, 0, senderAccountB64 = sender, resendOrigin = resend)
+        ProcessedRow(ProcessedKind.CHAT, text, 0, senderName = "Anna", senderAccountB64 = sender, resendOrigin = resend)
 
     private fun offer(sender: String?) = ProcessedRow(
         ProcessedKind.CALL_SIGNALING,
@@ -163,7 +170,7 @@ class SilentWakeTest {
         val outcome = wake(
             deps(group(owner = peer, retired, peer), listOf(chat("real", peer), chat("fake", retired)), setOf(retired)),
         )
-        assertEquals("real", outcome.preview?.body)
+        assertEquals("Anna: real", outcome.preview?.body)
         assertFalse(outcome.suppressed)
     }
 
@@ -212,23 +219,31 @@ class SilentWakeTest {
 
     @Test
     fun `a marker is believed only against the held row - another author, another conversation, a later segment`() = runTest {
+        // Seen from the peer's device: the re-sender is the peer, whose
+        // original this device received. (A re-send from this device's own
+        // account is never a notification at all.)
+        val heldFromPeer = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
         // The held row is someone else's: the sender did not write it.
-        val foreign = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
+        val foreign = mapOf((oldHex to 42L) to HeldRow(HeldRowDirection.INCOMING, "key-third"))
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, marker)), lineage = lineage, held = foreign), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), lineage = lineage, held = foreign), newHex).preview?.body,
         )
         // No lineage: the named group is another conversation.
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, marker)), held = heldOwn), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), held = heldFromPeer), newHex).preview?.body,
         )
         // The marker names the receiving group itself.
         val self = ResendOrigin(groupB64OfHex(newHex), 42)
-        val heldHere = mapOf((newHex to 42L) to HeldRow(HeldRowDirection.OUTGOING, null))
+        val heldHere = mapOf((newHex to 42L) to HeldRow(HeldRowDirection.INCOMING, peer))
         assertEquals(
             "x",
-            wake(deps(oneToOne(peer), listOf(chat("x", me, self)), lineage = lineage, held = heldHere), newHex).preview?.body,
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, self)), lineage = lineage, held = heldHere), newHex).preview?.body,
+        )
+        // And the same row against the held original IS a re-send.
+        assertNull(
+            wake(deps(oneToOne(peer), listOf(chat("x", peer, marker)), lineage = lineage, held = heldFromPeer), newHex).preview,
         )
     }
 

@@ -108,6 +108,39 @@ pub enum InfoSection {
     /// conversation (`docs/ux/conversation-info.md` section 2.1). Local, sends
     /// nothing. Appended last for the same reason as [`Self::ChannelMembers`].
     AddContact,
+    /// `Their contacts can find me`, the per-contact switch of "Who can find
+    /// me" (`docs/ux/who-can-find-me.md` section 5.1), shown only while
+    /// Contacts of my contacts is on. Appended last for the same reason as
+    /// [`Self::ChannelMembers`].
+    TheirContactsCanFindMe,
+    /// The `@name` of a group or channel, with a copy control (ADR-0087,
+    /// `docs/ux/group-and-channel-privacy.md` section 4). Shown to everyone
+    /// in the conversation while it holds a name. Appended last, like every
+    /// block below, so earlier uniffi ordinals stay put.
+    Handle,
+    /// `Who can join` / `Who can subscribe`, opening the type screen (the
+    /// flag and the `@name`). Owner only.
+    GroupType,
+    /// Delete the group or channel: the owner's exit when no one else holds
+    /// a role in it (a group of one; a channel with no publisher left).
+    DeleteGroup,
+    /// Invite people to a channel from contacts (ADR-0087 section 14).
+    /// Owner and publishers.
+    InvitePeople,
+    /// A channel's subscribers: the exact count for the owner and
+    /// publishers, the band and the member list for everyone else.
+    Subscribers,
+    /// A channel's publishers (on screen; co-publishers in the protocol).
+    /// Owner, and publishers read-only.
+    Admins,
+    /// `Reactions`: which reactions the conversation takes, opening the
+    /// Reactions screen (`docs/ux/reactions-and-emoji.md` section 9). A
+    /// group's owner and admins (the group setting is an owner-or-admin
+    /// envelope, checked at receipt like the group name); a channel's owner
+    /// (the setting rides the channel metadata record, ADR-0087 section
+    /// 13a). Never in a one-to-one, which takes every reaction. Appended last
+    /// so earlier uniffi ordinals stay put.
+    Reactions,
 }
 
 impl InfoSection {
@@ -125,6 +158,10 @@ impl InfoSection {
     /// new group rather than growing this one (the maintainer's call,
     /// 2026-09-23).
     #[must_use]
+    ///
+    /// The ADR-0087 blocks ([`Self::Handle`] onward) are on the list too:
+    /// each is about a group or a channel, and none belongs on a person. So
+    /// read the name as "conversation-only".
     pub const fn group_only(self) -> bool {
         matches!(
             self,
@@ -136,6 +173,13 @@ impl InfoSection {
                 | Self::Roles
                 | Self::TransferOwnership
                 | Self::LeaveGroup
+                | Self::Handle
+                | Self::GroupType
+                | Self::DeleteGroup
+                | Self::InvitePeople
+                | Self::Subscribers
+                | Self::Admins
+                | Self::Reactions
         )
     }
 
@@ -168,6 +212,14 @@ impl InfoSection {
             Self::Unsubscribe => "unsubscribe",
             Self::ChannelMembers => "channel-members",
             Self::AddContact => "add-contact",
+            Self::TheirContactsCanFindMe => "their-contacts-can-find-me",
+            Self::Handle => "handle",
+            Self::GroupType => "group-type",
+            Self::DeleteGroup => "delete-group",
+            Self::InvitePeople => "invite-people",
+            Self::Subscribers => "subscribers",
+            Self::Admins => "admins",
+            Self::Reactions => "reactions",
         }
     }
 }
@@ -188,6 +240,10 @@ pub struct PersonInfoCapabilities {
     /// contact, and it offers [`InfoSection::AddContact`] in place of the
     /// rename and remove blocks, which need a contact row to act on.
     pub is_contact: bool,
+    /// Contacts of my contacts is on in "Who can find me"
+    /// (`docs/ux/who-can-find-me.md` section 5.1), under either form. The
+    /// client reads it from the setting, so this crate never does.
+    pub contacts_of_contacts_on: bool,
 }
 
 /// What the viewer may do in a group.
@@ -268,6 +324,11 @@ pub const fn info_target(kind: crate::conversation::ConversationKind) -> InfoTar
 /// number, your name for them - is unaffected: the conversation ended, they
 /// did not.
 ///
+/// [`InfoSection::TheirContactsCanFindMe`] is about a contact and about a
+/// setting, so it needs both: when the setting does not include contacts of
+/// contacts the row is absent rather than dead, and a person who is not a
+/// contact has no list to be on.
+///
 /// Nothing in the result is ever [`InfoSection::group_only`]. That is the
 /// whole point of the split, and it is asserted rather than described.
 #[must_use]
@@ -286,6 +347,9 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     sections.push(InfoSection::Message);
     sections.push(InfoSection::SafetyNumber);
     if caps.is_contact {
+        if caps.contacts_of_contacts_on {
+            sections.push(InfoSection::TheirContactsCanFindMe);
+        }
         sections.push(InfoSection::RenameContact);
         sections.push(InfoSection::RemoveContact);
     } else {
@@ -326,6 +390,11 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
     if caps.can_mint_invite {
         sections.push(InfoSection::InviteLink);
     }
+    // Owner or admin, and still a member: the same authority as a rename
+    // (both are owner-or-admin group envelopes checked at receipt).
+    if caps.can_rename {
+        sections.push(InfoSection::Reactions);
+    }
     if caps.is_owner {
         sections.push(InfoSection::TransferOwnership);
     }
@@ -365,6 +434,142 @@ pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> 
     sections
 }
 
+/// Group or channel, for [`conversation_info_sections`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationInfoKind {
+    /// A group.
+    Group,
+    /// A channel.
+    Channel,
+}
+
+/// The viewer's role in a group or channel (ADR-0022; a channel's
+/// co-publisher is its admin, "publisher" on screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationRole {
+    /// The owner.
+    Owner,
+    /// An admin of a group, a publisher of a channel.
+    Admin,
+    /// A member of a group, a subscriber of a channel.
+    Member,
+}
+
+/// What the viewer is and may do in a group or channel: ONE record for both
+/// kinds (`docs/ux/group-and-channel-privacy.md` section 18), so a channel
+/// cannot grow a screen of its own. Every field is the client's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConversationInfoCapabilities {
+    /// Group or channel.
+    pub kind: ConversationInfoKind,
+    /// The viewer's role.
+    pub role: ConversationRole,
+    /// Nobody but the owner holds a place that blocks deleting: a group of
+    /// one person (ADR-0087 section 10, distinct accounts, not devices); a
+    /// channel with no publisher left besides the owner.
+    pub alone: bool,
+    /// The owner may hand the group over now (ADR-0045: a role-table group
+    /// with another member to hand it to).
+    pub can_transfer: bool,
+    /// This device can leave (see [`GroupInfoCapabilities::can_leave`]).
+    pub can_leave: bool,
+    /// The conversation holds an `@name` (a lapsed one shows no row,
+    /// UX section 4.4).
+    pub has_handle: bool,
+}
+
+/// What a group's or a channel's info holds under ADR-0087
+/// (`docs/ux/group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15).
+///
+/// Replaces [`group_info_sections`] and [`channel_info_sections`] once the
+/// clients move to it; both stay until then, because the clients call them.
+/// What differs from them, on purpose:
+///
+/// - No `DeleteChat` and no ended-membership state: the end of a membership
+///   wipes the conversation (ADR-0087 section 9), so there is no ended
+///   group to show.
+/// - The owner's exit is [`InfoSection::DeleteGroup`] when alone, else
+///   [`InfoSection::TransferOwnership`]; an owner is never offered
+///   `LeaveGroup` (UX sections 10 and 11).
+/// - A channel shows the group's blocks where they mean the same (rename,
+///   invite link) and its own (`InvitePeople`, `Subscribers`, `Admins`);
+///   the Manage page is gone (ADR-0087 section 12).
+#[must_use]
+pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<InfoSection> {
+    let owner = caps.role == ConversationRole::Owner;
+    let manager = matches!(caps.role, ConversationRole::Owner | ConversationRole::Admin);
+    let mut sections = Vec::new();
+    if caps.has_handle {
+        sections.push(InfoSection::Handle);
+    }
+    match caps.kind {
+        ConversationInfoKind::Group => {
+            sections.push(InfoSection::GroupName);
+            sections.push(InfoSection::MemberList);
+            if manager {
+                sections.push(InfoSection::RenameGroup);
+                sections.push(InfoSection::AddMember);
+            }
+            // Owner only: peers refuse an admin's role commit (ADR-0022).
+            if owner {
+                sections.push(InfoSection::Roles);
+            }
+            if manager {
+                sections.push(InfoSection::InviteLink);
+                // Owner and admins choose a group's reactions.
+                sections.push(InfoSection::Reactions);
+            }
+            if owner {
+                sections.push(InfoSection::GroupType);
+            }
+        },
+        ConversationInfoKind::Channel => {
+            sections.push(InfoSection::ChannelDescription);
+            // Rename and the description are the owner's (ADR-0087 section 15).
+            if owner {
+                sections.push(InfoSection::RenameGroup);
+            }
+            if manager {
+                sections.push(InfoSection::InvitePeople);
+                sections.push(InfoSection::InviteLink);
+            }
+            sections.push(InfoSection::Subscribers);
+            if manager {
+                sections.push(InfoSection::Admins);
+            }
+            // The owner's: the setting rides the channel metadata record
+            // (ADR-0087 section 13a), which a publisher does not re-issue.
+            if owner {
+                sections.push(InfoSection::Reactions);
+                sections.push(InfoSection::GroupType);
+            }
+        },
+    }
+    // The exit block.
+    if owner {
+        if caps.alone {
+            sections.push(InfoSection::DeleteGroup);
+        } else if caps.can_transfer && caps.kind == ConversationInfoKind::Group {
+            sections.push(InfoSection::TransferOwnership);
+        }
+    } else {
+        match caps.kind {
+            ConversationInfoKind::Group => {
+                if caps.can_leave {
+                    sections.push(InfoSection::LeaveGroup);
+                }
+            },
+            ConversationInfoKind::Channel => {
+                if caps.role == ConversationRole::Member {
+                    sections.push(InfoSection::Unsubscribe);
+                }
+            },
+        }
+    }
+    sections
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +579,7 @@ mod tests {
         PersonInfoCapabilities {
             membership_ended: ended,
             is_contact: true,
+            contacts_of_contacts_on: false,
         }
     }
 
@@ -381,6 +587,7 @@ mod tests {
         PersonInfoCapabilities {
             membership_ended: ended,
             is_contact: false,
+            contacts_of_contacts_on: false,
         }
     }
 
@@ -457,6 +664,47 @@ mod tests {
         }
         assert!(person_info_sections(removed_person(false)).contains(&InfoSection::Call));
         assert!(!person_info_sections(person(false)).contains(&InfoSection::AddContact));
+    }
+
+    /// The switch needs the setting to include contacts of contacts AND the
+    /// person to be a contact, under either state of the conversation: what
+    /// ends is the conversation, not the person.
+    #[test]
+    fn the_per_contact_switch_follows_the_setting_and_the_contact_row() {
+        for &membership_ended in &[false, true] {
+            for &is_contact in &[false, true] {
+                for &contacts_of_contacts_on in &[false, true] {
+                    let sections = person_info_sections(PersonInfoCapabilities {
+                        membership_ended,
+                        is_contact,
+                        contacts_of_contacts_on,
+                    });
+                    assert_eq!(
+                        sections.contains(&InfoSection::TheirContactsCanFindMe),
+                        is_contact && contacts_of_contacts_on,
+                        "{sections:?}"
+                    );
+                    assert!(!sections.iter().any(|s| s.group_only()), "{sections:?}");
+                }
+            }
+        }
+    }
+
+    /// `docs/ux/conversation-info.md` section 2.1 puts it straight after the
+    /// safety number and before the contact's own actions.
+    #[test]
+    fn the_per_contact_switch_sits_after_the_safety_number() {
+        let sections = person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: true,
+            contacts_of_contacts_on: true,
+        });
+        let at = |wanted| sections.iter().position(|s| *s == wanted).unwrap();
+        assert_eq!(
+            at(InfoSection::TheirContactsCanFindMe),
+            at(InfoSection::SafetyNumber) + 1
+        );
+        assert!(at(InfoSection::TheirContactsCanFindMe) < at(InfoSection::RenameContact));
     }
 
     /// One card wherever it was opened from: `Message` is always there, and
@@ -682,6 +930,7 @@ mod tests {
             InfoSection::Roles,
             InfoSection::TransferOwnership,
             InfoSection::LeaveGroup,
+            InfoSection::Reactions,
         ];
         for s in marked {
             assert!(s.group_only(), "{s:?} must be classified group-only");
@@ -745,6 +994,14 @@ mod tests {
             InfoSection::Unsubscribe,
             InfoSection::ChannelMembers,
             InfoSection::AddContact,
+            InfoSection::TheirContactsCanFindMe,
+            InfoSection::Handle,
+            InfoSection::GroupType,
+            InfoSection::DeleteGroup,
+            InfoSection::InvitePeople,
+            InfoSection::Subscribers,
+            InfoSection::Admins,
+            InfoSection::Reactions,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();
@@ -765,9 +1022,210 @@ mod tests {
             InfoSection::RenameContact,
             InfoSection::RemoveContact,
             InfoSection::AddContact,
+            InfoSection::TheirContactsCanFindMe,
             InfoSection::DeleteChat,
         ] {
             assert!(!s.group_only(), "{s:?}");
+        }
+    }
+
+    fn caps(
+        kind: ConversationInfoKind,
+        role: ConversationRole,
+        alone: bool,
+    ) -> ConversationInfoCapabilities {
+        ConversationInfoCapabilities {
+            kind,
+            role,
+            alone,
+            can_transfer: true,
+            can_leave: true,
+            has_handle: true,
+        }
+    }
+
+    #[test]
+    fn a_solo_owner_deletes_and_never_leaves_or_transfers() {
+        let s = conversation_info_sections(caps(
+            ConversationInfoKind::Group,
+            ConversationRole::Owner,
+            true,
+        ));
+        assert!(s.contains(&InfoSection::DeleteGroup));
+        assert!(!s.contains(&InfoSection::TransferOwnership));
+        assert!(!s.contains(&InfoSection::LeaveGroup));
+        assert!(s.contains(&InfoSection::GroupType));
+        assert!(s.contains(&InfoSection::AddMember));
+        assert!(s.contains(&InfoSection::InviteLink));
+    }
+
+    #[test]
+    fn an_owner_with_others_transfers_first() {
+        let s = conversation_info_sections(caps(
+            ConversationInfoKind::Group,
+            ConversationRole::Owner,
+            false,
+        ));
+        assert!(s.contains(&InfoSection::TransferOwnership));
+        assert!(!s.contains(&InfoSection::DeleteGroup));
+        assert!(!s.contains(&InfoSection::LeaveGroup));
+    }
+
+    #[test]
+    fn a_member_sees_the_name_and_the_way_out_and_nothing_to_manage() {
+        let s = conversation_info_sections(caps(
+            ConversationInfoKind::Group,
+            ConversationRole::Member,
+            false,
+        ));
+        assert_eq!(
+            s,
+            vec![
+                InfoSection::Handle,
+                InfoSection::GroupName,
+                InfoSection::MemberList,
+                InfoSection::LeaveGroup
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_owner_changes_the_type() {
+        for kind in [ConversationInfoKind::Group, ConversationInfoKind::Channel] {
+            for role in [ConversationRole::Admin, ConversationRole::Member] {
+                assert!(!conversation_info_sections(caps(kind, role, false))
+                    .contains(&InfoSection::GroupType));
+            }
+            assert!(
+                conversation_info_sections(caps(kind, ConversationRole::Owner, false))
+                    .contains(&InfoSection::GroupType)
+            );
+        }
+    }
+
+    #[test]
+    fn a_channel_has_its_own_blocks_and_no_delete_chat() {
+        let owner = conversation_info_sections(caps(
+            ConversationInfoKind::Channel,
+            ConversationRole::Owner,
+            false,
+        ));
+        for block in [
+            InfoSection::Handle,
+            InfoSection::ChannelDescription,
+            InfoSection::RenameGroup,
+            InfoSection::InvitePeople,
+            InfoSection::InviteLink,
+            InfoSection::Subscribers,
+            InfoSection::Admins,
+            InfoSection::GroupType,
+        ] {
+            assert!(owner.contains(&block), "{block:?}");
+        }
+        assert!(!owner.contains(&InfoSection::ManageChannel));
+        let publisher = conversation_info_sections(caps(
+            ConversationInfoKind::Channel,
+            ConversationRole::Admin,
+            false,
+        ));
+        assert!(!publisher.contains(&InfoSection::RenameGroup));
+        assert!(publisher.contains(&InfoSection::InvitePeople));
+        assert!(!publisher.contains(&InfoSection::Unsubscribe));
+        let subscriber = conversation_info_sections(caps(
+            ConversationInfoKind::Channel,
+            ConversationRole::Member,
+            false,
+        ));
+        assert_eq!(
+            subscriber,
+            vec![
+                InfoSection::Handle,
+                InfoSection::ChannelDescription,
+                InfoSection::Subscribers,
+                InfoSection::Unsubscribe
+            ]
+        );
+        let solo = conversation_info_sections(caps(
+            ConversationInfoKind::Channel,
+            ConversationRole::Owner,
+            true,
+        ));
+        assert!(solo.contains(&InfoSection::DeleteGroup));
+    }
+
+    /// `docs/ux/reactions-and-emoji.md` section 9: a group's owner and
+    /// admins, a channel's owner, and nobody else; never on a person, never
+    /// once a group membership has ended.
+    #[test]
+    fn the_reactions_row_is_for_those_who_choose_them() {
+        for (kind, role, shown) in [
+            (ConversationInfoKind::Group, ConversationRole::Owner, true),
+            (ConversationInfoKind::Group, ConversationRole::Admin, true),
+            (ConversationInfoKind::Group, ConversationRole::Member, false),
+            (ConversationInfoKind::Channel, ConversationRole::Owner, true),
+            (
+                ConversationInfoKind::Channel,
+                ConversationRole::Admin,
+                false,
+            ),
+            (
+                ConversationInfoKind::Channel,
+                ConversationRole::Member,
+                false,
+            ),
+        ] {
+            for alone in [false, true] {
+                assert_eq!(
+                    conversation_info_sections(caps(kind, role, alone))
+                        .contains(&InfoSection::Reactions),
+                    shown,
+                    "{kind:?} {role:?} alone={alone}"
+                );
+            }
+        }
+
+        assert!(group_info_sections(group(false)).contains(&InfoSection::Reactions));
+        let mut member = group(false);
+        member.can_manage_members = false;
+        member.can_rename = false;
+        member.can_mint_invite = false;
+        member.is_owner = false;
+        assert!(!group_info_sections(member).contains(&InfoSection::Reactions));
+        assert!(!group_info_sections(group(true)).contains(&InfoSection::Reactions));
+
+        for ended in [false, true] {
+            for is_contact in [false, true] {
+                assert!(!person_info_sections(PersonInfoCapabilities {
+                    membership_ended: ended,
+                    is_contact,
+                    contacts_of_contacts_on: true,
+                })
+                .contains(&InfoSection::Reactions));
+            }
+        }
+        assert!(InfoSection::Reactions.group_only());
+        assert_eq!(InfoSection::Reactions.name(), "reactions");
+    }
+
+    #[test]
+    fn no_delete_chat_and_no_handle_row_without_a_handle() {
+        for kind in [ConversationInfoKind::Group, ConversationInfoKind::Channel] {
+            for role in [
+                ConversationRole::Owner,
+                ConversationRole::Admin,
+                ConversationRole::Member,
+            ] {
+                for alone in [false, true] {
+                    let mut c = caps(kind, role, alone);
+                    c.has_handle = false;
+                    let s = conversation_info_sections(c);
+                    assert!(!s.contains(&InfoSection::DeleteChat));
+                    assert!(!s.contains(&InfoSection::Handle));
+                    assert!(s.iter().all(|b| b.group_only()
+                        || *b == InfoSection::Unsubscribe
+                        || *b == InfoSection::ChannelDescription));
+                }
+            }
         }
     }
 }

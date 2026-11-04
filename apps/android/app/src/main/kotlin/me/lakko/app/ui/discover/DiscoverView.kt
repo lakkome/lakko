@@ -112,12 +112,14 @@ public fun DiscoverView(
                         enabled = !unavailable && search != SearchState.Busy,
                     ) { Text(t("discover.search.action")) }
                 }
-                Text(
-                    (if (unavailable) DiscoverCopy.UNAVAILABLE else DiscoverCopy.SEARCH_HELPER).text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = muted,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
+                if (unavailable) {
+                    Text(
+                        DiscoverCopy.UNAVAILABLE.text(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = muted,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
                 notice?.let {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -270,12 +272,6 @@ private fun DiscoverSettings(model: DiscoverModel, mixRandom: Boolean, onEditTop
                 Text(DiscoverCopy.MIX_LABEL.text(), modifier = Modifier.weight(1f))
                 Switch(checked = mixRandom, onCheckedChange = { model.setMixRandom(it) })
             }
-            Text(
-                DiscoverCopy.MIX_OFF_LINE.text(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
         }
     }
 }

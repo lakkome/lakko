@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   subscribed: [] as Array<{ channel: string; pubHex: string }>,
   epochAsked: [] as string[],
   fresh: [] as Array<(key: { secret: Uint8Array; public: Uint8Array }) => void>,
+  state: undefined as undefined | { subscribe?: boolean },
 }));
 
 vi.mock("@solidjs/router", () => ({
@@ -31,7 +32,7 @@ vi.mock("@solidjs/router", () => ({
       return h.id === null ? "" : h.id();
     },
   }),
-  useLocation: () => ({ pathname: "/channels/x/subscribe", state: undefined }),
+  useLocation: () => ({ pathname: "/channels/x/subscribe", state: h.state }),
   useNavigate: () => () => undefined,
   Navigate: () => null,
 }));
@@ -98,8 +99,8 @@ vi.mock("../l10n/live-text", async () => {
 });
 vi.mock("../channels/own-member-card", () => ({ useOwnMemberCard: () => undefined }));
 vi.mock("../channels/channel-row", () => ({ channelTitle: () => "", displayHandle: () => "" }));
-vi.mock("../channels/PostCard", () => ({
-  PostCard: () => null,
+vi.mock("../channels/PostCard", () => ({ PostCard: () => null }));
+vi.mock("../channels/post-decode", () => ({
   isHiddenPostDecode: () => false,
   toPostDecode: vi.fn(),
 }));
@@ -158,6 +159,7 @@ beforeEach(() => {
   h.subscribed.length = 0;
   h.epochAsked.length = 0;
   h.fresh.length = 0;
+  h.state = { subscribe: true };
   const [id, setId] = createSignal("aa");
   h.id = id;
   h.setId = setId;
@@ -194,5 +196,33 @@ describe("ChannelSubscribe, switching channel while the first is still registeri
     // Each channel was caught up from its own state.
     expect(h.epochAsked).toContain("aa");
     expect(h.epochAsked).toContain("bb");
+  });
+});
+
+describe("ChannelSubscribe, opening a channel this account does not follow", () => {
+  it("offers it, and registers nothing until Subscribe is pressed", async () => {
+    h.state = undefined;
+    const view = renderUi(() => <ChannelSubscribe />);
+    const button = await vi.waitFor(() => {
+      const found = view.querySelector("button.primary");
+      expect(found).not.toBeNull();
+      return found as HTMLButtonElement;
+    });
+    expect(h.subscribed).toEqual([]);
+    expect(h.fresh).toEqual([]);
+
+    button.click();
+    await vi.waitFor(() => expect(h.fresh).toHaveLength(1));
+    h.fresh[0]?.(key(0xa0));
+    await vi.waitFor(() =>
+      expect(h.subscribed).toContainEqual({ channel: "aa", pubHex: "a0" }),
+    );
+  });
+
+  it("a channel already followed opens without asking", async () => {
+    h.state = undefined;
+    h.keys.set("aa", key(0xa1));
+    renderUi(() => <ChannelSubscribe />);
+    await vi.waitFor(() => expect(h.epochAsked).toContain("aa"));
   });
 });

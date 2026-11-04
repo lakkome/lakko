@@ -839,7 +839,7 @@ public struct KeyResetFinishRequest: Codable, Equatable {
 /// `POST /account/keys/reset/finish` response body: the key-reset
 /// attestation plus the session pair at the new generation.
 public struct KeyResetFinishResponse: Codable, Equatable, SessionPairCarrying {
-    /// URL-safe base64 (no pad) of the 177-byte `KeyResetAttestation`.
+    /// URL-safe base64 (no pad) of the 145-byte `KeyResetAttestation`.
     public let keyResetAttestB64: String
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64

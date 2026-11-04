@@ -35,10 +35,101 @@ extension ChatRepository {
     }
 
     /// Drop the messages of a pending contact (the person deleted the
-    /// contact, or the account is wiped).
+    /// contact, or the account is wiped), the display copies included.
     @discardableResult
     public func clearPendingInvitedMessages(queueKey: String) -> Bool {
-        pendingInvitedQueue?.clear(conversationHex: queueKey) ?? false
+        if let copies = pendingDisplayCopies {
+            copies.clear(key: queueKey)
+            invalidateDisplayCopies()
+        }
+        return pendingInvitedQueue?.clear(conversationHex: queueKey) ?? false
+    }
+
+    // MARK: - Display copies (pairing state bundle v3)
+
+    var pendingDisplayCopies: PendingDisplayCopies? {
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return PendingDisplayCopies(ownerAccountIdB64: accountIdB64, sealer: heldSendSealer)
+    }
+
+    /// The display-only copies of what another device of this account wrote
+    /// to the pending contact `queueKey`, in order (expired ones dropped).
+    public func pendingInvitedDisplayCopies(queueKey: String) -> [HeldSendQueue.Entry] {
+        PendingDisplayCopies.live(displayCopies()[queueKey] ?? [], nowMs: Self.nowMs())
+    }
+
+    /// Every key's copies, read once and kept until ``invalidateDisplayCopies()``.
+    func displayCopies() -> [String: [HeldSendQueue.Entry]] {
+        if let cached = displayCopyCache { return cached }
+        guard let copies = pendingDisplayCopies else { return [:] }
+        var next: [String: [HeldSendQueue.Entry]] = [:]
+        let now = Self.nowMs()
+        for (key, entries) in copies.all() {
+            // Reading through `list` drops the expired ones from disk too.
+            let live = PendingDisplayCopies.live(entries, nowMs: now).count == entries.count
+                ? entries : copies.list(key: key, nowMs: now)
+            if !live.isEmpty { next[key] = live }
+        }
+        displayCopyCache = next
+        return next
+    }
+
+    /// The copies changed on disk: read them again and re-draw the lists.
+    func invalidateDisplayCopies() {
+        displayCopyCache = nil
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// The rows a conversation draws for its display copies: own outgoing
+    /// rows in the waiting state, with local ids far below every other row's
+    /// (history rows sit at `id - n * 2^40`). Attachments of another client
+    /// are not drawn (only their number is kept, to match the real message).
+    func displayCopyRows(conversationHex: String, ownKey: MemberIdentity?) -> [ChatMessage] {
+        let copies = PendingDisplayCopies.live(displayCopies()[conversationHex] ?? [], nowMs: Self.nowMs())
+        return copies.enumerated().map { index, entry in
+            ChatMessage(
+                messageId: 0, direction: .outgoing, text: entry.text, attachments: [],
+                createdAt: Self.isoTimestamp(ms: entry.queuedAtMs), authorKeyB64: ownKey,
+                ack: .pending, localId: Int64.min + 1 + Int64(index))
+        }
+    }
+
+    /// A batch of a group arrived: each message from this account's OTHER
+    /// device (a sender key that is this account's, which the echo filter
+    /// keeps from being this device's own) replaces the first display copy
+    /// with the same text and the same number of attachments.
+    func matchDisplayCopies(_ events: [IncomingChatEvent], groupIdHex: String, ownAuthorKey: MemberIdentity?) {
+        guard let ownAuthorKey else { return }
+        let key = conversationIdHex(ofGroup: groupIdHex)
+        guard displayCopies()[key]?.isEmpty == false, let copies = pendingDisplayCopies else { return }
+        var changed = false
+        for event in events {
+            guard case .application(_, let text, let attachments, let senderKey, _, _, _) = event,
+                  senderKey == ownAuthorKey else { continue }
+            if copies.consumeMatch(key: key, text: text, attachmentCount: attachments.count) { changed = true }
+        }
+        if changed { invalidateDisplayCopies() }
+    }
+
+    /// The pending contact's one-to-one landed: its display copies move to
+    /// the conversation, and the messages of this account's other devices
+    /// already in it replace their copies (they arrived before the move).
+    func handOverDisplayCopies(queueKey: String, toGroupIdHex groupIdHex: String) {
+        guard let copies = pendingDisplayCopies,
+              displayCopies()[queueKey]?.isEmpty == false else { return }
+        let conversationHex = conversationIdHex(ofGroup: groupIdHex)
+        guard copies.move(from: queueKey, to: conversationHex) else {
+            invalidateDisplayCopies()
+            return
+        }
+        let head = groups[headGroupIdHex(of: conversationHex)]
+        let own = head.flatMap { AuthorIdentity.own(group: $0.group) }
+        for message in head?.messages ?? []
+        where message.messageId > 0 && message.direction == .outgoing && own != nil && message.authorKeyB64 == own {
+            copies.consumeMatch(
+                key: conversationHex, text: message.text, attachmentCount: message.attachments.count)
+        }
+        invalidateDisplayCopies()
     }
 
     /// Whether a group is a one-to-one, and the account keys of its people:
@@ -56,6 +147,8 @@ extension ChatRepository {
     /// the pending record); `false` leaves the pending queue as it was.
     public func handOverPendingInvitedMessages(queueKey: String, toGroupIdHex groupIdHex: String) -> Bool {
         guard let queue = pendingInvitedQueue else { return false }
+        // Display only, best effort: never what decides the hand-over.
+        handOverDisplayCopies(queueKey: queueKey, toGroupIdHex: groupIdHex)
         let entries = queue.list(conversationHex: queueKey)
         let conversationHex = conversationIdHex(ofGroup: groupIdHex)
         // Their give-up clock starts now: they could not be sent before the

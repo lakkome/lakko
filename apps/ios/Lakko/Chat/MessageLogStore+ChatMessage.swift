@@ -68,7 +68,9 @@ extension PersistedMessage {
         self.edited = msg.edited
         self.deleted = msg.deleted
         self.reactions = msg.reactions.map {
-            PersistedReaction(reactorKeyB64: $0.reactor, emoji: $0.emoji)
+            PersistedReaction(
+                reactorKeyB64: $0.reactor, emoji: $0.emoji,
+                remove: $0.add ? nil : true, at: $0.at == 0 ? nil : $0.at)
         }
         // ADR-0052 — a deleted reply is stored without its quote, for the
         // same reason as the text above: the tombstone draws no quote block,
@@ -118,7 +120,9 @@ extension PersistedMessage {
             edited: edited,
             deleted: deleted,
             reactions: reactions.map {
-                Reaction(reactor: $0.reactorKeyB64, emoji: $0.emoji)
+                Reaction(
+                    reactor: $0.reactorKeyB64, emoji: $0.emoji,
+                    add: $0.remove != true, at: $0.at ?? 0)
             },
             reply: reply.map {
                 ReplyRef(target: $0.target, author: $0.author, excerpt: $0.excerpt)

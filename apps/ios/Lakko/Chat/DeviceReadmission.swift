@@ -197,6 +197,18 @@ public enum DeviceReadmissionMemory {
         Set(load(accountIdB64: accountIdB64, defaults: defaults)[groupIdHex] ?? [])
     }
 
+    /// Forget what left one group this person is no longer in (ADR-0087
+    /// section 9): a device added back later is not a device someone removed.
+    public static func forgetGroup(
+        accountIdB64: String, groupIdHex: String, defaults: UserDefaults = .standard
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var all = load(accountIdB64: accountIdB64, defaults: defaults)
+        guard all.removeValue(forKey: groupIdHex) != nil else { return }
+        defaults.set(all, forKey: keyPrefix + accountIdB64)
+    }
+
     public static func clearForAccount(accountIdB64: String, defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: keyPrefix + accountIdB64)
         clearSlots()

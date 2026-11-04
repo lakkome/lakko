@@ -132,7 +132,7 @@ final class ContactsPerAccountTests: XCTestCase {
 
     func testAPairingBundleIsFiledUnderTheAccountBeingPaired() {
         AcceptedContactsStore.bind(accountIdB64: bob)
-        let bundle = StateBundle.V2(
+        let bundle = StateBundle.V3(
             contacts: [StateBundle.CarriedContact(
                 signaturePubkeyB64: base64Encode(Data(repeating: 0xD4, count: 32)),
                 displayName: "Dan",
@@ -155,6 +155,29 @@ final class ContactsPerAccountTests: XCTestCase {
         XCTAssertTrue(StateBundle.build(
             accountIdB64: bob,
             pinStore: PeerPinStore(defaults: defaults, ownerAccountIdB64: bob)).contacts.isEmpty)
+    }
+
+    // MARK: - A failed accept
+
+    /// Nothing delivered and no group: the request stays listed, no contact
+    /// without a chat, and Accept works again.
+    func testAFailedAcceptLeavesTheRequestListed() async {
+        let request = contact(7, byte: 0xA1).request
+        ContactsInboxStore(defaults: defaults).save(
+            PersistedContactsInbox(cursor: 0, pending: [request]), accountIdB64: alice)
+        let session = CurrentValueSubject<String?, Never>(alice)
+        let repository = makeRepository(session)
+        await Task.yield()
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
+
+        let first = await repository.acceptIncomingRequest(request)
+        XCTAssertEqual(first, .failed)
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
+        XCTAssertTrue(repository.state.accepted.isEmpty)
+
+        let again = await repository.acceptIncomingRequest(request)
+        XCTAssertEqual(again, .failed)
+        XCTAssertEqual(repository.state.pending.map(\.messageId), [7])
     }
 
     // MARK: - Fixtures

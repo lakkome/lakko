@@ -43,6 +43,24 @@ pub enum Error {
     #[error(transparent)]
     Crypto(#[from] lakko_crypto::Error),
 
+    /// A conversation link is not 201 bytes of the known version, or links a
+    /// key to itself (ADR-0074 section 3.7).
+    #[error("conversation link is malformed")]
+    ConversationLinkMalformed,
+
+    /// A conversation link names a key that is not one, or one of its two
+    /// signatures does not verify (ADR-0074 section 3.7).
+    #[error("conversation link signature is invalid")]
+    ConversationLinkInvalid,
+
+    /// A conversation link names another key as the account's current key.
+    #[error("conversation link is for another key")]
+    ConversationLinkKeyMismatch,
+
+    /// A conversation link was asked for from a key to itself.
+    #[error("a key cannot link to itself")]
+    ConversationLinkSameKey,
+
     /// A supersession proof was not the expected wire length (G-4).
     #[error("supersession proof has wrong length: {got} bytes")]
     SupersessionBadLength {

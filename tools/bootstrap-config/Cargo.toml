@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-bootstrap-config-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Offline publisher tool (ADR-0026) - generate the Ed25519 bootstrap-signing keypair and sign the bootstrap config clients fetch to arm anti-censorship."
+
+[[bin]]
+name = "lakko-bootstrap-config"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-crypto.workspace = true
+lakko-transport.workspace = true
+base64 = "0.22"
+serde_json.workspace = true

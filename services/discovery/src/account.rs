@@ -36,13 +36,17 @@ pub(crate) async fn delete_account(
     // The username binding and the published identity bundle are keyed on
     // `account_id`; so is everything `purge_owned_rows` removes.
     for sql in [
-        // Every row, current and retired (ADR-0076), and the rename time.
+        // The one-namespace claims of its names (ADR-0087), while the rows
+        // still say which names they are; then every row, current and
+        // retired (ADR-0076). The handles of groups and channels the account
+        // owns are not found here (a handle names no account): the client
+        // retires them before deleting the account.
+        "DELETE FROM name_claims WHERE lookup_key IN \
+           (SELECT oprf_hash FROM usernames WHERE account_id = ?)",
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
     ] {
-        sqlx::query(sql)
-            .bind(account_id.as_slice())
-            .execute(&state.db)
+        delete_keyed(&state.db, sql, &account_id)
             .await
             .map_err(db_err)?;
     }
@@ -65,15 +69,52 @@ async fn purge_owned_rows(
         "DELETE FROM keypackages WHERE account_id = ?",
         // ADR-0074 - the tombstones of device ids deleted from the directory.
         "DELETE FROM keypackage_tombstones WHERE account_id = ?",
-        "DELETE FROM display_names WHERE account_id = ?",
-        "DELETE FROM public_records WHERE account_id = ?",
+        "DELETE FROM search_terms WHERE kind = 1 AND target = ?",
+        "DELETE FROM public_records WHERE kind = 1 AND target = ?",
     ] {
-        sqlx::query(sql)
-            .bind(account_id.as_slice())
-            .execute(pool)
-            .await?;
+        delete_keyed(pool, sql, account_id).await?;
     }
     Ok(())
+}
+
+/// Run one account-keyed `DELETE` on its own READ COMMITTED connection, again
+/// when it meets a deadlock or a lock-wait timeout (at most
+/// [`crate::handles::LOCK_ATTEMPTS`] times in all).
+///
+/// Under the default REPEATABLE READ a `DELETE FROM search_terms WHERE kind
+/// = 1 AND target = ?` takes next-key locks on the primary key, whose gaps a
+/// concurrent publish of another target inserts into; the two deadlocked
+/// (MariaDB 1213, seen in the tests as a `500` on `DELETE
+/// /discovery/account`). READ COMMITTED takes no gap locks, as `PUT
+/// /discovery/visibility` already does for the same table.
+async fn delete_keyed(
+    pool: &sqlx::MySqlPool,
+    sql: &'static str,
+    account_id: &[u8; 16],
+) -> Result<(), sqlx::Error> {
+    let mut tries = 1;
+    loop {
+        let attempt = async {
+            let mut conn = pool.acquire().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(sql)
+                .bind(account_id.as_slice())
+                .execute(&mut *conn)
+                .await
+        };
+        match attempt.await {
+            Err(e)
+                if tries < crate::handles::LOCK_ATTEMPTS
+                    && crate::identity_bundle::is_lock_conflict(&e) =>
+            {
+                tries += 1;
+            },
+            Err(e) => return Err(e),
+            Ok(_) => return Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

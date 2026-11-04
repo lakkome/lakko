@@ -34,6 +34,7 @@ import uniffi.lakko_ffi_uniffi.FfiLinkAnswer
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
+import uniffi.lakko_ffi_uniffi.verifyConversationLink
 import uniffi.lakko_ffi_uniffi.verifySupersession
 
 /**
@@ -126,8 +127,10 @@ public class ContactsClient(
      * ADR-0074 section 3.5 - told once the gate re-pinned an account to a
      * key a supersession proof authorised: `(accountIdB64, oldKeyB64,
      * newKeyB64)`, standard base64. The old key is then that account's
-     * proven predecessor ([ProvenPredecessors]). Never called for a change
-     * the gate refused, and never for a first observation.
+     * proven predecessor ([ProvenPredecessors]). Also told, on any fetch that
+     * passed the gate, the key a conversation link names (ADR-0074 section
+     * 3.7), which is a first observation's only proven step. Never called for
+     * a change the gate refused.
      */
     private val onProvenRotation: (String, String, String) -> Unit = { _, _, _ -> },
     /**
@@ -172,6 +175,12 @@ public class ContactsClient(
     /** ADR-0078 - the binding check and sealing of mailbox rows; a test
      *  injects a fake (the host JVM loads no native library). */
     private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
+    /** ADR-0074 section 3.7 - the 32-byte conversation key a link names when
+     *  it verifies against the trusted key; throws otherwise. The default is
+     *  the native core; a test injects it. */
+    private val conversationLinkCheck: (link: ByteArray, trustedKey: ByteArray) -> ByteArray = { link, trustedKey ->
+        verifyConversationLink(link, trustedKey)
+    },
 ) : AutoCloseable {
 
     override fun close() {
@@ -207,7 +216,7 @@ public class ContactsClient(
          *  mailbox goes (the verified mailbox key) and what authorises it,
          *  by their signature key. `null` (or a `null` answer) writes nothing:
          *  the request is refused with no mailbox known. */
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> List<() -> MailboxDest?>)? = null,
     ): SendResult {
         // 1. Resolve the username.
         val lookup = try {
@@ -248,7 +257,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(recipientSignaturePub),
-            dest = reachFor?.invoke(recipientSignaturePub),
+            dests = reachFor?.invoke(recipientSignaturePub).orEmpty(),
         )
 
         return SendResult(
@@ -397,6 +406,36 @@ public class ContactsClient(
             oldPin,
             bundle.supersession_proof,
         )
+        recordConversationLink(accountId, bundle)
+    }
+
+    /**
+     * ADR-0074 section 3.7 - the gate passed and [bundle] carries a
+     * conversation link: the key the account's conversations stay under is a
+     * proven predecessor of the key served, for a contact first met after the
+     * rotation too (its pin holds no older key a supersession proof could be
+     * checked against). Only when the served key is what the gate left
+     * trusted, the pin or else the verified binding. A link that does not
+     * verify is ignored and refuses nothing. A reset does not come here: it
+     * ended the account's predecessors, and a key change that came with a
+     * reset carries no link.
+     */
+    private fun recordConversationLink(accountId: ByteArray, bundle: IdentityFetchResponse) {
+        val linkB64 = bundle.conversation_link?.takeIf { it.isNotEmpty() } ?: return
+        val accountIdB64 = base64Encode(accountId)
+        val fetchedKeyB64 = bundle.signature_pubkey
+        val trustedKeyB64 = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
+            ?: verifiedBindings.read(ownerAccountIdB64, accountIdB64)?.keyB64
+        if (trustedKeyB64 != fetchedKeyB64) return
+        try {
+            val conversationKey = conversationLinkCheck(base64Decode(linkB64), base64Decode(fetchedKeyB64))
+            onProvenRotation(accountIdB64, base64Encode(conversationKey), fetchedKeyB64)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            // A refused link changes nothing, so neither may its log line:
+            // `android.util.Log` is not mocked on the host JVM.
+            runCatching { Log.w("lakko-contacts", "a conversation link was not accepted: ${cause.javaClass.simpleName}") }
+        }
     }
 
     /**
@@ -666,6 +705,9 @@ public class ContactsClient(
          *  through search), its binding already verified against the
          *  recipient's account key. `null` writes nothing. */
         reach: MailboxDest? = null,
+        /** The destinations after [reach], tried in turn: a `401` moves on to
+         *  the next one (ADR-0050 section 2.5a item 7). */
+        reachCandidates: List<() -> MailboxDest?> = emptyList(),
         /** ADR-0079 section 2 — the answer to the recipient's own `/i/` link
          *  this request is sent through, so their device accepts it by itself.
          *  SECRET. `null` for every other request. */
@@ -697,7 +739,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = replyGrant,
-            dest = reach,
+            dests = listOfNotNull(reach?.let { held -> { held } }) + reachCandidates,
             linkAnswer = linkAnswer,
         )
         return SendResult(
@@ -767,7 +809,7 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile? = null,
         mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> List<() -> MailboxDest?>)? = null,
     ): SendResult {
         val (signaturePub, x25519Pub) = resolveVerifiedBundle(recipientAccountId)
         val publish = composeAndPublishContactRequest(
@@ -779,7 +821,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(signaturePub),
-            dest = reachFor?.invoke(signaturePub),
+            dests = reachFor?.invoke(signaturePub).orEmpty(),
         )
         return SendResult(
             recipientUsername = "",
@@ -1310,7 +1352,8 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile?,
         replyGrant: FfiReachGrant?,
-        dest: MailboxDest?,
+        /** Where the write may go, in turn; a `401` moves on to the next. */
+        dests: List<() -> MailboxDest?>,
         linkAnswer: FfiLinkAnswer? = null,
     ): PublishedRequest {
         // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
@@ -1327,9 +1370,6 @@ public class ContactsClient(
                 IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),
             )
         }
-        // ADR-0078: no verified mailbox key, no write.
-        val target = dest ?: throw ContactsError.wrap(MailboxUnknown())
-
         // Sender's from_pseudonym: 32 random bytes (routing metadata only).
         val senderPseudonym = ByteArray(FROM_PSEUDONYM_LEN).also { java.security.SecureRandom().nextBytes(it) }
 
@@ -1369,23 +1409,40 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         }
 
-        val sealed = try {
-            mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
-        } catch (e: FfiException) {
-            throw ContactsError.wrap(e)
+        val write: suspend (MailboxDest) -> me.lakko.app.ds.PublishResult = { target ->
+            val sealed = try {
+                mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
+            } catch (e: FfiException) {
+                throw ContactsError.wrap(e)
+            }
+            try {
+                ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
+            } catch (e: DsReachRefusedError) {
+                throw ContactsError.reachRefused(e)
+            } catch (e: DsHttpError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsNetworkError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsClientArgError) {
+                throw ContactsError.wrap(e)
+            }
         }
-        val publish = try {
-            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
-        } catch (e: DsReachRefusedError) {
-            throw ContactsError.reachRefused(e)
-        } catch (e: DsHttpError) {
-            throw ContactsError.wrap(e)
-        } catch (e: DsNetworkError) {
-            throw ContactsError.wrap(e)
-        } catch (e: DsClientArgError) {
-            throw ContactsError.wrap(e)
+        val publish = when (
+            val outcome = me.lakko.app.reach.firstAcceptedWrite(dests, write, ::isMailboxRefusal)
+        ) {
+            is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
+            // ADR-0078: no verified mailbox key, no write.
+            is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
+                throw outcome.lastRefusal ?: ContactsError.wrap(MailboxUnknown())
         }
         return PublishedRequest(messageId = publish.id, createdAt = publish.createdAt)
+    }
+
+    /** Whether [dest]'s grant opens its mailbox. No token is spent; a network
+     *  failure throws, it is never a no. */
+    public suspend fun checkReach(dest: MailboxDest): Boolean {
+        val auth = dest.auth ?: return false
+        return ds.checkReach(mailboxCrypto.address(dest.mailboxPk), auth.signer)
     }
 
     // -----------------------------------------------------------------
@@ -1538,13 +1595,20 @@ public class ContactsClient(
 
         val events = mutableListOf<IncomingMailboxEvent>()
         var cursor = after
+        var unopened = 0
+        var welcomeRows = 0
         for (message in raw.messages) {
             cursor = message.id
 
             // ADR-0078: open the sealed row; one that does not open (garbage,
             // a row for another mailbox, an unknown kind) is dropped and the
             // cursor still advances.
-            val env = own.open(message.payload) ?: continue
+            val env = own.open(message.payload)
+            if (env == null) {
+                unopened += 1
+                continue
+            }
+            if (env.kind == MailboxRowKind.WELCOME) welcomeRows += 1
             when (env.kind) {
                 MailboxRowKind.WELCOME_RENDEZVOUS -> {
                     // The channel co-publisher join reads its own rows
@@ -1659,6 +1723,18 @@ public class ContactsClient(
             }
         }
 
+        if (raw.messages.isNotEmpty()) {
+            // Counts only: a row that did not open (sealed to another mailbox
+            // key, or damaged) is otherwise dropped without a trace.
+            try {
+                android.util.Log.i(
+                    "ContactsClient",
+                    "mailbox poll: ${raw.messages.size} row(s), $welcomeRows Welcome(s), $unopened not opened",
+                )
+            } catch (_: RuntimeException) {
+                // The host JVM test suite has no android.util.Log.
+            }
+        }
         return PollResult(events = events, cursor = cursor, hasMore = raw.hasMore)
     }
 }

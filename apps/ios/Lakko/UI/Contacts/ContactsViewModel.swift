@@ -159,81 +159,46 @@ public final class ContactsViewModel: ObservableObject {
     /// `ContactsViewModel.DEFAULT_LONG_POLL_SECS` on Android.
     public static let defaultLongPollSecs: Int = 30
 
-    /// Accept a pending request:
-    ///
-    ///   1. If a chat bridge is wired AND the request carries a
-    ///      `fromAccountId` (the sender's UUIDv7 — present on
-    ///      every v2 ContactRequest, absent on v1 legacy
-    ///      envelopes), call
-    ///      ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``
-    ///      to fetch the sender's KeyPackage and ship them a
-    ///      Welcome.
-    ///   2. Move the row from `pending → accepted`, stashing the
-    ///      resulting `groupIdHex` (or `nil` if the bridge is
-    ///      unwired / the chat handshake failed).
-    ///
-    /// Failures during the chat handshake fall through to the
-    /// "move row to accepted with `groupIdHex = nil`" branch —
-    /// the user still sees the Accept confirmed in their UI; the
-    /// sender just won't get the Welcome (Phase-1 trade-off the
-    /// UI surfaces as "chat creation failed, retry").
+    /// The requests whose last Accept failed: their row says so and Accept
+    /// works again.
+    @Published public private(set) var acceptFailed: Set<Int64> = []
+    /// The requests being accepted: a second press does nothing, or it would
+    /// found a second chat.
+    @Published public private(set) var accepting: Set<Int64> = []
+
+    /// Accept a pending request (``ContactAccept``). The chat is founded
+    /// first and the row moves only then. The ack follows the Welcome, never
+    /// the other way round: both are written with the requester's `reply`
+    /// grant (ADR-0060 section 6), and a requester closes that key as soon as
+    /// the ack arrives (an ack sent first had the Welcome refused, seen live
+    /// on web 2026-09-30).
     public func onAcceptClicked(messageId: Int64) {
-        let pending = repository.state.pending.first { $0.messageId == messageId }
-        guard let pending = pending else { return }
-
-        guard let chatRepository = chatRepository,
-              let fromAccountId = pending.fromAccountId else {
-            // No chat bridge wired OR v1 legacy envelope without a
-            // sender account-id — fall back to the local-marker
-            // semantics.
-            Task { await sendAckBestEffort(pending) }
-            repository.acceptContactRequest(messageId: messageId)
-            return
-        }
+        guard let pending = repository.state.pending.first(where: { $0.messageId == messageId }),
+              accepting.insert(messageId).inserted else { return }
+        acceptFailed.remove(messageId)
         Task {
-            let groupIdHex: String?
-            do {
-                groupIdHex = try await chatRepository.startGroupWith(
-                    recipientAccountId: fromAccountId,
-                    recipientSignaturePubkey: pending.fromPubkey,
-                    kind: .oneToOne
-                )
-            } catch {
-                // chat handshake failed — fall back to the local-
-                // marker path with a "chat creation failed" hint
-                // on the accepted row.
-                groupIdHex = nil
-            }
-            repository.acceptContactRequest(
-                messageId: messageId,
-                groupIdHex: groupIdHex
-            )
-            // AFTER the chat's Welcome, never before it: see
-            // ``sendAckBestEffort(_:)``.
-            await sendAckBestEffort(pending)
-        }
-    }
-
-    /// 1.9b1: ship a ContactAck back to the original sender's mailbox so
-    /// their UI can flip from "pending" to "accepted". Best-effort — a
-    /// network failure here doesn't unwind the local accept.
-    ///
-    /// Sent once the 1:1 chat's Welcome has been written. Both are written
-    /// with the requester's `reply` grant (ADR-0060 section 6), and a
-    /// requester closes that key as soon as the ack arrives: an ack sent
-    /// first (or in parallel) let an online requester close the key before
-    /// the Welcome landed, and the Welcome was refused (seen live on web
-    /// 2026-09-30).
-    private func sendAckBestEffort(_ pending: IncomingContactRequest) async {
-        do {
-            _ = try await repository.sendContactAck(request: pending)
-        } catch {
-            // best-effort
+            let outcome = await repository.acceptIncomingRequest(pending)
+            accepting.remove(messageId)
+            if outcome == .failed { acceptFailed.insert(messageId) }
         }
     }
 
     public func onDeclineClicked(messageId: Int64) {
+        acceptFailed.remove(messageId)
         repository.declineContactRequest(messageId: messageId)
+    }
+
+    /// **Dismiss** on a row under Sent.
+    public func onDismissSentClicked(_ request: SentContactRequest) {
+        repository.dismissSentRequest(request)
+    }
+
+    /// The Contacts tab's badge: the incoming requests waiting, capped the
+    /// way a chat row's unread count is; `nil` for none.
+    public static func requestsBadge(waiting: Int) -> String? {
+        guard waiting > 0 else { return nil }
+        if waiting > 99 { return Localization.text("chats.row.unread_overflow") }
+        return waiting.formatted(.number.locale(Localization.shared.locale))
     }
 
     // MARK: - Contact detail (UX spec section 5.3)
@@ -318,6 +283,18 @@ public final class ContactsViewModel: ObservableObject {
     /// The inverse of ``chatGroupIdHex(for:)`` and reads the same two facts:
     /// the id the accept flow recorded, else the other member's key. A read
     /// over the live roster, no state change.
+    /// The contact row a group member opens (`docs/ux/conversation-info.md`
+    /// section 2.2), by the member's person (account) key; `nil` for a
+    /// member who is not a contact. A proven predecessor key names the same
+    /// person.
+    public func contactMessageId(forPersonKey personKey: Data) -> Int64? {
+        let current = ReachCenter.shared.currentAccountKey(of: personKey)
+        return repositoryState.accepted.first {
+            $0.request.fromPubkey == personKey
+                || ReachCenter.shared.currentAccountKey(of: $0.request.fromPubkey) == current
+        }?.request.messageId
+    }
+
     public func contact(forOneToOneChat groupIdHex: String) -> AcceptedContact? {
         if let recorded = repositoryState.accepted.first(where: { $0.groupIdHex == groupIdHex }) {
             return recorded

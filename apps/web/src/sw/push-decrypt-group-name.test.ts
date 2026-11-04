@@ -66,6 +66,8 @@ function deps(messages: unknown[]) {
     forbidden,
     deps: {
       readWakeBinding: async () => ({ accountId: "acct" }),
+      // A sender always has a name on this device (the mirror the app writes).
+      lookupSenderName: async () => "Test Sender",
       lookupRoute: async () => ({ accountId: "acct", groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),

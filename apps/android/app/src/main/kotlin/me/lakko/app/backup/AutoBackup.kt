@@ -44,6 +44,9 @@ public object AutoBackup {
          *  before the first report - which counts as a change, because nothing
          *  here can vouch for what the server already holds. */
         val lastGroupsKey: String? = null,
+        /** The own name, photo and visibility setting last reported
+         *  ([BackupPersonal.changeKey]). */
+        val lastPersonalKey: String? = null,
     ) {
         public companion object {
             public val CLEAN: State = State()
@@ -128,6 +131,11 @@ public object AutoBackupStore {
                 } else {
                     null
                 },
+                lastPersonalKey = if (o.has("lastPersonalKey") && !o.isNull("lastPersonalKey")) {
+                    o.getString("lastPersonalKey")
+                } else {
+                    null
+                },
             )
         }.getOrDefault(AutoBackup.State.CLEAN)
     }
@@ -138,6 +146,7 @@ public object AutoBackupStore {
                 .put("lastUploadAtMs", state.lastUploadAtMs)
                 .put("dirtySinceMs", state.dirtySinceMs ?: JSONObject.NULL)
                 .put("lastGroupsKey", state.lastGroupsKey ?: JSONObject.NULL)
+                .put("lastPersonalKey", state.lastPersonalKey ?: JSONObject.NULL)
             prefs(context).edit().putString(accountIdB64, o.toString()).apply()
         }
     }
@@ -171,6 +180,14 @@ public object AutoBackupStore {
         val state = load(context, accountIdB64)
         if (state.lastGroupsKey == key) return false
         save(context, accountIdB64, state.copy(lastGroupsKey = key))
+        return true
+    }
+
+    /** [knownGroupsChanged] for the own name, photo and visibility setting. */
+    public fun personalChanged(context: Context, accountIdB64: String, key: String): Boolean {
+        val state = load(context, accountIdB64)
+        if (state.lastPersonalKey == key) return false
+        save(context, accountIdB64, state.copy(lastPersonalKey = key))
         return true
     }
 }

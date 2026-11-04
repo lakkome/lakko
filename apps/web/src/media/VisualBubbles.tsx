@@ -23,7 +23,7 @@
 import { t } from "../l10n";
 import { AttachmentFailureNote } from "./AttachmentFailureNote";
 import { openFailureOf, type AttachmentFailure } from "../chat/attachment-failure";
-import { createEffect, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
 import { formatAttachmentSize } from "../chat/attachments";
@@ -237,6 +237,10 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
 // ----- video ---------------------------------------------------------------
 
 export function VideoBubble(props: MediaBubbleProps): JSX.Element {
+  // What a cleanup releases. Reading `props.mediaKey` there would run the
+  // parent's getter while the parent is being torn down, where it can throw
+  // and stop the route change that disposed this bubble.
+  const settledKey = createMemo(() => props.mediaKey);
   const [posterUrl, setPosterUrl] = createSignal<string | null>(null);
   const [videoUrl, setVideoUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<LoadStatus>("idle");
@@ -295,7 +299,7 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
   }
   onCleanup(() => {
     player?.pause();
-    props.hub.release(props.mediaKey);
+    props.hub.release(settledKey());
   });
 
   const size = (): string => formatAttachmentSize(props.attachment.size);

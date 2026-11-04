@@ -81,6 +81,22 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
         try c.encodeIfPresent(avatar, forKey: .avatar)
     }
 
+    /// The name this device found a person under, filed for them until their
+    /// own profile arrives (`docs/ux/who-can-find-me.md` section 6.1). Nothing
+    /// a person publishes looks like this: their own profile carries their
+    /// account id.
+    public var isFoundName: Bool {
+        updatedAtMs == 0 && accountId == nil && usernameCertificate == nil
+    }
+
+    /// What a pairing state bundle carries of this claim, `nil` for nothing.
+    /// A found username stands on this device's own verdict, which does not
+    /// travel: with no certificate the new device would refuse it for good.
+    var forStateBundle: ProfileClaim? {
+        guard isFoundName, username != nil else { return self }
+        return displayName.map { ProfileClaim(displayName: $0, username: nil, updatedAtMs: updatedAtMs) }
+    }
+
     /// The same claim without its grants — what the profile store keeps.
     public var withoutGrants: ProfileClaim {
         ProfileClaim(
@@ -192,7 +208,12 @@ final class ReceivedProfileStore {
         guard let accountIdB64 else { return .inactive }
         guard let key = signatureKeyB64, Self.isSignatureKey(key) else { return .noSender }
         let stored = profiles[key]
-        if let stored, !isNewer(claim.updatedAtMs, stored.updatedAtMs) {
+        // A person who never set a name publishes at stamp 0, level with a
+        // name found for them: theirs still replaces it. A profile saying
+        // nothing does not: it would put the stand-in back.
+        let replacesFoundName = stored?.isFoundName == true && !claim.isFoundName
+            && (claim.displayName != nil || claim.username != nil)
+        if let stored, !replacesFoundName, !isNewer(claim.updatedAtMs, stored.updatedAtMs) {
             // The same profile sent again (a growth or request answer carries
             // the stamp it was set at) is not newer, but it can carry an
             // account id the held row never had: a row filed before the
@@ -237,6 +258,28 @@ final class ReceivedProfileStore {
     /// The stored profile for `signatureKeyB64`, if any.
     /// Every received profile, by signature key (b64).
     func all() -> [String: ProfileClaim] { profiles }
+
+    /// Every profile kept for `accountIdB64`: the live map when it is the
+    /// active account, else what is on disk for it.
+    func all(accountIdB64: String) -> [String: ProfileClaim] {
+        if accountIdB64 == self.accountIdB64 { return profiles }
+        guard let data = persistence.load(accountIdB64: accountIdB64) else { return [:] }
+        return (try? JSONDecoder().decode([String: ProfileClaim].self, from: data)) ?? [:]
+    }
+
+    /// ``accept(_:signatureKeyB64:)`` for `accountIdB64`, active or not: the
+    /// live map when it is the active account (so its next save keeps the
+    /// row), else the account's map on disk, under the same rule.
+    func accept(
+        _ claim: ProfileClaim, signatureKeyB64: String?, intoAccount accountIdB64: String
+    ) -> ProfileAcceptance {
+        if accountIdB64 == self.accountIdB64 {
+            return accept(claim, signatureKeyB64: signatureKeyB64)
+        }
+        let other = ReceivedProfileStore(persistence: persistence, isNewer: isNewer)
+        other.activate(accountIdB64: accountIdB64)
+        return other.accept(claim, signatureKeyB64: signatureKeyB64)
+    }
 
     func profile(signatureKeyB64: String) -> ProfileClaim? {
         profiles[signatureKeyB64]

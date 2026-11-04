@@ -25,16 +25,21 @@ The setting has three positions:
 1. **Nobody.** No one finds the person by username or by name.
 2. **Some people**, made of two parts that can be on together:
    - **2.1 Contacts of my contacts.** People who are a direct contact of
-     one of the person's contacts.
-   - **2.2 Members of my groups and channels**, in one of two forms, never
-     both:
-     - **2.2.1 All of them.** Every member of every group and channel the
-       person is in.
-     - **2.2.2 Only the ones I choose.** The members of the groups and
-       channels the person has switched on, one by one.
-3. **Everyone.** Anyone finds the person by username and by name.
+     one of the person's contacts, in one of two forms, never both:
+     - **2.1.1 All of them.** The contacts of every contact the person has.
+     - **2.1.2 Only the ones I choose.** The contacts of the contacts the
+       person has switched on, one by one.
+   - **2.2 Members of my groups**, in one of two forms, never both:
+     - **2.2.1 All of them.** Every member of every group the person is in.
+     - **2.2.2 Only the ones I choose.** The members of the groups the person
+       has switched on, one by one.
+   - **2.3 Subscribers of my channels**, in the same two forms:
+     - **2.3.1 All of them.** Every subscriber of every channel the person
+       follows.
+     - **2.3.2 Only the ones I choose.** The subscribers of the channels the
+       person has switched on, one by one.
 
-Choosing 1 turns 2 and 3 off, choosing 3 turns 1 and 2 off, and 2.1 and 2.2
+Choosing 1 turns 2 and 3 off, choosing 3 turns 1 and 2 off, and 2.1, 2.2 and 2.3
 combine freely.
 
 **Knowing someone is not permission to reach them.** Knowing a person's
@@ -43,7 +48,9 @@ does not let you send them a contact request or a message. Only the setting
 (through search) or a link from them does. Existing contacts are unaffected:
 a contact can always write.
 
-**Default for a new account: Some people, with 2.1 and 2.2.1 on.**
+**Default for a new account: Some people, with 2.1.1 and 2.2.1 on and 2.3 off**
+(decided 2026-10-30). A group is mostly people who know each other; a channel can
+be a million strangers, and being findable lets any of them send a request.
 
 ## 2. Where the setting lives
 
@@ -68,8 +75,13 @@ People with your invite link or QR code can always reach you.
 ( ) Nobody
 (•) Some people
       [x] Contacts of my contacts
-      [x] Members of my groups and channels
-            (•) All groups and channels
+            (•) All my contacts
+            ( ) Only the ones I choose          >
+      [x] Members of my groups
+            (•) All my groups
+            ( ) Only the ones I choose          >
+      [ ] Subscribers of my channels
+            (•) All my channels
             ( ) Only the ones I choose          >
 ( ) Everyone
 ```
@@ -85,12 +97,13 @@ Controls, top to bottom:
     showing a choice that contradicts its own contents. Turning either part
     back on selects Some people again.
   - Choosing **Some people** from Nobody or Everyone restores the parts the
-    person last had on; if they never had any, the default parts (2.1 and
-    2.2.1).
-- **All / Only the ones I choose** is a single choice, shown only while
-  Members of my groups and channels is on.
-- **Only the ones I choose** has a disclosure that opens the list (section
-  4). Selecting it for the first time opens the list straight away.
+    person last had on; if they never had any, the default parts (2.1.1 and
+    2.2.1, with 2.3 off).
+- **All / Only the ones I choose** is a single choice, one under each part,
+  shown only while that part is on.
+- **Only the ones I choose** has a disclosure that opens its list (section 4
+  for groups and channels, section 4.1 for contacts). Selecting it for the
+  first time opens the list straight away.
 
 The row descriptions, as muted helper text under each position:
 
@@ -98,7 +111,7 @@ The row descriptions, as muted helper text under each position:
 |---|---|
 | Nobody | Only people with your invite link or QR code can reach you. |
 | Some people | (the parts speak for themselves) |
-| Contacts of my contacts | People your contacts have added. |
+| Contacts of my contacts | People your contacts have added. / Only the contacts of the people you choose (N of M). |
 | Members of my groups and channels | Everyone in the groups and channels you're in. / Only the ones you choose (N of M). |
 | Everyone | Anyone can find you by your username or name. |
 
@@ -117,6 +130,24 @@ of them.
 - Under **All groups and channels**, a group joined later is included
   automatically, which is what "all" means.
 
+### 4.1 The list of contacts
+
+Opens from **Only the ones I choose** under Contacts of my contacts. One row
+per contact, each row the avatar, the name and a switch, sorted as the Contacts
+screen sorts them, with a search field on top when there are more than a screen
+of them.
+
+- **Empty**: "You have no contacts yet."
+- A contact added later appears here switched **off**: under Only the ones I
+  choose, each one is a decision the person makes. Under **All my contacts** a
+  contact added later is included, which is what "all" means.
+- A contact removed leaves the list; adding them back brings them in switched
+  off.
+- With nobody switched on, no one finds the person through their contacts. The
+  helper says "0 of M"; the setting does not change by itself.
+- The contacts themselves are told nothing, and nothing shows them whether they
+  are switched on.
+
 ## 5. The switch in group and channel info
 
 `Members can find me`, in the group info ([`conversation-info.md`](conversation-info.md)
@@ -132,6 +163,20 @@ noise.
   on and this one off, and says so once, in place: "Now only the groups and
   channels you choose. Change in Privacy." That is the one way to exclude
   one group without first visiting Settings.
+
+### 5.1 The switch on a contact
+
+`Their contacts can find me`, on the contact's screen
+([`conversation-info.md`](conversation-info.md) section 2.1), shown only while
+Contacts of my contacts is on and only for a person who is a contact. When the
+setting does not include contacts of contacts, the row is absent.
+
+- Under **Only the ones I choose**, it is that contact's switch from the list in
+  section 4.1, the same value in two places.
+- Under **All my contacts**, it shows on. Turning it off switches the part to
+  **Only the ones I choose** with every other contact on and this one off, and
+  says so once, in place: "Now only the contacts you choose. Change in
+  Privacy."
 
 ## 6. What other people see
 
@@ -161,9 +206,8 @@ Android.
   field also asks the network for the username and the name at once, and
   shows the network results under the local ones under the heading
   **People**. Both numbers are chosen, not measured.
-- A text asked once is not asked again in the same session; a result
-  already shown stays while the person keeps typing, until the new answer
-  arrives.
+- A text asked in the last 60 seconds is not asked again; a result already
+  shown stays while the person keeps typing, until the new answer arrives.
 - A text that cannot be a username and has no word of 3 letters asks
   nothing (`lakko_ui_rules::lookup::looks_like_a_name` and the name-term
   rule); a leading `@` is ignored.
@@ -202,6 +246,56 @@ States of the People part:
 | Out of searches | "Too many searches for now. Try again later." Searching spends anonymous tokens and they ran out; the local results stay. |
 | Request refused | On the row, after Add contact: "Couldn't send the request. They may have changed who can find them." |
 | Request failed | On the row: "Couldn't send the request. Try again." with the button back. |
+
+**A kept grant is checked before it is offered** (2026-10-30). A person this
+device knows from a group it shared with them may have left that group, and
+then the grant it kept no longer reaches them. Before a local row offers **Add
+contact** or shows `@username`, the device asks the Delivery Service whether a
+kept grant still reaches the person, trying every grant it holds for them in
+turn, with no 3-character minimum and no anonymous token. Until the answer
+arrives the row shows the name alone. If a grant passes, the row offers **Add
+contact** with that grant; if none does, the row stays as a name with no button
+and no username, the same as any member who cannot be reached. A connection
+failure changes nothing: the row behaves as before and the send checks again.
+**No one found** is shown only when no person stands under **People**.
+
+**A row says what is true now** (2026-10-30). A person's reach changes while the
+field is open, so nothing a row says may need an app restart to become correct:
+- Every change of the text checks the kept grants again; the last answer stays
+  on screen until the new one arrives.
+- **Add contact** tries every grant the device holds for the person at that
+  moment, not only the one the row passed with, and is refused only when none
+  passes.
+- A network answer kept for a text is reused for at most 60 seconds (chosen, not
+  measured), a found answer and a not-found one alike.
+- A row's refused or failed line lasts until the text changes.
+- **Request sent** is read from the Sent list, and from the people added through
+  their invite link who have not answered: declined, dismissed or accepted, the
+  row goes back to what the check says.
+- One person, one row (2026-10-31). A person the list above already shows, a
+  contact or someone added through their link, is not repeated under **People**,
+  in Contacts and in Chats. A person with a conversation who is no contact keeps
+  their row under **People**, and with it the way to add them.
+- A contact the list cannot match yet, because their name has not arrived, stands
+  under **People** until it can, so the field is never blank.
+- The name a person was found under is theirs until their own profile arrives, so
+  a new contact is never listed as a stand-in.
+- The line that nothing matches shows only when nothing stands in the field, no
+  list row and no person under **People**.
+
+**One list (decided 2026-11-04 by the maintainer).** Everything the field
+finds, by `@name` or by name, stands in ONE list with no section headings:
+first what this device already holds (conversations in Chats, contacts),
+then what the network found (people, groups, channels), each row saying
+what it is on its second line. There is no **People** heading and no
+**Groups and channels** heading, so a search for a group never reads "No
+one found" above the group it found. The state lines of the table above
+apply to the whole list: the spinner sits at the end of the list while the
+network is asked; "Nothing found. Check the spelling, or ask for an invite
+link." replaces "No one found" and shows only when the list is empty; a
+network failure or an empty token pool shows its line at the end of the
+list, under whatever local rows stand. Where the text above says "under
+**People**", read "in the list".
 
 **What goes away:** the "Search people" row of the Chats search, the "Add by
 username" form in Contacts (its username field, its message field and its
@@ -258,7 +352,11 @@ The screen must not claim more than has happened.
 
 - **Narrowing takes effect at once.** Whoever loses the ability to find the
   person stops finding them on their next search, and a request they had
-  not yet sent is refused (section 6.1).
+  not yet sent is refused (section 6.1). This holds for switching a contact
+  off or moving to Only the ones I choose: the people who found the person
+  only through that contact stop finding them, and the people reachable
+  through a contact still switched on find them again once that contact's
+  device has the new record.
 - **Widening can take a while for contacts of contacts**, because it travels
   through the person's contacts' devices. Under **Contacts of my contacts**,
   after it is turned on, the helper text reads "Contacts of your contacts
@@ -275,6 +373,13 @@ The screen must not claim more than has happened.
   "Couldn't update who can find you. Try again." with a Retry action, and
   the rows show what is actually in effect.
 
+**Under the mechanism of [ADR-0086](../adr/0086-circle-directories.md)** (proposed,
+not built): a contact switched off, and a person removed from a contact list, stop
+working at once, and no other device has to do anything. A new device finds people
+through contacts more completely over its first sessions, starting with the contacts
+it uses most; nothing on screen speaks of it, and a person not found yet reads like
+anyone not found.
+
 ## 9. States of the screen
 
 | State | What it shows |
@@ -288,9 +393,10 @@ The screen must not claim more than has happened.
 
 ## 10. Data the UI needs (input to the ADR)
 
-- The setting itself: the position, the two parts, the All/chosen form, the
-  set of chosen groups and channels, **synced across the person's own
-  devices** (changing it on the phone changes it on the laptop).
+- The setting itself: the position, the two parts, the All/chosen form of
+  each part, the set of chosen groups and channels and the set of chosen
+  contacts, **synced across the person's own devices** (changing it on the
+  phone changes it on the laptop).
 - The part-restoration memory of section 3 (last parts on), stored with it.
 - Per member of a group or channel: can I find this person - which decides
   Add contact and the `@username` in section 6.2.
@@ -306,8 +412,7 @@ The screen must not claim more than has happened.
 ## 11. Cross-platform shape
 
 One screen, one model: a single choice of three, two switches under the
-middle one, a single choice of two under the second switch, a list behind
-it.
+middle one, a single choice of two under each switch, a list behind each.
 
 **Per platform**: web a Settings page with radio and checkbox rows; iOS a
 `Form` with an inline `Picker` for the single choices and `Toggle`s for the
@@ -317,7 +422,8 @@ and `Switch`es in a `LazyColumn`, the list pushed on the nav graph.
 **The rule that turns taps into a setting is one copy, in Rust**
 (`lakko_ui_rules`, [`navigation.md`](navigation.md) section 8): "turning off
 the last part selects Nobody", "choosing Some people restores the last
-parts", "turning a group off under All switches to chosen with the rest on".
+parts", "turning a group or a contact off under All switches that part to
+chosen with the rest on".
 Three hand-written copies of those would drift, and the drift would be a
 person hidden from, or shown to, people they did not choose.
 

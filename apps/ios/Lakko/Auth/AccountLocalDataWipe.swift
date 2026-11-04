@@ -4,6 +4,7 @@
 import Foundation
 import LakkoCore
 import Security
+import UserNotifications
 
 /// Forget device and Delete account: remove every piece of ONE account's
 /// local data from this device (maintainer rule, 2026-09-30).
@@ -207,6 +208,12 @@ enum AccountLocalDataWipe {
         step("backup-restore-retry") {
             BackupRestoreRetryStore.clear(accountIdB64: accountIdB64)
         }
+        step("backup-restored-device") {
+            RestoredDeviceStore.clear(accountIdB64: accountIdB64)
+        }
+        step("channel-pending-handles") {
+            PendingChannelHandleStore.clear(accountIdB64: accountIdB64)
+        }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)
@@ -234,6 +241,7 @@ enum AccountLocalDataWipe {
             AnonTokenPool.shared.forget(accountKey: accountIdB64)
         }
         step("reach") { ReachCenter.shared.forget(accountIdB64: accountIdB64) }
+        step("copublisher-keys") { CoPublisherKeyBook.clear(accountIdB64: accountIdB64) }
 
         // 3. The DeviceGroup and the cross-device synced state. The founding
         //    mark of the account's DeviceGroup journal goes too; the id is
@@ -255,6 +263,14 @@ enum AccountLocalDataWipe {
         step("snapshot-leaf-key") { SnapshotLeafKeyStore().clear(accountIdB64: accountIdB64) }
         step("known-groups") { KnownGroupsStore().clear(accountIdB64: accountIdB64) }
         step("group-names") { GroupNameStore().clear(accountIdB64: accountIdB64) }
+        // ADR-0087 — group photos, allowed reactions, @names, knock seeds,
+        // the names this account holds, unseen reactions and recent ones.
+        step("group-settings") { GroupSettingsStore().clear(accountIdB64: accountIdB64) }
+        step("held-handles") { standard.removeObject(forKey: HeldHandleStore.key(accountIdB64)) }
+        step("unseen-reactions") { UnseenReactionsStore().clear(accountIdB64: accountIdB64) }
+        step("recent-reactions") { standard.removeObject(forKey: RecentReactions.key(accountIdB64)) }
+        step("knock-versions") { standard.removeObject(forKey: KnockVersionStore.key(accountIdB64)) }
+        step("requests-sent") { standard.removeObject(forKey: RequestsSentStore.key(accountIdB64)) }
         step("shared-pins") { SharedPinStore().clear(accountIdB64: accountIdB64) }
         step("personal-pins") { PersonalPinStore().clear(accountIdB64: accountIdB64) }
         step("read-watermarks") { ReadWatermarkStore().clear(accountIdB64: accountIdB64) }
@@ -280,6 +296,8 @@ enum AccountLocalDataWipe {
             LastObservedOwnerStore().clearForAccount(accountIdB64: accountIdB64)
         }
         step("leave-requests") { LeaveRequestStore().clearForAccount(accountIdB64: accountIdB64) }
+        step("membership-ends") { MembershipEndStore().clear(accountIdB64: accountIdB64) }
+        step("group-arrivals") { GroupArrivalStore().clearForAccount(accountIdB64: accountIdB64) }
         step("knock-cursors") {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
@@ -304,6 +322,7 @@ enum AccountLocalDataWipe {
         step("group-closed") { GroupClosedStore.clear(ownerAccountIdB64: accountIdB64) }
         step("continuity-store") { ContinuityStore.clear(ownerAccountIdB64: accountIdB64) }
         step("held-sends") { HeldSendQueue.clearAccount(ownerAccountId: accountIdB64) }
+        step("pending-display-copies") { PendingDisplayCopies.clearAccount(ownerAccountIdB64: accountIdB64) }
         step("lineage-unsent") {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.lineageUnsentKey(accountIdB64: accountIdB64))
@@ -402,15 +421,15 @@ enum AccountLocalDataWipe {
         step("feeds") { FeedStore().delete(accountIdB64: accountIdB64) }
         step("feed-reading") { FeedReadingStore().delete(accountIdB64: accountIdB64) }
         // The Feed tab's selection (it can name one of this account's saved
-        // feeds) and the device banner: device-wide keys, as on Android.
+        // feeds): a device-wide key, as on Android.
         step("feed-prefs") {
             standard.removeObject(forKey: FeedViewModel.selectionKey)
-            standard.removeObject(forKey: FeedViewModel.bannerKey)
         }
 
         // 7. Calls and media.
         step("call-history") { CallHistoryStore.shared.forget(accountIdB64: accountIdB64) }
         step("call-peer-names") { CallPeerNameMirror.clear(accountIdB64: accountIdB64) }
+        step("person-names") { PersonNameMirror.clear(accountIdB64: accountIdB64) }
         step("conversation-mutes") { ConversationMuteMirror.clear(accountIdB64: accountIdB64) }
         step("media-played") { MediaPrefs().clearPlayed(accountIdB64: accountIdB64) }
         step("emoji-recents-and-tones") { EmojiIndex.clear(accountIdB64: accountIdB64, standard) }
@@ -422,6 +441,11 @@ enum AccountLocalDataWipe {
         }
         step("new-device-notice") {
             NewDeviceNoticeStore(defaults: standard).clear(accountIdB64: accountIdB64)
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.deviceAcksUnsentKey(accountIdB64: accountIdB64))
+            let ids = [NewDeviceNoticeCenter.notificationIdentifier(accountIdB64: accountIdB64)]
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
         }
         // ADR-0080 — the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.
@@ -429,6 +453,7 @@ enum AccountLocalDataWipe {
             standard.removeObject(forKey: DeviceCards.cardsKey(accountIdB64: accountIdB64))
             standard.removeObject(forKey: DeviceCards.cityKey(accountIdB64: accountIdB64))
             standard.removeObject(forKey: DeviceCards.showCityKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.resendOwedKey(accountIdB64: accountIdB64))
         }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()

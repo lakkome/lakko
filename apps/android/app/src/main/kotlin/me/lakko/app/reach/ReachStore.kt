@@ -77,6 +77,23 @@ internal data class StoredDelegation(
     val envelopeHex: String,
 )
 
+/**
+ * ADR-0060 section 6 (amended 2026-10-29) — the mailbox binding of a person
+ * found in Everyone and picked on Add members, recorded by the proposing
+ * device for the group the Add went to, so this device's own sweep can write
+ * the Welcome into that open mailbox (a device never receives its own group
+ * messages, so it cannot read its own no-delegation envelope back). Verified
+ * under the person's account key before it was recorded.
+ */
+@Serializable
+internal data class StoredOpenBinding(
+    val groupHex: String,
+    /** The added person's account key (their current one when recorded), hex. */
+    val addedAccountKeyHex: String,
+    /** The 97-byte mailbox binding, hex. */
+    val bindingHex: String,
+)
+
 /** ADR-0060 §4 — a contact's relayed introductions bundle, kept whole. */
 @Serializable
 internal data class StoredIntroBundle(
@@ -105,6 +122,9 @@ internal data class ReachDoc(
     val spentLinks: List<StoredLink> = emptyList(),
     val held: List<StoredHeld> = emptyList(),
     val delegations: List<StoredDelegation> = emptyList(),
+    /** ADR-0060 section 6 — the open-mailbox bindings this device recorded
+     *  for adds of people found in Everyone ([StoredOpenBinding]). */
+    val openBindings: List<StoredOpenBinding> = emptyList(),
     /** The visibility setting envelope (`composeVisibilityEnvelope`), hex. */
     val visibilityHex: String? = null,
     /** The `open` flag the server was last told, or `null` when never told. */
@@ -155,6 +175,8 @@ internal data class ReachDoc(
     val offerSentTo: Map<String, String> = emptyMap(),
     /** One-to-one group hex -> the relayed-bundle digest last sent there. */
     val bundleSentTo: Map<String, String> = emptyMap(),
+    /** One-to-one group hex -> when an ask last reopened those two records. */
+    val introReopenedAtMs: Map<String, Long> = emptyMap(),
     /** ADR-0060 §1 ("Versions after a restore", amended 2026-10-01) — the
      *  [VersionRecovery] name of this document, `null` before it was decided
      *  on the first reconcile. */
@@ -219,3 +241,7 @@ internal class EncryptedReachDocStore(context: Context) : ReachDocStore {
         const val KEY_PREFIX = "doc.v1."
     }
 }
+
+/** The document once nothing is known about the Everyone publication: `true`
+ *  with no key sends, in or out of Everyone ([everyoneAction]). */
+internal fun ReachDoc.withUnknownEveryoneNote(): ReachDoc = copy(publishedPublic = true, publishedKey = null)

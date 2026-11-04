@@ -268,9 +268,7 @@ export function createDebouncer(delayMs: number, timers: Timers = realTimers) {
 
 // ----- copy (UX spec §5) -------------------------------------------------
 
-export const GIF_PRIVACY_NOTE = (): string => t("chat.gif.privacy_note");
 export const GIF_NO_RESULTS = (): string => t("chat.gif.no_results");
 export const GIF_UNAVAILABLE = (): string => t("chat.gif.unavailable");
 export const GIF_RATE_LIMITED = (): string => t("chat.gif.rate_limited");
 export const GIF_ATTRIBUTION = (): string => t("chat.gif.attribution");
-export const GIF_PRIVACY_NOTE_STORAGE_KEY = "lakko.gif.privacyNoteDismissed";

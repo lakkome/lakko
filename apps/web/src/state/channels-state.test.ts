@@ -12,6 +12,7 @@
  * `channels/channel-log-codec.test.ts`.
  */
 
+import { type DeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // A `localStorage` stub installed BEFORE the module is imported (dynamic
@@ -49,7 +50,7 @@ function fakeIdentity(): {
   };
 }
 
-const DEVICE_KEY = {} as unknown as CryptoKey;
+const DEVICE_KEY = {} as unknown as DeviceCipher;
 
 describe("channels-state module evaluation", () => {
   afterEach(() => {

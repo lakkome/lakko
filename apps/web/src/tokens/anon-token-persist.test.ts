@@ -220,6 +220,12 @@ describe("each context keeps about a day of use on hand", () => {
     // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
     // one-to-one call. Chosen, not measured.
     ["call-join", 4],
+    // ADR-0086: claiming a circle directory. Chosen, not measured.
+    ["circle-claim", 2],
+    // ADR-0087 section 13a: one per reaction / comment on a channel post.
+    // Chosen, not measured.
+    ["channel-react", 4],
+    ["channel-comment", 4],
   ];
 
   it("names a target for every context", () => {

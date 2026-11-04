@@ -1,22 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, describe, it, expect } from "vitest";
+
+import init from "../../wasm/lakko_ffi_wasm";
 import {
   applyOp,
   editDeleteAuthorized,
-  OWN_REACTION_SENTINEL,
   type MessageOpState,
 } from "./message-ops";
+
+beforeAll(async () => {
+  const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await init({ module_or_path: readFileSync(wasmPath) });
+});
 
 const EMPTY = (): Map<number, MessageOpState> => new Map();
 
 // Stand-in signature keys. Real ones are base64 32-byte Ed25519 keys;
 // what matters to these rules is only that distinct members carry
 // distinct strings, and that no member's string is a leaf index.
-const ALICE = "alice-key";
-const BOB = "bob-key";
-const CAROL = "carol-key";
+const keyB64 = (n: number): string => btoa(String.fromCharCode(...new Uint8Array(32).fill(n)));
+const ALICE = keyB64(1);
+const BOB = keyB64(2);
+const CAROL = keyB64(3);
 
 describe("applyOp — edit", () => {
   it("sets editedText on the target", () => {
@@ -46,12 +55,7 @@ describe("applyOp — delete", () => {
 
   it("preserves an existing edit + reactions when deleting", () => {
     let m = applyOp(EMPTY(), { op: "edit", target: 3, text: "hi" });
-    m = applyOp(m, {
-      op: "reaction",
-      target: 3,
-      emoji: "👍",
-      reactor: BOB,
-    });
+    m = react(m, 3, "👍", BOB, "add", 10);
     m = applyOp(m, { op: "delete", target: 3 });
     expect(m.get(3)?.deleted).toBe(true);
     expect(m.get(3)?.editedText).toBe("hi");
@@ -59,90 +63,65 @@ describe("applyOp — delete", () => {
   });
 });
 
-describe("applyOp — reaction toggle", () => {
+/** One reaction op: explicit add or remove at a journal position. */
+function react(
+  m: Map<number, MessageOpState>,
+  target: number,
+  emoji: string,
+  reactor: string,
+  action: "add" | "remove",
+  at: number,
+): Map<number, MessageOpState> {
+  return applyOp(m, { op: "reaction", target, emoji, reactor, action, at });
+}
+
+// The fold is the core's (`foldReactions`): reactors are 32-byte account
+// keys, base64.
+describe("applyOp — reactions through the core fold", () => {
   it("adds a reaction from a member", () => {
-    const m = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 5,
-      emoji: "❤️",
-      reactor: ALICE,
-    });
+    const m = react(EMPTY(), 5, "❤️", ALICE, "add", 1);
     expect(m.get(5)?.reactions.get("❤️")).toEqual(new Set([ALICE]));
   });
 
-  it("toggles the same (member, emoji) off, pruning the empty set", () => {
-    const a = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 5,
-      emoji: "❤️",
-      reactor: ALICE,
-    });
-    const b = applyOp(a, {
-      op: "reaction",
-      target: 5,
-      emoji: "❤️",
-      reactor: ALICE,
-    });
-    // The emoji entry is gone once its last reactor toggles off.
+  it("an explicit remove takes it off; the empty emoji is pruned", () => {
+    const a = react(EMPTY(), 5, "❤️", ALICE, "add", 1);
+    const b = react(a, 5, "❤️", ALICE, "remove", 2);
     expect(b.get(5)?.reactions.has("❤️")).toBe(false);
   });
 
+  it("a second add of a held emoji is a no-op, not a toggle", () => {
+    const a = react(EMPTY(), 5, "❤️", ALICE, "add", 1);
+    const b = react(a, 5, "❤️", ALICE, "add", 2);
+    expect(b.get(5)?.reactions.get("❤️")).toEqual(new Set([ALICE]));
+  });
+
   it("aggregates distinct members on one emoji (count)", () => {
-    let m = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 9,
-      emoji: "😂",
-      reactor: ALICE,
-    });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: BOB });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: CAROL });
+    let m = react(EMPTY(), 9, "😂", ALICE, "add", 1);
+    m = react(m, 9, "😂", BOB, "add", 2);
+    m = react(m, 9, "😂", CAROL, "add", 3);
     expect(m.get(9)?.reactions.get("😂")?.size).toBe(3);
   });
 
-  it("one member toggling off leaves the others intact", () => {
-    let m = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 9,
-      emoji: "😂",
-      reactor: ALICE,
-    });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: BOB });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: ALICE });
+  it("one member taking theirs off leaves the others intact", () => {
+    let m = react(EMPTY(), 9, "😂", ALICE, "add", 1);
+    m = react(m, 9, "😂", BOB, "add", 2);
+    m = react(m, 9, "😂", ALICE, "remove", 3);
     expect(m.get(9)?.reactions.get("😂")).toEqual(new Set([BOB]));
   });
 
-  it("keeps distinct emojis separate on the same message", () => {
-    let m = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 4,
-      emoji: "👍",
-      reactor: ALICE,
-    });
-    m = applyOp(m, { op: "reaction", target: 4, emoji: "🙏", reactor: ALICE });
-    expect(m.get(4)?.reactions.get("👍")?.size).toBe(1);
-    expect(m.get(4)?.reactions.get("🙏")?.size).toBe(1);
-  });
-
-  it("supports the own-reaction sentinel identity", () => {
-    const m = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 4,
-      emoji: "😮",
-      reactor: OWN_REACTION_SENTINEL,
-    });
-    expect(m.get(4)?.reactions.get("😮")?.has(OWN_REACTION_SENTINEL)).toBe(true);
+  it("a person holds at most three; a fourth add is ignored", () => {
+    let m = react(EMPTY(), 4, "👍", ALICE, "add", 1);
+    m = react(m, 4, "🙏", ALICE, "add", 2);
+    m = react(m, 4, "😮", ALICE, "add", 3);
+    m = react(m, 4, "😢", ALICE, "add", 4);
+    expect(m.get(4)?.held.filter((h) => h.person === ALICE).length).toBe(3);
+    expect(m.get(4)?.reactions.has("😢")).toBe(false);
   });
 
   it("does not mutate a prior map's nested reaction set", () => {
-    const a = applyOp(EMPTY(), {
-      op: "reaction",
-      target: 5,
-      emoji: "❤️",
-      reactor: ALICE,
-    });
+    const a = react(EMPTY(), 5, "❤️", ALICE, "add", 1);
     const before = a.get(5)?.reactions.get("❤️")?.size;
-    applyOp(a, { op: "reaction", target: 5, emoji: "❤️", reactor: BOB });
-    // `a` is unchanged — the second apply cloned the nested set.
+    react(a, 5, "❤️", BOB, "add", 2);
     expect(a.get(5)?.reactions.get("❤️")?.size).toBe(before);
     expect(a.get(5)?.reactions.get("❤️")?.has(BOB)).toBe(false);
   });

@@ -173,4 +173,18 @@ class CallSettingsTest {
         val second = CallUiState(devices = held)
         assertEquals(2, second.devices.audioOutput.value)
     }
+
+    @Test
+    fun `with one of everything the sheet lists them instead of saying none were reported`() {
+        val listed = callSettingsSheetDevices(listOf(phoneMic), listOf("1"), listOf(speaker), strings)
+        assertEquals(
+            listOf(SettingsSectionKind.MICROPHONE, SettingsSectionKind.CAMERA, SettingsSectionKind.SPEAKER),
+            sections(devices = listed).map { it.kind },
+        )
+        // A choice somewhere keeps the rule: a kind with one device stays out.
+        val choice = callSettingsSheetDevices(listOf(phoneMic), listOf("1", "0"), listOf(speaker), strings)
+        assertEquals(listOf(SettingsSectionKind.CAMERA), sections(devices = choice).map { it.kind })
+        // Nothing reported is still nothing.
+        assertTrue(callSettingsSheetDevices(emptyList(), emptyList(), emptyList(), strings).isEmpty())
+    }
 }

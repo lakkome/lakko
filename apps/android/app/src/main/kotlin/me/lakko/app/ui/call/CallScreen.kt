@@ -108,7 +108,7 @@ import me.lakko.app.calls.CallDeviceSelection
 import me.lakko.app.calls.SettingsSectionKind
 import me.lakko.app.calls.SettingsSelection
 import me.lakko.app.calls.callPlaysOnLoudspeaker
-import me.lakko.app.calls.callSettingsDevices
+import me.lakko.app.calls.callSettingsSheetDevices
 import me.lakko.app.calls.callSettingsSections
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -1068,7 +1068,7 @@ private fun InCallView(
             val chosenInput by state.devices.audioInput.collectAsState()
             CallSettingsSheet(
                 sections = callSettingsSections(
-                    devices = callSettingsDevices(inputs, cameras, outputs, strings),
+                    devices = callSettingsSheetDevices(inputs, cameras, outputs, strings),
                     selection = SettingsSelection(
                         audioInput = chosenInput?.toString(),
                         videoInput = chosenCamera,
@@ -1705,7 +1705,7 @@ private fun QualityIndicator(state: CallUiState) {
                 val strings = LocalStrings.current
                 val locale = remember(strings.language) { java.util.Locale.forLanguageTag(strings.language) }
                 val rtt = detail.rttMs?.let {
-                    strings.format("call.quality.ms", mapOf("value" to java.text.NumberFormat.getIntegerInstance(locale).format(it)))
+                    strings.format("call.quality.ms", mapOf("value" to me.lakko.app.l10n.DeviceFormats.integer(it.toLong(), locale, me.lakko.app.l10n.DeviceFormats.region())))
                 } ?: "—"
                 Text(
                     strings.format("common.fact_pair", mapOf("first" to strings["call.quality.round_trip"], "second" to rtt)),
@@ -1730,15 +1730,21 @@ private fun QualityIndicator(state: CallUiState) {
 /** A bitrate with its unit as its own message; the number formatted for the interface language. */
 private fun formatBps(bps: Int?, strings: Strings, locale: java.util.Locale): String {
     if (bps == null) return "—"
-    val number = java.text.NumberFormat.getNumberInstance(locale)
+    // Separators from the device's region (localization.md section 5).
+    val region = me.lakko.app.l10n.DeviceFormats.region()
     if (bps >= 1_000_000) {
-        number.minimumFractionDigits = 1
-        number.maximumFractionDigits = 1
-        return strings.format("call.quality.mbps", mapOf("value" to number.format(bps / 1_000_000.0)))
+        return strings.format(
+            "call.quality.mbps",
+            mapOf("value" to me.lakko.app.l10n.DeviceFormats.decimal(bps / 1_000_000.0, 1, locale, region)),
+        )
     }
-    number.maximumFractionDigits = 0
-    if (bps >= 1_000) return strings.format("call.quality.kbps", mapOf("value" to number.format(bps / 1_000)))
-    return strings.format("call.quality.bps", mapOf("value" to number.format(bps)))
+    if (bps >= 1_000) {
+        return strings.format(
+            "call.quality.kbps",
+            mapOf("value" to me.lakko.app.l10n.DeviceFormats.integer((bps / 1_000).toLong(), locale, region)),
+        )
+    }
+    return strings.format("call.quality.bps", mapOf("value" to me.lakko.app.l10n.DeviceFormats.integer(bps.toLong(), locale, region)))
 }
 
 /**

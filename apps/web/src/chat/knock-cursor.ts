@@ -77,6 +77,17 @@ export function writeKnockCursor(groupIdB64: string, id: number, owner?: string)
   }
 }
 
+/** Drop one group's knock cursor (ADR-0087 section 9). */
+export function clearKnockCursorForGroup(groupIdB64: string, owner?: string): void {
+  const account = accountOf(owner);
+  if (account === null) return;
+  try {
+    globalThis.localStorage?.removeItem(keyFor(account, groupIdB64));
+  } catch {
+    /* storage unavailable: nothing to clear */
+  }
+}
+
 /** Forget device: drop every knock cursor of `accountIdB64` and the retired
  *  device-wide rows. Another account's cursors are left alone. */
 export function clearKnockCursorsForAccount(accountIdB64: string): void {

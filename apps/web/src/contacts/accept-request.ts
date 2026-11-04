@@ -2,46 +2,63 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The one accept path of a contact request, shared by the person's Accept on
- * a request card and by the device's own accept of a request sent through one
- * of the account's live invite links (ADR-0079 section 3): the same four
- * steps in the same order, so an automatic accept cannot drift from a manual
- * one.
+ * A person's Accept on a request card. The device's own accept of a request
+ * sent through a live invite link is `runLinkBuild`, which keeps its own
+ * durable record; both answer with the same grants.
  *
- * 1. The requester becomes a contact (kept even if what follows fails: the
- *    person, or the link, consented).
- * 2. The one-to-one is founded and its Welcome written with the requester's
- *    `reply` grant (ADR-0060 section 6).
- * 3. The ContactAck is sent AFTER the Welcome: the requester closes the reply
- *    key once the ack arrives (seen live 2026-09-30).
- * 4. A request without an account id (a legacy wire) gets the ack only.
+ * What an accept leaves is one of three things, never a contact with no chat:
+ *
+ * 1. **Failed**: no group stands and nothing was sent. The request stays
+ *    listed and Accept works again.
+ * 2. **Owed**: the group stands, and the Welcome or the ack has not landed.
+ *    The person is a contact with the chat, and the outbox holds what is owed
+ *    (`owed-answer.ts`), retried at the tail of every poll and at launch.
+ * 3. **Done**: the Welcome landed, then the ack: the requester closes its
+ *    `reply` key once the ack arrives (seen live 2026-09-30).
+ *
+ * The answer goes under the request's `reply` grant, then a held `contact`
+ * grant, and nothing else (`reach/mailbox-write.ts`).
+ *
+ * A request without an account id (a legacy wire) can found nothing: it is
+ * answered with the ack alone.
  */
 import type { IdentitySecrets } from "../auth/AuthContext";
-import type { ChatApi } from "../chat/ChatContext";
+import type { ActiveGroup } from "../chat/ChatContext";
+import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
 import { groupIdHex } from "../devices/sync/state";
 import type { ProfileApi } from "../profile/ProfileContext";
 import { base64Encode } from "../auth/account-id";
 import type { ContactsClient, IncomingContactRequest } from "./client";
-import { foundOneToOneWith } from "./found-one-to-one";
 import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
 
 /** What an accept did. */
 export interface AcceptOutcome {
   /** The accepted list after the accept. */
   readonly accepted: AcceptedContact[];
-  /** base64 group id of the one-to-one, or `null` when none was founded. */
+  /** base64 group id of the one-to-one, or `null` when none stands. */
   readonly groupIdB64: string | null;
-  /** The request carried no account id: only the ack went out. */
-  readonly legacy: boolean;
-  /** Why founding the one-to-one failed, or `null`. */
-  readonly chatError: unknown;
+  /** See the module docs. `legacy`: the request carried no account id. */
+  readonly status: "done" | "owed" | "failed" | "legacy";
+}
+
+/** Whether the request stays in the incoming list after this accept. */
+export function acceptKeepsRequest(outcome: Pick<AcceptOutcome, "status">): boolean {
+  return outcome.status === "failed";
 }
 
 export async function acceptContactRequest(
   deps: {
-    readonly client: Pick<ContactsClient, "startGroupWith" | "sendContactAck">;
+    readonly client: Pick<
+      ContactsClient,
+      "prepareGroupWith" | "recordOwedAnswer" | "settleOwedAnswer" | "sendContactAck"
+    >;
     readonly identity: IdentitySecrets;
-    readonly chats: Pick<ChatApi, "add">;
+    readonly accountIdB64: string;
+    readonly chats: {
+      add(args: { label: string; group: ActiveGroup["group"] }): ActiveGroup;
+      /** Record the held conversations durably. */
+      persistHeld(): Promise<void>;
+    };
     readonly profiles: Pick<ProfileApi, "groupJoined">;
   },
   req: IncomingContactRequest,
@@ -56,39 +73,58 @@ export async function acceptContactRequest(
     // ADR-0021 — the peer's account id (hex), for the call roster.
     ...(req.fromAccountId ? { accountIdHex: groupIdHex(req.fromAccountId) } : {}),
   };
-  let accepted = upsertAccepted(contact);
-
-  const sendAck = async (): Promise<void> => {
-    try {
-      await deps.client.sendContactAck(deps.identity, req);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
-    }
-  };
 
   if (req.fromAccountId === null) {
-    await sendAck();
-    return { accepted, groupIdB64: null, legacy: true, chatError: null };
+    try {
+      await deps.client.sendContactAck(deps.identity, req);
+    } catch {
+      // eslint-disable-next-line no-console
+      console.warn("contact accept: the ack did not land");
+      return { accepted: loadAccepted(), groupIdB64: null, status: "failed" };
+    }
+    return { accepted: upsertAccepted(contact), groupIdB64: null, status: "legacy" };
   }
-  let groupIdB64: string | null = null;
-  let chatError: unknown = null;
+
+  // ADR-0062 — a contact's conversation is a one-to-one for good.
+  let prepared;
   try {
-    const founded = await foundOneToOneWith({
-      client: deps.client,
-      identity: deps.identity,
-      chats: deps.chats,
-      profiles: deps.profiles,
-      contact,
-      peerAccountId: req.fromAccountId,
-      peerPubkey: req.fromPubkey,
-      replyGrantB64: req.replyGrantB64,
-    });
-    accepted = founded.accepted;
-    groupIdB64 = founded.conversation.groupIdB64;
-  } catch (err) {
-    chatError = err;
+    prepared = await deps.client.prepareGroupWith(deps.identity, req.fromAccountId, "chat", req.fromPubkey);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("contact accept: the group could not be founded");
+    return { accepted: loadAccepted(), groupIdB64: null, status: "failed" };
   }
-  await sendAck();
-  return { accepted, groupIdB64, legacy: false, chatError };
+  // Kept before the group is shown or anything is sent: from here on the
+  // accept cannot be lost.
+  let entry;
+  try {
+    entry = await deps.client.recordOwedAnswer(deps.accountIdB64, req, prepared);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("contact accept: the answer could not be kept");
+    try {
+      prepared.group.free();
+    } catch {
+      /* already freed */
+    }
+    return { accepted: loadAccepted(), groupIdB64: null, status: "failed" };
+  }
+  // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
+  // this label is only the fallback.
+  const conversation = deps.chats.add({ label: DIRECT_CHAT_STAND_IN, group: prepared.group });
+  // ADR-0048 §2 — founding a group is joining it.
+  deps.profiles.groupJoined(conversation.groupIdB64);
+  const accepted = upsertAccepted({ ...contact, groupIdB64: conversation.groupIdB64 });
+  try {
+    await deps.chats.persistHeld();
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("contact accept: the held conversations could not be recorded");
+  }
+  const settled = await deps.client.settleOwedAnswer(deps.identity, entry);
+  return {
+    accepted,
+    groupIdB64: conversation.groupIdB64,
+    status: settled === "settled" ? "done" : "owed",
+  };
 }

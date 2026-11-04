@@ -481,6 +481,27 @@ public fun pinChanges(
     return changeSet(pins = listOf(FolderPinsRegister(stamp(), folder.id, next)))
 }
 
+/**
+ * ADR-0087 section 9 - take the conversation [ref] out of every folder: a row
+ * added or excluded by hand goes back to none, and a folder's pin goes. `null`
+ * when no folder holds it. A folder's kind toggles keep matching conversations
+ * this device holds, so the row goes from a folder when the conversation does.
+ */
+public fun conversationRemovalChanges(
+    folders: List<ChatFolder>,
+    ref: FolderConversationRef,
+    stamp: StampSource,
+): FolderChangeSet? {
+    val key = refKey(ref)
+    val members = folders.filter { folder ->
+        (folder.included + folder.excluded).any { refKey(it) == key }
+    }.map { FolderMemberRegister(stamp(), it.id, ref, FolderMemberState.NONE) }
+    val pins = folders.filter { folder -> folder.pinned.any { refKey(it) == key } }
+        .map { folder -> FolderPinsRegister(stamp(), folder.id, folder.pinned.filter { refKey(it) != key }) }
+    if (members.isEmpty() && pins.isEmpty()) return null
+    return changeSet(members = members, pins = pins)
+}
+
 // ---------------------------------------------------------------------------
 // Suggested folders (UX spec 4)
 // ---------------------------------------------------------------------------

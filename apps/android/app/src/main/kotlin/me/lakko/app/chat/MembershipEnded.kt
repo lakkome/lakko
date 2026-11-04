@@ -13,6 +13,14 @@ import me.lakko.app.l10n.UiText
  * Android mirror of `apps/web/src/chat/membership-ended.ts`. Copy and rules
  * come from `docs/ux/proposal-based-membership.md` §6.2, thirteen subsections.
  *
+ * ## What this still covers (ADR-0087 section 9)
+ *
+ * A person who is out of a group loses it: `MembershipEnd.kt` holds that. What
+ * is below is for what does not end that way: a device whose own leaf was
+ * retired while the account stays in the group, which keeps its history and
+ * this presentation, and a one-to-one, which no commit can take a person out
+ * of. Everything below that argues the transcript stays argues it for those.
+ *
  * ## What this is for
  *
  * The commit that removes your own leaf arrives on an ordinary poll, merges,
@@ -140,12 +148,7 @@ internal val DELETE_CHAT_CONTROL: UiText = UiText("chat.delete.control")
 internal val DELETE_CHAT_TITLE: UiText = UiText("chat.delete.title")
 
 /**
- * §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
- * load-bearing: **the messages really are gone, and the dead MLS handle is
- * not.** `Group` exposes no delete, so the inactive group's state stays in the
- * provider snapshot as inert bytes — inert in the strong sense (it cannot send,
- * decrypt, export or process) but not nothing. A `Group::delete` is a real,
- * small core follow-up this does not ride free.
+ * §6.2.4 — confirmation body.
  */
 internal val DELETE_CHAT_BODY: UiText = UiText("chat.delete.body")
 
@@ -462,6 +465,13 @@ internal class EndedTeardownLatch {
     /** Hand a claimed step back after it failed, so a later pass retries it. */
     fun release(step: EndedTeardownStep): Unit = synchronized(done) {
         done.remove(step)
+        Unit
+    }
+
+    /** ADR-0087 section 9 — the membership came back (a retired leaf was
+     *  re-admitted): what ran for the old handle is owed for the new one. */
+    fun reset(): Unit = synchronized(done) {
+        done.clear()
         Unit
     }
 

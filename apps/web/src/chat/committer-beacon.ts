@@ -377,6 +377,16 @@ export function pruneBeaconObservations(
   if (changed) saveBeaconObservations(accountIdB64, groupIdB64, observations);
 }
 
+/** Drop one group's observations (ADR-0087 section 9: the group is gone from
+ *  this device). Never throws. */
+export function clearBeaconObservationsForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(storeKey(accountIdB64, groupIdB64));
+  } catch {
+    /* best-effort */
+  }
+}
+
 /** Drop every observation for one account — `recover` / `forgetDevice`
  *  hygiene, the same discipline the pending-request store follows. */
 export function clearBeaconObservationsForAccount(accountIdB64: string): void {

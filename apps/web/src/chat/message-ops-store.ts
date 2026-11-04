@@ -41,6 +41,8 @@
 import {
   applyOp,
   editDeleteAuthorized,
+  reactionsFromHeld,
+  type HeldReactionRecord,
   type MessageOpState,
   type OverlayOp,
 } from "./message-ops";
@@ -63,7 +65,7 @@ export function persistedWithOps(
   state: MessageOpState | undefined,
 ): PersistedMessage {
   if (state === undefined) return m;
-  const reactions = reactionsToPersisted(state.reactions);
+  const reactions = reactionsToPersisted(state.held);
   const opId = state.lastOpId === undefined ? {} : { lastOpId: String(state.lastOpId) };
   if (state.deleted === true) {
     return {
@@ -105,16 +107,17 @@ export function opsFromPersisted(
   for (const m of messages) {
     const id = Number(m.messageId);
     if (!Number.isFinite(id)) continue;
-    const reactions = reactionsFromPersisted(m.reactions);
+    const held = heldFromPersisted(m.reactions);
     const deleted = m.deleted === true;
     const edited = m.edited === true;
-    if (!deleted && !edited && reactions.size === 0) continue;
+    if (!deleted && !edited && held.length === 0) continue;
     const opId = m.lastOpId === undefined ? Number.NaN : Number(m.lastOpId);
     out.set(id, {
       ...(edited ? { editedText: m.text } : {}),
       ...(deleted ? { deleted: true } : {}),
       ...(Number.isFinite(opId) ? { lastOpId: opId } : {}),
-      reactions,
+      held,
+      reactions: reactionsFromHeld(held),
     });
   }
   return out;
@@ -129,13 +132,15 @@ export interface IncomingOp {
   readonly text: string;
   /** The emoji, for `reaction`. */
   readonly emoji: string | undefined;
+  /** Add or take off, for `reaction` (absent reads as add). */
+  readonly reactionAction?: "add" | "remove";
+  /** This op's own DS message id: the fold's journal position. */
+  readonly messageId?: number;
   /**
    * The sender's signature key, resolved from its MLS leaf at
    * receipt. `undefined` — unattributable — is dropped.
    */
   readonly senderKey: MemberIdentity | undefined;
-  /** The op's own DS `messageId`, when the receive path knows it. */
-  readonly messageId?: number;
 }
 
 /**
@@ -196,7 +201,14 @@ function foldOne(
     // An empty emoji is what the decoder produces for a reaction it
     // could not read; reacting with nothing is not a reaction.
     if (emoji === undefined || emoji === "") return overlay;
-    return applyOp(overlay, { op: "reaction", target: op.target, emoji, reactor: sender });
+    return applyOp(overlay, {
+      op: "reaction",
+      target: op.target,
+      emoji,
+      reactor: sender,
+      action: op.reactionAction ?? "add",
+      at: op.messageId ?? 0,
+    });
   }
   // edit / delete are the author's alone (invariant #4, fail-closed).
   if (!editDeleteAuthorized(persistedAuthorIdentity(target.authorKeyB64), sender)) {
@@ -210,21 +222,17 @@ function foldOne(
 }
 
 /**
- * The overlay's `emoji -> reactors` map as the stored flat list.
+ * What is held as the stored flat list, with each add's journal position.
  *
  * Sorted by `(emoji, reactor)` so re-persisting unchanged state
- * produces identical bytes: the blob is re-encrypted on every write,
- * and a set's iteration order is its insertion order, which differs
- * between the device that applied the ops live and the one that read
- * them back.
+ * produces identical bytes: the blob is re-encrypted on every write.
  */
-function reactionsToPersisted(
-  reactions: ReadonlyMap<string, ReadonlySet<MemberIdentity>>,
-): readonly PersistedReaction[] {
-  const out: PersistedReaction[] = [];
-  for (const [emoji, reactors] of reactions) {
-    for (const reactorKeyB64 of reactors) out.push({ reactorKeyB64, emoji });
-  }
+function reactionsToPersisted(held: readonly HeldReactionRecord[]): readonly PersistedReaction[] {
+  const out: PersistedReaction[] = held.map((h) => ({
+    reactorKeyB64: h.person,
+    emoji: h.emoji,
+    at: String(h.at),
+  }));
   out.sort((a, b) =>
     a.emoji === b.emoji
       ? compareStrings(a.reactorKeyB64, b.reactorKeyB64)
@@ -233,19 +241,18 @@ function reactionsToPersisted(
   return out;
 }
 
-/** Inverse of [`reactionsToPersisted`]. An empty emoji is dropped:
- *  the overlay prunes an emoji whose last reactor toggles off, so a
- *  chip that renders no glyph would be a chip nothing can remove. */
-function reactionsFromPersisted(
+/** Inverse of [`reactionsToPersisted`], ordered by position. An empty emoji
+ *  is dropped: a chip that renders no glyph would be one nothing removes. */
+function heldFromPersisted(
   stored: readonly PersistedReaction[] | undefined,
-): Map<string, Set<MemberIdentity>> {
-  const out = new Map<string, Set<MemberIdentity>>();
+): HeldReactionRecord[] {
+  const out: HeldReactionRecord[] = [];
   for (const r of stored ?? []) {
     if (r.emoji === "") continue;
-    const set = out.get(r.emoji) ?? new Set<MemberIdentity>();
-    set.add(r.reactorKeyB64);
-    out.set(r.emoji, set);
+    const at = Number(r.at ?? "0");
+    out.push({ person: r.reactorKeyB64, emoji: r.emoji, at: Number.isFinite(at) ? at : 0 });
   }
+  out.sort((a, b) => a.at - b.at);
   return out;
 }
 

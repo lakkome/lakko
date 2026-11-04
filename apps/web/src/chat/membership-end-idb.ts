@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * ADR-0087 section 9 — the sealed row behind `membership-end.ts`: one row per
+ * account, AES-GCM under the device root key. It holds a group's name (the
+ * notice) and a composer's unsent text, so it is never written in the clear.
+ *
+ * ```text
+ *   db   "lakko-membership-end"  v1
+ *   └── store "rows"  keyPath: "accountId"
+ *         row { accountId: <b64>, ciphertext: Uint8Array  // [12-byte IV | AES-GCM ct+tag] }
+ * ```
+ *
+ * Unlike the group-name row, a write that cannot happen THROWS: what depends
+ * on this row (the next step of an end, the mailbox cursor moving past a held
+ * Welcome) must not go on without it. The one quiet case is a sealed account
+ * (`account-store-gate.ts`), which refuses by throwing too.
+ */
+
+import { requireAccountStoresWritable } from "../auth/account-store-gate";
+import type { DeviceCipher } from "../auth/device-cipher";
+import {
+  decodeMembershipEndRow,
+  encodeMembershipEndRow,
+  type MembershipEndBackend,
+  type MembershipEndRow,
+} from "./membership-end";
+
+const DB_NAME = "lakko-membership-end";
+const DB_VERSION = 1;
+const STORE = "rows";
+const IV_LEN = 12;
+
+interface PersistedRow {
+  accountId: string;
+  ciphertext: Uint8Array;
+}
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable in this environment"));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (): void => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "accountId" });
+      }
+    };
+    req.onsuccess = (): void => resolve(req.result);
+    req.onerror = (): void => reject(req.error ?? new Error("indexedDB.open failed"));
+  });
+}
+
+function awaitTx(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = (): void => resolve();
+    tx.onabort = (): void => reject(tx.error ?? new Error("idb tx aborted"));
+    tx.onerror = (): void => reject(tx.error ?? new Error("idb tx errored"));
+  });
+}
+
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const ct = new Uint8Array(await deviceKey.encrypt(iv, plaintext));
+  const out = new Uint8Array(IV_LEN + ct.length);
+  out.set(iv, 0);
+  out.set(ct, IV_LEN);
+  return out;
+}
+
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
+  if (blob.length < IV_LEN + 16) throw new Error("encrypted membership-end row is too short");
+  return new Uint8Array(await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)));
+}
+
+/**
+ * The production backend.
+ *
+ * @param deviceKeyFor  the account's device root key, or `null` when this
+ *                      device holds none; a save then throws
+ */
+export class IdbMembershipEndBackend implements MembershipEndBackend {
+  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>) {}
+
+  async load(accountId: string): Promise<MembershipEndRow | null> {
+    const deviceKey = await this.deviceKeyFor(accountId);
+    if (deviceKey === null) return null;
+    const db = await openDb();
+    let row: PersistedRow | undefined;
+    try {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(accountId);
+      row = await new Promise<PersistedRow | undefined>((resolve, reject) => {
+        req.onsuccess = (): void => resolve(req.result as PersistedRow | undefined);
+        req.onerror = (): void => reject(req.error ?? new Error("idb get failed"));
+      });
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+    if (row === undefined) return null;
+    try {
+      const plain = await decryptBlob(deviceKey, row.ciphertext);
+      return decodeMembershipEndRow(new TextDecoder().decode(plain));
+    } catch {
+      // A row this key cannot open (the device key changed) is unusable.
+      return null;
+    }
+  }
+
+  async save(accountId: string, row: MembershipEndRow): Promise<void> {
+    const deviceKey = await this.deviceKeyFor(accountId);
+    if (deviceKey === null) throw new Error("membership-end row: no device key");
+    const json = encodeMembershipEndRow(row);
+    const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
+    const db = await openDb();
+    try {
+      requireAccountStoresWritable(accountId);
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+  }
+}
+
+/** Erase the row for an account (forget device). No-op when absent. */
+export async function deleteMembershipEndRow(accountId: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(accountId);
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}

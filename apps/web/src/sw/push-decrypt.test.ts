@@ -184,6 +184,7 @@ function mockWasm() {
           if (s === "THROW") throw new Error("cannot decrypt (wrong epoch)");
           return { kind: "Application", applicationData: payload, senderLeaf: 1 };
         },
+        members: () => [{ leafIndex: 1, signaturePublicKey: new Uint8Array(32).fill(7) }],
         free: freeSpy,
       }),
     },
@@ -241,6 +242,8 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
   }));
   const deps = {
     readWakeBinding: vi.fn(async () => ({ accountId: ACCOUNT_ID })),
+    // A sender always has a name on this device (the mirror the app writes).
+    lookupSenderName: async () => "Test Sender",
     // ADR-0078: the bound account's route row for the wake's push_gid, with
     // this device's subscription id (the wake's `s`).
     lookupRoute: vi.fn(async (_account: string, _gid: string) => ({
@@ -277,7 +280,7 @@ describe("decryptPushPreview — happy path", () => {
   it("decrypts to the real newest-message preview", async () => {
     const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps();
     const out = await decryptPushPreview(wake(), deps);
-    expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
+    expect(out).toEqual({ title: "Test Sender", body: "hello world", tag: GROUP_HEX });
     // Read-only-throwaway: nothing was ever persisted.
     expect(saveSnapshot).not.toHaveBeenCalled();
     expect(saveMessageLog).not.toHaveBeenCalled();
@@ -810,7 +813,7 @@ describe("decryptPushPreview — ADR-0042 push_gid reverse-map", () => {
     const { deps, dsFetchGroup, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps();
     const out = await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps);
     // Downstream everything (DS fetch, cursor, tag) uses the REAL group.
-    expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
+    expect(out).toEqual({ title: "Test Sender", body: "hello world", tag: GROUP_HEX });
     expect(deps.lookupRoute).toHaveBeenCalledWith(ACCOUNT_ID, PUSH_GID_HEX);
     expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41, expect.any(Function));
     expect(deps.startCursor).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);

@@ -12,6 +12,7 @@
  * Idempotent: a no-op when the policy is already on. Called after a successful
  * passkey registration (`PasskeysSection`).
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { ensureDeviceGroup } from "./lifecycle";
 import { encodeJournalEntry } from "./journal-envelope";
 import { commitDeviceGroupChange } from "./device-group-commit-runtime";
@@ -26,7 +27,7 @@ import { commitDeviceGroupChange } from "./device-group-commit-runtime";
 export async function enableAttestedRemovalsIfNeeded(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
 }): Promise<void> {
   const { ensureDeviceIdentitySeed } = await import("../auth/device-identity-store");
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);

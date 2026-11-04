@@ -76,7 +76,7 @@ final class UnrecognisedServiceEnvelopeTests: XCTestCase {
 
     func testAProfileV3NeverCountsAsAnUnreadMessage() {
         XCTAssertEqual(UnreadCounting.incomingMessages(in: [classify(profileV3())]), 0)
-        XCTAssertEqual(UnreadCounting.next(current: 3, applied: [classify(profileV3())], chatOpen: false), 3)
+        XCTAssertEqual(UnreadCounting.next(current: [1, 2, 3], applied: [classify(profileV3())], chatOpen: false), [1, 2, 3])
     }
 
     func testAnyUnknownLakkoEnvelopeIsDroppedAndAChatEnvelopeStillRenders() throws {
@@ -144,6 +144,8 @@ final class UnrecognisedServiceEnvelopeTests: XCTestCase {
     }
 
     private struct StubDeps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         let group: NseThrowawayGroup
         let rows: [NseFetchedRow]
 

@@ -19,10 +19,17 @@ import uniffi.lakko_ffi_uniffi.OprfResult
 
 /** What the publication is keyed on: a change of any part republishes. The
  *  certificate is in the key so a certificate arriving later republishes the
- *  record with the username in it. */
-internal fun everyonePublishKey(displayName: String?, username: String?, certificate: ByteArray?): String {
+ *  record with the username in it; the mailbox binding is, so a rotation of
+ *  the account keys replaces a record naming the old mailbox. */
+internal fun everyonePublishKey(
+    displayName: String?,
+    username: String?,
+    certificate: ByteArray?,
+    mailboxBinding: ByteArray? = null,
+): String {
     val cert = certificate?.joinToString("") { "%02x".format(it) } ?: ""
-    return "${displayName ?: ""}|${username ?: ""}|$cert"
+    val binding = mailboxBinding?.joinToString("") { "%02x".format(it) } ?: ""
+    return "${displayName ?: ""}|${username ?: ""}|$cert|$binding"
 }
 
 /** What a refresh has to do. */
@@ -51,6 +58,23 @@ internal fun everyoneAction(
     else -> EveryoneAction.PUT
 }
 
+/**
+ * [everyoneAction] for one refresh. The first refresh of a session in Everyone
+ * sends even when the note says the server already holds it: the note is this
+ * device's memory, not the server's state, and a person who chose Everyone and
+ * cannot be found has no way to tell.
+ */
+internal fun everyoneActionForRefresh(
+    wantPublic: Boolean,
+    published: Boolean?,
+    publishedKey: String?,
+    currentKey: String,
+    firstOfSession: Boolean,
+): EveryoneAction {
+    val action = everyoneAction(wantPublic, published, publishedKey, currentKey)
+    return if (action == EveryoneAction.NONE && wantPublic && firstOfSession) EveryoneAction.PUT else action
+}
+
 /** The person as the publication states them. */
 internal class EveryoneIdentity(
     val displayName: String?,
@@ -74,6 +98,9 @@ internal class EveryoneOps(
     val oprfUsername: suspend (String) -> OprfResult,
     val composePublicRecord: (FfiIntroductionPayload, List<ByteArray>, ULong) -> ByteArray,
     val putVisibility: suspend (public: Boolean, lookupKeys: List<ByteArray>, record: ByteArray?) -> Unit,
+    /** The own name's terms at once (`POST /discovery/oprf/batch`, one
+     *  register token), in order; `null` evaluates them one by one. */
+    val oprfOwnTerms: (suspend (List<me.lakko.app.discovery.OwnTerm>) -> List<OprfResult>)? = null,
 )
 
 /** How a publication ended. */
@@ -116,12 +143,26 @@ internal suspend fun publishEveryone(
         return EveryoneOutcome.NOTHING_TO_PUBLISH
     }
     val recordTermOutputs = mutableListOf<ByteArray>()
-    if (username != null) recordTermOutputs += ops.oprfUsername(username).output
     val lookupKeys = mutableListOf<ByteArray>()
-    for (term in terms) {
-        val oprf = ops.oprfNameTerm(term)
-        lookupKeys += oprf.lookupKey
-        recordTermOutputs += oprf.output
+    val batch = ops.oprfOwnTerms
+    if (batch != null) {
+        // Publishing the own name: every term in one batch, one token.
+        val own = listOfNotNull(username?.let { me.lakko.app.discovery.OwnTerm.Username(it) }) +
+            terms.map { me.lakko.app.discovery.OwnTerm.NameTerm(it) }
+        val results = batch(own)
+        val offset = if (username != null) 1 else 0
+        if (username != null) recordTermOutputs += results[0].output
+        for (i in terms.indices) {
+            lookupKeys += results[offset + i].lookupKey
+            recordTermOutputs += results[offset + i].output
+        }
+    } else {
+        if (username != null) recordTermOutputs += ops.oprfUsername(username).output
+        for (term in terms) {
+            val oprf = ops.oprfNameTerm(term)
+            lookupKeys += oprf.lookupKey
+            recordTermOutputs += oprf.output
+        }
     }
     val payload = FfiIntroductionPayload(
         identityPk = identityPk,

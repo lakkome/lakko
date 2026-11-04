@@ -475,31 +475,11 @@ export function transferPendingLabel(successorLabel: string | null): string {
     : t("chat.transfer.pending_named", { name: successorLabel });
 }
 
-/**
- * The outcome notice (§6.1.7).
- *
- * The two swept forms name the transferor's **own new role**, because half the
- * panel changes under them in one tap: an owner who chose `Become a regular
- * member` loses the add form, the invite block, every `Remove` and every admin
- * toggle at once. §5.3's reasoning about a vanishing control applies with more
- * force to a vanishing section.
- *
- * The published-but-unswept form names **no** role, because nothing has changed
- * yet; appending "you are now an admin" to a request that has not landed would
- * be the optimistic-update lie in its purest form.
+/*
+ * §6.1.7 — there is no outcome notice (UX section 2, amended 2026-10-29): a
+ * landed transfer changes the panel in place, a waiting one shows
+ * `transferPendingLabel` on the member row.
  */
-export function transferOutcomeNotice(
-  outcome: "committed" | "proposed",
-  successorLabel: string,
-  outgoing: OutgoingOwnerChoice,
-): string {
-  if (outcome === "proposed") {
-    return t("chat.transfer.requested");
-  }
-  return outgoing === "admin"
-    ? t("chat.transfer.done_admin", { name: successorLabel })
-    : t("chat.transfer.done_member", { name: successorLabel });
-}
 
 // ---------------------------------------------------------------------------
 // §6.1.9 — telling the new owner
@@ -623,6 +603,15 @@ export function rememberObservedOwner(
     );
   } catch {
     /* best-effort — losing it costs one notice */
+  }
+}
+
+/** Drop the owner remembered for one group (ADR-0087 section 9). Never throws. */
+export function clearLastObservedOwnerForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(ownerStoreKey(accountIdB64, groupIdB64));
+  } catch {
+    /* best-effort */
   }
 }
 

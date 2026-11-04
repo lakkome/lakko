@@ -12,7 +12,7 @@
  */
 
 import type { Wasm } from "../wasm";
-import { isDevicePlatform, type StoredDeviceCard } from "./device-cards";
+import { storedCardOf, type StoredDeviceCard } from "./device-cards";
 import { receiveOwnDeviceCard } from "./device-card-runtime";
 
 type WasmDeviceCard = InstanceType<Wasm["DeviceCard"]>;
@@ -38,18 +38,7 @@ export function decodeDeviceCardEnvelope(
     return null;
   }
   try {
-    const platform = card.platform;
-    if (!isDevicePlatform(platform)) return null;
-    return {
-      platform,
-      model: card.model,
-      appVersion: card.appVersion,
-      os: card.os,
-      city: card.city,
-      country: card.country,
-      updatedAtMs: Number(card.updatedAtMs),
-      lastActiveMs: Number(card.lastActiveMs),
-    };
+    return storedCardOf(card);
   } finally {
     card.free();
   }
@@ -78,11 +67,19 @@ export function receiveDeviceCardEnvelope(
   const card = decodeDeviceCardEnvelope(wasm, envelope);
   if (card === null) return false;
   const key = senderKeyAtReceipt(senderLeaf, roster);
-  if (key === null || roster === null) return true;
-  receiveOwnDeviceCard(
+  if (key === null || roster === null) {
+    // eslint-disable-next-line no-console
+    console.info(`[device-card] card received from a ${card.platform} device: refused, sender not resolved`);
+    return true;
+  }
+  const stored = receiveOwnDeviceCard(
     key,
     card,
     roster.map((m) => m.key),
+  );
+  // eslint-disable-next-line no-console
+  console.info(
+    `[device-card] card received from a ${card.platform} device: ${stored ? "stored" : "refused, not newer or not in the roster"}`,
   );
   return true;
 }

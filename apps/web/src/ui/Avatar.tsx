@@ -11,17 +11,22 @@
  */
 import { createSignal, Match, Switch, type JSX } from "solid-js";
 
-import { avatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
+import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
+import { wasmSync } from "../wasm";
 
-/** Up to two initials from a display label. */
-export function initialsOf(label: string): string {
-  const trimmed = label.replace(/^@/, "").trim();
-  if (trimmed.length === 0) return "?";
-  const parts = trimmed.split(/\s+/).filter((p) => p.length > 0);
-  if (parts.length >= 2) {
-    return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase();
+/**
+ * The initials of a display label: the shared rule in the core
+ * (`avatarInitials`, design-system.md Avatar bullet), the same on every
+ * client. No initials logic lives here; an empty answer, or a core not loaded
+ * yet, shows `placeholder`. Reactive: re-runs once the core has loaded.
+ */
+export function initialsOf(label: string, placeholder = "?"): string {
+  try {
+    const initials = wasmSync().avatarInitials(label);
+    return initials.length > 0 ? initials : placeholder;
+  } catch {
+    return placeholder;
   }
-  return trimmed.slice(0, 2).toUpperCase();
 }
 
 /** One of the four avatar tints, stable per id. */
@@ -41,6 +46,9 @@ export function Avatar(props: {
   /** The person's key (the one their profile is filed under), or `self` for
    *  the signed-in account: the photo is looked up for it. */
   personKey?: string | undefined;
+  /** A group or channel (its id, base64): its photo is looked up instead of
+   *  a person's (ADR-0087 section 18, UX 4.5.5). */
+  conversationKey?: string | undefined;
   /** Media to show instead of the looked-up photo (a pending change on the
    *  profile screen); `null` forces the initials. */
   media?: AvatarMedia | null | undefined;
@@ -50,6 +58,9 @@ export function Avatar(props: {
   const [broken, setBroken] = createSignal<string | null>(null);
   const media = (): AvatarMedia | null => {
     if (props.media !== undefined) return props.media;
+    if (props.conversationKey !== undefined) {
+      return conversationAvatarMediaFor(props.conversationKey, props.playVideo === true);
+    }
     return avatarMediaFor(props.personKey, props.playVideo === true);
   };
   const video = (): string | null => {

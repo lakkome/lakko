@@ -22,12 +22,30 @@ package me.lakko.app.calls
  *
  * ## The rule, and why it is this narrow
  *
- * Exactly two of the seven signaling bodies wake anyone:
+ * Only two of the seven signaling bodies may wake anyone:
  *
  *   * **offer** — the ring itself. Nothing else can start one.
  *   * **end** — stops a ring the callee may already be showing, on every device
  *     of theirs, including the ones whose app is shut. Without it a cancelled
  *     call keeps ringing until the user dismisses it by hand.
+ *
+ * And not every offer or end does. A call wake reaches an iPhone as a VoIP
+ * push, and iOS makes the app report every VoIP push to CallKit as an incoming
+ * call; the DS also wakes the sender's own devices. So a wake on a frame that
+ * rings nobody is not merely wasted: it rings. Two such frames share the tags
+ * above and cannot be told apart by them:
+ *
+ *   * a mid-call **renegotiation offer** (camera on, screen share) is an offer
+ *     for the same call id. Waking for it showed the peer's iPhone an incoming
+ *     audio call while the two were already talking;
+ *   * the **end of a connected call** is an end. The peer is in the call and
+ *     awake; waking for it rang the iPhone again after the call was over.
+ *
+ * Only the call session knows which offer is the dial and whether the call
+ * connected, so it states the intent with each frame ([CallSignalingWake],
+ * decided by [OneToOneCallWakes]) and the publisher wakes only when the session
+ * asked AND the bytes are an offer or an end. The tag check stays as a floor:
+ * a session that asks for a wake on an answer or a candidate still gets none.
  *
  * Everything else is deliberately silent:
  *
@@ -37,7 +55,9 @@ package me.lakko.app.calls
  *   * **groupStart** / **groupJoin** / **groupLeave** are group-call
  *     announcements, not a 1x1 ring. `docs/ux/calls.md` §9 puts the group call
  *     redesign out of scope, and waking for a join / leave would push once per
- *     participant churn.
+ *     participant churn. A group call's **end** is silent too
+ *     ([GROUP_CALL_CONTROL_WAKE]): a group call never rings a closed device, so
+ *     its end has no ring to stop.
  *
  * ## Why a byte peek rather than a parse
  *
@@ -59,6 +79,59 @@ package me.lakko.app.calls
  * next time a field number moves.
  */
 
+/**
+ * What a call session asks of the publisher for one outbound frame.
+ *
+ * [CALL]: this frame rings someone or stops a ring (the dial offer, the end of
+ * a call that never connected on this device). [NONE]: publish it silently.
+ * The session decides; [shouldWakeForCallSignaling] still refuses a wake for
+ * any frame that is not an offer or an end.
+ */
+public enum class CallSignalingWake { CALL, NONE }
+
+/**
+ * The wake each outbound frame of one 1x1 call asks for.
+ *
+ * Holds the one fact the bytes do not carry: whether this call ever reached
+ * `Connected` on this device. Kept out of [CallSession] so the rule runs in a
+ * host unit test, where libwebrtc and the native core are absent.
+ */
+internal class OneToOneCallWakes {
+    @Volatile
+    private var everConnected: Boolean = false
+
+    /** The call reached `Connected` on this device. Never undone. */
+    fun markConnected() {
+        everConnected = true
+    }
+
+    /** The dial: the one offer that rings the callee. */
+    fun dialOffer(): CallSignalingWake = CallSignalingWake.CALL
+
+    /** A renegotiation of a call already past its dial (camera on / off): the
+     *  peer is in the call. */
+    fun renegotiationOffer(): CallSignalingWake = CallSignalingWake.NONE
+
+    /** Answers and ICE candidates: the peer is awake and in the call. */
+    fun inCall(): CallSignalingWake = CallSignalingWake.NONE
+
+    /** An End for a call that never connected here stops a ring on the other
+     *  side's devices, including ones whose app is closed: it wakes. An End for
+     *  a connected call reaches a peer that is in the call: silent. */
+    fun end(): CallSignalingWake =
+        if (everConnected) CallSignalingWake.NONE else CallSignalingWake.CALL
+}
+
+/**
+ * The wake every group-call control frame asks for: none, `end` included.
+ *
+ * A group call never rings a closed device (start / join / leave were always
+ * silent), so a group `end` stops no ring anywhere. Its call wake reached
+ * iPhones as a VoIP push, which iOS reports to CallKit as an incoming call, and
+ * showed a phantom incoming call after every group call ended.
+ */
+internal val GROUP_CALL_CONTROL_WAKE: CallSignalingWake = CallSignalingWake.NONE
+
 /** The `CallSignalingPayload.body` variants, as `schemas/mls-app/call_signaling_v1.proto` names them. */
 internal enum class CallSignalingBodyKind {
     OFFER,
@@ -68,6 +141,8 @@ internal enum class CallSignalingBodyKind {
     GROUP_START,
     GROUP_JOIN,
     GROUP_LEAVE,
+    /** ADR-0083: a one-to-one call's screen-share state (field 17). */
+    SCREEN_SHARE,
 }
 
 /**
@@ -83,6 +158,9 @@ internal enum class CallSignalingBodyKind {
  *   field 16 (group_leave) -> 0x82 0x01 (tag 130, a TWO-byte varint — a field
  *                            number above 15 no longer fits one byte, which is
  *                            exactly how a first-byte sniff silently misses it)
+ *   field 17 (screen_share) -> 0x8A 0x01 (tag 138, ADR-0083; missing here until
+ *                            2026-10-29, so a one-to-one call's share state
+ *                            rendered as a garbage chat bubble)
  *
  * A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...` service
  * envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -127,7 +205,28 @@ internal fun callSignalingBodyKind(bytes: ByteArray): CallSignalingBodyKind? {
     if (first == 0x82 && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01) {
         return if (opensWithCallId(bytes, 2)) CallSignalingBodyKind.GROUP_LEAVE else null
     }
+    if (first == 0x8A && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01) {
+        // The share state carries a signature, so this body can pass 127 bytes
+        // and its length is then a two-byte varint.
+        return if (opensWithCallIdAfterVarint(bytes, 2)) CallSignalingBodyKind.SCREEN_SHARE else null
+    }
     return null
+}
+
+/** [opensWithCallId] for a body whose length varint may take one or two
+ *  bytes. */
+private fun opensWithCallIdAfterVarint(bytes: ByteArray, lengthAt: Int): Boolean {
+    if (bytes.size <= lengthAt) return false
+    val firstLengthByte = bytes[lengthAt].toInt() and 0xFF
+    val headerAt = if (firstLengthByte < 0x80) {
+        lengthAt + 1
+    } else {
+        if (bytes.size <= lengthAt + 1 || (bytes[lengthAt + 1].toInt() and 0xFF) >= 0x80) return false
+        lengthAt + 2
+    }
+    if (bytes.size < headerAt + 2) return false
+    return (bytes[headerAt].toInt() and 0xFF) == 0x0A &&
+        (bytes[headerAt + 1].toInt() and 0xFF) == 0x10
 }
 
 /** `bytes[lengthAt]` is a one-byte body length, followed by the `call_id`
@@ -144,12 +243,15 @@ private fun opensWithCallId(bytes: ByteArray, lengthAt: Int): Boolean {
  * Should publishing this signaling frame also fan a push wake out to the
  * group's subscribed devices?
  *
- * `true` for an offer and an end, `false` for everything else — including
- * anything that is not call signaling at all, so a caller that hands over the
- * wrong bytes fails toward silence rather than toward a push.
+ * `true` only when the sender asked for a call wake AND the frame is an offer
+ * or an end; `false` for everything else — including anything that is not call
+ * signaling at all, so a caller that hands over the wrong bytes fails toward
+ * silence rather than toward a push.
  */
-internal fun shouldWakeForCallSignaling(bytes: ByteArray): Boolean =
-    when (callSignalingBodyKind(bytes)) {
+internal fun shouldWakeForCallSignaling(bytes: ByteArray, asked: CallSignalingWake): Boolean {
+    if (asked != CallSignalingWake.CALL) return false
+    return when (callSignalingBodyKind(bytes)) {
         CallSignalingBodyKind.OFFER, CallSignalingBodyKind.END -> true
         else -> false
     }
+}

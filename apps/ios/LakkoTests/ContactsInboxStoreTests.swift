@@ -133,6 +133,18 @@ final class ContactsInboxStoreTests: XCTestCase {
         XCTAssertEqual(result.dropped.map(\.reason), [.alreadyPending])
     }
 
+    /// One person is one row: a person who asked again (search offers that)
+    /// replaces their earlier request, in one batch or across two.
+    func testAPersonWhoAskedAgainIsOneRow() {
+        let later = ContactsInboxMerge.merge(
+            fetched: [request(7, from: 0x01)], pending: [request(5, from: 0x01)], accepted: [])
+        XCTAssertEqual(later.applied(to: [request(5, from: 0x01)]).map(\.messageId), [7])
+
+        let sameBatch = ContactsInboxMerge.merge(
+            fetched: [request(5, from: 0x01), request(7, from: 0x01)], pending: [], accepted: [])
+        XCTAssertEqual(sameBatch.applied(to: []).map(\.messageId), [7])
+    }
+
     func testFreshRequestsKeepFetchOrder() {
         let result = ContactsInboxMerge.merge(
             fetched: [request(9, from: 0x01), request(4, from: 0x02), request(6, from: 0x03)],

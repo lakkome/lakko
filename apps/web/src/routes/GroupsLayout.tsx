@@ -29,7 +29,7 @@ export default function GroupsLayout(props: RouteSectionProps): JSX.Element {
 export function GroupsIndex(): JSX.Element {
   return (
     <div class="lk-main-center">
-      <span class="lk-hint-pill">{t("new_group.index_hint")}</span>
+      <span class="lk-hint-pill">{t("chats.empty.select")}</span>
     </div>
   );
 }

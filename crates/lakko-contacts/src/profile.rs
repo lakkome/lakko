@@ -180,7 +180,17 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use crate::avatar::{encode_avatar_field, read_avatar_field, AvatarError};
 use crate::reach::{ReachClass, ReachError, ReachGrant, REACH_GRANT_LEN};
+
+/// The avatar field moved to [`crate::avatar`] (ADR-0087 section 18), shared
+/// with the group and channel carriers; re-exported here so the profile's
+/// public paths and its wire are unchanged.
+pub use crate::avatar::{
+    Avatar, AvatarRef, AvatarVideo, AVATAR_REF_LEN, AVATAR_STILL_MAX_BYTES, AVATAR_STILL_MAX_PX,
+    AVATAR_STILL_ONLY_LEN, AVATAR_VIDEO_MAX_BYTES, AVATAR_VIDEO_MAX_DURATION_MS,
+    AVATAR_VIDEO_MAX_PX, AVATAR_WITH_VIDEO_LEN,
+};
 use crate::username::{check_canonical_username, UsernameError, USERNAME_MAX_LEN};
 
 /// 17-byte domain separator prepended to the profile payload.
@@ -213,31 +223,6 @@ pub const PROFILE_VERSION_V3: u8 = 0x03;
 /// Schema version carried in the first payload byte since ADR-0084: v3
 /// plus an optional avatar after the grants. The only version decoded.
 pub const PROFILE_VERSION_V4: u8 = 0x04;
-
-/// Length of an encoded [`AvatarRef`]: blob id, key, nonce, size, width,
-/// height.
-pub const AVATAR_REF_LEN: usize = 32 + 32 + 12 + 4 + 2 + 2;
-
-/// Length of an avatar field holding a still only.
-pub const AVATAR_STILL_ONLY_LEN: usize = AVATAR_REF_LEN;
-
-/// Length of an avatar field holding a still, a video and its duration.
-pub const AVATAR_WITH_VIDEO_LEN: usize = 2 * AVATAR_REF_LEN + 2;
-
-/// Largest side of the avatar still, in pixels.
-pub const AVATAR_STILL_MAX_PX: u16 = 640;
-
-/// Largest avatar still, in plaintext bytes (256 KiB).
-pub const AVATAR_STILL_MAX_BYTES: u32 = 256 * 1024;
-
-/// Largest side of the avatar video, in pixels.
-pub const AVATAR_VIDEO_MAX_PX: u16 = 480;
-
-/// Largest avatar video, in plaintext bytes (4 MiB).
-pub const AVATAR_VIDEO_MAX_BYTES: u32 = 4 * 1024 * 1024;
-
-/// Longest avatar video, in milliseconds.
-pub const AVATAR_VIDEO_MAX_DURATION_MS: u16 = 10_000;
 
 /// Length of the discovery-signed username certificate a profile may carry
 /// (ADR-0060 §5). Opaque to this crate: `lakko-attest` defines the layout
@@ -387,125 +372,6 @@ pub struct Profile {
     pub avatar: Option<Avatar>,
 }
 
-/// A reference to one encrypted avatar blob in storage (ADR-0084): what
-/// `lakko_attachments::encrypt_attachment` produced for it, plus its size
-/// and pixel dimensions.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AvatarRef {
-    /// `SHA-256` of the ciphertext: the storage address.
-    pub blob_id: [u8; 32],
-    /// The ChaCha20-Poly1305 key. Secret.
-    pub key: [u8; 32],
-    /// The AEAD nonce.
-    pub nonce: [u8; 12],
-    /// Plaintext size in bytes.
-    pub size: u32,
-    /// Width in pixels.
-    pub width: u16,
-    /// Height in pixels; equal to `width`.
-    pub height: u16,
-}
-
-impl core::fmt::Debug for AvatarRef {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("AvatarRef")
-            .field("size", &self.size)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A profile video: its blob and its length.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AvatarVideo {
-    /// The encrypted square MP4.
-    pub reference: AvatarRef,
-    /// Duration in milliseconds, 1..=[`AVATAR_VIDEO_MAX_DURATION_MS`].
-    pub duration_ms: u16,
-}
-
-/// The profile photo: a still, and optionally a short video whose first
-/// frame the still is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Avatar {
-    /// The encrypted square JPEG, shown everywhere.
-    pub still: AvatarRef,
-    /// The encrypted square MP4, played in large views.
-    pub video: Option<AvatarVideo>,
-}
-
-impl AvatarRef {
-    fn check(&self, max_px: u16, max_bytes: u32) -> CoreResult<(), ProfileError> {
-        if self.width != self.height {
-            return Err(ProfileError::AvatarNotSquare);
-        }
-        if self.width == 0 || self.width > max_px {
-            return Err(ProfileError::AvatarDimensions);
-        }
-        if self.size == 0 || self.size > max_bytes {
-            return Err(ProfileError::AvatarSize);
-        }
-        Ok(())
-    }
-
-    fn encode_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.blob_id);
-        out.extend_from_slice(&self.key);
-        out.extend_from_slice(&self.nonce);
-        out.extend_from_slice(&self.size.to_be_bytes());
-        out.extend_from_slice(&self.width.to_be_bytes());
-        out.extend_from_slice(&self.height.to_be_bytes());
-    }
-
-    fn decode(cur: &mut &[u8]) -> CoreResult<Self, ProfileError> {
-        let blob_id = take_array::<32>(cur)?;
-        let key = take_array::<32>(cur)?;
-        let nonce = take_array::<12>(cur)?;
-        let size = u32::from_be_bytes(take_array::<4>(cur)?);
-        let width = u16::from_be_bytes(take_array::<2>(cur)?);
-        let height = u16::from_be_bytes(take_array::<2>(cur)?);
-        Ok(Self {
-            blob_id,
-            key,
-            nonce,
-            size,
-            width,
-            height,
-        })
-    }
-}
-
-impl Avatar {
-    /// Check every avatar bound (ADR-0084).
-    ///
-    /// # Errors
-    ///
-    /// [`ProfileError::AvatarNotSquare`], [`ProfileError::AvatarDimensions`],
-    /// [`ProfileError::AvatarSize`], [`ProfileError::AvatarDuration`].
-    pub fn validate(&self) -> CoreResult<(), ProfileError> {
-        self.still
-            .check(AVATAR_STILL_MAX_PX, AVATAR_STILL_MAX_BYTES)?;
-        if let Some(video) = &self.video {
-            video
-                .reference
-                .check(AVATAR_VIDEO_MAX_PX, AVATAR_VIDEO_MAX_BYTES)?;
-            if video.duration_ms == 0 || video.duration_ms > AVATAR_VIDEO_MAX_DURATION_MS {
-                return Err(ProfileError::AvatarDuration);
-            }
-        }
-        Ok(())
-    }
-
-    const fn encoded_len(&self) -> usize {
-        if self.video.is_some() {
-            AVATAR_WITH_VIDEO_LEN
-        } else {
-            AVATAR_STILL_ONLY_LEN
-        }
-    }
-}
-
 impl Profile {
     /// Check every bound. The single rule both [`compose_profile`] and
     /// [`decode_profile`] run, so they cannot drift.
@@ -553,7 +419,7 @@ impl Profile {
             }
         }
         if let Some(avatar) = &self.avatar {
-            avatar.validate()?;
+            avatar.validate().map_err(ProfileError::from)?;
         }
         Ok(())
     }
@@ -774,17 +640,7 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
     for grant in &profile.grants {
         out.extend_from_slice(&grant.encode());
     }
-    match &profile.avatar {
-        Some(avatar) => {
-            out.push(u8::try_from(avatar.encoded_len()).unwrap_or(u8::MAX));
-            avatar.still.encode_into(&mut out);
-            if let Some(video) = &avatar.video {
-                video.reference.encode_into(&mut out);
-                out.extend_from_slice(&video.duration_ms.to_be_bytes());
-            }
-        },
-        None => out.push(0),
-    }
+    encode_avatar_field(profile.avatar.as_ref(), &mut out);
     Ok(out)
 }
 
@@ -855,25 +711,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
             ReachGrant::decode(take(&mut cur, REACH_GRANT_LEN)?).map_err(ProfileError::Grant)?;
         grants.push(grant);
     }
-    let avatar_len = usize::from(take_u8(&mut cur)?);
-    let avatar = match avatar_len {
-        0 => None,
-        AVATAR_STILL_ONLY_LEN | AVATAR_WITH_VIDEO_LEN => {
-            let still = AvatarRef::decode(&mut cur)?;
-            let video = if avatar_len == AVATAR_WITH_VIDEO_LEN {
-                let reference = AvatarRef::decode(&mut cur)?;
-                let duration_ms = u16::from_be_bytes(take_array::<2>(&mut cur)?);
-                Some(AvatarVideo {
-                    reference,
-                    duration_ms,
-                })
-            } else {
-                None
-            };
-            Some(Avatar { still, video })
-        },
-        got => return Err(ProfileError::AvatarLength { got }),
-    };
+    let avatar = read_avatar_field(&mut cur).map_err(ProfileError::from)?;
     if !cur.is_empty() {
         return Err(ProfileError::TrailingBytes { count: cur.len() });
     }
@@ -1030,16 +868,23 @@ impl ProfileError {
     }
 }
 
+impl From<AvatarError> for ProfileError {
+    fn from(e: AvatarError) -> Self {
+        match e {
+            AvatarError::Truncated => Self::Truncated,
+            AvatarError::Length { got } => Self::AvatarLength { got },
+            AvatarError::NotSquare => Self::AvatarNotSquare,
+            AvatarError::Dimensions => Self::AvatarDimensions,
+            AvatarError::Size => Self::AvatarSize,
+            AvatarError::Duration => Self::AvatarDuration,
+        }
+    }
+}
+
 fn take_u8(cur: &mut &[u8]) -> CoreResult<u8, ProfileError> {
     let (&first, rest) = cur.split_first().ok_or(ProfileError::Truncated)?;
     *cur = rest;
     Ok(first)
-}
-
-fn take_array<const N: usize>(cur: &mut &[u8]) -> CoreResult<[u8; N], ProfileError> {
-    take(cur, N)?
-        .try_into()
-        .map_err(|_| ProfileError::Truncated)
 }
 
 fn take<'a>(cur: &mut &'a [u8], n: usize) -> CoreResult<&'a [u8], ProfileError> {
@@ -1941,6 +1786,7 @@ mod tests {
             crate::push_routing::PUSH_GID_DERIVE_DOMAIN_V1,
             crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,

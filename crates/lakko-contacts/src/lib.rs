@@ -62,6 +62,14 @@
 //!   and the padded bundle a contact relays.
 //! - [`visibility`] — ADR-0060 "who can find me" setting and the reach-key
 //!   version state, as envelopes the owner's devices exchange.
+//! - [`handle`], [`handle_record`], [`conversation_handle`], [`knock`] —
+//!   ADR-0087: the handle key of a group or channel and the statements it
+//!   signs to discovery, the public record of a public group or channel, the
+//!   envelope that tells members the `@name` and its flag, and the sealed
+//!   knock row (a request to join with no epoch); [`knock_seed`], the
+//!   envelope that hands an admin one version of the knock seed;
+//!   [`admission_seed`], the envelope that hands a co-publisher one version
+//!   of a private channel's admission seed.
 //! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
 //!   root hands one member its Delivery Service registrar seed, sealed to
 //!   that member's account X25519 key, with the registrar public key in the
@@ -97,12 +105,16 @@
 #![warn(missing_docs)]
 
 pub mod ack;
+pub mod admission_seed;
+pub mod allowed_reactions;
+pub mod avatar;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
+pub mod conversation_handle;
 pub mod device_card;
 pub mod envelope;
 pub mod error;
@@ -110,11 +122,17 @@ pub mod group_closed;
 pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
+pub mod group_photo;
+pub mod group_reactions;
+pub mod handle;
+pub mod handle_record;
 pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
 pub mod journal_epoch;
 pub mod key_rotation;
+pub mod knock;
+pub mod knock_seed;
 pub mod link_claim;
 pub mod link_founded;
 pub mod link_refusal;
@@ -136,6 +154,21 @@ pub mod username;
 pub mod visibility;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
+pub use admission_seed::{
+    admission_seed_public_key, compose_admission_seed, decode_admission_seed,
+    try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError,
+    ADMISSION_SEED_ENVELOPE_DOMAIN_V1, ADMISSION_SEED_ENVELOPE_LEN, ADMISSION_SEED_VERSION_V1,
+};
+pub use allowed_reactions::{
+    is_reaction_emoji_bytes, AllowedReactions, AllowedReactionsError,
+    ALLOWED_REACTIONS_ENCODED_MAX_LEN, ALLOWED_REACTIONS_MAX, REACTION_EMOJI_MAX_BYTES,
+};
+pub use avatar::{
+    avatar_field_len, decode_avatar_field, encode_avatar_field, read_avatar_field, Avatar,
+    AvatarError, AvatarRef, AvatarVideo, AVATAR_FIELD_MAX_LEN, AVATAR_REF_LEN,
+    AVATAR_STILL_MAX_BYTES, AVATAR_STILL_MAX_PX, AVATAR_STILL_ONLY_LEN, AVATAR_VIDEO_MAX_BYTES,
+    AVATAR_VIDEO_MAX_DURATION_MS, AVATAR_VIDEO_MAX_PX, AVATAR_WITH_VIDEO_LEN,
+};
 pub use call_invite::{
     call_revoke_canonical_bytes, call_sign_revocation, compose as compose_call_invite,
     decode_and_verify as decode_and_verify_call_invite, CallInviteCapability, CallInviteMedia,
@@ -168,6 +201,13 @@ pub use committer_delegation::{
     COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V2,
     MAX_COMMITTER_DELEGATIONS,
 };
+pub use conversation_handle::{
+    compose_conversation_handle, conversation_handle_is_newer, decode_conversation_handle,
+    try_unwrap_conversation_handle, ConversationHandle, ConversationHandleError,
+    CONVERSATION_HANDLE_CERT_LEN, CONVERSATION_HANDLE_ENVELOPE_DOMAIN_V1,
+    CONVERSATION_HANDLE_ENVELOPE_MAX_LEN, CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
+    CONVERSATION_HANDLE_VERSION_V1,
+};
 pub use device_card::{
     compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
     DeviceCard, DeviceCardError, DeviceCardField, DeviceCardFieldError, DevicePlatform,
@@ -183,9 +223,10 @@ pub use group_closed::{
 };
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
-    group_revoke_canonical_bytes, group_sign_revocation, GroupInviteCapability,
-    GROUP_INVITE_NEVER_EXPIRES, GROUP_INVITE_REVOKE_DOMAIN_V1,
-    GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_GROUP_ID_LEN,
+    group_revoke_canonical_bytes, group_sign_revocation, ChannelAccess, ChannelInviteCard,
+    GroupInviteCapability, GroupInvitePreview, GroupKnockKey, SubscriberInvite,
+    CHANNEL_INVITE_CARD_MAX_LEN, CHANNEL_INVITE_CARD_MIN_LEN, GROUP_INVITE_NEVER_EXPIRES,
+    GROUP_INVITE_REVOKE_DOMAIN_V1, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_GROUP_ID_LEN,
 };
 pub use group_join_attribution::{
     compose_attribution as compose_group_join_attribution,
@@ -196,6 +237,28 @@ pub use group_name::{
     try_unwrap_group_name, GroupName, GroupNameError, GROUP_NAME_ENVELOPE_DOMAIN_V1,
     GROUP_NAME_ENVELOPE_MAX_LEN, GROUP_NAME_ENVELOPE_MIN_LEN, GROUP_NAME_VERSION_V1,
 };
+pub use group_photo::{
+    compose_group_photo, decode_group_photo, group_photo_is_newer, try_unwrap_group_photo,
+    GroupPhoto, GroupPhotoError, GROUP_PHOTO_ENVELOPE_DOMAIN_V1, GROUP_PHOTO_ENVELOPE_MAX_LEN,
+    GROUP_PHOTO_ENVELOPE_MIN_LEN, GROUP_PHOTO_ENVELOPE_STILL_LEN, GROUP_PHOTO_VERSION_V1,
+};
+pub use group_reactions::{
+    compose_group_reactions, decode_group_reactions, group_reactions_is_newer,
+    try_unwrap_group_reactions, GroupReactions, GroupReactionsError,
+    GROUP_REACTIONS_ENVELOPE_DOMAIN_V1, GROUP_REACTIONS_ENVELOPE_MAX_LEN,
+    GROUP_REACTIONS_ENVELOPE_MIN_LEN, GROUP_REACTIONS_VERSION_V1,
+};
+pub use handle::{
+    handle_content_hash, handle_write_public_key, handle_write_seed, HandleStatement,
+    HandleStatementBody, HandleStatementError, HandleVisibility, HANDLE_STATEMENT_MAX_LEN,
+    HANDLE_STATEMENT_MIN_LEN, HANDLE_STATEMENT_WINDOW_MS, HANDLE_WRITE_DOMAIN, MAX_HANDLE_TERMS,
+};
+pub use handle_record::{
+    compose_handle_record, open_handle_record, open_search_record, HandleRecordError,
+    HandleRecordKind, HandleRecordPayload, SearchRecord, HANDLE_RECORD_KNOCK_VERSION_LEN,
+    HANDLE_RECORD_PAYLOAD_MAX_LEN, HANDLE_RECORD_PAYLOAD_MIN_LEN, HANDLE_RECORD_PAYLOAD_VERSION_V3,
+    MAX_SIZE_BAND,
+};
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use introduction::{
     bundle_is_newer, compose_bundle, compose_introduction, compose_introduction_offer,
@@ -205,7 +268,8 @@ pub use introduction::{
     IntroductionRecord, IntroductionsBundle, BUNDLE_SIZE_BUCKETS, FOF_KEY_DOMAIN, FOF_TAG_DOMAIN,
     FOF_TAG_LEN, INTRODUCTIONS_ENVELOPE_DOMAIN_V1, INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
     INTRODUCTION_RECORD_MAX_LEN, INTRODUCTION_RECORD_MIN_LEN, MAX_BUNDLE_RECORDS,
-    MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, WRAPPED_KEY_LEN,
+    MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, PUBLIC_RECORD_MAX_LEN, PUBLIC_RECORD_MIN_LEN,
+    WRAPPED_KEY_LEN,
 };
 pub use invite::{
     compute_joiner_tag, generate_blob_id, generate_link_id, revocation_public_key,
@@ -221,6 +285,14 @@ pub use key_rotation::{
     KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
     KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
     KEY_ROTATION_VERSION_V1,
+};
+pub use knock::{
+    is_knock_row_len, knock_public_key, knock_row_version, knock_seed, open_knock, seal_knock,
+    KnockError, KnockRequest, KNOCK_LARGE_ROW_LEN, KNOCK_SMALL_ROW_LEN,
+};
+pub use knock_seed::{
+    compose_knock_seed, decode_knock_seed, try_unwrap_knock_seed, KnockSeedEnvelope,
+    KnockSeedError, KNOCK_SEED_ENVELOPE_DOMAIN_V1, KNOCK_SEED_ENVELOPE_LEN, KNOCK_SEED_VERSION_V1,
 };
 pub use link_claim::{
     compose_link_claim, decode_link_claim, link_claim_answered_elsewhere, link_claim_outcome,
@@ -319,10 +391,11 @@ pub use username::{
 pub use visibility::{
     compose_reach_state, compose_visibility, decode_reach_state, decode_visibility,
     merge_reach_state, reach_state_is_newer, try_unwrap_reach_state, try_unwrap_visibility,
-    visibility_is_newer, GroupsForm, ReachState, ReachStateEntry, ReachStateMerge, ScopeId,
-    ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting, MAX_CHOSEN_SCOPES,
-    MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN, MAX_SCOPE_ID_LEN,
-    MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
+    visibility_is_newer, ContactsForm, GroupsForm, ReachState, ReachStateEntry, ReachStateMerge,
+    ScopeId, ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting, CONTACT_ACCOUNT_ID_LEN,
+    MAX_CHOSEN_CONTACTS, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN,
+    MAX_SCOPE_ID_LEN, MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1,
+    VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.
@@ -452,5 +525,88 @@ pub mod fuzz_api {
             Ok(crate::incoming_envelope::IncomingEnvelope::LinkFounded(n)) if n == note
         );
         Some(recomposed && within && dispatched)
+    }
+
+    /// Decode `bytes` as a handle statement (ADR-0087 section 3). `None`
+    /// when the decoder refuses; `Some(true)` when what decoded re-encodes
+    /// to the same bytes (and verifying it never panicked).
+    #[must_use]
+    pub fn handle_statement_decode(bytes: &[u8]) -> Option<bool> {
+        crate::handle::fuzz_decode(bytes)
+    }
+
+    /// Decode `bytes` as a group's or channel's record payload and as a
+    /// public record opened under a fixed OPRF output (ADR-0087 section 4).
+    /// `None` when both refuse; `Some(true)` when what decoded re-encodes to
+    /// the same bytes.
+    #[must_use]
+    pub fn handle_record_decode(bytes: &[u8]) -> Option<bool> {
+        crate::handle_record::fuzz_decode(bytes)
+    }
+
+    /// Decode `bytes` as a conversation-handle envelope (ADR-0087 section
+    /// 11) and check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-composes to the same bytes within the
+    /// advertised lengths and dispatches as the same envelope.
+    #[must_use]
+    pub fn conversation_handle_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::conversation_handle::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ConversationHandle(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a knock-seed envelope (ADR-0087 section 5) and check
+    /// the dispatcher agrees. `None` when the decoder refuses; `Some(true)`
+    /// when it re-encodes to the same bytes at the fixed length and
+    /// dispatches as the same envelope.
+    #[must_use]
+    pub fn knock_seed_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::knock_seed::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::KnockSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as an admission-seed envelope (ADR-0087 section 7) and
+    /// check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-encodes to the same bytes at the fixed length
+    /// and dispatches as the same envelope.
+    #[must_use]
+    pub fn admission_seed_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::admission_seed::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::AdmissionSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel invitation card (ADR-0087 section 14) and
+    /// try to open it. `None` when the decoder refuses; `Some(true)` when
+    /// what decoded re-encodes to the same bytes (opening never panicked).
+    #[must_use]
+    pub fn channel_invite_card_open(bytes: &[u8]) -> Option<bool> {
+        crate::group_invite::fuzz_channel_invite_card(bytes)
+    }
+
+    /// Open `row` as a sealed knock (ADR-0087 section 5) under a fixed seed.
+    /// `None` when the open refuses; `Some(true)` when what opened re-seals
+    /// and re-opens to the same request.
+    #[must_use]
+    pub fn sealed_knock_open(row: &[u8]) -> Option<bool> {
+        crate::knock::fuzz_open(row)
+    }
+
+    /// Parse an opened knock plaintext, which a fuzzer cannot reach through
+    /// the AEAD. `None` when the parser refuses; `Some(true)` when what
+    /// parsed re-seals and re-opens to the same request.
+    #[must_use]
+    pub fn knock_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::knock::fuzz_plaintext(plain)
     }
 }

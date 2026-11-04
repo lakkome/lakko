@@ -31,7 +31,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { fetchPosts } from "../channels/api";
 import { foldChannelMeta } from "../channels/channel-meta";
 import { decodeAndDecryptPost } from "../channels/composer";
-import { toPostDecode, type PostDecode } from "../channels/PostCard";
+import { toPostDecode, type PostDecode } from "../channels/post-decode";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import {

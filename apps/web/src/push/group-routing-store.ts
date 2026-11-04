@@ -157,6 +157,7 @@
  * - #7 — the secret is wrapped under the hardware-backed device root key.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
@@ -298,16 +299,12 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 }
 
 async function encrypt(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: Uint8Array,
 ): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv.slice() },
-      deviceKey,
-      plaintext.slice(),
-    ),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -316,7 +313,7 @@ async function encrypt(
 }
 
 async function decrypt(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   blob: Uint8Array,
 ): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
@@ -325,7 +322,7 @@ async function decrypt(
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
   return new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+    await deviceKey.decrypt(iv, ct),
   );
 }
 
@@ -360,7 +357,7 @@ export async function putGroupRouting(
     distributed: boolean;
     mintEpoch: bigint;
   },
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   const ciphertext = await encrypt(deviceKey, args.secret);
   const secretRow: SecretRow = {
@@ -415,7 +412,7 @@ export async function putGroupRouting(
 export async function getGroupRoutingRecord(
   accountId: string,
   groupIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<GroupRoutingRecord | null> {
   const row = await readSecretRow(accountId, groupIdB64);
   if (row === undefined) return null;
@@ -439,7 +436,7 @@ export async function getGroupRoutingRecord(
 export async function getGroupRoutingSecret(
   accountId: string,
   groupIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   return (await getGroupRoutingRecord(accountId, groupIdB64, deviceKey))
     ?.secret ?? null;
@@ -719,6 +716,31 @@ function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16);
   return out;
+}
+
+/**
+ * Delete one group's routing secret and every reverse-index row that points
+ * at it (ADR-0087 section 9). The caller retired the subscription first
+ * (`retireOldPushGid`). No-op when absent.
+ */
+export async function deleteGroupRouting(accountId: string, groupIdB64: string): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
+    tx.objectStore(SECRETS_STORE).delete(secretRowKey(accountId, groupIdB64));
+    const routes = tx.objectStore(ROUTES_STORE);
+    const rows = routes.getAll();
+    rows.onsuccess = (): void => {
+      for (const row of rows.result as RouteRow[]) {
+        if (row.accountId === accountId && row.groupIdB64 === groupIdB64) {
+          routes.delete(routeRowKey(accountId, row.pushGidHex));
+        }
+      }
+    };
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
 }
 
 /**

@@ -62,7 +62,10 @@ that someone invites them before being asked to sign in:
   working, the Contacts screen (below).
 - A link that does not work, opened signed out: title **This invite link no
   longer works**, line **Ask the person who sent it for a new one.**, and the
-  same two buttons with no return.
+  same two buttons with no return. A link with no uses left counts (amended
+  2026-11-01): the ledger still serves it, flagged `used_up`, because a person
+  who used it and is signed in must reach "already in your contacts", and only
+  the consume can tell them from anyone else.
 
 The card is built on the device from the link itself (the ledger fetch needs no
 session and the name is sealed under the link's secret); nothing is consumed

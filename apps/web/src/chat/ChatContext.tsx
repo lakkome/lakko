@@ -48,8 +48,8 @@
  *   * `add(...)` upserts (same `groupIdB64` replaces the prior
  *     entry — useful when a Welcome arrives after a reload and
  *     the in-memory replacement should win).
- *   * `remove(groupIdB64)` is a deliberate user gesture (Phase
- *     1.16e6+ adds `Group::leave` plumbing).
+ *   * `remove(groupIdB64)` is the last step of a group leaving this
+ *     device (`membership-end-runtime.ts`, `delete-chat.ts`).
  *   * `clear()` is called from `AuthProvider.logout` /
  *     `forgetDevice` so per-account state never bleeds across
  *     sessions.
@@ -94,6 +94,13 @@ export interface ActiveGroup {
   /** ms since epoch — used to display "active for N minutes"
    *  and to pick a stable initial sort order. */
   readonly createdAtMs: number;
+  /** ADR-0087 section 9 — how many times a Welcome replaced this group on
+   *  this device. The chat view is keyed on it: a person added back has a new
+   *  conversation under the same id, and nothing the old view held (rows, a
+   *  cursor, a frozen roster) is that conversation's. An ADR-0040 persist
+   *  reset replaces the entry too and keeps the generation: there the view
+   *  must stay mounted. */
+  readonly joinGeneration: number;
 }
 
 /** Public surface of the chat context. */
@@ -139,7 +146,17 @@ export interface ChatApi {
   /** Insert (or replace) a group in the registry. The
    *  `groupIdB64` field is computed from the live
    *  `group.groupId` accessor. */
-  add(input: Omit<ActiveGroup, "groupIdB64" | "createdAtMs">): ActiveGroup;
+  add(
+    input: Omit<ActiveGroup, "groupIdB64" | "createdAtMs" | "joinGeneration"> & {
+      /** A Welcome replaced the group held under this id. */
+      readonly rejoined?: boolean;
+      /** Loaded from this device's store, so not made now. With no message
+       *  to go by it must not read as the newest thing in the list. */
+      readonly restored?: boolean;
+      /** When this device created or joined the group, from the store. */
+      readonly joinedAtMs?: number;
+    },
+  ): ActiveGroup;
   /** Drop a group from the registry. No-op when missing. */
   remove(groupIdB64: string): void;
   /** Replace the canonical Identity. Frees the previous
@@ -207,6 +224,13 @@ export interface ChatApi {
 }
 
 const ChatContext = createContext<ChatApi>();
+
+/** When this device created or joined each group, for the snapshot row. */
+export function joinedTimes(groups: readonly ActiveGroup[]): Record<string, number> {
+  return Object.fromEntries(
+    groups.filter((g) => g.createdAtMs > 0).map((g) => [g.groupIdB64, g.createdAtMs]),
+  );
+}
 
 export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   const [groups, setGroups] = createSignal<readonly ActiveGroup[]>([]);
@@ -354,11 +378,21 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     },
     add(input) {
       const groupIdB64 = base64Encode(input.group.groupId);
+      const prior = groups().find((g) => g.groupIdB64 === groupIdB64);
+      const held = prior?.joinGeneration ?? 0;
       const entry: ActiveGroup = {
         groupIdB64,
         label: input.label,
         group: input.group,
-        createdAtMs: Date.now(),
+        // A group reloaded under its id keeps the moment it was joined; only
+        // a Welcome that replaced it is a new join.
+        createdAtMs:
+          input.restored === true
+            ? (input.joinedAtMs ?? 0)
+            : prior !== undefined && input.rejoined !== true
+              ? prior.createdAtMs
+              : Date.now(),
+        joinGeneration: input.rejoined === true ? held + 1 : held,
       };
       // Upsert by groupIdB64 — a duplicate Welcome on the same
       // group should reuse the slot rather than pile up.
@@ -405,6 +439,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     async persistSnapshotDurable(accountIdB64, expectedIdentity) {
@@ -436,6 +471,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     async persistSnapshotWithCommit(accountIdB64, entry) {
@@ -469,6 +505,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         knownGroupIds,
         full,
         base64Encode(id.signaturePublicKey),
+        joinedTimes(groups()),
       );
     },
     clear() {

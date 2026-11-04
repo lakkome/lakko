@@ -16,9 +16,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
+use crate::scoped_discovery::{
+    FfiContactsForm, FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting,
+};
 use crate::FfiError;
-use lakko_contacts::visibility::{ScopeId as RustScopeId, VisibilitySetting as RustSetting};
+use lakko_contacts::visibility::{
+    contact_account_id, ScopeId as RustScopeId, VisibilityError, VisibilitySetting as RustSetting,
+    CONTACT_ACCOUNT_ID_LEN,
+};
 use lakko_ui_rules::av_align::{
     av_align_capability as rust_av_align_capability, AvAlign as RustAvAlign,
     AvAudioPlan as RustAvAudioPlan, AvAudioReading as RustAvAudioReading,
@@ -48,11 +53,15 @@ use lakko_ui_rules::folder::{
     order_conversations_in_folder as rust_order_conversations_in_folder,
     FolderRule as RustFolderRule,
 };
+use lakko_ui_rules::handle::{suggest_handle as rust_suggest_handle, HandleKind as RustHandleKind};
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
+    conversation_info_sections as rust_conversation_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    ConversationInfoCapabilities as RustConversationInfoCapabilities,
+    ConversationInfoKind as RustConversationInfoKind, ConversationRole as RustConversationRole,
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoSection as RustInfoSection,
     InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
@@ -74,7 +83,9 @@ use lakko_ui_rules::speaking::{
     SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
 };
 use lakko_ui_rules::visibility::{
-    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    choose_mode as rust_choose_mode, exclude_contact_under_all as rust_exclude_contact_under_all,
+    exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contact_chosen as rust_set_contact_chosen, set_contacts_form as rust_set_contacts_form,
     set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
     set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
 };
@@ -258,6 +269,39 @@ pub fn guest_name(random: u64) -> String {
     lakko_ui_rules::guest_name::guest_name(random)
 }
 
+/// The letters drawn in an avatar without a photo: the first letter of each
+/// of the first two words, or the first two letters of a one-word name, in
+/// upper case; at most two grapheme clusters; empty when nothing in the name
+/// is a letter, digit or emoji (the client then draws its placeholder).
+#[uniffi::export]
+#[must_use]
+pub fn avatar_initials(name: String) -> String {
+    lakko_ui_rules::initials::avatar_initials(&name)
+}
+
+/// One run of a message's text: `docs/ux/message-links.md`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MessageTextPiece {
+    /// The text as sent.
+    pub text: String,
+    /// Whether this run is a link to open. The address is the text.
+    pub is_link: bool,
+}
+
+/// A message's text as pieces, in order. Joining every piece's text gives the
+/// input back. Draw a link piece as a link; decide nothing else about it here.
+#[uniffi::export]
+#[must_use]
+pub fn split_message_links(text: String) -> Vec<MessageTextPiece> {
+    lakko_ui_rules::message_links::split_message_links(&text)
+        .into_iter()
+        .map(|p| MessageTextPiece {
+            text: p.text,
+            is_link: p.is_link,
+        })
+        .collect()
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -334,6 +378,27 @@ pub enum InfoSection {
     /// sends nothing (UX `conversation-info.md` 2.1). Appended last: uniffi
     /// decodes by ordinal.
     AddContact,
+    /// `Their contacts can find me`, the per-contact switch of "Who can find
+    /// me" (UX `who-can-find-me.md` 5.1). Appended last: uniffi decodes by
+    /// ordinal.
+    TheirContactsCanFindMe,
+    /// ADR-0087: a group's or channel's `@name` row. The blocks from here on
+    /// are produced only by [`conversation_info_sections`]. Appended last.
+    Handle,
+    /// ADR-0087: `Who can join` / `Who can subscribe`. Owner only.
+    GroupType,
+    /// ADR-0087: the owner's exit when nobody else holds a role.
+    DeleteGroup,
+    /// ADR-0087 section 14: invite contacts to a channel.
+    InvitePeople,
+    /// ADR-0087 section 15: a channel's subscribers.
+    Subscribers,
+    /// ADR-0087 section 15: a channel's publishers.
+    Admins,
+    /// `docs/ux/reactions-and-emoji.md` section 9: which reactions the
+    /// conversation takes (a group's owner and admins, a channel's owner).
+    /// Appended last: uniffi lowers this enum by ordinal.
+    Reactions,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -360,6 +425,14 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
             RustInfoSection::ChannelMembers => Self::ChannelMembers,
             RustInfoSection::AddContact => Self::AddContact,
+            RustInfoSection::TheirContactsCanFindMe => Self::TheirContactsCanFindMe,
+            RustInfoSection::Handle => Self::Handle,
+            RustInfoSection::GroupType => Self::GroupType,
+            RustInfoSection::DeleteGroup => Self::DeleteGroup,
+            RustInfoSection::InvitePeople => Self::InvitePeople,
+            RustInfoSection::Subscribers => Self::Subscribers,
+            RustInfoSection::Admins => Self::Admins,
+            RustInfoSection::Reactions => Self::Reactions,
         }
     }
 }
@@ -372,6 +445,10 @@ pub struct PersonInfoCapabilities {
     /// The person is on this device's contact list. `false` only for a
     /// person the viewer removed, whose one-to-one remains.
     pub is_contact: bool,
+    /// Contacts of my contacts is on in "Who can find me" (UX
+    /// `who-can-find-me.md` 5.1), under either form.
+    #[uniffi(default = false)]
+    pub contacts_of_contacts_on: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
@@ -379,6 +456,7 @@ impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
         Self {
             membership_ended: c.membership_ended,
             is_contact: c.is_contact,
+            contacts_of_contacts_on: c.contacts_of_contacts_on,
         }
     }
 }
@@ -680,6 +758,57 @@ pub fn set_groups_visible(setting: FfiVisibilitySetting, on: bool) -> FfiVisibil
 #[must_use]
 pub fn set_groups_form(setting: FfiVisibilitySetting, form: FfiGroupsForm) -> FfiVisibilitySetting {
     rust_set_groups_form(&setting.into(), form.into()).into()
+}
+
+/// All my contacts, or only the chosen ones. No effect unless part 2.1 is
+/// on.
+#[uniffi::export]
+#[must_use]
+pub fn set_contacts_form(
+    setting: FfiVisibilitySetting,
+    form: FfiContactsForm,
+) -> FfiVisibilitySetting {
+    rust_set_contacts_form(&setting.into(), form.into()).into()
+}
+
+fn contact_id(id: &[u8]) -> Result<[u8; CONTACT_ACCOUNT_ID_LEN], FfiError> {
+    Ok(contact_account_id(id)?)
+}
+
+/// Exclude one contact while "all" is on: the form becomes "only the ones I
+/// choose" with every other contact in `all_contact_ids` chosen.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `contactIdLength` / `tooManyChosenContacts`.
+#[uniffi::export]
+pub fn exclude_contact_under_all(
+    setting: FfiVisibilitySetting,
+    all_contact_ids: Vec<Vec<u8>>,
+    excluded: Vec<u8>,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    let all = all_contact_ids
+        .iter()
+        .map(|id| contact_account_id(id))
+        .collect::<Result<Vec<_>, VisibilityError>>()?;
+    let excluded = contact_id(&excluded)?;
+    let s: RustSetting = setting.into();
+    Ok(rust_exclude_contact_under_all(&s, &all, &excluded)?.into())
+}
+
+/// Choose or unchoose one contact in the chosen list.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `contactIdLength` / `tooManyChosenContacts`.
+#[uniffi::export]
+pub fn set_contact_chosen(
+    setting: FfiVisibilitySetting,
+    account_id: Vec<u8>,
+    on: bool,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    let id = contact_id(&account_id)?;
+    Ok(rust_set_contact_chosen(&setting.into(), &id, on)?.into())
 }
 
 /// Exclude one group or channel while "all" is on: the form becomes "only
@@ -1649,6 +1778,102 @@ pub fn speaking_floor_onset_ms() -> u64 {
     FLOOR_ONSET_MS
 }
 
+/// Group or channel, for [`conversation_info_sections`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConversationInfoKind {
+    /// A group.
+    Group,
+    /// A channel.
+    Channel,
+}
+
+/// The viewer's role in a group or channel (a channel's co-publisher is its
+/// admin, "publisher" on screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConversationRole {
+    /// The owner.
+    Owner,
+    /// An admin of a group, a publisher of a channel.
+    Admin,
+    /// A member of a group, a subscriber of a channel.
+    Member,
+}
+
+/// What the viewer is and may do in a group or channel (UX
+/// `group-and-channel-privacy.md` section 18): one record for both kinds.
+/// Every field is the client's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConversationInfoCapabilities {
+    /// Group or channel.
+    pub kind: ConversationInfoKind,
+    /// The viewer's role.
+    pub role: ConversationRole,
+    /// Nobody but the owner holds a place that blocks deleting.
+    pub alone: bool,
+    /// The owner may hand the group over now.
+    pub can_transfer: bool,
+    /// This device can leave.
+    pub can_leave: bool,
+    /// The conversation holds an `@name`.
+    pub has_handle: bool,
+}
+
+impl From<ConversationInfoCapabilities> for RustConversationInfoCapabilities {
+    fn from(c: ConversationInfoCapabilities) -> Self {
+        Self {
+            kind: match c.kind {
+                ConversationInfoKind::Group => RustConversationInfoKind::Group,
+                ConversationInfoKind::Channel => RustConversationInfoKind::Channel,
+            },
+            role: match c.role {
+                ConversationRole::Owner => RustConversationRole::Owner,
+                ConversationRole::Admin => RustConversationRole::Admin,
+                ConversationRole::Member => RustConversationRole::Member,
+            },
+            alone: c.alone,
+            can_transfer: c.can_transfer,
+            can_leave: c.can_leave,
+            has_handle: c.has_handle,
+        }
+    }
+}
+
+/// What a group's or channel's info holds under ADR-0087 (UX
+/// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15). Replaces
+/// [`group_info_sections`] and [`channel_info_sections`] once the clients
+/// move to it.
+#[uniffi::export]
+#[must_use]
+pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<InfoSection> {
+    rust_conversation_info_sections(caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// Group or channel, for [`suggest_handle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HandleKind {
+    /// A group.
+    Group,
+    /// A channel.
+    Channel,
+}
+
+/// The `@name` to prefill for a new group or channel named `name` (UX
+/// `group-and-channel-privacy.md`): from the name where it can be, with a
+/// random suffix for a private one; `random` is the caller's randomness.
+#[uniffi::export]
+#[must_use]
+pub fn suggest_handle(name: String, kind: HandleKind, private: bool, random: u64) -> String {
+    let kind = match kind {
+        HandleKind::Group => RustHandleKind::Group,
+        HandleKind::Channel => RustHandleKind::Channel,
+    };
+    rust_suggest_handle(&name, kind, private, random)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1838,6 +2063,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn contact_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{allows_contact, default_visibility_setting};
+        let s = default_visibility_setting();
+        let id = |b: u8| vec![b; 16];
+        let chosen = set_contacts_form(s.clone(), FfiContactsForm::Chosen);
+        assert_eq!(chosen.contacts_form, FfiContactsForm::Chosen);
+        // The memory of the form crosses too.
+        let nobody = choose_visibility_mode(chosen, FfiVisibilityMode::Nobody);
+        let back = choose_visibility_mode(nobody, FfiVisibilityMode::Some);
+        assert_eq!(back.contacts_form, FfiContactsForm::Chosen);
+
+        let excluded = exclude_contact_under_all(s.clone(), vec![id(1), id(2)], id(2)).unwrap();
+        assert_eq!(excluded.contacts_form, FfiContactsForm::Chosen);
+        assert_eq!(excluded.chosen_contacts, vec![id(1)]);
+        assert!(!allows_contact(excluded.clone(), id(2)));
+        let more = set_contact_chosen(excluded, id(3), true).unwrap();
+        assert_eq!(more.chosen_contacts, vec![id(1), id(3)]);
+        assert_eq!(
+            set_contact_chosen(more, id(1), false)
+                .unwrap()
+                .chosen_contacts,
+            vec![id(3)]
+        );
+        for refused in [
+            set_contact_chosen(s.clone(), vec![1; 15], true),
+            exclude_contact_under_all(s.clone(), vec![vec![1; 17]], id(1)),
+            exclude_contact_under_all(s, vec![id(1)], vec![]),
+        ] {
+            assert!(
+                matches!(&refused, Err(FfiError::Visibility(m)) if m.starts_with("contactIdLength")),
+                "{refused:?}"
+            );
+        }
+    }
+
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow {
             id: id.to_string(),
@@ -1898,15 +2159,24 @@ mod tests {
         let ended = person_info_sections(PersonInfoCapabilities {
             membership_ended: true,
             is_contact: true,
+            contacts_of_contacts_on: false,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
         let removed = person_info_sections(PersonInfoCapabilities {
             membership_ended: false,
             is_contact: false,
+            contacts_of_contacts_on: true,
         });
         assert!(removed.contains(&InfoSection::AddContact));
         assert!(!removed.contains(&InfoSection::RemoveContact));
+        assert!(!removed.contains(&InfoSection::TheirContactsCanFindMe));
+        assert!(person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: true,
+            contacts_of_contacts_on: true,
+        })
+        .contains(&InfoSection::TheirContactsCanFindMe));
         assert!(channel_info_sections(ChannelInfoCapabilities {
             is_publisher: false,
             is_subscriber: true,
@@ -1941,8 +2211,23 @@ mod tests {
     }
 
     #[test]
+    fn a_message_link_crosses_the_boundary_as_a_piece() {
+        let pieces = split_message_links("see https://lakko.me/x now".to_owned());
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces[1].is_link);
+        assert_eq!(pieces[1].text, "https://lakko.me/x");
+    }
+
+    #[test]
     fn the_guest_name_crosses_the_boundary_intact() {
         assert_eq!(guest_name(0), "Calm Dog");
+    }
+
+    #[test]
+    fn the_avatar_initials_cross_the_boundary_intact() {
+        assert_eq!(avatar_initials("QA Phase A".to_owned()), "QP");
+        assert_eq!(avatar_initials("VG3".to_owned()), "VG");
+        assert_eq!(avatar_initials("   ".to_owned()), "");
     }
 
     #[test]
@@ -1994,5 +2279,34 @@ mod tests {
         t.sample(String::new(), Some(f64::NAN), u64::MAX);
         t.sample("a".into(), Some(f64::INFINITY), 0);
         t.decide_floor(Vec::new(), 0);
+    }
+
+    #[test]
+    fn conversation_info_and_handle_suggestion_cross_the_boundary() {
+        let caps = ConversationInfoCapabilities {
+            kind: ConversationInfoKind::Group,
+            role: ConversationRole::Owner,
+            alone: true,
+            can_transfer: false,
+            can_leave: false,
+            has_handle: true,
+        };
+        let sections = conversation_info_sections(caps);
+        assert_eq!(sections.first(), Some(&InfoSection::Handle));
+        assert!(sections.contains(&InfoSection::DeleteGroup));
+        assert!(sections.contains(&InfoSection::Reactions));
+        let channel_admin = conversation_info_sections(ConversationInfoCapabilities {
+            kind: ConversationInfoKind::Channel,
+            role: ConversationRole::Admin,
+            ..caps
+        });
+        assert!(!channel_admin.contains(&InfoSection::Reactions));
+        assert_eq!(
+            InfoSection::Reactions as u32,
+            InfoSection::Admins as u32 + 1,
+            "Reactions is appended after the last earlier variant"
+        );
+        let handle = suggest_handle("Book Club".into(), HandleKind::Group, false, 0);
+        assert!(handle.starts_with("book_club"), "{handle}");
     }
 }

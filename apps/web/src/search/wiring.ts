@@ -9,6 +9,10 @@
  * and `send-request.ts`; this file only answers their questions from real
  * sources, so it holds no rule of its own.
  */
+import { nameLookupAll, type NameLookupAnyHit } from "../discovery/handle-lookup";
+import type { LookupResponse } from "../discovery/wire";
+import { avatarFromWasm } from "../profile/avatar-model";
+import type { FoundConversation } from "./people-search";
 import type { ContactsClient } from "../contacts/client";
 import { ContactsError } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
@@ -18,10 +22,9 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
-import { bytesToHex } from "../channels/composer";
 import { personKeysOf, verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { provenSuccessorWith } from "../contacts/proven-successor";
-import { bestGrantForPerson } from "../reach/received-grants";
+import { grantsInOrderForPerson } from "../reach/received-grants";
 import { personKeysHex } from "../contacts/address-resolver";
 import { reachSession, reachSignerForGrantWire } from "../reach/reach-service";
 import { loadIntroductions } from "../reach/scoped-intake";
@@ -29,7 +32,7 @@ import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discover
 import type { Wasm } from "../wasm";
 import { openMatchingIntroductions, recordsOf } from "./introductions";
 import { searchNormalizer, toHex, type LocalCandidate, type Normalize } from "./people";
-import type { KnownPerson, OpenedPublicRecord, PeopleSearchDeps } from "./people-search";
+import type { KnownPerson, OpenedPublicRecord, PeopleSearchDeps, SearchCounts } from "./people-search";
 import type { SendDeps } from "./send-request";
 
 /** The core's search normaliser, with the short-input fallback. */
@@ -42,6 +45,22 @@ function contactKeySet(): Set<string> {
   return new Set(loadAccepted().map((c) => c.signaturePubkeyB64));
 }
 
+/**
+ * Every grant kept for a person, in the order they are tried. ADR-0074
+ * section 3.5a rule 2 - the grants of the PERSON, under any key a proven
+ * rotation left behind. All of them: a person may have rotated one away and
+ * still answer to another.
+ */
+function keptGrantWiresOf(keyHex: string): readonly string[] {
+  const session = reachSession();
+  if (session === null) return [];
+  try {
+    return grantsInOrderForPerson(session.receivedGrants(), personKeysHex(keyHex)).map((g) => g.wireB64);
+  } catch {
+    return [];
+  }
+}
+
 /** What this device knows about one person (by account key, base64). */
 export function knownPerson(
   profiles: ProfileApi,
@@ -51,18 +70,11 @@ export function knownPerson(
   const isContact = contactKeys.has(keyB64);
   const resolved = profiles.resolve(keyB64);
   const named = resolved.source === "rename" || resolved.source === "profile";
-  const session = reachSession();
-  let keptGrantWireB64: string | null = null;
-  if (session !== null) {
-    try {
-      keptGrantWireB64 =
-        // ADR-0074 section 3.5a rule 2 - the grants of the PERSON, under
-        // any key a proven rotation left behind.
-        bestGrantForPerson(session.receivedGrants(), personKeysHex(toHex(base64Decode(keyB64))))
-          ?.wireB64 ?? null;
-    } catch {
-      keptGrantWireB64 = null;
-    }
+  let keptGrantWires: readonly string[] = [];
+  try {
+    keptGrantWires = keptGrantWiresOf(toHex(base64Decode(keyB64)));
+  } catch {
+    keptGrantWires = [];
   }
   return {
     // Only a name this device holds counts as a name. A contact nothing
@@ -72,7 +84,7 @@ export function knownPerson(
     contactFallbackName: isContact && !named ? resolved.name : null,
     verifiedUsername: resolved.username === null ? null : resolved.username.replace(/^@+/, ""),
     isContact,
-    keptGrantWireB64,
+    keptGrantWires,
   };
 }
 
@@ -114,7 +126,7 @@ export function localCandidates(
       // A claimed account id only locates the identity bundle; the send path
       // checks the bundle's key against this key before anything goes out.
       accountIdHex: contactAccountIdHex ?? profiles.accountIdHexOf(keyB64),
-      keptGrantWireB64: k.keptGrantWireB64,
+      keptGrantWires: k.keptGrantWires,
     });
   }
   return out;
@@ -150,6 +162,8 @@ export function openPublicRecordWith(
       identityPk: payload.identityPk,
       accountId: payload.accountId,
       displayName: payload.displayName ?? null,
+      username: payload.username ?? null,
+      usernameCertificate: payload.usernameCertificate ?? null,
       // ADR-0078 - where an unsigned request to this person goes.
       mailboxBinding: payload.mailboxBinding,
     };
@@ -162,7 +176,7 @@ export function openPublicRecordWith(
  *  ADR-0078: the mailbox is the one the grant's binding names, verified
  *  against the person's key (and its proven chain); a binding that does not
  *  verify is a refusal, and no request is made. */
-async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
+export async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
   const target = await verifiedTargetOfGrant(grantWireB64, personKeysOf(identityPk));
   if (target === null) return false;
   const signer = await reachSignerForGrantWire(grantWireB64);
@@ -197,6 +211,64 @@ async function provenPredecessorOf(
   }
 }
 
+/** The lookup keys of usernames a record stated, by username. A key depends
+ *  on the name alone, so a person found again costs no token. Memory only;
+ *  the oldest goes first. Chosen, not measured. */
+const MAX_KEPT_USERNAME_LOOKUP_KEYS = 64;
+const usernameLookupKeys = new Map<string, Uint8Array>();
+
+/** One line per finished network search: counts only. */
+function logSearchCounts(c: SearchCounts): void {
+  // eslint-disable-next-line no-console
+  console.info(
+    `[search] finished records_held=${c.recordsHeld} records_opened=${c.recordsOpened} ` +
+      `kept_after_match=${c.keptAfterMatch} refused_by_reach_check=${c.refusedByReachCheck} ` +
+      `people=${c.people}`,
+  );
+}
+
+/** The answers of one search's lookups, by lookup key (base64), so the
+ *  conversation question reads what the person question already fetched. */
+const handleLookups = new Map<string, LookupResponse | null>();
+const termLookups = new Map<string, NameLookupAnyHit[]>();
+
+/** `openSearchRecord` for a public group or channel; `null` otherwise. */
+export function openConversationRecordWith(
+  wasm: Wasm,
+  record: Uint8Array,
+  output: Uint8Array,
+): FoundConversation | null {
+  let opened;
+  try {
+    opened = wasm.openSearchRecord(record, output);
+  } catch {
+    return null;
+  }
+  if (opened === undefined) return null;
+  try {
+    const c = opened.conversation;
+    if (c === undefined) return null;
+    try {
+      const kind = c.kind === "channel" ? "channel" : "group";
+      return {
+        kind,
+        idB64: base64Encode(c.id),
+        handle: c.handle,
+        name: c.name,
+        description: c.description,
+        sizeBand: c.sizeBand,
+        key: c.key,
+        knockVersion: c.knockVersion,
+        avatar: avatarFromWasm(c.avatar),
+      };
+    } finally {
+      c.free();
+    }
+  } finally {
+    opened.free();
+  }
+}
+
 /** The network search, answered from the running app. */
 export function peopleSearchDeps(args: {
   readonly wasm: Wasm;
@@ -206,18 +278,33 @@ export function peopleSearchDeps(args: {
   const { wasm, profiles } = args;
   const discovery = new DiscoveryClient(undefined, { sessionToken: args.sessionToken });
   const scoped = new ScopedDiscoveryClient(args.sessionToken);
+  let recordsHeld = 0;
   return {
     canonicalUsername: (typed) => canonicalUsernameOf(wasm, typed),
     queryTerm: (query) => wasm.nameQueryTerm(query) ?? null,
     nameMatches: (name, query) => wasm.nameMatchesQuery(name, query),
-    lookupChannel: async (handle) => {
-      const found = await discovery.lookupChannel(handle);
-      return found.channel === null ? null : bytesToHex(found.channel);
-    },
+    // ADR-0087 section 1: a channel's `@name` is a handle in the one
+    // namespace; the conversations question below finds it (by `@name` and by
+    // name) from the same OPRF rounds, so no separate channel question.
     usernameOprf: (username) => scoped.usernameOprf(username),
+    usernameLookupKey: async (username) => {
+      const held = usernameLookupKeys.get(username);
+      if (held !== undefined) return held;
+      const { lookupKey } = await scoped.usernameOprf(username);
+      usernameLookupKeys.set(username, lookupKey);
+      const oldest = usernameLookupKeys.keys().next().value;
+      if (usernameLookupKeys.size > MAX_KEPT_USERNAME_LOOKUP_KEYS && oldest !== undefined) {
+        usernameLookupKeys.delete(oldest);
+      }
+      return lookupKey;
+    },
     accountOfUsernameLookupKey: async (lookupKey) => {
       const res = await discovery.lookupRaw({ oprf_hash: base64Encode(lookupKey) });
+      handleLookups.set(base64Encode(lookupKey), res);
       if (res === null) return null;
+      // ADR-0087 section 1: one namespace; a group or channel answers here
+      // with its record and no account (read by the conversation question).
+      if ((res as { kind?: string }).kind === "handle" || res.account_id === undefined) return null;
       let publicRecord: Uint8Array | null = null;
       if (res.public_record_b64 !== undefined) {
         try {
@@ -229,7 +316,32 @@ export function peopleSearchDeps(args: {
       return { accountId: base64Decode(res.account_id), publicRecord };
     },
     nameTermOprf: (term) => scoped.nameTermOprf(term),
-    accountsOfNameTermLookupKey: (lookupKey) => scoped.nameLookup(lookupKey),
+    accountsOfNameTermLookupKey: async (lookupKey) => {
+      const all = await nameLookupAll(lookupKey);
+      termLookups.set(base64Encode(lookupKey), all);
+      return all.flatMap((h) =>
+        h.kind === "person" && h.accountId !== null ? [{ accountId: h.accountId, publicRecord: h.publicRecord }] : [],
+      );
+    },
+    conversationRecordOfLookupKey: async (lookupKey) => {
+      const key = base64Encode(lookupKey);
+      const res = handleLookups.has(key)
+        ? handleLookups.get(key)
+        : await discovery.lookupRaw({ oprf_hash: key });
+      if (res === null || res === undefined) return null;
+      if ((res as { kind?: string }).kind !== "handle" || res.public_record_b64 === undefined) return null;
+      try {
+        return base64Decode(res.public_record_b64);
+      } catch {
+        return null;
+      }
+    },
+    conversationRecordsOfTermLookupKey: async (lookupKey) => {
+      const key = base64Encode(lookupKey);
+      const all = termLookups.get(key) ?? (await nameLookupAll(lookupKey));
+      return all.flatMap((h) => (h.kind === "handle" && h.publicRecord !== null ? [h.publicRecord] : []));
+    },
+    openConversationRecord: (record, output) => openConversationRecordWith(wasm, record, output),
     openPublicRecord: (record, oprfOutput) => openPublicRecordWith(wasm, record, oprfOutput),
     identityKeyOf: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
@@ -241,8 +353,12 @@ export function peopleSearchDeps(args: {
       const session = reachSession();
       if (session === null) return [];
       const row = await loadIntroductions(session.accountIdB64);
-      return openMatchingIntroductions(recordsOf(row, wasm), probes, wasm);
+      const records = recordsOf(row, wasm);
+      recordsHeld = records.length;
+      return openMatchingIntroductions(records, probes, wasm);
     },
+    introductionRecordsHeld: () => recordsHeld,
+    logCounts: logSearchCounts,
     verifyUsername: async (certificate, usernameLookupKey, accountId) => {
       try {
         const cert = wasm.verifyUsernameBinding(certificate, await usernameCertKey(), usernameLookupKey, accountId);
@@ -282,6 +398,7 @@ export function sendDeps(args: {
   };
   return {
     reachCheck: reachCheckWith,
+    heldGrantWires: (identityPk) => keptGrantWiresOf(toHex(identityPk)),
     identityFetch: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
       if (bundle === null) return null;

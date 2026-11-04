@@ -138,3 +138,14 @@ describe("the persisted reply reference", () => {
     expect(replyRefFromPersisted({ target: "not-a-number" })).toBeUndefined();
   });
 });
+
+describe("a reply snapshot never carries a placeholder (2026-11-04)", () => {
+  it("an author the device cannot name is left out, not baked in", () => {
+    const bubbleOf = (): MediaBubble => "file";
+    for (const author of [undefined, "", "   "]) {
+      const s = replySnapshotFor({ text: "hi", attachments: [] }, author, bubbleOf);
+      expect(s).toEqual({ excerpt: "hi" });
+      expect("author" in s).toBe(false);
+    }
+  });
+});

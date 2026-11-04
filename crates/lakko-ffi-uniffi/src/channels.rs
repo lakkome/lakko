@@ -667,8 +667,26 @@ pub struct FfiChannelMeta {
     pub language: String,
     /// Whether the owner lists the channel in the directory (ADR-0059 §2).
     /// A member shares only listed channels in a group. Defaults to false.
+    ///
+    /// ADR-0087 sections 6, 7 and 16: since meta v3 this is the channel's
+    /// PUBLIC flag (found by name, listed, read by anyone who subscribes);
+    /// the name `listed` is kept for the existing initialisers.
     #[uniffi(default = false)]
     pub listed: bool,
+    /// ADR-0087 section 3: the channel's `@name` as the owner's handle key
+    /// signed it for this channel's PublisherGroup id, or `None`. Its
+    /// `public` flag must equal `listed`.
+    #[uniffi(default = None)]
+    pub handle: Option<crate::conversation_meta::FfiConversationHandle>,
+    /// ADR-0087 section 18.2: the channel's photo, or `None`. Its keys are
+    /// SECRET to the subscribers.
+    #[uniffi(default = None)]
+    pub avatar: Option<crate::contacts::FfiAvatar>,
+    /// ADR-0087 section 13a: which reactions the channel's posts take.
+    /// `None` means all (the default); a decoded record never carries
+    /// `Some(All)`.
+    #[uniffi(default = None)]
+    pub reactions: Option<crate::conversation_meta::FfiAllowedReactions>,
 }
 
 impl From<ChannelMeta> for FfiChannelMeta {
@@ -679,21 +697,32 @@ impl From<ChannelMeta> for FfiChannelMeta {
             updated_at_ms: m.updated_at_ms,
             topic: m.topic,
             language: m.language,
-            listed: m.listed,
+            listed: m.public,
+            handle: m.handle.map(Into::into),
+            avatar: m.avatar.map(Into::into),
+            reactions: match m.reactions {
+                lakko_channels::AllowedReactions::All => None,
+                other => Some(other.into()),
+            },
         }
     }
 }
 
-impl From<FfiChannelMeta> for ChannelMeta {
-    fn from(m: FfiChannelMeta) -> Self {
-        Self {
+impl TryFrom<FfiChannelMeta> for ChannelMeta {
+    type Error = FfiError;
+
+    fn try_from(m: FfiChannelMeta) -> Result<Self, FfiError> {
+        Ok(Self {
             name: m.name,
             description: m.description,
             updated_at_ms: m.updated_at_ms,
             topic: m.topic,
             language: m.language,
-            listed: m.listed,
-        }
+            public: m.listed,
+            handle: m.handle.map(TryInto::try_into).transpose()?,
+            avatar: m.avatar.map(TryInto::try_into).transpose()?,
+            reactions: m.reactions.unwrap_or_default().into(),
+        })
     }
 }
 
@@ -708,6 +737,9 @@ pub enum FfiChannelPostKind {
     /// `error` carries the frozen reason code. Drop it, never
     /// render it as text.
     Malformed,
+    /// ADR-0087 section 13a: a well-formed ban list in `ban_list`. Never
+    /// shown as a post; keep the newest by `banListIsNewer`. Appended last.
+    BanList,
 }
 
 /// Result of [`classify_channel_post_plaintext`]. A flat record
@@ -724,6 +756,9 @@ pub struct FfiChannelPostContent {
     /// The frozen `ChannelMetaError::code()` when `kind == Malformed`
     /// (for example `name.empty`, `unknownVersion`).
     pub error: Option<String>,
+    /// The decoded ban list when `kind == BanList`.
+    #[uniffi(default = None)]
+    pub ban_list: Option<crate::channel_feedback::FfiBanList>,
 }
 
 /// Compose a channel metadata record — the PLAINTEXT to hand to
@@ -738,7 +773,7 @@ pub struct FfiChannelPostContent {
 /// `name.notTrimmed`, and the same under `description.`).
 #[uniffi::export]
 pub fn compose_channel_meta(meta: FfiChannelMeta) -> Result<Vec<u8>, FfiError> {
-    Ok(inner_compose_channel_meta(&ChannelMeta::from(meta))?)
+    Ok(inner_compose_channel_meta(&ChannelMeta::try_from(meta)?)?)
 }
 
 /// Classify a decrypted post plaintext: run this on EVERY post
@@ -747,25 +782,58 @@ pub fn compose_channel_meta(meta: FfiChannelMeta) -> Result<Vec<u8>, FfiError> {
 #[uniffi::export]
 #[must_use]
 pub fn classify_channel_post_plaintext(plaintext: Vec<u8>) -> FfiChannelPostContent {
+    let content = |kind, text, meta, error, ban_list| FfiChannelPostContent {
+        kind,
+        text,
+        meta,
+        error,
+        ban_list,
+    };
     match classify_post_plaintext(&plaintext) {
-        PostContent::Text(text) => FfiChannelPostContent {
-            kind: FfiChannelPostKind::Text,
-            text: Some(text.to_vec()),
-            meta: None,
-            error: None,
-        },
-        PostContent::Meta(meta) => FfiChannelPostContent {
-            kind: FfiChannelPostKind::Meta,
-            text: None,
-            meta: Some(meta.into()),
-            error: None,
-        },
-        PostContent::Malformed(e) => FfiChannelPostContent {
-            kind: FfiChannelPostKind::Malformed,
-            text: None,
-            meta: None,
-            error: Some(e.code()),
-        },
+        // ADR-0087: a post is the chat envelope; the caller parses `text`
+        // with `parseBodyEnvelope`.
+        PostContent::Message { plaintext, .. } => content(
+            FfiChannelPostKind::Text,
+            Some(plaintext.to_vec()),
+            None,
+            None,
+            None,
+        ),
+        PostContent::NotAPost => content(
+            FfiChannelPostKind::Malformed,
+            None,
+            None,
+            Some("notAPost".to_string()),
+            None,
+        ),
+        PostContent::Meta(meta) => content(
+            FfiChannelPostKind::Meta,
+            None,
+            Some((*meta).into()),
+            None,
+            None,
+        ),
+        PostContent::Malformed(e) => content(
+            FfiChannelPostKind::Malformed,
+            None,
+            None,
+            Some(e.code()),
+            None,
+        ),
+        PostContent::BanList(list) => content(
+            FfiChannelPostKind::BanList,
+            None,
+            None,
+            None,
+            Some(list.into()),
+        ),
+        PostContent::MalformedBanList(e) => content(
+            FfiChannelPostKind::Malformed,
+            None,
+            None,
+            Some(format!("banList.{}", e.code())),
+            None,
+        ),
     }
 }
 
@@ -789,14 +857,14 @@ pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: 
 // re-upload after every epoch rotation. A reader picks the seed for the
 // card's clear epoch with `memberCardEpoch`, then opens it.
 
-fn content_seed(seed: &[u8]) -> Result<ContentKeySeed, FfiError> {
+pub(crate) fn content_seed(seed: &[u8]) -> Result<ContentKeySeed, FfiError> {
     let arr: [u8; CONTENT_KEY_SEED_LEN] = seed
         .try_into()
         .map_err(|_| FfiError::Channels("content-key seed must be exactly 32 bytes".into()))?;
     Ok(ContentKeySeed::from_bytes_for_test(arr))
 }
 
-fn subscriber_pk_from_vec(pk: &[u8]) -> Result<[u8; SUBSCRIBER_PK_LEN], FfiError> {
+pub(crate) fn subscriber_pk_from_vec(pk: &[u8]) -> Result<[u8; SUBSCRIBER_PK_LEN], FfiError> {
     pk.try_into().map_err(|_| {
         FfiError::Channels(format!(
             "subscriber key must be exactly {SUBSCRIBER_PK_LEN} bytes, got {}",
@@ -900,7 +968,7 @@ pub fn max_member_card_profile_len() -> u32 {
 // Internal helpers
 // ---------------------------------------------------------
 
-fn channel_id_from_vec(slice: Vec<u8>) -> Result<[u8; CHANNEL_ID_LEN], FfiError> {
+pub(crate) fn channel_id_from_vec(slice: Vec<u8>) -> Result<[u8; CHANNEL_ID_LEN], FfiError> {
     slice
         .as_slice()
         .try_into()
@@ -1296,6 +1364,9 @@ mod tests {
             topic: 2,
             language: "en".to_string(),
             listed: true,
+            handle: None,
+            avatar: None,
+            reactions: None,
         }
     }
 

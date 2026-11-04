@@ -655,6 +655,223 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertEqual(directory.resolve(signatureKey: key).listLabel, "Alice Petrova · @alice")
     }
 
+    // MARK: - The name a person was found under (who-can-find-me section 6.1)
+
+    private func sentRow(
+        name: String?, username: String = "", key: Data?
+    ) -> SentContactRequest {
+        SentContactRequest(
+            recipientUsername: username, recipientAccountIdB64: "acct-b", messageId: 1, createdAt: "",
+            recipientName: name, recipientKeyB64: key.map { base64Encode($0) })
+    }
+
+    /// A directory over `persistence`, verifying as the app does: a check of
+    /// the stored username reads no certificate here, so it refuses.
+    private func relaunchable(
+        _ persistence: Persistence, checks: @escaping () -> Void = {}
+    ) -> ProfileDirectory {
+        let verifier = UsernameVerifier(resolve: { _ in .notRegistered }, defaults: defaults)
+        verifier.verifyBinding = { _, _ in
+            checks()
+            return false
+        }
+        let directory = ProfileDirectory(
+            received: ReceivedProfileStore(
+                persistence: persistence,
+                isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) }),
+            verifier: verifier,
+            ownStore: OwnProfileStore(defaults: defaults))
+        directory.setRenames(from: [])
+        directory.activate(accountIdB64: "acct", username: "valentin")
+        return directory
+    }
+
+    func testANewContactStandsUnderTheNameTheyWereFoundUnder() async {
+        let key = Data(repeating: 0x41, count: 32)
+        var checks = 0
+        let directory = relaunchable(Persistence()) { checks += 1 }
+        let before = directory.revision
+
+        let claim = SentRequests.foundClaim(
+            sentRow(name: "Anna Weber", username: "anna_w", key: key), signatureKey: key)
+        XCTAssertEqual(
+            directory.fileFoundName(
+                claim!, signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64),
+            .stored)
+
+        XCTAssertGreaterThan(directory.revision, before, "the row re-renders in place")
+        let resolved = directory.resolve(signatureKey: key)
+        XCTAssertEqual(resolved.name, "Anna Weber")
+        XCTAssertFalse(resolved.isPlaceholder)
+        XCTAssertEqual(resolved.verifiedUsername, "anna_w", "the search verified it")
+        XCTAssertFalse(resolved.usernameNotVerified)
+        await Task.yield()
+        XCTAssertEqual(checks, 0, "a check of this claim would refuse the pair for good")
+    }
+
+    func testTheNameStandsAfterARelaunchLikeAnyProfile() {
+        let key = Data(repeating: 0x42, count: 32)
+        let persistence = Persistence()
+        let first = relaunchable(persistence)
+        first.fileFoundName(
+            ProfileClaim(displayName: "Anna Weber", username: "anna_w", updatedAtMs: 0),
+            signatureKeyB64: base64Encode(key), accountIdB64: first.accountIdB64)
+
+        var checks = 0
+        let again = relaunchable(persistence) { checks += 1 }
+        let resolved = again.resolve(signatureKey: key)
+        XCTAssertEqual(resolved.name, "Anna Weber")
+        XCTAssertEqual(resolved.verifiedUsername, "anna_w")
+        XCTAssertEqual(checks, 0)
+    }
+
+    func testTheirOwnProfileReplacesTheFoundName() {
+        let key = Data(repeating: 0x43, count: 32)
+        let directory = relaunchable(Persistence())
+        directory.fileFoundName(
+            ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Anna W", username: nil, updatedAtMs: 7),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "Anna W")
+    }
+
+    /// A person who never set a name publishes at stamp 0, level with the
+    /// found name: strictly newer alone would keep the stand-in for good.
+    func testAProfileAtStampZeroStillReplacesTheFoundName() {
+        let key = Data(repeating: 0x44, count: 32)
+        let store = ReceivedProfileStore(
+            persistence: Persistence(),
+            isNewer: { profileIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1) })
+        store.activate(accountIdB64: "acct")
+        let keyB64 = base64Encode(key)
+        _ = store.accept(
+            ProfileClaim(displayName: nil, username: "anna_w", updatedAtMs: 0), signatureKeyB64: keyB64)
+
+        let own = ProfileClaim(
+            displayName: nil, username: "anna_w", updatedAtMs: 0,
+            accountId: Data(repeating: 1, count: 16), usernameCertificate: Data(repeating: 2, count: 8))
+        XCTAssertEqual(store.accept(own, signatureKeyB64: keyB64), .stored)
+        XCTAssertEqual(store.profile(signatureKeyB64: keyB64), own)
+        XCTAssertFalse(own.isFoundName)
+    }
+
+    func testAProfileSayingNothingDoesNotTakeTheNameAway() {
+        let key = Data(repeating: 0x45, count: 32)
+        let directory = relaunchable(Persistence())
+        directory.fileFoundName(
+            ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        directory.acceptReceived(
+            ProfileClaim(
+                displayName: nil, username: nil, updatedAtMs: 0, accountId: Data(repeating: 1, count: 16)),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "Anna Weber")
+    }
+
+    func testAFoundNameNeverReplacesAProfile() {
+        let key = Data(repeating: 0x46, count: 32)
+        let directory = relaunchable(Persistence())
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Anna W", username: nil, updatedAtMs: 7),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertEqual(
+            directory.fileFoundName(
+                ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0),
+                signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64),
+            .notNewer)
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "Anna W")
+    }
+
+    func testAFoundNameIsFiledOnlyForTheAccountThatFoundIt() {
+        let key = Data(repeating: 0x47, count: 32)
+        let directory = relaunchable(Persistence())
+        XCTAssertEqual(
+            directory.fileFoundName(
+                ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0),
+                signatureKeyB64: base64Encode(key), accountIdB64: "another"),
+            .inactive)
+        XCTAssertTrue(directory.resolve(signatureKey: key).isPlaceholder)
+    }
+
+    func testTheFoundClaimIsOnlyEverTheirs() {
+        let found = Data(repeating: 0x48, count: 32)
+        let other = Data(repeating: 0x49, count: 32)
+        let row = sentRow(name: "Anna Weber", key: found)
+
+        XCTAssertEqual(
+            SentRequests.foundClaim(row, signatureKey: found),
+            ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0))
+        XCTAssertNil(
+            SentRequests.foundClaim(row, signatureKey: other),
+            "the row matched by the account id the answer states, and another key signed it")
+        XCTAssertNil(SentRequests.foundClaim(sentRow(name: nil, key: found), signatureKey: found))
+        XCTAssertNil(SentRequests.foundClaim(sentRow(name: "  ", key: found), signatureKey: found))
+        XCTAssertNil(
+            SentRequests.foundClaim(sentRow(name: "Anna", key: nil), signatureKey: found),
+            "a row that does not say which key it found")
+        XCTAssertNil(
+            SentRequests.foundClaim(
+                sentRow(name: displayFingerprint(found), username: "anna_w", key: found),
+                signatureKey: found),
+            "a fingerprint names nobody")
+    }
+
+    func testAUsernameOnlyNameIsTheUsername() {
+        let key = Data(repeating: 0x4A, count: 32)
+        XCTAssertEqual(
+            SentRequests.foundClaim(sentRow(name: "@anna_w", username: "anna_w", key: key), signatureKey: key),
+            ProfileClaim(displayName: nil, username: "anna_w", updatedAtMs: 0))
+    }
+
+    /// The profile request asks while someone is unnamed. A found name is not
+    /// their profile: counted as a name, the asking that brings it would stop.
+    func testAFoundNameStillCountsAsUnnamedForTheProfileRequest() {
+        let key = Data(repeating: 0x4E, count: 32)
+        let directory = relaunchable(Persistence())
+        XCTAssertTrue(directory.countsAsUnnamed(signatureKey: key))
+
+        directory.fileFoundName(
+            ProfileClaim(displayName: "Anna Weber", username: "anna_w", updatedAtMs: 0),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertFalse(directory.resolve(signatureKey: key).isPlaceholder)
+        XCTAssertTrue(directory.countsAsUnnamed(signatureKey: key))
+
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Anna W", username: nil, updatedAtMs: 7),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertFalse(directory.countsAsUnnamed(signatureKey: key))
+    }
+
+    /// The verdict stays on this device: a new one reading the username with
+    /// no certificate would refuse it for good.
+    func testAFoundUsernameDoesNotTravelInAStateBundle() {
+        let key = Data(repeating: 0x4B, count: 32)
+        let bare = Data(repeating: 0x4C, count: 32)
+        let real = Data(repeating: 0x4D, count: 32)
+        let directory = relaunchable(Persistence())
+        directory.fileFoundName(
+            ProfileClaim(displayName: "Anna Weber", username: "anna_w", updatedAtMs: 0),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        directory.fileFoundName(
+            ProfileClaim(displayName: nil, username: "anna_w", updatedAtMs: 0),
+            signatureKeyB64: base64Encode(bare), accountIdB64: directory.accountIdB64)
+        let own = ProfileClaim(
+            displayName: "Boris", username: "boris", updatedAtMs: 3,
+            usernameCertificate: Data(repeating: 2, count: 8))
+        directory.acceptReceived(
+            own, signatureKeyB64: base64Encode(real), accountIdB64: directory.accountIdB64)
+
+        let carried = directory.profilesForBundle(accountIdB64: "acct")
+        XCTAssertEqual(
+            carried[base64Encode(key)],
+            ProfileClaim(displayName: "Anna Weber", username: nil, updatedAtMs: 0))
+        XCTAssertNil(carried[base64Encode(bare)])
+        XCTAssertEqual(carried[base64Encode(real)], own)
+    }
+
     /// A profile received by one account's work is not filed under another
     /// account that became active meanwhile.
     func testAProfileReceivedForAnotherAccountIsNotFiled() {
@@ -704,6 +921,143 @@ final class ProfileDirectoryTests: XCTestCase {
         let resolved = directory.resolve(signatureKey: key)
         XCTAssertEqual(resolved.name, "Mum")
         XCTAssertEqual(resolved.theirName, "Alice Petrova")
+    }
+
+    // MARK: ADR-0079 - a pending contact is named by its link's statement
+
+    private func pendingContact(
+        _ key: Data, name: String, username: String = "", hex: String = "a1"
+    ) -> PendingContact {
+        PendingContact(
+            accountIdHex: String(repeating: hex, count: 16), signaturePubkey: key,
+            x25519Pubkey: Data(repeating: 0x01, count: 32), displayName: name,
+            username: username, addedAtMs: 1, linkId: Data(repeating: 0x02, count: 16))
+    }
+
+    /// Seen live 2026-10-29: a pending contact read "Member" in a group
+    /// roster while the contact list named it from the link.
+    func testAPendingContactIsNamedByItsLinkLikeAProfileNotARename() {
+        let key = Data(repeating: 0x71, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        XCTAssertTrue(directory.resolve(signatureKey: key).isPlaceholder)
+
+        let before = directory.revision
+        directory.setPendingContacts([pendingContact(key, name: "  VG2 ", username: "vg2")])
+        XCTAssertGreaterThan(directory.revision, before, "a pending contact re-renders the names in place")
+        let resolved = directory.resolve(signatureKey: key)
+        XCTAssertEqual(resolved.name, "VG2")
+        XCTAssertEqual(resolved.source, .profileName, "the link states the person's own name, not a rename")
+        XCTAssertNil(resolved.verifiedUsername, "the link's username is a claim with no verdict")
+        XCTAssertFalse(resolved.usernameNotVerified)
+        XCTAssertNil(resolved.theirName)
+
+        let unchanged = directory.revision
+        directory.setPendingContacts([pendingContact(key, name: "  VG2 ", username: "vg2")])
+        XCTAssertEqual(directory.revision, unchanged, "the same list is not a change")
+    }
+
+    func testAReceivedProfileWinsOverAPendingContactsLink() {
+        let key = Data(repeating: 0x72, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        directory.setPendingContacts([pendingContact(key, name: "Link name")])
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Current name", username: nil, updatedAtMs: 5),
+            signatureKeyB64: base64Encode(key), accountIdB64: directory.accountIdB64)
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "Current name")
+    }
+
+    func testALocalRenameWinsOverAPendingContactsLink() {
+        let key = Data(repeating: 0x73, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        directory.setPendingContacts([pendingContact(key, name: "Link name")])
+        let contact = AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: 1, fromPubkey: key, fromAccountId: nil,
+                fromPseudonym: Data(count: 32), validAfterMs: 0, intro: nil, createdAt: ""),
+            displayName: "Mum")
+        directory.setRenames(from: [contact])
+        let resolved = directory.resolve(signatureKey: key)
+        XCTAssertEqual(resolved.name, "Mum")
+        XCTAssertEqual(resolved.source, .localRename)
+    }
+
+    func testRemovingThePendingContactGoesBackToThePlaceholder() {
+        let key = Data(repeating: 0x74, count: 32)
+        let other = Data(repeating: 0x75, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        directory.setPendingContacts([
+            pendingContact(key, name: "VG2"), pendingContact(other, name: "Other", hex: "b2"),
+        ])
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "VG2")
+
+        let before = directory.revision
+        directory.setPendingContacts([pendingContact(other, name: "Other", hex: "b2")])
+        XCTAssertGreaterThan(directory.revision, before, "a removal re-renders the names in place")
+        XCTAssertEqual(directory.resolve(signatureKey: key).name, "Member")
+        XCTAssertEqual(directory.resolve(signatureKey: other).name, "Other")
+
+        directory.setPendingContacts([pendingContact(other, name: "Other", hex: "b2")])
+        directory.deactivate()
+        XCTAssertTrue(directory.resolve(signatureKey: other).isPlaceholder, "no account, no pending names")
+    }
+
+    func testALinkStatingNothingIsNotAName() {
+        let key = Data(repeating: 0x76, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        let before = directory.revision
+        directory.setPendingContacts([pendingContact(key, name: "   ")])
+        XCTAssertEqual(directory.revision, before)
+        XCTAssertTrue(directory.resolve(signatureKey: key).isPlaceholder)
+    }
+
+    /// The link's username is shown only with a verdict for the pair, and a
+    /// resolve never starts a check for it: the check reads the certificate
+    /// a received profile carried, and a link carries none, so a check would
+    /// record a refusal a later profile with a certificate could not undo.
+    func testAPendingContactsUsernameIsShownOnlyWithAVerdictAndNeverStartsACheck() async {
+        let key = Data(repeating: 0x77, count: 32)
+        final class Counter { var lookups = 0 }
+        let counter = Counter()
+        let (directory, verifier) = makeDirectory { _ in
+            counter.lookups += 1
+            return .signatureKey(key)
+        }
+        directory.verifiesOnResolve = true
+        directory.setPendingContacts([pendingContact(key, name: "", username: "vg2")])
+        let unverified = directory.resolve(signatureKey: key)
+        XCTAssertTrue(unverified.isPlaceholder, "a username without a verdict is no name")
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(counter.lookups, 0, "no check is started for a link's username")
+        XCTAssertNil(verifier.state(signatureKeyB64: base64Encode(key), username: "vg2"))
+
+        await verifier.verify(signatureKeyB64: base64Encode(key), username: "vg2")
+        let verified = directory.resolve(signatureKey: key)
+        XCTAssertEqual(verified.name, "@vg2")
+        XCTAssertEqual(verified.source, .verifiedUsername)
+    }
+
+    /// The "is something known about this key" predicate counts a pending
+    /// contact: a key known only by its link is not resolved as a proven
+    /// predecessor's name, and a key known by nothing resolves through a
+    /// predecessor known only by its link.
+    func testAPendingContactCountsAsSomethingKnownAcrossAProvenRotation() {
+        let oldKey = Data(repeating: 0x78, count: 32)
+        let newKey = Data(repeating: 0x79, count: 32)
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        var map = ProvenPredecessors()
+        map.record(oldKeyB64: base64Encode(oldKey), newKeyB64: base64Encode(newKey), evidence: .verifiedProof)
+        directory.setProvenPredecessors(map)
+
+        directory.setPendingContacts([pendingContact(oldKey, name: "Linked")])
+        XCTAssertEqual(directory.resolve(signatureKey: newKey).name, "Linked", "the same person, by proof")
+
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Old profile", username: nil, updatedAtMs: 5),
+            signatureKeyB64: base64Encode(oldKey), accountIdB64: directory.accountIdB64)
+        directory.setPendingContacts([pendingContact(newKey, name: "Linked now")])
+        XCTAssertEqual(
+            directory.resolve(signatureKey: newKey).name, "Linked now",
+            "a key known by its own link is not resolved through another key")
     }
 
     func testTheOwnProfileEnvelopeRoundTripsThroughTheCore() throws {

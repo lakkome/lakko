@@ -74,6 +74,7 @@ import { clearSpendOwed } from "../contacts/rotation-spent";
 import { clearInviteLinkSecrets } from "../contacts/invite-link-secrets";
 import { deleteMintedLinksForAccount } from "../contacts/minted-links";
 import { deletePendingContactsForAccount } from "../contacts/pending-contacts";
+import { deleteCarriedCopiesForAccount } from "../contacts/carried-copies";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
@@ -85,6 +86,7 @@ import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
+import { deleteMembershipEndRow } from "../chat/membership-end-idb";
 import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deletePinRow } from "../chat/pin-idb";
@@ -94,12 +96,14 @@ import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
+import { clearClaimedHandles } from "../channels/claimed-handles";
 import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
 import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteAvatarCache } from "../profile/avatar-cache-idb";
+import { deleteAccountKv } from "../storage/account-kv";
 import { clearOwnProfile } from "../profile/own-profile";
 import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
@@ -127,6 +131,7 @@ import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearRestoredKnownGroups } from "../backup/restored-known-groups";
 import { clearBackupRestoreOwed } from "../backup/restore-owed";
+import { clearRestoreMarker } from "../backup/restored-marker";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
@@ -211,13 +216,18 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // keys since reset. Its own step: a plain localStorage row that must go
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
+    { name: "channels-claimed-handles", run: () => clearClaimedHandles(accountIdB64) },
     // ADR-0074 section 3.5: which channels' owner key moved to the key of a
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
     { name: "avatars", run: () => deleteAvatarCache(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
+    { name: "account-kv", run: () => deleteAccountKv(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
+    // ADR-0087 section 9: ends under way, the notices not yet closed and the
+    // Welcomes held.
+    { name: "membership-end", run: () => deleteMembershipEndRow(accountIdB64) },
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },
@@ -244,6 +254,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // ADR-0079: the inviters added through a link, and what was written to
     // them before their app answered.
     { name: "pending-contacts", run: () => deletePendingContactsForAccount(accountIdB64) },
+    // The display-only copies of what this account wrote to a pending
+    // contact on another of its devices (pairing state bundle v3).
+    { name: "carried-copies", run: () => deleteCarriedCopiesForAccount(accountIdB64) },
     { name: "push-routing", run: () => clearGroupRoutingForAccount(accountIdB64) },
     // ADR-0073 R.8: the service worker's copy of the keys a reset retired.
     { name: "superseded-mirror", run: () => clearSupersededMirrorForAccount(accountIdB64) },
@@ -326,6 +339,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
     // ADR-0073 R.5: the "a lineage register is not confirmed sent" marker.
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
+    // Reactions D3 and section 12: the quick-reaction send marker and the
+    // unseen-reactions list.
+    { name: "quick-reaction-unsent", run: () => removeLocal(`lakko.quick-reaction.unsent.v1.${accountIdB64}`) },
+    { name: "unseen-reactions", run: () => removeLocal(`lakko.unseen-reactions.v1:${accountIdB64}`) },
     // ADR-0080: the cards of the account's devices, this device's own card,
     // its city answer and its "Show my city" switch.
     { name: "device-cards", run: () => removeLocal(cardsStorageKey(accountIdB64)) },
@@ -346,6 +363,12 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
     },
     { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
+    // Identity-recovery 17.5: the "device acknowledgement is not confirmed
+    // sent" marker.
+    {
+      name: "device-ack-unsent",
+      run: () => removeLocal(`lakko.device-ack.unsent.v1.${accountIdB64}`),
+    },
     // ADR-0079: the "link-record register is not confirmed sent" marker,
     // the claims of link requests (seen from the account's other devices and
     // this device's own, reworked 2026-10-17), and the ledger-row deletions
@@ -389,6 +412,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // joined yet, and the "backup not consulted yet" flag (2026-10-02).
     { name: "restored-known-groups", run: () => clearRestoredKnownGroups(accountIdB64) },
     { name: "backup-restore-owed", run: () => clearBackupRestoreOwed(accountIdB64) },
+    { name: "backup-restored-marker", run: () => clearRestoreMarker(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },

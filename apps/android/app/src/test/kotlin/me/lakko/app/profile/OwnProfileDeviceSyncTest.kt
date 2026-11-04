@@ -157,4 +157,48 @@ class OwnProfileDeviceSyncTest {
         assertEquals(500L, claimed.nameUpdatedAtMs)
         assertEquals("Alice", claimed.displayName)
     }
+
+    // ---------------------------------------------------------------- backup
+
+    @Test
+    fun `the backup envelope carries the name, the username and the stored stamp`() {
+        val profile = OwnProfile("Anna", "anna", updatedAtMs = 900L, nameUpdatedAtMs = 500L)
+        var composed: FfiProfile? = null
+        val wire = ownProfileBackupEnvelope(profile, ownAccount) {
+            composed = it
+            byteArrayOf(1)
+        }
+        assertArrayEquals(byteArrayOf(1), wire)
+        assertEquals("Anna", composed?.displayName)
+        assertEquals("anna", composed?.username)
+        assertEquals(500uL, composed?.updatedAtMs)
+    }
+
+    @Test
+    fun `a name never saved goes into no backup`() {
+        val unnamed = OwnProfile(null, "anna", updatedAtMs = 0L, nameUpdatedAtMs = 0L)
+        assertNull(ownProfileBackupEnvelope(unnamed, ownAccount) { byteArrayOf(1) })
+        assertNull(ownProfileBackupEnvelope(null, ownAccount) { byteArrayOf(1) })
+    }
+
+    @Test
+    fun `a restore on an empty device takes the name and the username`() {
+        val adopted = adoptOwnProfileFromBackup(null, incoming("Anna", 500uL), ownAccount)
+        assertEquals("Anna", adopted?.displayName)
+        assertEquals("someone_else", adopted?.username)
+        assertEquals(500L, adopted?.nameUpdatedAtMs)
+    }
+
+    @Test
+    fun `a restore never replaces something newer, nor another account's`() {
+        val held = OwnProfile("Newer", "anna", updatedAtMs = 900L, nameUpdatedAtMs = 900L)
+        assertNull(adoptOwnProfileFromBackup(held, incoming("Older", 500uL), ownAccount))
+        assertNull(adoptOwnProfileFromBackup(null, incoming("Other", 500uL, accountId = otherAccount), ownAccount))
+    }
+
+    @Test
+    fun `a restore keeps the username this session states`() {
+        val held = OwnProfile(null, "anna", updatedAtMs = 0L, nameUpdatedAtMs = 0L)
+        assertEquals("anna", adoptOwnProfileFromBackup(held, incoming("Anna", 500uL), ownAccount)?.username)
+    }
 }

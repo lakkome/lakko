@@ -61,5 +61,15 @@ public fun scopedEnvelopeKindOf(bytes: ByteArray): ScopedEnvelopeKind? {
     return null
 }
 
+/**
+ * Whether a committer-delegation envelope is kept: its sender resolved at
+ * receipt (C-68) to a person of the group. Being this account does not refuse
+ * it: a device never receives its own group messages, so one from this account
+ * came from another of its devices, which proposed the Add this device may
+ * sweep and is the only way to the added person this device has.
+ */
+public fun keepsCommitterDelegation(senderKey: String?, memberPersonKeys: List<String>): Boolean =
+    senderKey != null && senderKey in memberPersonKeys
+
 /** `'l'`, the first byte of every `lakko/...` domain. */
 private const val SERVICE_ENVELOPE_FIRST_BYTE: Int = 0x6c

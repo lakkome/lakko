@@ -442,7 +442,7 @@ public enum ChatFolders {
     /// Whether a change set writes anything at all.
     public static func isEmpty(_ c: FolderChangeSet) -> Bool {
         c.metas.isEmpty && c.members.isEmpty && c.pins.isEmpty && c.removed.isEmpty
-            && c.order == nil && c.saved.isEmpty
+            && c.order == nil && c.saved.isEmpty && c.conversationEnds.isEmpty
     }
 
     // MARK: - Suggested folders (UX spec 4)

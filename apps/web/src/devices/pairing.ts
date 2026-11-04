@@ -25,6 +25,7 @@
  */
 import { loadWasm } from "../wasm";
 import { LOGIN_HANDLE_LEN, LoginHandleUsernameError, loginHandleFor } from "../auth/login-handle";
+import { storedCardOf, type DeviceCardLike, type StoredDeviceCard } from "./device-cards";
 
 /** Length of the rendezvous pseudonym in bytes. Pinned at 32 —
  *  matches `lakko_mls::pairing::RENDEZVOUS_PSEUDONYM_LEN` on
@@ -47,6 +48,7 @@ export interface PairingCore {
     loginHandle: Uint8Array,
     keyPackage: Uint8Array,
     rendezvousPseudonym: Uint8Array,
+    deviceCardEnvelope?: Uint8Array | null,
   ): Uint8Array;
   decodePairingQr(
     bytes: Uint8Array,
@@ -55,6 +57,9 @@ export interface PairingCore {
     readonly keyPackage: Uint8Array;
     readonly rendezvousPseudonym: Uint8Array;
     readonly selfRemovalProof?: Uint8Array | undefined;
+    /** docs/ux/second-device.md section 2.1: the new device's own card,
+     *  `undefined` when absent or undecodable. Display only. */
+    readonly deviceCard?: (DeviceCardLike & { free(): void }) | undefined;
   };
 }
 
@@ -96,6 +101,7 @@ export function buildPairingQrPayloadWith(
   loginHandle: Uint8Array,
   keyPackage: Uint8Array,
   rendezvousPseudonym: Uint8Array,
+  deviceCardEnvelope: Uint8Array | null = null,
 ): Uint8Array {
   if (loginHandle.length !== LOGIN_HANDLE_LEN) {
     throw new Error(`loginHandle must be ${LOGIN_HANDLE_LEN} bytes (got ${loginHandle.length})`);
@@ -106,7 +112,9 @@ export function buildPairingQrPayloadWith(
         `(got ${rendezvousPseudonym.length})`,
     );
   }
-  return core.encodePairingQr(loginHandle, keyPackage, rendezvousPseudonym);
+  return deviceCardEnvelope === null
+    ? core.encodePairingQr(loginHandle, keyPackage, rendezvousPseudonym)
+    : core.encodePairingQr(loginHandle, keyPackage, rendezvousPseudonym, deviceCardEnvelope);
 }
 
 /**
@@ -116,6 +124,9 @@ export function buildPairingQrPayloadWith(
  * fresh device wants to join. `keyPackage` is the TLS-encoded `KeyPackage`
  * from the joining device's DeviceIdentity (ADR-0007). `rendezvousPseudonym`
  * is the 32-byte slot from [`generateRendezvousPseudonym`].
+ * `deviceCardEnvelope` (docs/ux/second-device.md section 2.1) is this
+ * device's own device-card envelope, so the signed-in device can name it;
+ * `null` builds a payload without one.
  *
  * Throws on wrong-length inputs — caller bugs surface synchronously, not
  * deep inside the QR-render call.
@@ -124,9 +135,10 @@ export async function buildPairingQrPayload(
   loginHandle: Uint8Array,
   keyPackage: Uint8Array,
   rendezvousPseudonym: Uint8Array,
+  deviceCardEnvelope: Uint8Array | null = null,
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
-  return buildPairingQrPayloadWith(wasm, loginHandle, keyPackage, rendezvousPseudonym);
+  return buildPairingQrPayloadWith(wasm, loginHandle, keyPackage, rendezvousPseudonym, deviceCardEnvelope);
 }
 
 /** Result of [`parsePairingQrPayload`]. */
@@ -141,6 +153,10 @@ export interface DecodedPairingQr {
    *  device's self-removal proof (137 bytes, not verified here), else
    *  `null`. */
   readonly selfRemovalProof: Uint8Array | null;
+  /** docs/ux/second-device.md section 2.1: what the new device says about
+   *  itself, or `null`. Nothing checks it; it names the device on the
+   *  confirm step and its row until its own card arrives. */
+  readonly deviceCard: StoredDeviceCard | null;
 }
 
 /** The screen copy for a codec refusal: the core's messages are stable
@@ -174,7 +190,25 @@ export function parsePairingQrPayloadWith(
     keyPackage: decoded.keyPackage,
     rendezvousPseudonym: decoded.rendezvousPseudonym,
     selfRemovalProof: decoded.selfRemovalProof ?? null,
+    deviceCard: cardOfDecoded(decoded.deviceCard),
   };
+}
+
+/** The decoded payload's card as this client keeps it; the wasm handle is
+ *  freed. A card this client cannot read gives `null`, never an error. */
+function cardOfDecoded(card: (DeviceCardLike & { free(): void }) | undefined): StoredDeviceCard | null {
+  if (card === undefined) return null;
+  try {
+    return storedCardOf(card);
+  } catch {
+    return null;
+  } finally {
+    try {
+      card.free();
+    } catch {
+      // Already freed.
+    }
+  }
 }
 
 /**

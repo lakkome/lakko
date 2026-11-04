@@ -40,9 +40,6 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import java.text.DateFormat
-import java.util.Date
-import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -133,7 +130,7 @@ internal fun RecallRoot(repository: AuthRepository, ui: RecallUi, modifier: Modi
 private fun mediumDate(atMs: Long): String {
     val language = LocalStrings.current.language
     return remember(atMs, language) {
-        DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.forLanguageTag(language)).format(Date(atMs))
+        me.lakko.app.l10n.DeviceFormats.mediumDate(atMs, language)
     }
 }
 

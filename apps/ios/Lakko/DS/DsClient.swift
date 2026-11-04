@@ -421,6 +421,25 @@ public final class DsClient {
         )
     }
 
+    /// ADR-0087 section 5 — `DELETE /ds/group/{hex}/knocks?through=<id>`
+    /// behind `Reject all`: the rows up to the last one this admin saw go, a
+    /// request that arrived after stays. Write tier, signed like a read.
+    public func deleteKnocks(groupId: Data, through: Int64, auth: DsAuth? = nil) async throws {
+        guard !groupId.isEmpty else {
+            throw DsClientError.argument("groupId must be non-empty")
+        }
+        let endpoint = "/ds/group/\(Self.pseudonymHex(groupId))/knocks"
+        let (data, http) = try await send(
+            method: "DELETE", endpoint: endpoint,
+            queryItems: [URLQueryItem(name: "through", value: String(through))],
+            auth: auth, acceptAnyStatus: true)
+        guard (200..<300).contains(http.statusCode) else {
+            throw DsClientError.http(
+                status: http.statusCode, endpoint: endpoint,
+                body: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
     private func doFetch(
         endpoint: String,
         after: Int64?,

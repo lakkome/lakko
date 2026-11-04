@@ -13,7 +13,8 @@
  *   1. [`applyOp`] — fold an (already-authorized) op into a
  *      mutation-overlay map, returning a NEW map (replace-to-
  *      rerender for SolidJS). Edit sets the text, delete sets the
- *      tombstone, reaction toggles `(reactor, emoji)`.
+ *      tombstone, a reaction adds or takes off `(reactor, emoji)` through
+ *      the core's fold (`foldReactions`).
  *
  *   2. [`editDeleteAuthorized`] — the author-only integrity gate
  *      (ADR-0023, invariant #4): an edit / delete is applied ONLY
@@ -35,14 +36,29 @@
  * Dave` commit (ADR-0045 composes both into ONE commit) leaves
  * Dave holding Bob's index, and a leaf comparison then reads Dave
  * as Bob — free rein to edit and delete Bob's history and to
- * toggle off Bob's reactions. See `author-identity.ts` for the
+ * take off Bob's reactions. A reactor is the ACCOUNT key the leaf resolves
+ * to (ADR-0050), so one person on two devices is one reactor. See `author-identity.ts` for the
  * resolution rule and the reason it must happen at receipt.
  */
 
 import {
+  foldReactions as wasmFoldReactions,
+  ReactionOp as WasmReactionOp,
+} from "../../wasm/lakko_ffi_wasm";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import {
   OWN_REACTION_SENTINEL as OWN_SENTINEL,
   type MemberIdentity,
 } from "./author-identity";
+
+/** One reaction a person holds on a message after the fold: who (the
+ *  account key, base64), which emoji, and the journal position (DS message
+ *  id) of the add that gave it. */
+export interface HeldReactionRecord {
+  readonly person: MemberIdentity;
+  readonly emoji: string;
+  readonly at: number;
+}
 
 /** The session-scoped mutation overlay for one message, keyed in
  *  the timeline's `msgOps` map on the target's DS `messageId`.
@@ -59,15 +75,14 @@ export interface MessageOpState {
    *  message is keyed on (ADR-0082 section 5). `undefined` = no such op
    *  seen, or one applied without an id (a local-only op). */
   lastOpId?: number;
-  /** emoji → set of reactor IDENTITIES (base64 signature keys),
-   *  never leaf indices: a departing member's leaf is handed to
-   *  the next member added, so a leaf-keyed set lets a newcomer
-   *  toggle the departed member's reaction off and merge their own
-   *  into the departed member's count. A sentinel
-   *  ([`OWN_REACTION_SENTINEL`]) records an own reaction whose key
-   *  the client couldn't resolve; it still toggles + counts. Empty
-   *  sets are pruned so a chip vanishes when its last reactor
-   *  toggles off. */
+  /** What each person holds, as the Rust fold left it (UX
+   *  reactions-and-emoji sections 10 and 17): at most three per person, an
+   *  ignored fourth stays ignored. Ordered by `at`. The source of truth;
+   *  {@link reactions} is derived from it. */
+  held: readonly HeldReactionRecord[];
+  /** emoji → set of reactor IDENTITIES (base64 ACCOUNT keys, ADR-0050),
+   *  derived from {@link held}. Never leaf indices: a departing member's
+   *  leaf is handed to the next member added. Empty sets do not occur. */
   reactions: Map<string, Set<MemberIdentity>>;
 }
 
@@ -87,9 +102,14 @@ export type OverlayOp =
       op: "reaction";
       target: number;
       emoji: string;
-      /** The reactor's signature key, resolved from its MLS leaf at
+      /** The reactor's account key, resolved from its MLS leaf at
        *  receipt — see the module doc on why not the leaf. */
       reactor: MemberIdentity;
+      /** Explicit add or take off. */
+      action: "add" | "remove";
+      /** The op's own journal position (its DS message id): ops are folded
+       *  in this order on every member. */
+      at: number;
     };
 
 /** Re-exported so the reaction call sites take the sentinel from
@@ -97,19 +117,82 @@ export type OverlayOp =
  *  `author-identity.ts` alongside the identity type it inhabits. */
 export const OWN_REACTION_SENTINEL = OWN_SENTINEL;
 
-/** The fixed reaction palette offered by the picker (kept here so
- *  the UI + any future test share one definition). */
-export const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+/** Derive the `emoji -> people` view of what is held, in `at` order. */
+export function reactionsFromHeld(
+  held: readonly HeldReactionRecord[],
+): Map<string, Set<MemberIdentity>> {
+  const out = new Map<string, Set<MemberIdentity>>();
+  for (const h of held) {
+    const set = out.get(h.emoji) ?? new Set<MemberIdentity>();
+    set.add(h.person);
+    out.set(h.emoji, set);
+  }
+  return out;
+}
+
+/** The emoji `person` holds on a message. */
+export function heldBy(
+  state: MessageOpState | undefined,
+  person: MemberIdentity | null | undefined,
+): string[] {
+  if (state === undefined || person === null || person === undefined) return [];
+  return state.held.filter((h) => h.person === person).map((h) => h.emoji);
+}
+
+/** Decode a reactor identity to the 32-byte key the fold keys on, or
+ *  `null` (an undecodable identity takes no part in the fold). */
+function personBytes(person: MemberIdentity): Uint8Array | null {
+  try {
+    const b = base64Decode(person);
+    return b.length === 32 ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply one reaction op on top of what is held, through the core's fold
+ * (`foldReactions`, the one rule every member computes alike). What is held
+ * re-enters the fold as the adds that gave it, at their own positions, then
+ * the new op: the same result as folding the whole history, since an ignored
+ * add never re-enters.
+ */
+function foldHeld(
+  held: readonly HeldReactionRecord[],
+  op: Extract<OverlayOp, { op: "reaction" }>,
+): HeldReactionRecord[] {
+  // The inputs cross by value (the core takes them), so they are not freed
+  // here; the glue's finalizers release whatever is left.
+  const inputs: WasmReactionOp[] = [];
+  for (const h of held) {
+    const p = personBytes(h.person);
+    if (p === null) continue;
+    inputs.push(new WasmReactionOp(p, h.emoji, "add", BigInt(Math.max(0, h.at))));
+  }
+  const p = personBytes(op.reactor);
+  if (p === null) return [...held];
+  inputs.push(new WasmReactionOp(p, op.emoji, op.action, BigInt(Math.max(0, op.at))));
+  return wasmFoldReactions(inputs).map((r) => {
+    const rec: HeldReactionRecord = {
+      person: base64Encode(r.person),
+      emoji: r.emoji,
+      at: Number(r.at),
+    };
+    r.free();
+    return rec;
+  });
+}
 
 /**
  * Fold one (already-authorized) op into the overlay map, returning
  * a NEW map (the previous map is never mutated, so a stale signal
- * value stays valid). Pure + total.
+ * value stays valid). Pure + total apart from the core fold.
  *
  *   - `edit`     → set `editedText`.
  *   - `delete`   → set `deleted`.
- *   - `reaction` → toggle `(reactor, emoji)`; an empty emoji set
- *     is pruned.
+ *   - `reaction` → add or take off `(reactor, emoji)` through the core's
+ *     fold: at most three per person, an add of a held emoji and a remove of
+ *     one not held are no-ops.
  */
 export function applyOp(
   prev: Map<number, MessageOpState>,
@@ -117,16 +200,12 @@ export function applyOp(
 ): Map<number, MessageOpState> {
   const next = new Map(prev);
   const cur = next.get(op.target);
-  // Clone the per-message state (incl. the reactions map) so we
-  // never mutate the object the previous map points at. Optional
-  // fields are spread conditionally for `exactOptionalPropertyTypes`.
   const state: MessageOpState = {
     ...(cur?.editedText !== undefined ? { editedText: cur.editedText } : {}),
     ...(cur?.deleted !== undefined ? { deleted: cur.deleted } : {}),
     ...(cur?.lastOpId !== undefined ? { lastOpId: cur.lastOpId } : {}),
-    reactions: cur
-      ? new Map([...cur.reactions].map(([k, v]) => [k, new Set(v)]))
-      : new Map(),
+    held: cur?.held ?? [],
+    reactions: cur ? new Map([...cur.reactions].map(([k, v]) => [k, new Set(v)])) : new Map(),
   };
   if (op.op === "edit") {
     state.editedText = op.text;
@@ -135,18 +214,9 @@ export function applyOp(
     state.deleted = true;
     if (op.opId !== undefined) state.lastOpId = op.opId;
   } else {
-    const reactors =
-      state.reactions.get(op.emoji) ?? new Set<MemberIdentity>();
-    if (reactors.has(op.reactor)) {
-      reactors.delete(op.reactor);
-    } else {
-      reactors.add(op.reactor);
-    }
-    if (reactors.size === 0) {
-      state.reactions.delete(op.emoji);
-    } else {
-      state.reactions.set(op.emoji, reactors);
-    }
+    const held = foldHeld(state.held, op);
+    state.held = held;
+    state.reactions = reactionsFromHeld(held);
   }
   next.set(op.target, state);
   return next;

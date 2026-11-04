@@ -92,6 +92,16 @@
 //! - `POST   /ds/mailbox/{mailbox_hex}/reach/check` — is this reach key registered? (ADR-0060)
 //! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (token)
 //! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
+//! - `DELETE /ds/group/{group_id_hex}/knocks`      — an admin clears the knocks, `?through=` (write
+//!   tier, ADR-0087 section 5)
+//! - `PUT    /ds/directory/{id_hex}/claim`         — claim a circle directory under its owner key
+//!   (ADR-0086; `src/directory.rs`; spends a `circle-claim` token)
+//! - `POST   /ds/directory/{id_hex}/write`         — the owner's one write: head, edges, chain,
+//!   filter, rows, and the next read key when the epoch moves
+//! - `GET    /ds/directory/{id_hex}/header`        — public: the head, `?nodes=` the path, `?chain_from=`
+//! - `GET    /ds/directory/{id_hex}/filter`        — the filter, under the current read key
+//! - `GET    /ds/directory/{id_hex}/rows/{index}`  — one row, under the current read key
+//! - `DELETE /ds/directory/{id_hex}`               — the owner deletes the directory
 //!
 //! See `~/.claude/plans/1-nested-wreath.md` §4 (MLS Delivery Service).
 
@@ -99,6 +109,7 @@
 
 mod access;
 mod commit;
+mod directory;
 mod journal;
 mod ownership;
 mod reach;
@@ -284,7 +295,34 @@ pub(crate) fn build_app(state: AppState) -> Router {
             post(reach::post_reach_check),
         )
         .route("/ds/group/{group_hex}/knock", post(access::post_knock))
-        .route("/ds/group/{group_hex}/knocks", get(access::get_knocks))
+        .route(
+            "/ds/group/{group_hex}/knocks",
+            get(access::get_knocks).delete(access::delete_knocks),
+        )
+        .route(
+            "/ds/directory/{directory_hex}/claim",
+            put(directory::put_claim).layer(DefaultBodyLimit::max(directory::MAX_WRITE_BODY)),
+        )
+        .route(
+            "/ds/directory/{directory_hex}/write",
+            post(directory::post_write).layer(DefaultBodyLimit::max(directory::MAX_WRITE_BODY)),
+        )
+        .route(
+            "/ds/directory/{directory_hex}/header",
+            get(directory::get_header),
+        )
+        .route(
+            "/ds/directory/{directory_hex}/filter",
+            get(directory::get_filter),
+        )
+        .route(
+            "/ds/directory/{directory_hex}/rows/{index}",
+            get(directory::get_row),
+        )
+        .route(
+            "/ds/directory/{directory_hex}",
+            axum::routing::delete(directory::delete_directory),
+        )
         .layer(DefaultBodyLimit::max(journal::MAX_MESSAGE_BYTES))
         // The request span names the method and the route template, never
         // the URI: a path carries a mailbox address or a journal id, which a

@@ -520,7 +520,7 @@ data class KeyRotateFinishRequest(
  *  issued at the new generation (the caller's old pair is superseded). */
 @Serializable
 data class KeyResetFinishResponse(
-    /** base64url (no padding) of the signed 177-byte `KeyResetAttestation`. */
+    /** base64url (no padding) of the signed 145-byte `KeyResetAttestation`. */
     val key_reset_attest_b64: String,
     val key_generation: Long,
     val session_token: String,
@@ -693,6 +693,24 @@ data class RecoveryEmailStatusResponse(
     val vault: Boolean = false,
     val phrase_saved: Boolean = false,
     val totp: Boolean = false,
+)
+
+/** `GET /account/phrase` (bearer, ADR-0075 section 3 as amended 2026-11-01).
+ *  Answered on a server that sends no mail too. Both fields are required: a
+ *  body without them is a failure, never a guessed path. */
+@Serializable
+data class AccountPhraseResponse(
+    /** The owner saved a recovery phrase. */
+    val saved: Boolean,
+    /** The current phrase was ever sealed in an email vault: saving it takes
+     *  a key rotation. */
+    val rotation_needed: Boolean,
+)
+
+/** `POST /account/phrase/saved` (bearer + fresh-auth grant). */
+@Serializable
+data class PhraseSavedRequest(
+    val fresh_grant: String,
 )
 
 /** `POST /recovery-email/enrol/start` (bearer). The address is sent as typed

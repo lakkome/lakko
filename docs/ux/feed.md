@@ -35,8 +35,9 @@ across them without opening each one. A feed answers that.
 Twitter and Bluesky build feeds on a server that reads every post. Lakko's
 server reads none, so **every feed is built on the device** from messages
 the device has already received and decrypted. Three consequences shape
-everything below, and the UI says the first two out loud rather than
-hiding them:
+everything below,
+shaping what the person sees (the Feed itself carries no sentence about it,
+maintainer 2026-10-31: it told a person nothing they could act on):
 
 1. **A feed shows what this device has.** A new device, or one that was
    offline for a month, has a short feed. Messages expire from the server
@@ -45,7 +46,7 @@ hiding them:
 2. **The server cannot rank for you.** "Your own algorithm" is a set of
    rules the device runs, not a service you subscribe to. Rules can be
    shared as a file; they contain no messages.
-3. **Recommendations cost a little privacy, stated per source.** The
+3. **Recommendations cost a little privacy.** The
    shortlist tells the server which topics you picked; a search tells it
    what you typed; group-shared channels tell it nothing.
 
@@ -88,6 +89,32 @@ A reply is not an item of its own: it joins its parent. If the parent is
 not on this device (it expired, or it predates the device), the reply is
 shown alone with the quote it carries (ADR-0052 keeps a snapshot of the
 quoted text), marked "Reply to an earlier message".
+
+**Layout, identical on the three clients (maintainer, 2026-10-31).** One
+item reads like a post, left aligned, never centred:
+
+```
+[avatar]  Source name                      14:32
+          Author (groups only)
+          Forwarded from ...
+          Text, as many lines as it has up to 8, wrapped, left aligned
+          [photo / video / GIF / voice, in the text column]
+          Why line
+          3 reactions row
+          ----------
+          3 replies   Anna: newest reply
+```
+
+- The **source avatar** (40 px, the same tone and initials as the
+  conversation's row in Chats) is the left column; everything else sits in
+  the column beside it, so a person scans a column of names.
+- A card is as tall as its content. It never shrinks to fit the list, and
+  nothing inside it is cut by the card's edge. Text longer than 8 lines ends
+  in an ellipsis; opening the item shows the rest.
+- Media is the same bubble as in the chat, inline, playing in place. The
+  whole first row and text open the conversation at that message; the media
+  and the reply row keep their own actions.
+- Wide screens keep the content width of 720 px; the column does not stretch.
 
 Edits show the current text with "(edited)"; a deleted message leaves the
 feed. Service envelopes (names, pins, beacons, profiles) never appear.
@@ -236,23 +263,22 @@ encrypted until you subscribe):
 The first time the person opens Discover, one card:
 
 > **Pick a few topics.** Lakko downloads suggestions for them, mixed with
-> a few random topics so Lakko's server can't tell exactly which ones you
-> picked. It never sees which channels you open.
+> a few random topics.
 > [topic chips] [Language] [Save] [Not now]
 
 Topics come from a fixed list (the same list a channel owner picks from).
 Along with the picked topics the client downloads a few random ones and
 discards them (maintainer, 2026-09-28: on by default); a switch in the
-Discover menu, "Mix in random topics", turns it off, with the line "Uses
-less data. Lakko's server will see exactly which topics you picked."
+Discover menu, "Mix in random topics", turns it off. No line sits under
+the switch (maintainer decision, 2026-10-28).
 The language defaults to the app language. The choice is editable from the
 Discover menu. With no topics picked, the shortlist is not downloaded at
 all and Discover shows only group-shared suggestions and search.
 
 ### 6.2 Search
 
-A search field at the top of Discover, with helper text under it the first
-time: "Searches are sent to Lakko's server." Results are channel cards.
+A search field at the top of Discover, with no helper text under it
+(maintainer decision, 2026-10-28). Results are channel cards.
 Search is Discover's own: the global search of `navigation.md` section 4
 (exact names only) is unchanged.
 
@@ -267,7 +293,7 @@ interested, no Hide this topic.
 
 Group info gains a switch, **Share my channels with this group**, off by
 default, with one line under it: "People in this group can see which
-channels you follow. Lakko's server cannot." When on, the person's
+channels you follow." When on, the person's
 subscribed channels that are **listed in Discover** are shared with that
 group; unlisted channels are never shared, since their handle may be a
 secret invitation.
@@ -302,7 +328,6 @@ switch):
 | Feed | no groups or channels at all | Empty state: "Your feed fills up from your groups and channels." + "Discover channels" (primary) |
 | Feed | has sources, nothing received yet | "Nothing here yet. New messages from your groups and channels will show up here." |
 | Feed | loading (first build after launch) | skeleton items, never a spinner over an empty screen |
-| Feed | new device / short history | a one-time banner: "Your feed shows messages this device has received." |
 | Feed | a feed whose filters match nothing | "No messages match this feed." + "Edit feed" |
 | Feed | refresh failed (network): no group and no channel could be reached in one check (a check where some answered is not a failure) | the existing items stay; a banner "Couldn't check for new messages." + Retry; the banner goes at the next check that reaches anything |
 | Feed | a source can no longer be read (left the group, unsubscribed, removed) | its items leave the feed; no message |

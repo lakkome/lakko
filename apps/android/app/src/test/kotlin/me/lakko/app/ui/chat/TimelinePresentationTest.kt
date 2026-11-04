@@ -90,8 +90,9 @@ class TimelinePresentationTest {
     @Test
     fun `another year shows the locale short numeric date`() {
         val lastYear = at("2025-09-16T10:00:00Z")
-        assertEquals("16/09/2025", formatListTime(lastYear, now, zone, use24h = true, locale = en))
-        assertEquals("16.09.25", formatListTime(lastYear, now, zone, use24h = true, locale = Locale.GERMANY))
+        // The order and separators of the DEVICE's region (localization.md 5).
+        assertEquals("16/09/2025", formatListTime(lastYear, now, zone, use24h = true, locale = en, region = Locale.UK))
+        assertEquals("16.09.25", formatListTime(lastYear, now, zone, use24h = true, locale = en, region = Locale.GERMANY))
     }
 
     @Test
@@ -278,5 +279,46 @@ class TimelinePresentationTest {
         assertTrue(isHiddenSystemRow(msg(3, direction = Direction.System, author = null, text = "[mls commit]")))
         // The marker text on a non-system row is a message someone typed.
         assertFalse(isHiddenSystemRow(msg(4, text = "[mls commit]")))
+    }
+
+    // --- one-to-one: no "Members changed", ever (2026-10-29) ---------------
+
+    /** A conversation as its stored log seeds it: messages with commit rows
+     *  written between them by an older build. */
+    private fun storedLogWithCommits(): List<ChatMessage> = listOf(
+        msg(1, createdAt = "2026-10-29T08:00:00Z"),
+        msg(2, direction = Direction.System, author = null, createdAt = "2026-10-29T08:01:00Z", text = "[mls commit]"),
+        msg(3, direction = Direction.System, author = null, createdAt = "2026-10-29T08:02:00Z", text = "[mls commit]"),
+        msg(4, direction = Direction.Outgoing, author = null, createdAt = "2026-10-29T08:03:00Z", text = "yes"),
+        msg(5, direction = Direction.System, author = null, createdAt = "2026-10-29T08:04:00Z", text = "[mls commit]"),
+    )
+
+    @Test
+    fun `a one-to-one's stored commit rows are not in the displayed timeline and stay in the log`() {
+        val stored = storedLogWithCommits()
+        val rows = buildTimeline(stored, now, zone, use24h = true, locale = en)
+            .filterIsInstance<TimelineItem.Row>()
+        assertEquals(listOf(1L, 4L), rows.map { it.message.messageId })
+        assertTrue(rows.none { it.message.direction == Direction.System })
+        // Filtered at display time: the log itself is untouched.
+        assertEquals(5, stored.size)
+    }
+
+    @Test
+    fun `a one-to-one whose last row is a commit previews the message before it`() {
+        val stored = storedLogWithCommits()
+        assertEquals(4L, previewSourceRow(stored)?.messageId)
+        // Only commit rows: no preview row at all ("No messages yet").
+        assertNull(previewSourceRow(stored.filter { it.direction == Direction.System }))
+    }
+
+    @Test
+    fun `a group's stored commit rows without person keys are hidden too`() {
+        // UX second-device.md section 4: a commit row is drawn in a group only
+        // when it names the people its batch changed; these stored rows name
+        // none (`MembershipRowsTest` covers the ones that do).
+        val rows = buildTimeline(storedLogWithCommits(), now, zone, use24h = true, locale = en, isGroup = true)
+            .filterIsInstance<TimelineItem.Row>()
+        assertEquals(listOf(1L, 4L), rows.map { it.message.messageId })
     }
 }

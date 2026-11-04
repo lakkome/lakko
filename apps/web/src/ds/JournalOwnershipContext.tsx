@@ -34,6 +34,16 @@
  *
  * Renders nothing of its own.
  */
+import {
+  installKnockSeedHandler,
+  INITIAL_KNOCK_VERSION,
+  installOwnerKnockSeedSource,
+  knockSeeds,
+  knockSeedSent,
+  knockSeedVerdict,
+  noteKnockSeedSent,
+  type KnockSeedHeader,
+} from "./knock-seeds";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
@@ -48,7 +58,7 @@ import { DiscoveryClient } from "../discovery/client";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm, type Wasm } from "../wasm";
-import { installRotationTakeOver } from "./rotation-takeover";
+import { installRotationKnockKeys, installRotationTakeOver } from "./rotation-takeover";
 import { dsAccess } from "./access";
 import {
   clearAppointmentRecord,
@@ -85,6 +95,10 @@ import {
   takeOverJournal,
 } from "./root-handover";
 import { durableSnapshotHook } from "../chat/persist-hooks";
+import { noteKnockKeyChanged } from "../chat/handle-owed";
+import { ownsGroup } from "../chat/group-owner";
+import { openKnockOrigins } from "../chat/knock-origins";
+import { openJoinReplies } from "../reach/join-replies";
 
 /** How long a reconcile that left members pending waits before trying the
  *  unresolved ones again (chosen, not measured: a member's profile, which
@@ -343,6 +357,11 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
           await publisher.broadcastControl(secrets, entry.group, envelope);
         },
       });
+      // ADR-0087 section 5 - the owner hands each admin the current knock
+      // seed, sealed to the admin's account key, once per session per version.
+      if (rosterNow?.ownerAccountKeyB64 === ownB64 && rosterNow !== undefined) {
+        await sendKnockSeedsToAdmins(wasm, entry, groupId, groupIdB64, rosterNow.adminAccountKeysB64, ownB64);
+      }
       if (outcome.kind === "reconciled" && outcome.pending.length > 0) {
         notBefore.set(groupIdB64, Date.now() + PENDING_RETRY_MS);
       } else {
@@ -352,6 +371,105 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
       notBefore.set(groupIdB64, Date.now() + PENDING_RETRY_MS);
       // eslint-disable-next-line no-console
       console.warn("ds: registrar appointment failed; retried later", err);
+    }
+  }
+
+  /** Every account identity this device holds, current first. */
+  function ownIdentitiesNow(): WasmIdentity[] {
+    const out: WasmIdentity[] = [];
+    const current = accountIdentityNow();
+    if (current !== null) out.push(current);
+    for (const p of [...chats.ownPredecessorIdentities()].reverse()) out.push(p);
+    return out;
+  }
+
+  /**
+   * ADR-0087 section 5 - the owner's knock seeds of `version`: from the root
+   * of the identity the recorded boundary names (`null`: the current account
+   * identity), then the same version under every other own identity, for an
+   * owner device that never saw the boundary. Empty when this account does
+   * not own the group. The caller wipes them.
+   */
+  function ownerKnockSeeds(groupId: Uint8Array, version: number, rootKeyB64: string | null): Uint8Array[] {
+    const wasm = wasmNow;
+    const entry = chats.get(base64Encode(groupId));
+    if (wasm === null || entry === undefined) return [];
+    const identities = ownIdentitiesNow();
+    if (identities.length === 0) return [];
+    if (!ownsGroup(entry.group, [conversationIdentityNow()?.signaturePublicKey, ...identities.map((i) => i.signaturePublicKey)])) {
+      return [];
+    }
+    const named = rootKeyB64 === null ? identities[0] : identities.find((i) => base64Encode(i.signaturePublicKey) === rootKeyB64);
+    const order = named === undefined ? identities : [named, ...identities.filter((i) => i !== named)];
+    const out: Uint8Array[] = [];
+    for (const identity of order) {
+      const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
+      try {
+        out.push(wasm.groupKnockSeed(root, version));
+      } finally {
+        root.fill(0);
+      }
+    }
+    return out;
+  }
+
+  async function sendKnockSeedsToAdmins(
+    wasm: Awaited<ReturnType<typeof loadWasm>>,
+    entry: NonNullable<ReturnType<typeof chats.get>>,
+    groupId: Uint8Array,
+    groupIdB64: string,
+    admins: ReadonlySet<string>,
+    ownAccountKeyB64: string,
+  ): Promise<void> {
+    const account = accountIdentityNow();
+    const accountIdB64 = accountId();
+    if (account === null || accountIdB64 === null) return;
+    // Removing (or demoting) an admin bumps the version; only the admins
+    // left get the new seed. Older versions stay derivable here, so a
+    // request sealed to an older key still opens.
+    // The public record names the knock key: its republish is recorded as
+    // owed, durably, before the bump itself is written.
+    const { version, bumped } = await knockSeeds.reconcileOwnerAdmins(accountIdB64, groupIdB64, admins, () =>
+      noteKnockKeyChanged(accountIdB64, groupIdB64),
+    );
+    if (bumped) {
+      // eslint-disable-next-line no-console
+      console.info("ds: an admin left; the group's knock key moved to a new version");
+    }
+    // The owner's other devices learn the version from an envelope addressed
+    // to this account, once there is more than the initial one.
+    // The admins get the current version. The owner's own other devices get
+    // every version from the first to the current one (another platform
+    // stores the seeds it is given and derives none), sealed to this
+    // account's own key.
+    const sends: { readonly to: string; readonly version: number }[] = [];
+    for (const adminB64 of admins) sends.push({ to: adminB64, version });
+    if (version > INITIAL_KNOCK_VERSION) {
+      for (let v = INITIAL_KNOCK_VERSION; v <= version; v++) sends.push({ to: ownAccountKeyB64, version: v });
+    }
+    for (const send of sends) {
+      if (knockSeedSent(groupIdB64, send.to, send.version)) continue;
+      const x =
+        send.to === ownAccountKeyB64
+          ? (conversationIdentityNow()?.x25519PublicKey ?? null)
+          : await memberX25519(send.to);
+      if (x === null) continue;
+      const seeds = ownerKnockSeeds(groupId, send.version, await knockSeeds.ownerRootKey(groupIdB64, send.version));
+      const seed = seeds[0];
+      for (const other of seeds.slice(1)) other.fill(0);
+      if (seed === undefined) return;
+      try {
+        const envelope = wasm.composeKnockSeedEnvelope(groupId, base64Decode(send.to), x, send.version, seed);
+        const secrets = auth.identitySecrets();
+        if (secrets === null) return;
+        await publisher.broadcastControl(secrets, entry.group, envelope);
+        noteKnockSeedSent(groupIdB64, send.to, send.version);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("ds: knock seed not sent; retried at the next reconcile", err instanceof Error ? err.name : "");
+      } finally {
+        seed.fill(0);
+      }
     }
   }
 
@@ -517,6 +635,40 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   });
   onCleanup(uninstallRotationTakeOver);
 
+  // ADR-0087 section 5 - the rotation moved the journal root, and every knock
+  // seed with it: each owned group's knock version goes one up under the new
+  // root, the boundary is recorded (earlier versions stay with the
+  // predecessor's root, which this device keeps), the public record's
+  // republish is recorded first, and the reconcile hands the new seed to the
+  // admins. A failure throws, which keeps the rotation step owed.
+  const uninstallRotationKnockKeys = installRotationKnockKeys(async (oldAccountKeyB64) => {
+    const account = accountId();
+    const current = accountIdentityNow();
+    if (account === null || current === null) throw new Error("no session");
+    const newKeyB64 = base64Encode(current.signaturePublicKey);
+    if (newKeyB64 === oldAccountKeyB64) throw new Error("the rotation has not landed here yet");
+    let moved = 0;
+    for (const entry of chats.groups()) {
+      if (readIsActive(entry.group) === false) continue;
+      if (
+        !ownsGroup(entry.group, [
+          conversationIdentityNow()?.signaturePublicKey,
+          current.signaturePublicKey,
+          base64Decode(oldAccountKeyB64),
+        ])
+      ) {
+        continue;
+      }
+      const result = await knockSeeds.rotateOwnerRoot(account, entry.groupIdB64, oldAccountKeyB64, newKeyB64, () =>
+        noteKnockKeyChanged(account, entry.groupIdB64),
+      );
+      if (result.bumped) moved += 1;
+      scheduleReconcile(entry.groupIdB64);
+    }
+    return moved;
+  });
+  onCleanup(uninstallRotationKnockKeys);
+
   function scheduleTakeover(groupIdB64: string): void {
     const account = accountId();
     if (account === null || wasmNow === null) return;
@@ -615,6 +767,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   });
 
   let uninstallHandler: (() => void) | null = null;
+  let uninstallKnockHandler: (() => void) | null = null;
   let boundAccount: string | null = null;
   createEffect(() => {
     const account = accountId();
@@ -622,7 +775,12 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
       if (account === boundAccount) return;
       boundAccount = account;
       uninstallHandler?.();
+    uninstallKnockHandler?.();
       uninstallHandler = null;
+      uninstallKnockHandler?.();
+      uninstallKnockHandler = null;
+      installOwnerKnockSeedSource(null);
+      knockSeeds.close();
       running.clear();
       notBefore.clear();
       sentSets.clear();
@@ -649,6 +807,12 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
         await registrarSeeds.open(account, new IdbRegistrarSeedBackend(getDeviceKey));
         if (accountId() !== account) return;
         await pendingRootSeeds.open(account, new IdbPendingRootSeedBackend(getDeviceKey));
+        if (accountId() !== account) return;
+        await knockSeeds.open(account);
+        // UX section 8: where each request to join came from.
+        await openKnockOrigins(account);
+        // A joiner's reply grant, kept until the Welcome is written (C-69).
+        await openJoinReplies(account);
         if (accountId() !== account) return;
         dsAccess.setAuthorityFactory(
           wasmJournalAuthorityFactory(wasm, accountIdentityNow, registrarSeeds, {
@@ -725,6 +889,84 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
             },
             arrival,
           );
+        });
+        // ADR-0087 section 5 - the owner's own knock seeds, derived.
+        installOwnerKnockSeedSource((groupId, version, rootKeyB64) => ownerKnockSeeds(groupId, version, rootKeyB64));
+        // ADR-0087 section 5 - a knock seed the owner handed this admin.
+        uninstallKnockHandler = installKnockSeedHandler(async (arrival) => {
+          let header: KnockSeedHeader | null = null;
+          try {
+            const d = wasm.decodeKnockSeedEnvelope(arrival.plaintext);
+            try {
+              header = {
+                journalId: d.journalId,
+                memberAccountKey: d.memberAccountKey,
+                knockVersion: d.knockVersion,
+                knockPublicKey: d.knockPublicKey,
+              };
+            } finally {
+              d.free();
+            }
+          } catch {
+            header = null;
+          }
+          const ownKey = ownAccountKey();
+          if (ownKey === null) return "not-addressed";
+          // Another device of the owner moved the group's knock version (an
+          // admin left, or a key rotation moved the root): the clear header
+          // says to which version, and its public key which of this account's
+          // journal roots it was made under, whoever it is addressed to.
+          if (header !== null && base64Encode(header.journalId) === arrival.groupIdB64) {
+            const identities = ownIdentitiesNow();
+            const ownKeys = new Set(identities.map((i) => base64Encode(i.signaturePublicKey)));
+            const conv = conversationIdentityNow();
+            if (conv !== null) ownKeys.add(base64Encode(conv.signaturePublicKey));
+            const sender = arrival.senderAccountKey === undefined ? null : base64Encode(arrival.senderAccountKey);
+            const owner = arrival.ownerAccountKey === undefined ? null : base64Encode(arrival.ownerAccountKey);
+            if (sender !== null && owner !== null && ownKeys.has(sender) && ownKeys.has(owner)) {
+              let rootKeyB64: string | null = null;
+              for (const identity of identities) {
+                const root = wasm.dsJournalRootSeed(identity.ed25519Seed, arrival.groupId);
+                const seed = wasm.groupKnockSeed(root, header.knockVersion);
+                root.fill(0);
+                const pk = wasm.groupKnockPublicKey(seed);
+                seed.fill(0);
+                if (base64Encode(pk) === base64Encode(header.knockPublicKey)) {
+                  rootKeyB64 = base64Encode(identity.signaturePublicKey);
+                  break;
+                }
+              }
+              const current = identities[0];
+              if (current !== undefined) {
+                await knockSeeds.learnOwnerRoot(
+                  account,
+                  arrival.groupIdB64,
+                  header.knockVersion,
+                  rootKeyB64,
+                  base64Encode(current.signaturePublicKey),
+                );
+              }
+            }
+          }
+          const verdict = knockSeedVerdict({
+            header,
+            groupId: arrival.groupId,
+            ownAccountKey: ownKey,
+            senderAccountKey: arrival.senderAccountKey,
+            ownerAccountKey: arrival.ownerAccountKey,
+          });
+          if (verdict !== "accept" || header === null) return verdict;
+          const identity = conversationIdentityNow();
+          if (identity === null) return "not-addressed";
+          let seed: Uint8Array;
+          try {
+            seed = wasm.openKnockSeedEnvelope(arrival.plaintext, identity);
+          } catch {
+            return "malformed";
+          }
+          if (seed.length !== 32) return "malformed";
+          await knockSeeds.keep(account, arrival.groupIdB64, header.knockVersion, seed);
+          return "accept";
         });
         // Once per group at session start: a join that landed while this
         // tab was closed still gets its registrar, and a handover this

@@ -173,10 +173,10 @@ class IncomingCallRingTest {
     }
 
     @Test
-    fun `the title is the caller, or one word when this device cannot name them`() {
+    fun `the title is the caller, or the app's own name and never a placeholder word`() {
         assertEquals("Anna", callRingContent("Anna", video = false).title)
-        assertEquals("Someone", callRingContent(null, video = false).title)
-        assertEquals("Someone", callRingContent("   ", video = false).title)
+        assertEquals("Lakko", callRingContent(null, video = false).title)
+        assertEquals("Lakko", callRingContent("   ", video = false).title)
     }
 
     // ---- the accept / decline mapping ---------------------------------------

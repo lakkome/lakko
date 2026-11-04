@@ -4,7 +4,6 @@
 package me.lakko.app.ui.chat
 
 import androidx.compose.material.icons.filled.Bookmark
-import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +28,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Check
@@ -71,6 +71,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -91,6 +93,7 @@ import me.lakko.app.chat.folderRows
 import me.lakko.app.chat.membershipToggle
 import me.lakko.app.chat.membershipToggleBlocked
 import me.lakko.app.chat.rowsMatching
+import me.lakko.app.chat.searchFoundNoRow
 import me.lakko.app.chat.selectedTabIndex
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
@@ -150,6 +153,10 @@ public fun ChatListScreen(
     onCreateChannel: () -> Unit,
     /** A looked-up channel handle: its subscribe page. */
     onSubscribeToChannel: (channelId: String, handle: String) -> Unit,
+    /** ADR-0087 section 5.1 — the card's Subscribe: subscribe at once and
+     *  open the channel under [name]. */
+    onSubscribeChannelPressed: (channelId: String, handle: String, name: String) -> Unit =
+        { id, handle, _ -> onSubscribeToChannel(id, handle) },
     modifier: Modifier = Modifier,
     channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
@@ -188,10 +195,43 @@ public fun ChatListScreen(
      *  app has not answered yet, listed in All chats at once. */
     invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
     onOpenPendingChat: (accountIdHex: String) -> Unit = {},
+    /** `docs/ux/identity-recovery.md` 7.2 — what the list says after a restore. */
+    restoredChats: me.lakko.app.backup.RestoredChatsHint = me.lakko.app.backup.RestoredChatsHint.NONE,
+    onOpenContacts: () -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
+    // ADR-0087 section 5 — public groups and channels in search.
+    // The groups and channels this device is in, read as snapshot state so a
+    // card or a result row says Open as soon as a join lands.
+    val memberIds = remember { mutableStateOf<Set<String>>(emptySet()) }
+    val conversationSearch = remember(repository) {
+        object : ConversationSearchPort {
+            override suspend fun search(query: String) = repository.searchPublicConversations(query)
+            override suspend fun requestToJoin(found: me.lakko.app.chat.FoundConversation) =
+                repository.requestToJoinPublicGroup(found)
+            override fun isMember(idHex: String): Boolean =
+                idHex.lowercase() in memberIds.value || repository.holdsGroup(idHex)
+            override fun open(found: me.lakko.app.chat.FoundConversation) {
+                val hex = found.id.joinToString("") { "%02x".format(it) }
+                if (found.kind == uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP) {
+                    onOpenThread(hex)
+                } else {
+                    onSubscribeToChannel(hex, found.handle)
+                }
+            }
+            override fun subscribe(found: me.lakko.app.chat.FoundConversation) {
+                val hex = found.id.joinToString("") { "%02x".format(it) }
+                onSubscribeChannelPressed(hex, found.handle, found.name)
+            }
+        }
+    }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val knownChannels = channels?.channels?.collectAsStateWithLifecycle()?.value.orEmpty()
+    val knownChannelName: (String) -> String? = { id ->
+        knownChannels.firstOrNull { it.id.equals(id, ignoreCase = true) }
+            ?.let { it.sharedName.ifEmpty { it.localName } }
+    }
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
     var refreshing by remember { mutableStateOf(false) }
@@ -234,9 +274,22 @@ public fun ChatListScreen(
     val allRows = rememberConversationRows(repository, channels, deviceGroupSync)
 
     val rows = remember(allRows) { orderConversationRows(allRows) }
+    val currentMembers = remember(allRows) { me.lakko.app.chat.searchMemberIds(allRows) }
+    androidx.compose.runtime.SideEffect { if (memberIds.value != currentMembers) memberIds.value = currentMembers }
     val visible = remember(rows, query) {
-        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview, it.handle) }
     }
+    // The people whose one-to-one is among the matching conversations.
+    val visibleChatPeers = remember(visible) {
+        visible.mapNotNullTo(HashSet()) { row ->
+            row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }
+        }
+    }
+    // The pending contacts the text matches: rows of the list, so the people
+    // half leaves them out (`docs/ux/who-can-find-me.md` section 6.1).
+    val visibleInvited = remember(invited, query) { me.lakko.app.contacts.PendingContacts.matching(invited, query) }
+    val visibleInvitedKeys = remember(visibleInvited) { visibleInvited.mapTo(HashSet()) { it.signaturePubkeyB64 } }
+    val foundNoRow = searchFoundNoRow(visible.size, visibleInvited.size)
     val synchronizing = remember(state) { repository.isSynchronizing() }
 
     // docs/ux/chat-folders.md — the person's folders, in their order.
@@ -352,6 +405,14 @@ public fun ChatListScreen(
                     query = query,
                     onQueryChange = { query = it },
                 )
+                // ADR-0087 UX 9.1 — "You are no longer in {name}.", once per
+                // device, one at a time. It waits here across a restart.
+                state.endNotices.firstOrNull()?.let { notice ->
+                    MembershipEndBanner(
+                        notice = notice,
+                        onClose = { repository.dismissEndNotice(notice.idHex) },
+                    )
+                }
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
                 if (synchronizing) {
@@ -361,6 +422,24 @@ public fun ChatListScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
+                }
+                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.BANNER) {
+                    Text(
+                        t("chats.restored.banner_other_devices"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
+                // group-and-channel-privacy section 6.2 — `Requests sent`,
+                // above the list while one is open.
+                val requestsSentFlow = remember(repository) { repository.requestsSent() }
+                val requestsSent by requestsSentFlow.collectAsStateWithLifecycle()
+                val openRequests = remember(requestsSent, state) {
+                    requestsSent.filter { !repository.holdsGroup(it.idHex) }
+                }
+                if (!searching) {
+                    RequestsSentRow(requests = openRequests, onAskAgain = { repository.askAgain(it) })
                 }
                 // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
                 // does; a search hides it and searches everything (2.4).
@@ -393,11 +472,15 @@ public fun ChatListScreen(
                     // empty list a search still reaches the people half below
                     // (docs/ux/navigation.md section 4, "Also with an empty
                     // list").
-                    showsEmptyConversationState(rows.isEmpty(), query) && !showBar ->
-                        EmptyPanel(onStart = { createMenuOpen = true })
+                    showsEmptyConversationState(rows.isEmpty() && invited.isEmpty(), query) && !showBar ->
+                        if (restoredChats == me.lakko.app.backup.RestoredChatsHint.CARD) {
+                            RestoredChatsPanel(onOpenContacts = onOpenContacts)
+                        } else {
+                            EmptyPanel(onStart = { createMenuOpen = true })
+                        }
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
-                    searching && visible.isEmpty() && peopleSearch != null && peopleSession != null -> Column(
+                    searching && foundNoRow && peopleSearch != null && peopleSession != null -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
@@ -407,6 +490,7 @@ public fun ChatListScreen(
                             service = peopleSearch,
                             session = peopleSession,
                             conversationMatches = 0,
+                            channelName = knownChannelName,
                             onOpenChannel = { id, handle ->
                                 query = ""
                                 onSubscribeToChannel(id, handle)
@@ -415,14 +499,15 @@ public fun ChatListScreen(
                                 query = ""
                                 onOpenContact(key)
                             },
+                            conversations = conversationSearch,
                         )
                     }
-                    searching && visible.isEmpty() -> NoMatchPanel()
+                    searching && foundNoRow -> NoMatchPanel()
                     searching || !showBar -> ConversationList(
                         rows = visible,
                         folder = null,
                         handlers = rowHandlers,
-                        invited = invitedMatching(invited, query),
+                        invited = visibleInvited,
                         onOpenPendingChat = onOpenPendingChat,
                         // UX who-can-find-me 6.1 — people under the matching
                         // conversations.
@@ -432,7 +517,8 @@ public fun ChatListScreen(
                                     query = query,
                                     service = peopleSearch,
                                     session = peopleSession,
-                                    conversationMatches = visible.size,
+                                    conversationMatches = visible.size + visibleInvited.size,
+                                    channelName = knownChannelName,
                                     onOpenChannel = { id, handle ->
                                         query = ""
                                         onSubscribeToChannel(id, handle)
@@ -441,6 +527,9 @@ public fun ChatListScreen(
                                         query = ""
                                         onOpenContact(key)
                                     },
+                                    excludeKeysB64 = visibleInvitedKeys,
+                                    chatPeersB64 = visibleChatPeers,
+                                    conversations = conversationSearch,
                                 )
                             }
                         } else {
@@ -456,7 +545,11 @@ public fun ChatListScreen(
                         val folder = folders.getOrNull(page - 1)
                         if (folder == null) {
                             if (rows.isEmpty() && invited.isEmpty()) {
-                                EmptyPanel(onStart = { createMenuOpen = true })
+                                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.CARD) {
+                                    RestoredChatsPanel(onOpenContacts = onOpenContacts)
+                                } else {
+                                    EmptyPanel(onStart = { createMenuOpen = true })
+                                }
                             } else {
                                 ConversationList(
                                     rows = rows,
@@ -524,7 +617,7 @@ internal fun rememberConversationRows(
     // ADR-0061: dates, times and every row line in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.
@@ -609,6 +702,7 @@ internal fun rememberConversationRows(
                     readThrough = reading.channelRead[channel.id],
                     own = channelKeys.containsKey(channel.id),
                 ),
+                handle = channel.handle,
             )
         }
     }
@@ -633,6 +727,36 @@ internal class RowHandlers(
 )
 
 /** One tab's rows. [folder] is the tab (`null` = All chats). */
+@Composable
+private fun MembershipEndBanner(
+    notice: me.lakko.app.chat.MembershipEndNotice,
+    onClose: () -> Unit,
+) {
+    val fallback = t("chat.group.fallback_name")
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            Text(
+                text = me.lakko.app.chat.endNoticeLine(notice.name, fallback).text(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = t("common.close"),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConversationList(
     rows: List<ConversationListRow>,
@@ -678,20 +802,6 @@ private fun ConversationList(
         if (footer != null) {
             item(key = "people-search") { footer() }
         }
-    }
-}
-
-/** The pending contacts whose stated name or username matches [query]. */
-@Composable
-private fun invitedMatching(
-    invited: List<me.lakko.app.contacts.PendingContact>,
-    query: String,
-): List<me.lakko.app.contacts.PendingContact> {
-    val q = query.trim()
-    if (q.isEmpty()) return invited
-    return invited.filter { c ->
-        me.lakko.app.contacts.PendingContacts.name(c)?.contains(q, ignoreCase = true) == true ||
-            c.username.contains(q.removePrefix("@"), ignoreCase = true)
     }
 }
 
@@ -848,16 +958,11 @@ internal fun threadConversationRows(
     strings: Strings = Localization.strings.value,
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(repository, thread.groupIdHex)
-    // A call row IS the conversation's last event and belongs in the
-    // preview; the receive loop's bookkeeping rows are not and never
-    // did. Found live: a group whose only rows were commits showed the
-    // literal "[mls commit]" as its preview, which is a protocol name
-    // in a person's face and the one thing the copy rules forbid
-    // outright. A call row is a system row carrying its parts, so the
-    // two are told apart by what the row HOLDS, not by its text.
-    val last = thread.messages.lastOrNull { it.direction != Direction.System || it.call != null }
-        ?: thread.messages.lastOrNull { it.call != null }
+    val last = previewSourceRow(thread.messages)
     val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
+    // Section 10 of the group privacy spec — a conversation with no message
+    // sorts by the moment this device created or joined it.
+    val activityMs = me.lakko.app.chat.conversationActivityMs(lastMs, thread.joinedAtMs)
     val senderName = last?.takeIf { it.direction == Direction.Incoming }
         ?.authorKey?.let { directory.resolve(it).primary }
     val flags = flagsMap[thread.conversationHex]
@@ -877,12 +982,8 @@ internal fun threadConversationRows(
             senderName = senderName,
             strings = strings,
         ),
-        time = lastMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
-        // A conversation nothing has happened in yet has no activity
-        // at all, and the shared rule puts "never" at the bottom and
-        // breaks the tie on the title — so an unrelated refresh never
-        // reshuffles the empty ones.
-        lastActivityMs = lastMs,
+        time = activityMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
+        lastActivityMs = activityMs,
         // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
         // has ended; the count would be frozen for good.
         unread = if (thread.membershipEnded) {
@@ -900,8 +1001,32 @@ internal fun threadConversationRows(
         } else {
             null
         },
+        // ADR-0087 — a group's verified @name, so the local search finds it.
+        handle = if (kind == ConversationKind.Group) {
+            runCatching {
+                me.lakko.app.chat.GroupSettingsStore.handle(context, repository.currentAccountIdB64(), thread.groupIdHex)
+                    ?.takeIf { it.verified }?.handle
+            }.getOrNull().orEmpty()
+        } else {
+            ""
+        },
     )
 }
+
+/**
+ * The row a conversation's preview is taken from: the last message or call
+ * row. A call row IS the conversation's last event and belongs in the
+ * preview; the receive loop's bookkeeping rows (a commit, an external-join
+ * request) are not and never did, in a group or a one-to-one alike. Found
+ * live: a group whose only rows were commits showed the literal
+ * "[mls commit]" as its preview, which is a protocol name in a person's face
+ * and the one thing the copy rules forbid outright; and in a one-to-one,
+ * whose people cannot change (ADR-0062), a commit row is never a "Members
+ * changed" line either (2026-10-29). A call row is a system row carrying its
+ * parts, so the two are told apart by what the row HOLDS, not by its text.
+ */
+internal fun previewSourceRow(messages: List<ChatMessage>): ChatMessage? =
+    messages.lastOrNull { it.direction != Direction.System || it.call != null }
 
 /**
  * The second line of a row: the membership-ended line when this device's
@@ -922,6 +1047,8 @@ internal fun rowPreview(
         ),
     )
     if (endedLine != null) return endedLine.renderWith(strings)
+    // ADR-0087 UX 9.4 — the row stays until the leave lands, and says so.
+    if (thread.leaveWaiting) return strings["chat.members.pending.waiting_leave"]
     val noMessages = strings["chats.row.no_messages"]
     if (last == null) return noMessages
     if (last.direction == Direction.System) {
@@ -949,7 +1076,11 @@ internal fun rowPreview(
  *     composing. `null` when the chat has no cursor.
  *   - the local count of incoming messages this device's polls applied while
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
- *     with no cursor never showed a badge, whatever arrived. */
+ *     with no cursor never showed a badge, whatever arrived.
+ *
+ *  A row the pairing history brought is never unread here, with a cursor or
+ *  without one ([me.lakko.app.chat.rowInPairingHistory]; the local count leaves
+ *  those rows out as they arrive). */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
     // ADR-0063 section 5 — a message the feed showed is read, whether or not
     // the chat was opened: its id sits in `feedSeen` or under the feed's own
@@ -964,6 +1095,7 @@ internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
         val position = me.lakko.app.chat.decodeReadPosition(c.upToMessageId) ?: return@let 0
         thread.messages.count { m ->
             m.direction != Direction.Outgoing &&
+                !me.lakko.app.chat.rowInPairingHistory(thread, m) &&
                 me.lakko.app.chat.rowPastReadPosition(thread, m, position) &&
                 // The feed's own marks are the head group's ids.
                 (m.isHistory || (m.messageId !in thread.feedSeen && (feedThrough == null || m.messageId > feedThrough)))
@@ -1324,6 +1456,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
             size = 40.dp,
             group = row.kind != ConversationRowKind.CHAT,
             personKey = me.lakko.app.ui.components.personKeyBytes(row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }),
+            groupIdHex = row.id.takeIf { row.kind != ConversationRowKind.CHAT },
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -1378,6 +1511,21 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
                         modifier = Modifier.size(16.dp),
                     )
                 }
+                // reactions-and-emoji section 12 — a small heart beside the
+                // badge while others' reactions to own messages are unseen.
+                val unseenVersion by me.lakko.app.chat.UnseenReactions.version.collectAsStateWithLifecycle()
+                val unseen = remember(unseenVersion, row.id) {
+                    row.kind != ConversationRowKind.CHANNEL && me.lakko.app.chat.UnseenReactions.any(row.id)
+                }
+                if (unseen) {
+                    Spacer(Modifier.width(6.dp))
+                    val heartLabel = t("chats.row.unseen_reactions")
+                    Text(
+                        text = "\u2764\uFE0F",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.semanticsLabel(heartLabel),
+                    )
+                }
                 if (row.unread > 0) {
                     Spacer(Modifier.width(6.dp))
                     UnreadBadge(count = row.unread, muted = row.muted)
@@ -1388,7 +1536,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
 }
 
 @Composable
-private fun UnreadBadge(count: Int, muted: Boolean) {
+internal fun UnreadBadge(count: Int, muted: Boolean) {
     val label = if (count > 99) t("chats.row.unread_overflow") else count.toString()
     Box(
         contentAlignment = Alignment.Center,
@@ -1434,6 +1582,28 @@ private fun EmptyPanel(onStart: () -> Unit) {
     }
 }
 
+/** The empty list of a device restored with no other device left
+ *  (`docs/ux/identity-recovery.md` 7.2). Not a loading state: no spinner. */
+@Composable
+private fun RestoredChatsPanel(onOpenContacts: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = t("chats.restored.card"),
+                style = MaterialTheme.typography.bodyLarge,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onOpenContacts) { Text(t("nav.contacts")) }
+        }
+    }
+}
+
 /** Nothing local matched and no people search is wired: say so. */
 @Composable
 private fun NoMatchPanel() {
@@ -1450,3 +1620,7 @@ private fun NoMatchPanel() {
         )
     }
 }
+
+/** A plain spoken label on a decorative glyph. */
+private fun Modifier.semanticsLabel(label: String): Modifier =
+    this.semantics { contentDescription = label }

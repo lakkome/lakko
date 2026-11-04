@@ -56,6 +56,20 @@ export function attachmentLine(message: PersistedMessage): string | null {
   return t("chat.media.file");
 }
 
+/**
+ * The card's text line (`docs/ux/feed.md` section 3). A message with text
+ * shows its text; with none, the attachments no bubble draws are named, so a
+ * file beside a photo is not lost, and a media-only message has no line.
+ */
+export function cardBody(
+  message: PersistedMessage,
+  drawsAsBubble: (attachment: PersistedMessage["attachments"][number]) => boolean,
+): string {
+  if (message.text.trim() !== "") return message.text;
+  const files = message.attachments.filter((a) => !drawsAsBubble(a));
+  return attachmentLine({ ...message, attachments: files }) ?? "";
+}
+
 /** "3 replies", "1 reply". */
 export function repliesLabel(count: number): string {
   return t("feed.replies.count", { count });

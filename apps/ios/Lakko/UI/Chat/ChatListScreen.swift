@@ -58,14 +58,16 @@ public struct ChatListScreen: View {
     /// A channel the search found by its handle, which this device may not
     /// hold yet: its subscribe page.
     public var onFoundChannel: (_ channelIdHex: String, _ handle: String) -> Void
+    /// `Subscribe` on the card of a public channel found by search
+    /// (`docs/ux/group-and-channel-privacy.md` section 5.1): subscribe in one
+    /// step and open the channel under the name its record carries.
+    public var onSubscribeFoundChannel: (_ channelIdHex: String, _ handle: String, _ name: String) -> Void
     /// **Open** on a found person who is already a contact: the conversation
     /// with them (`docs/ux/who-can-find-me.md` section 6.1).
     public var onOpenPerson: (FoundPerson) -> Void
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
-    /// UX 17.5 — `Open Devices` on the new-device banner: Settings > Devices.
-    public var onOpenDevices: () -> Void = {}
     /// UX 18.4, "Done" — the one-session line after the account was taken
     /// back on this device (``RecalledNoticeBanner``). A view of its own, so
     /// this screen is not re-evaluated by it; `nil` draws nothing.
@@ -94,6 +96,13 @@ public struct ChatListScreen: View {
     /// that conversation's row here as well as in the chat itself. Every other
     /// call surface is the root view's (``CallHostOverlay``); this one has to be
     /// where the person already looks, and answerable without navigating.
+    /// The account signed in here, for the restored-device notice.
+    var accountIdB64: String?
+    /// `Contacts` on the restored-device card.
+    var onOpenContacts: () -> Void = {}
+    /// The marker of a restore, read when the list opens and when a restore
+    /// finishes (section 7.2 of `docs/ux/identity-recovery.md`).
+    @State private var restored: RestoredDeviceStore.Record?
     @EnvironmentObject private var callHost: CallHost
 
     init(
@@ -103,23 +112,27 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
+        onSubscribeFoundChannel: @escaping (String, String, String) -> Void = { _, _, _ in },
         onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
-        onOpenDevices: @escaping () -> Void = {},
         accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
-        peopleSearch: PeopleSearchModel? = nil
+        peopleSearch: PeopleSearchModel? = nil,
+        accountIdB64: String? = nil,
+        onOpenContacts: @escaping () -> Void = {}
     ) {
+        self.accountIdB64 = accountIdB64
+        self.onOpenContacts = onOpenContacts
         self.viewModel = viewModel
         self.channels = channels
         self.feedReading = feedReading
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
+        self.onSubscribeFoundChannel = onSubscribeFoundChannel
         self.onOpenPerson = onOpenPerson
         self.onOpenFolderSettings = onOpenFolderSettings
-        self.onOpenDevices = onOpenDevices
         self.recalledNotice = recalledNotice
         self.accountNotice = accountNotice
         self.keysUpdatingLabel = keysUpdatingLabel
@@ -130,6 +143,10 @@ public struct ChatListScreen: View {
     /// half filters what this device holds; the network half asks by itself
     /// (`docs/ux/who-can-find-me.md` section 6.1, ``PeopleSearchModel``).
     @State private var searchText: String = ""
+    /// UX 6.2 — the `Requests sent` list.
+    @State private var requestsSentOpen = false
+    /// UX 5.1 — the card of a public group or channel opened from search.
+    @State private var foundCard: ConversationHandles.Found?
 
     // MARK: Chat folders (`docs/ux/chat-folders.md`)
 
@@ -156,12 +173,6 @@ public struct ChatListScreen: View {
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
               VStack(spacing: 0) {
-                // UX 17.5 — "A device was added to your account", above the
-                // folder bar. Its own view observes the notice, so this
-                // screen is not re-evaluated by it.
-                NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
-                if let accountNotice { accountNotice }
-                if let recalledNotice { recalledNotice }
                 if showsFolderBar {
                     FolderBar(
                         folders: deviceGroupSync.folders,
@@ -205,6 +216,11 @@ public struct ChatListScreen: View {
             // channels sit at the bottom of the list until something else
             // fetches them.
             .task { await refreshChannels() }
+            .task(id: accountIdB64) { reloadRestored() }
+            .onReceive(NotificationCenter.default.publisher(for: .lakkoBackupRestored)) { _ in
+                reloadRestored()
+            }
+            .onChange(of: allRows.isEmpty && invitedRows.isEmpty) { _, _ in noteConversationIfAny() }
             .toolbar {
                 // ADR-0050 / docs/ux/second-device.md section 2: one label
                 // while this device is still being admitted to the chats a
@@ -262,7 +278,30 @@ public struct ChatListScreen: View {
     /// own — and a channel's last post time has to become the same field as a
     /// chat's last message time, or the one ordering has nothing to order by.
     private var rows: [ConversationListRow] {
-        ConversationList.filtered(allRows, query: searchText)
+        let all = allRows
+        let byText = ConversationList.filtered(all, query: searchText)
+        // ADR-0087 — a group or channel the person is in is found by its
+        // `@name` too, with or without the `@`.
+        let needle = String(searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .drop(while: { $0 == "@" })).lowercased()
+        guard !needle.isEmpty else { return byText }
+        let found = Set(byText.map(\.id))
+        return all.filter { row in
+            found.contains(row.id) || (heldHandle(row).map { $0.contains(needle) } ?? false)
+        }
+    }
+
+    /// The `@name` (without `@`, lower case) of a group or channel row.
+    private func heldHandle(_ row: ConversationListRow) -> String? {
+        switch row.kind {
+        case .channel:
+            let handle = channels.channels.first { $0.id == row.id }?.handle ?? ""
+            return handle.isEmpty ? nil : handle.lowercased()
+        case .group:
+            return viewModel.repository.groupHandle(groupIdHex: row.id)?.handle.lowercased()
+        default:
+            return nil
+        }
     }
 
     /// Every conversation, ordered, unfiltered: what All chats shows and what
@@ -311,8 +350,11 @@ public struct ChatListScreen: View {
                 id: thread.conversationIdHex,
                 kind: kind == .group ? .group : .chat,
                 title: viewModel.title(groupIdHex: thread.groupIdHex),
-                preview: viewModel.preview(thread: thread, isGroup: kind == .group),
-                lastActivityMs: viewModel.lastMessageMs(thread: thread),
+                // UX 9.4 — the row stays while a leave waits, and says so.
+                preview: thread.leaveRequested
+                    ? waitingToLeaveLine
+                    : viewModel.preview(thread: thread, isGroup: kind == .group),
+                lastActivityMs: viewModel.activityMs(thread: thread),
                 unread: UnreadCounting.displayed(
                     local: thread.unread,
                     cursorDerived: Self.unreadCount(
@@ -321,15 +363,16 @@ public struct ChatListScreen: View {
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
                 archived: flags?.archived == true,
-                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
-                // muted line in the slot the preview occupies. Removing it
-                // would delete a transcript the user still has as a side effect
-                // of something somebody else did.
+                // ADR-0045 UX §6.2.4 — a device whose own leaf was retired
+                // keeps the chat, with one muted line in the preview's slot. A
+                // person who is out has no row at all (ADR-0087 section 9).
                 endedLine: chatListLine(
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
                 markedUnread: flags?.unreadOverride == true,
-                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex))
+                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex),
+                photoGroupIdHex: kind == .group ? thread.groupIdHex : nil,
+                hasUnseenReactions: viewModel.hasUnseenReactions(groupIdHex: thread.groupIdHex))
         }
     }
 
@@ -392,6 +435,96 @@ public struct ChatListScreen: View {
         }
     }
 
+    /// The notices at the top of the list. Rows of the list, not an inset over
+    /// it: an inset stays put while the large title and the search field move,
+    /// so it hid the title and lay across the field on a pull. A `Group`, not a
+    /// stack, so that with no notice the list holds no empty row.
+    private var listNotices: some View {
+        Group {
+            // UX 9.1 — removed from a group, anywhere but in it.
+            MembershipEndBanner(
+                center: viewModel.endNotices, onClose: viewModel.closeEndNotice(groupIdHex:))
+            if let accountNotice { accountNotice }
+            if let recalledNotice { recalledNotice }
+            // UX 6.2 — the requests to join this device sent, with a count.
+            let requests = viewModel.requestsSent
+            if !requests.isEmpty {
+                Button { requestsSentOpen = true } label: {
+                    HStack {
+                        Label(l10n.t("requests_sent.title"), systemImage: "paperplane")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(requests.count.formatted(.number.locale(l10n.locale)))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $requestsSentOpen) {
+                    RequestsSentList(viewModel: viewModel)
+                }
+            }
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+    }
+
+    /// Section 7.2 — what the list says about a restored device. No spinner:
+    /// the list stays what it is, a sentence says why.
+    private var restoredNotice: RestoredListNotice {
+        RestoredListNotice.decide(
+            record: restored, listEmpty: allRows.isEmpty && invitedRows.isEmpty,
+            otherDeviceSignedIn: deviceGroupSync.otherDeviceSignedIn)
+    }
+
+    private func reloadRestored() {
+        restored = accountIdB64.flatMap { RestoredDeviceStore.load(accountIdB64: $0) }
+        noteConversationIfAny()
+    }
+
+    /// The first conversation arrived: the notice is gone for good.
+    private func noteConversationIfAny() {
+        guard let accountIdB64, restored?.awaitingFirstConversation == true,
+              !allRows.isEmpty || !invitedRows.isEmpty else { return }
+        RestoredDeviceStore.noteConversationArrived(accountIdB64: accountIdB64)
+        restored = RestoredDeviceStore.load(accountIdB64: accountIdB64)
+    }
+
+    private var restoredCard: some View {
+        VStack(spacing: 16) {
+            Text(l10n.t("chats.restored.card"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoText)
+                .multilineTextAlignment(.center)
+            Button(action: onOpenContacts) {
+                Text(l10n.t("nav.contacts"))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.lakkoAccent)
+                    .foregroundStyle(Color.lakkoAccentForeground)
+                    .clipShape(Capsule())
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 80)
+    }
+
+    private var restoredBanner: some View {
+        Text(l10n.t("chats.restored.banner_other_devices"))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+    }
+
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
@@ -400,20 +533,34 @@ public struct ChatListScreen: View {
             // Inside a scroll view so the pull gesture works on the empty list
             // too.
             ScrollView {
+                listNotices
                 if let folder {
                     folderEmptyState(folder)
                 } else if query.isEmpty {
-                    emptyState
+                    switch restoredNotice {
+                    case .card:
+                        restoredCard
+                    case .banner:
+                        restoredBanner
+                        emptyState
+                    case .none:
+                        emptyState
+                    }
                 } else {
                     VStack(spacing: 12) {
                         if let peopleSearch {
                             PeopleSearchSection(
                                 model: peopleSearch, includesChannels: true, showsLocalContacts: true,
-                                emptyText: l10n.t("chats.search.no_results"),
-                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
+                                channelName: foundChannelName,
+                                onOpenConversation: { foundCard = $0 },
+                                isHeld: { idHex in allRows.contains { $0.id == idHex } },
+                                onOpenHeld: { _ = openHeldConversation($0) })
+                            .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         } else {
-                            Text(l10n.t("chats.search.no_results"))
+                            Text(l10n.t("search.nothing_found"))
                                 .foregroundStyle(Color.lakkoTextMuted)
+                                .multilineTextAlignment(.center)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -424,6 +571,7 @@ public struct ChatListScreen: View {
         } else {
             let quietCall = callHost.quietIncomingCall
             List {
+                listNotices
                 ForEach(invited) { contact in
                     InvitedChatRow(contact: contact)
                         .listRowSeparator(.hidden)
@@ -464,12 +612,23 @@ public struct ChatListScreen: View {
                     // folder items (`docs/ux/chat-folders.md` section 5).
                     .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
                 }
-                // ADR-0060 — the people this device knows, then the network
-                // results under People (UX section 6.1).
+                // ADR-0060 — the people this device knows, then what the
+                // network found, in the same list with no heading (UX section
+                // 6.1, "One list").
                 if !query.isEmpty, let peopleSearch {
                     PeopleSearchSection(
                         model: peopleSearch, includesChannels: true, showsLocalContacts: true,
-                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                        listShowsRows: true,
+                        listed: Set(invited.map(\.signaturePubkey)),
+                        chatPeers: Set(visible.filter { $0.kind == .chat }.compactMap {
+                            viewModel.peerSignatureKey(groupIdHex: $0.id)
+                        }),
+                        listedConversations: Set(visible.map(\.id)),
+                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
+                        channelName: foundChannelName, onOpenConversation: { foundCard = $0 },
+                        isHeld: { idHex in allRows.contains { $0.id == idHex } },
+                        onOpenHeld: { _ = openHeldConversation($0) })
+                        .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         .listRowSeparator(.hidden)
                 }
             }
@@ -668,6 +827,30 @@ public struct ChatListScreen: View {
 
     /// A channel row under People: its subscribe page. The field is cleared,
     /// as it was for the lookup row this replaced.
+    private func foundChannelName(_ channelIdHex: String) -> String? {
+        channels.channels.first { $0.id == channelIdHex }.map(\.title)
+    }
+
+    private func foundCardScreen(_ found: ConversationHandles.Found) -> some View {
+        ConversationCardScreen(
+            found: found, repository: viewModel.repository,
+            isHeld: { idHex in allRows.contains { $0.id == idHex } },
+            openHeld: openHeldConversation,
+            subscribe: { idHex, handle, name in
+                searchText = ""
+                onSubscribeFoundChannel(idHex, handle, name)
+            },
+            onClose: { foundCard = nil })
+    }
+
+    /// UX 5.1 — `Open` on the card of a group or channel this device holds.
+    private func openHeldConversation(_ idHex: String) -> Bool {
+        guard let row = allRows.first(where: { $0.id == idHex }) else { return false }
+        searchText = ""
+        onOpen(row)
+        return true
+    }
+
     private func openFoundChannel(_ channelIdHex: String, _ handle: String) {
         searchText = ""
         onFoundChannel(channelIdHex, handle)
@@ -699,7 +882,12 @@ public struct ChatListScreen: View {
     /// receive applied while the chat was closed (``UnreadCounting``). Counting
     /// every prior row against a missing cursor would flip the whole history to
     /// unread on a cold start.
-    private static func unreadCount(
+    ///
+    /// A row the pairing history brought is never unread here, with a cursor
+    /// or without one (``PairingHistory``; the local count leaves those rows
+    /// out as they arrive). Rows of older segments carry history ids below
+    /// zero and are not counted at all.
+    static func unreadCount(
         thread: ChatThread,
         cursor: ReadCursorState?
     ) -> Int? {
@@ -718,6 +906,9 @@ public struct ChatListScreen: View {
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
             if msg.messageId <= 0 { return acc }
+            if PairingHistory.isHistory(messageId: msg.messageId, floor: thread.syncedThroughMessageId) {
+                return acc
+            }
             // ADR-0063 section 5 — a message the feed showed is seen, even
             // when it sits above messages that are not.
             if thread.feedSeen.contains(msg.messageId) { return acc }
@@ -874,7 +1065,8 @@ struct ConversationRowView: View {
             InitialsAvatar(
                 // The id is hashed for the tint only, never shown.
                 name: row.title, identity: row.id, size: 40,
-                photo: row.personKey.map(AvatarPhoto.person))
+                isGroup: row.kind == .group,
+                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -929,6 +1121,12 @@ struct ConversationRowView: View {
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            if row.hasUnseenReactions {
+                Image(systemName: "heart.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoAccent)
+                    .accessibilityLabel(Localization.text("chats.row.unseen_reactions"))
+            }
             if row.showsUnread {
                 // Accent capsule; a muted conversation renders it grey so a
                 // muted-but-unread row still surfaces a hint without grabbing
@@ -968,7 +1166,7 @@ public final class ChatListViewModel: ObservableObject {
 
     @Published public private(set) var threads: [ChatThread] = []
 
-    private let repository: ChatRepository
+    let repository: ChatRepository
     private var cancellables: Set<AnyCancellable> = []
 
     public init(repository: ChatRepository) {
@@ -994,12 +1192,75 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0087 / reactions spec section 12 — a group photo, or unseen
+        // reactions, changed.
+        repository.$groupSettingsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        repository.$unseenReactionsRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+
+    /// UX 6.2 — the open requests to join this device sent.
+    var requestsSent: [RequestsSentStore.Entry] {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return [] }
+        return RequestsSentStore.open(
+            accountIdB64: accountIdB64, heldGroups: Set(threads.map(\.groupIdHex)))
+    }
+
+    /// UX 6.2 — `Ask again` on a request over 7 days old.
+    func askAgain(_ entry: RequestsSentStore.Entry) async {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        // A request from search: sealed again to the key the record named.
+        if let keyB64 = entry.knockKeyB64, let key = Data(base64Encoded: keyB64),
+           let groupId = ChatRepository.hexToBytes(entry.groupIdHex) {
+            let outcome = await repository.requestToJoinPublicGroup(
+                groupId: groupId, knockKey: key, knockVersion: entry.knockVersion ?? 0)
+            if outcome == .sent {
+                RequestsSentStore.recordPublic(
+                    groupId: groupId, name: entry.name ?? "", handle: entry.handle ?? "", knockKey: key,
+                    knockVersion: entry.knockVersion ?? 0, accountIdB64: accountIdB64, nowMs: nowMs)
+                objectWillChange.send()
+            }
+            return
+        }
+        guard let cap = RequestsSentStore.capability(entry) else { return }
+        do {
+            let result = try await repository.requestToJoinFromLink(
+                capabilityWire: cap.wire, nowMs: UInt64(nowMs), blobId: cap.blobId)
+            RequestsSentStore.record(
+                groupId: result.groupId, name: entry.name, capabilityWire: cap.wire,
+                blobId: cap.blobId, accountIdB64: accountIdB64, nowMs: nowMs)
+            objectWillChange.send()
+        } catch {
+            NSLog("requests sent: ask again failed: %@", String(describing: error))
+        }
+    }
+
+    /// Reactions-and-emoji spec section 12 — the small heart beside the
+    /// unread badge.
+    func hasUnseenReactions(groupIdHex: String) -> Bool {
+        !repository.unseenReactionIds(groupIdHex: groupIdHex).isEmpty
     }
 
     /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
     /// yet all joined here. Drives the single "Synchronizing..." label.
     var synchronizing: Bool {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: repository.knownGroupIdHexes) > 0
+    }
+
+    /// UX 9.1 — the notices the banner shows.
+    var endNotices: MembershipEndNoticeCenter { repository.membershipEndNotices }
+
+    /// UX 9.1 — the close icon. The name goes with it.
+    func closeEndNotice(groupIdHex: String) {
+        repository.closeEndNotice(groupIdHex: groupIdHex)
     }
 
     /// The conversation's kind (ADR-0062, read from the group's own
@@ -1025,6 +1286,11 @@ public final class ChatListViewModel: ObservableObject {
         }
         if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
             return ProfileDirectory.shared.resolve(signatureKey: peer).name
+        }
+        // ADR-0087 / UX 4.3 — a solo group with no name is titled `@name`.
+        if repository.isAloneInGroup(groupIdHex: groupIdHex),
+           let handle = repository.groupHandle(groupIdHex: groupIdHex) {
+            return "@" + handle.handle
         }
         return ConversationTitle.groupTitle(
             otherMemberNames: Self.otherMemberNames(repository: repository, groupIdHex: groupIdHex))
@@ -1074,6 +1340,12 @@ public final class ChatListViewModel: ObservableObject {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)
+    }
+
+    /// The time this row sorts by and shows (``GroupArrival``).
+    func activityMs(thread: ChatThread) -> Int64? {
+        GroupArrival.activityMs(
+            lastMessageMs: lastMessageMs(thread: thread), arrivedAtMs: thread.arrivedAtMs)
     }
 
     /// Chat folders' Mark all as read: clear the local badge and return the
@@ -1138,5 +1410,88 @@ struct InvitedChatRow: View {
             .padding(.vertical, 4)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// UX 9.1 — "You are no longer in {name}." with a close icon, at the top of
+/// Chats. It observes the notices itself, so the list is not re-evaluated by
+/// them. One at a time: closing one shows the next.
+struct MembershipEndBanner: View {
+    @ObservedObject var center: MembershipEndNoticeCenter
+    let onClose: (String) -> Void
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        if let notice = center.notices.first {
+            HStack(alignment: .center, spacing: 12) {
+                Text(l10n.t("chat.ended.notice", texts: ["name": notice.name]))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    onClose(notice.groupIdHex)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(l10n.t("common.dismiss"))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .background(Color.lakkoSurface)
+        }
+    }
+}
+
+
+/// UX 6.2 — the requests to join this device sent: avatar, name, one line;
+/// `Ask again` after 7 days with no answer. A request is never withdrawn, and
+/// the person is never told one was refused.
+struct RequestsSentList: View {
+    @ObservedObject var viewModel: ChatListViewModel
+    @ObservedObject private var l10n = Localization.shared
+    @State private var asking: String?
+
+    var body: some View {
+        NavigationStack {
+            List(viewModel.requestsSent) { entry in
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                let late = RequestsSentStore.mayAskAgain(entry, nowMs: now)
+                HStack(spacing: 12) {
+                    InitialsAvatar(
+                        name: entry.name ?? "", identity: entry.groupIdHex, size: 40, isGroup: true,
+                        photo: .group(entry.groupIdHex))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.name ?? l10n.t("group_info.header.aria"))
+                            .foregroundStyle(Color.lakkoText)
+                        if let handle = entry.handle {
+                            Text("@" + handle).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                        Text(l10n.t(late ? "requests_sent.no_answer" : "requests_sent.waiting"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    Spacer()
+                    if late {
+                        Button(l10n.t("requests_sent.ask_again")) {
+                            asking = entry.id
+                            Task {
+                                await viewModel.askAgain(entry)
+                                asking = nil
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(Color.lakkoAccent)
+                        .disabled(asking != nil)
+                    }
+                }
+            }
+            .navigationTitle(l10n.t("requests_sent.title"))
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium, .large])
     }
 }

@@ -173,6 +173,13 @@ public data class ProcessedRow(
     val senderAccountB64: String? = null,
     /** ADR-0073 R.7 case 1 — the re-send marker a chat body carried. */
     val resendOrigin: me.lakko.app.chat.ResendOrigin? = null,
+    /** Reactions only: add (`true`) or take off. */
+    val reactionAdd: Boolean? = null,
+    /** Reactions only: the emoji. */
+    val reactionEmoji: String? = null,
+    /** Reactions only: the account key (base64) of the reacted-to message's
+     *  author, as the reactor named it. */
+    val reactionTargetAuthorB64: String? = null,
 )
 
 /** What the superseded-sender rule reads off the group as the batch left it
@@ -289,6 +296,13 @@ public interface PushDecryptDeps {
      * silence a phone.
      */
     public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
+
+    /** reactions-and-emoji section 12 — this device's `Reactions`
+     *  notification switch (on by default). A READ. */
+    public fun reactionNotificationsOn(accountIdB64: String): Boolean = true
+
+    /** The group's shared name as this device stores it, or `null`. A READ. */
+    public fun groupName(accountIdB64: String, groupHex: String): String? = null
 
     /**
      * ADR-0073 R.5 — is the group the OLD segment of a one-to-one whose
@@ -426,7 +440,33 @@ public data class PushWakeOutcome(
     /** UX 16.4 — the wake named a closed one-to-one: post NOTHING for it, not
      *  even the generic banner [EMPTY] falls back to. */
     val suppressed: Boolean = false,
+    /** The read ran to the end: the snapshot was restored and the rows were
+     *  fetched and processed. `false` for every early return, where nothing
+     *  is known about the wake and the generic banner stands. */
+    val readRan: Boolean = false,
+    /** Rows that did not decrypt and that the app's message log does not
+     *  hold, i.e. a message this device cannot read yet. A row that does not
+     *  decrypt but IS held is this device's own message coming back (a
+     *  sender cannot open its own message) and is not counted. */
+    val unreadableRows: Int = 0,
 ) {
+    /**
+     * Whether a wake that showed no preview and rang for nothing still posts
+     * the generic "New message" banner.
+     *
+     * A banner means a message from someone else. A wake that brought only
+     * this device's own message, a message from another device of the same
+     * account, or service traffic (receipts, typing, reactions, profiles, ...)
+     * posts nothing. The generic banner is kept for what cannot be told
+     * apart: a read that did not run, or a row that did not decrypt and is
+     * not ours, and only while the app is not on screen (on screen the app
+     * shows the conversation itself).
+     */
+    public fun genericBannerWanted(appOnScreen: Boolean): Boolean =
+        preview == null && ring == null &&
+            (!readRan || (!appOnScreen && unreadableRows > 0))
+
+
     internal companion object {
         val EMPTY = PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList())
         val SUPPRESSED =
@@ -582,10 +622,29 @@ public suspend fun decryptPushWake(
                 me.lakko.app.chat.NO_LINEAGE
             }
         }
+        // The account key of this device's person, read once and only when a
+        // decrypted message asks: a message from it (another device of the
+        // same account) is not a notification.
+        val ownPersonKeyB64 by lazy { runCatching { group.facts()?.ownPersonKeyB64 }.getOrNull() }
+        // The notification's shape: the conversation's name as the title, in
+        // a group the sender before the text. Read once, when a row asks.
+        val conversationKind by lazy { runCatching { group.facts()?.kind }.getOrNull() }
+        val groupName by lazy { runCatching { deps.groupName(account.accountIdB64, realGroupHex) }.getOrNull() }
+        var unreadableRows = 0
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
-            } catch (_: Throwable) {
+            } catch (cause: Throwable) {
+                // A sender cannot open its own message. The app's log holds a
+                // row it sent (or one it already received), so a held id is
+                // quiet; anything else is a message this device cannot read.
+                if (isOwnMessageEcho(cause)) continue
+                val held = try {
+                    deps.heldRow(account.accountIdB64, realGroupHex, row.id) != null
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!held) unreadableRows += 1
                 continue
             }
             if (processed != null) {
@@ -611,10 +670,36 @@ public suspend fun decryptPushWake(
                 }
             }
             processed?.callSignal?.let { callSignals += it }
+            val fromOwnAccount = processed?.senderAccountB64 != null &&
+                processed.callSignal == null &&
+                processed.senderAccountB64 == ownPersonKeyB64
+            if (fromOwnAccount) continue
+            // reactions-and-emoji section 12 — a reaction added to one of
+            // this person's own messages is a notification of its own,
+            // "Anna reacted ❤️ to your message", unless the switch is off or
+            // the conversation is muted. No excerpt: this path holds no
+            // message log.
+            val reactionBody = processed?.let { p ->
+                reactionNotificationBody(
+                    row = p,
+                    ownPersonKeyB64 = ownPersonKeyB64,
+                    enabled = { runCatching { deps.reactionNotificationsOn(account.accountIdB64) }.getOrDefault(true) },
+                    muted = { runCatching { deps.isMuted(account.accountIdB64, realGroupHex) }.getOrDefault(false) },
+                )
+            }
+            if (reactionBody != null) {
+                // The reaction line names the reactor itself: no prefix.
+                val shape = notificationShape(conversationKind, groupName, processed?.senderName, reactionBody, prefixSender = false)
+                latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                    ?: unnamedSenderPreview(realGroupHex)
+                continue
+            }
             val body = previewBodyOf(processed) ?: continue
-            // ADR-0048 UX §5 — the sender's resolved name when it is already
-            // known on this device; the generic title otherwise.
-            latest = PushPreview(title = processed?.senderName ?: "Lakko", body = body, tag = realGroupHex)
+            // The conversation's name as the title; in a group the sender's
+            // name before the text.
+            val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
+            latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                ?: unnamedSenderPreview(realGroupHex)
         }
         // `docs/ux/calls.md` section 2.1 — resolved only when this batch
         // actually rings for something, so an ordinary message wake never pays
@@ -646,6 +731,8 @@ public suspend fun decryptPushWake(
             // of a retired key, or a re-send this device holds the original
             // of): nothing is posted for it, not even the generic banner.
             suppressed = wakePostsNothing(latest != null, calls.ring != null, suppressedRows),
+            readRan = true,
+            unreadableRows = unreadableRows,
         )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —
@@ -697,6 +784,120 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
         ProcessedKind.CALL_SIGNALING,
         -> null
     }
+}
+
+/**
+ * reactions-and-emoji section 12 — the body of a reaction notification, or
+ * `null`: only an ADD naming this person's account as the message's author,
+ * from someone else, with the switch on and the conversation not muted. Pure
+ * apart from the two reads it is handed.
+ */
+internal fun reactionNotificationBody(
+    row: ProcessedRow,
+    ownPersonKeyB64: String?,
+    enabled: () -> Boolean,
+    muted: () -> Boolean,
+): String? {
+    if (row.kind != ProcessedKind.REACTION || row.reactionAdd != true) return null
+    val emoji = row.reactionEmoji ?: return null
+    if (ownPersonKeyB64 == null || row.reactionTargetAuthorB64 != ownPersonKeyB64) return null
+    if (row.senderAccountB64 == ownPersonKeyB64) return null
+    if (!enabled() || muted()) return null
+    // The reactor is named by the name this device holds for them. With no
+    // name there is no reaction line ([notificationShape] then refuses the
+    // row and the wake shows the generic banner): never a placeholder word.
+    val name = row.senderName?.trim()?.takeIf { it.isNotEmpty() } ?: return ""
+    return me.lakko.app.l10n.Localization.strings.value.format(
+        "notification.reaction.body",
+        texts = mapOf("name" to name, "emoji" to emoji),
+    )
+}
+
+/**
+ * The banner of a row whose sender has no name on this device: the generic
+ * one a wake that cannot be read shows ("Lakko" / "New message"). A sender is
+ * always a contact, a group member or a channel member whose name is stored
+ * here, so this is a defect, and it is logged as one, with no identifier.
+ */
+internal fun unnamedSenderPreview(tag: String): PushPreview {
+    try {
+        android.util.Log.e("LakkoPush", "notification sender has no name on this device")
+    } catch (_: RuntimeException) {
+        // Host unit tests: android.util.Log is a stub.
+    }
+    return PushPreview(
+        title = "Lakko",
+        body = me.lakko.app.l10n.Localization.strings.value["notification.message.new"],
+        tag = tag,
+    )
+}
+
+/**
+ * The sender's name for a background notification, by the rule the app's
+ * screens use ([me.lakko.app.profile.ProfileDirectory.resolve], which every
+ * bubble, member row and one-to-one title asks): the name filed under the
+ * PERSON key (the ADR-0050 account key a leaf is bound to, which is what
+ * every receive path files a profile under), else under the leaf's own
+ * signature key, else `null` (no name stored: a defect the caller reports,
+ * never covered by a placeholder word).
+ */
+internal fun backgroundSenderName(
+    personKeyB64: String,
+    leafKeyB64: String?,
+    resolve: (String) -> me.lakko.app.profile.ResolvedName,
+): String? {
+    val person = resolve(personKeyB64)
+    if (!person.isPlaceholder && person.primary.isNotBlank()) return person.primary
+    if (leafKeyB64 != null && leafKeyB64 != personKeyB64) {
+        val leaf = resolve(leafKeyB64)
+        if (!leaf.isPlaceholder && leaf.primary.isNotBlank()) return leaf.primary
+    }
+    return null
+}
+
+/**
+ * A profile envelope met in this background batch, applied to [names] for
+ * the rest of the batch: filed exactly where the app files a received
+ * profile (the sender's PERSON key, resolved from the leaf against the
+ * roster at receipt, C-68) and under the leaf's own key, so the sender's
+ * next row in the same batch is named. In memory only; the app stores the
+ * same row when it polls.
+ */
+internal fun withBatchProfile(
+    names: me.lakko.app.profile.ProfileNameSnapshot,
+    roster: List<uniffi.lakko_ffi_uniffi.GroupMember>,
+    senderLeaf: UInt?,
+    profile: me.lakko.app.profile.PeerProfile,
+    isNewer: (ULong, ULong) -> Boolean,
+): me.lakko.app.profile.ProfileNameSnapshot {
+    val leaf = senderLeaf ?: return names
+    val member = roster.firstOrNull { it.leafIndex == leaf } ?: return names
+    val encoder = java.util.Base64.getEncoder()
+    val personKey = encoder.encodeToString(me.lakko.app.chat.personKeyOf(member))
+    val leafKey = encoder.encodeToString(member.signaturePublicKey)
+    var out = names.withBatchProfile(personKey, profile, isNewer)
+    if (leafKey != personKey) out = out.withBatchProfile(leafKey, profile, isNewer)
+    return out
+}
+
+/**
+ * The sender's name for the leaf [senderLeaf] of [roster] (the throwaway
+ * group's roster right after the apply, C-68), or `null` when the leaf is
+ * not in it.
+ */
+internal fun backgroundSenderNameOf(
+    roster: List<uniffi.lakko_ffi_uniffi.GroupMember>,
+    senderLeaf: UInt?,
+    resolve: (String) -> me.lakko.app.profile.ResolvedName,
+): String? {
+    val leaf = senderLeaf ?: return null
+    val member = roster.firstOrNull { it.leafIndex == leaf } ?: return null
+    val encoder = java.util.Base64.getEncoder()
+    return backgroundSenderName(
+        personKeyB64 = encoder.encodeToString(me.lakko.app.chat.personKeyOf(member)),
+        leafKeyB64 = encoder.encodeToString(member.signaturePublicKey),
+        resolve = resolve,
+    )
 }
 
 /** Truncate a preview body to a sane notification length. */
@@ -771,4 +972,51 @@ public fun notificationGroupKey(
     val resolved = resolvedGroupHex?.lowercase()?.takeIf { it != raw.lowercase() } ?: return raw
     val conversation = conversationHexForWake(resolved, lineage)
     return if (conversation == resolved) raw else conversation
+}
+
+/**
+ * Whether a row's decrypt failure is this device's own message coming back: a
+ * sender cannot open what it sent. The core names the refusal: openmls's
+ * `ValidationError::CannotDecryptOwnMessage` reaches the client inside the
+ * error text (`process_message: ValidationError(CannotDecryptOwnMessage)`).
+ * It covers every row this device published (its typing, receipts and
+ * commits, which the message log never holds). A text that does not match
+ * (another openmls wording) only falls back to the held-id check.
+ */
+internal fun isOwnMessageEcho(cause: Throwable): Boolean =
+    generateSequence(cause) { it.cause }.any { it.message?.contains("CannotDecryptOwnMessage") == true }
+
+/**
+ * A message notification's title and body, the same on every client: the
+ * title is the conversation's name (a group's name; in a one-to-one the other
+ * person's, who is the sender); in a group the body reads `Sender: text`, in
+ * a one-to-one just the text. The person is always named by the name stored
+ * on this device; with none (or an empty [text], a reaction line that could
+ * not name its reactor) this returns `null` and the caller shows the generic
+ * banner: never a placeholder word, never the conversation's name as the
+ * person, never a group body without the sender. A group with no name known
+ * is titled "Lakko". Media previews (an attachment line) take the same
+ * shape. [prefixSender] is `false` for a line that already names the sender
+ * (a reaction).
+ */
+public fun notificationShape(
+    kind: me.lakko.app.chat.ConversationKind?,
+    groupName: String?,
+    senderName: String?,
+    text: String,
+    prefixSender: Boolean = true,
+): Pair<String, String>? {
+    val sender = senderName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (text.isEmpty()) return null
+    val body = if (prefixSender) "$sender: $text" else text
+    return when (kind) {
+        me.lakko.app.chat.ConversationKind.Group -> {
+            val title = groupName?.trim()?.takeIf { it.isNotEmpty() } ?: "Lakko"
+            title to body
+        }
+        me.lakko.app.chat.ConversationKind.Chat -> sender to text
+        // The group could not be read: the generic title, the sender before
+        // the text, since nothing says whether this is a one-to-one.
+        null -> "Lakko" to body
+    }
 }

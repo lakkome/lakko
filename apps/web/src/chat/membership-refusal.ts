@@ -337,6 +337,9 @@ export const COLLAPSED_TO_FALLBACK: ReadonlySet<string> = new Set([
   "notACommitter",
   "proposalsPending",
   "sweepAlreadyStaged",
+  // ADR-0045: a Welcome for a group this device still holds. It is the answer
+  // to no action of the person's, and the client holds the Welcome.
+  "groupStillActive",
 ]);
 
 /** The reasons {@link TABLE} gives a sentence of their own. Exported for the

@@ -6,8 +6,9 @@ import Foundation
 // ADR-0074 section 3.5, "Peers" — the proven-predecessor rule (Stage A).
 //
 // An account that changes its keys WITH a valid supersession proof (the
-// ADR-0016 gate verified it under the pinned key and re-pinned) is the same
-// person under a new key. Its conversation leaves keep their bindings under
+// ADR-0016 gate verified it under the pinned key and re-pinned), or whose
+// bundle carries a conversation link the trusted key signed (section 3.7), is
+// the same person under a new key. Its conversation leaves keep their bindings under
 // the OLD key until Stage B moves them, so the old key stays what those
 // leaves are: the same person. Nothing is evicted, no chat closes, no
 // successor is founded, and NOTHING IS SHOWN to anyone.
@@ -34,6 +35,12 @@ public enum KeyChangeEvidence: Equatable {
     /// key-reset attestation beside it: what tells a rotation from a reset is
     /// the proof.
     case verifiedProof
+    /// A two-way conversation link (ADR-0074 section 3.7) that verified
+    /// against the key the gate left trusted: the trusted key itself signed
+    /// that the account's conversations are bound to the other key. What a
+    /// contact first met after a rotation has in place of a proof, which only
+    /// the old key signs and which that contact therefore cannot anchor.
+    case verifiedConversationLink
     /// An attestation at a higher generation and no proof: a reset (or an
     /// account taken back). The old key is superseded, not a predecessor.
     case attestationOnly
@@ -55,13 +62,16 @@ public enum ProvenPredecessorRule {
     }
 
     public static func treatment(for evidence: KeyChangeEvidence) -> Treatment {
-        evidence == .verifiedProof ? .provenPredecessor : .none
+        switch evidence {
+        case .verifiedProof, .verifiedConversationLink: return .provenPredecessor
+        case .attestationOnly, .none: return .none
+        }
     }
 
     /// Whether the ADR-0073 phase-2 "keys reset" state may be recorded for a
     /// key change: never for a proven rotation.
     public static func flagsAsReset(_ evidence: KeyChangeEvidence) -> Bool {
-        evidence != .verifiedProof
+        treatment(for: evidence) != .provenPredecessor
     }
 }
 
@@ -89,8 +99,8 @@ public struct ProvenPredecessors: Codable, Equatable {
     public var predecessorKeysB64: [String] { successor.keys.sorted() }
 
     /// Record that `oldKeyB64` was superseded by `newKeyB64`, for
-    /// `evidence`. Only a verified proof records anything; returns whether
-    /// the map changed.
+    /// `evidence`. Only verified evidence (a proof, a conversation link)
+    /// records anything; returns whether the map changed.
     ///
     /// Refused: a key over itself, and an edge that would close a cycle (a
     /// later proof leading back to a key already superseded: old keys do not
@@ -103,7 +113,9 @@ public struct ProvenPredecessors: Codable, Equatable {
         guard !oldKeyB64.isEmpty, !newKeyB64.isEmpty, oldKeyB64 != newKeyB64 else { return false }
         // `new` must not already resolve to `old`.
         guard current(of: newKeyB64) != oldKeyB64 else { return false }
-        guard successor[oldKeyB64] != newKeyB64 else { return false }
+        // Already the same person: an edge that is there, or a chain that
+        // leads there (a link names the oldest key, a proof the one before).
+        guard current(of: oldKeyB64) != current(of: newKeyB64) else { return false }
         successor[oldKeyB64] = newKeyB64
         return true
     }

@@ -315,6 +315,15 @@ internal fun copyMids(mid: String?): List<String> =
     if (mid.isNullOrEmpty()) emptyList() else listOf(mid)
 
 /**
+ * The transceivers to prepare an offer on: the [held] ones when there are any,
+ * else the connection's [list], which is not asked for in that first case:
+ * asking disposes every held transceiver with its sender, and from then on the
+ * offer names no light or middle line and the senders cannot be switched.
+ */
+internal fun <T> offerTransceivers(held: List<T>, list: () -> List<T>): List<T> =
+    held.ifEmpty { list() }
+
+/**
  * The codec a sender's SFrame encryptor is told (ADR-0071): the name of the
  * first entry of the sender's negotiated codecs, or `null` before any codec
  * is negotiated. An encryptor told `null`, or a name with no rule, keeps

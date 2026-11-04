@@ -54,8 +54,11 @@ internal fun InviteCreateFormView(
 ) {
     val language = LocalStrings.current.language
     val maxUsesText = remember(language) {
-        java.text.NumberFormat.getIntegerInstance(java.util.Locale.forLanguageTag(language))
-            .format(INVITE_CUSTOM_MAX_USES)
+        me.lakko.app.l10n.DeviceFormats.integer(
+            INVITE_CUSTOM_MAX_USES,
+            java.util.Locale.forLanguageTag(language),
+            me.lakko.app.l10n.DeviceFormats.region(),
+        )
     }
     val params = form.toParams()
     Column(

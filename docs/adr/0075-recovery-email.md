@@ -125,6 +125,30 @@ grant, as rotation does.
 Going back (discarding the phrase to return to mail-protected mode) is not
 offered.
 
+**Amended 2026-11-01 (maintainer).** The reason above holds only for an
+account that had an email vault: a phrase that never left its devices has no
+earlier copy to outrun. So the rotation is now conditional:
+
+- **The current phrase was never in an email vault:** "Save a recovery
+  phrase" shows the words the device already holds, runs the same three-word
+  check and calls `POST /account/phrase/saved`, which needs the fresh-auth
+  grant, sets `accounts.phrase_saved` and writes the notice. Nothing else
+  changes: no new identity, no key generation, no predecessor.
+- **The current phrase was ever sealed in an email vault**
+  (`accounts.phrase_in_vault`, set on the vault write and cleared only by what
+  changes the phrase, so removing the email does not reopen the cheap path):
+  the rotation of this section, unchanged. `POST /account/phrase/saved`
+  answers `409 phrase-save-needs-rotation`.
+
+`GET /account/phrase` (bearer) answers `{saved, rotation_needed}`, on a server
+with no mail set up too, so the client knows which path it is on before any
+word is shown. A client that does not hold the phrase rotates.
+
+Found walking the base scenarios: every account that saved its phrase at
+sign-up had rotated, and so talked under a key its phrase did not hold
+(ADR-0074 section 3.7). The rotation there bought nothing, since no vault
+existed.
+
 ### 4. What the server stores for the address
 
 `recovery_emails(account_id PK, email_key BINARY(32), created_at)` with

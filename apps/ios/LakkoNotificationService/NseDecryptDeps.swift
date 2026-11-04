@@ -127,6 +127,21 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         return held(received)
     }
 
+    /// The DS message ids of the group the app's message log holds, sent or
+    /// received; what tells this device's own message coming back from one
+    /// it cannot read. READ-ONLY: the log the app wrote (C-59).
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> {
+        guard let messages = messageLog.getLog(accountIdB64: accountIdB64)?
+            .groups[groupIdHex.lowercased()]?.messages else { return [] }
+        return Set(messages.lazy.map(\.messageId).filter { $0 > 0 })
+    }
+
+    /// This account's own person key, from the App Group mirror the APP
+    /// writes (``ContinuityMirror``). READ-ONLY.
+    func ownPersonKeyB64(accountIdB64: String) -> String? {
+        ContinuityMirror.read(accountIdB64: accountIdB64).ownPersonKeyB64
+    }
+
     func loadIdentitySeed(accountIdB64: String) -> Data? {
         // ADR-0050 — the app's MLS snapshot is taken under this device's
         // DEVICE identity (the conversation leaf), so that seed rebuilds the
@@ -240,6 +255,19 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         }
         return out
     }
+
+    /// The reactor's name, from the App Group mirror the app writes
+    /// (``PersonNameMirror``). READ-ONLY (C-59).
+    func personName(accountIdB64: String, keyB64: String) -> String? {
+        let name = PersonNameMirror.name(accountIdB64: accountIdB64, keyB64: keyB64)
+        nseTrace("mirror lookup key=\(keyB64) \(name != nil ? "hit" : "miss") \(PersonNameMirror.debugShape(accountIdB64: accountIdB64))")
+        return name
+    }
+
+    /// The Settings > Notifications > Reactions switch (App Group mirror).
+    func reactionNotificationsOn() -> Bool {
+        ReactionNotificationMirror.isOn
+    }
 }
 
 /// A THROWAWAY MLS group backed by a temporary `Identity` + `Group` restored
@@ -263,6 +291,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         self.group = group
     }
 
+    var isGroupConversation: Bool { ((try? group.groupKind()) ?? nil) == .group }
+
     /// ADR-0053 point 9 — the throwaway group's access signer at its restored
     /// epoch. An exporter read over the throwaway provider, never persisted.
     func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? {
@@ -270,16 +300,13 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         return signer.sign(method: method, path: path, query: query, body: body)
     }
 
-    func process(_ payload: Data) -> NseProcessedRow? {
+    func process(_ payload: Data) throws -> NseProcessedRow? {
         // ADR-0022 — the same role-verifying receive path the live poll loop
         // uses. A bad frame / wrong epoch / own echo / role-refused commit
-        // throws and is dropped (fail-closed, invariant #4).
-        let processed: ProcessedMessage
-        do {
-            processed = try group.processIncomingVerifyingRoles(identity: identity, bytes: payload)
-        } catch {
-            return nil
-        }
+        // throws, and the throw reaches the caller's loop, which drops the
+        // row (fail-closed, invariant #4) and tells this device's own message
+        // apart from one it cannot read.
+        let processed = try group.processIncomingVerifyingRoles(identity: identity, bytes: payload)
         // Only Application messages carry a user-visible preview. A Commit /
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
@@ -343,7 +370,12 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             // ADR-0079 (order of 2026-10-17) — a link-founded note: a yes /
             // no from the slim FFI.
             isLinkFounded: { isLinkFoundedEnvelope(plaintext: $0) },
-            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen())
+            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen()),
+            isGroupSetting: { bytes in
+                isGroupPhotoEnvelope(plaintext: bytes) || isGroupReactionsEnvelope(plaintext: bytes)
+                    || isConversationHandleEnvelope(plaintext: bytes) || isKnockSeedEnvelope(plaintext: bytes)
+                    || isAdmissionSeedEnvelope(plaintext: bytes)
+            }
         ) {
             return nil
         }
@@ -364,13 +396,22 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // empty by contract; the preview is the extension's own sentence.
         case .unsupported: kind = .unsupported
         }
+        // Reactions-and-emoji spec section 12 — what a reaction row says, for
+        // the "reacted to your message" notification.
+        var reaction: NseReaction?
+        if kind == .reaction, let target = body.target, let emoji = body.emoji, !emoji.isEmpty {
+            reaction = NseReaction(
+                targetMessageId: target, emoji: emoji, add: body.reactionAction != .remove,
+                targetAuthorB64: body.reactionTargetAuthor?.base64EncodedString())
+        }
         return NseProcessedRow(
             kind: kind,
             text: body.text,
             attachmentCount: body.attachments.count,
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
             senderKeyB64: senderKeyB64,
-            resendOrigin: Self.resendOrigin(of: body)
+            resendOrigin: Self.resendOrigin(of: body),
+            reaction: reaction
         )
     }
 
@@ -775,3 +816,41 @@ enum NseConfig {
         return ApiEndpoints.baseURL(for: .ds)
     }
 }
+
+#if DEBUG
+/// DEBUG builds only: the extension's trace file, one line per step of a
+/// wake, appended to `Library/Caches/nse-trace.log` in the App Group
+/// container so a device run can be read back with `devicectl`. Capped at
+/// 256 KiB (the older half is dropped). Carries no message text.
+enum NseTraceFile {
+    private static let queue = DispatchQueue(label: "me.lakko.nse-trace")
+
+    /// Route ``nseTrace(_:)`` here. Called once from the extension's entry.
+    static func install() {
+        guard nseTraceSink == nil else { return }
+        nseTraceSink = { line in append(line) }
+    }
+
+    static func append(_ line: String) {
+        guard let dir = SharedStorage.containerURL()?
+            .appendingPathComponent("Library/Caches", isDirectory: true) else { return }
+        queue.sync {
+            let url = dir.appendingPathComponent("nse-trace.log")
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let existing = try? Data(contentsOf: url), existing.count + data.count > 256 * 1024 {
+                try? existing.suffix(128 * 1024).write(to: url)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+}
+#endif
+

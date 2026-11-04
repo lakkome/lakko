@@ -196,4 +196,34 @@ class InviteLinkRowsTest {
         assertEquals("Expires in 59m", describeInviteExpiry(now + 59 * min, now).en)
         assertEquals("Expires in 1m", describeInviteExpiry(now + 30_000L, now).en)
     }
+
+    @Test
+    fun `a sent row shows the name it was found under, then the username`() {
+        assertEquals(SentRowText("Kaj Ulm", "@kaj_u"), sentRowText("Kaj Ulm", "kaj_u"))
+        assertEquals("found by name alone", SentRowText("Kaj Ulm", null), sentRowText("Kaj Ulm", ""))
+    }
+
+    @Test
+    fun `a sent row says the username once and stands without a name`() {
+        assertEquals(SentRowText("@kaj_u", null), sentRowText("@kaj_u", "kaj_u"))
+        assertEquals(SentRowText("@kaj_u", null), sentRowText(null, "kaj_u"))
+        assertEquals(SentRowText("@kaj_u", null), sentRowText("  ", "kaj_u"))
+    }
+
+    @Test
+    fun `the people the list shows count contacts and pending contacts alike`() {
+        val contact = ContactRowModel(key = "route-key", name = "Anna", username = null)
+        val invited = ContactRowModel(key = "invited:0a", name = "Ines", username = "ines", personKey = "ines-key")
+        val keys = listedPersonKeys(contactSections(listOf(contact, invited))) { rowKey ->
+            "anna-key".takeIf { rowKey == "route-key" }
+        }
+        assertEquals(setOf("anna-key", "ines-key"), keys)
+    }
+
+    @Test
+    fun `a pending contact the text does not match is not listed`() {
+        val invited = ContactRowModel(key = "invited:0a", name = "Ines", username = "ines", personKey = "ines-key")
+        val shown = contactSections(filterContacts(listOf(invited, ContactRowModel(key = "k", name = "Anna", username = null)), "anna"))
+        assertEquals(emptySet<String>(), listedPersonKeys(shown) { null })
+    }
 }

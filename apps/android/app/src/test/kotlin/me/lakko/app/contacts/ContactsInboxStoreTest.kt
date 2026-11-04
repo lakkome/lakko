@@ -5,6 +5,7 @@ package me.lakko.app.contacts
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -218,6 +219,33 @@ class ContactsInboxStoreTest {
     )
 
     @Test
+    fun dismissing_a_person_takes_every_request_to_them_and_nobody_else() {
+        val first = sentTo(5)
+        val again = sentTo(5).copy(messageId = 2L)
+        val other = sentTo(6)
+        assertEquals(
+            listOf(other),
+            withoutSentTo(listOf(first, again, other), first.recipientAccountIdB64),
+        )
+    }
+
+    @Test
+    fun a_welcome_from_the_person_asked_retires_the_sent_request_with_no_ack() {
+        val key = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 5 })
+        val asked = sentTo(5).copy(recipientKeyB64 = key)
+        val other = sentTo(6).copy(recipientKeyB64 = "b3RoZXI=")
+        val unknown = sentTo(7)
+        assertEquals(listOf(other, unknown), withoutSentAnsweredBy(listOf(asked, other, unknown), setOf(key)))
+        assertEquals(listOf(asked), withoutSentAnsweredBy(listOf(asked), emptySet()))
+    }
+
+    @Test
+    fun the_contacts_badge_counts_each_waiting_request_once_and_nothing_when_none_wait() {
+        assertEquals(0, waitingRequestCount(emptyList()))
+        assertEquals(2, waitingRequestCount(listOf(request(1, 1), request(2, 2), request(2, 2))))
+    }
+
+    @Test
     fun an_ack_from_a_stranger_adds_a_contact_with_their_account_id_and_retires_the_sent_request() {
         val applied = applyContactAcks(
             accepted = listOf(accepted(1)),
@@ -230,6 +258,25 @@ class ContactsInboxStoreTest {
         assertTrue(added.fromPubkey.contentEquals(ByteArray(32) { 5 }))
         assertTrue(added.fromAccountId!!.contentEquals(ByteArray(16) { 45 }))
         assertEquals(listOf(sentTo(6)), applied.sent)
+    }
+
+    @Test
+    fun accepting_someone_retires_the_request_sent_to_them() {
+        val them = request(messageId = 1L, pubkeyByte = 5, accountId = ByteArray(16) { 45 })
+        assertEquals(listOf(sentTo(6)), sentAfterAccepting(listOf(sentTo(5), sentTo(6)), listOf(them)))
+    }
+
+    @Test
+    fun an_ack_from_a_rotated_key_of_a_known_contact_adds_no_second_row() {
+        val known = accepted(1)
+        val applied = applyContactAcks(
+            accepted = listOf(known),
+            sent = emptyList(),
+            acks = listOf(ack(5)),
+            samePerson = { a, b -> a[0].toInt() in setOf(1, 5) && b[0].toInt() in setOf(1, 5) },
+        )
+        assertEquals(1, applied.accepted.size)
+        assertTrue(applied.accepted.single().request.fromPubkey.contentEquals(known.request.fromPubkey))
     }
 
     @Test
@@ -343,5 +390,40 @@ class ContactsInboxStoreTest {
         assertEquals(1, oldKey[0].toInt())
         // The claim alone replaces nothing: without a proof it is two rows.
         assertEquals(5, mergeFetchedRequests(pending, emptyList(), fetched.take(1) + fetched.drop(2)).pending.size)
+    }
+
+    private val askedKey = ByteArray(32) { 5 }
+    private val askedKeyB64 = java.util.Base64.getEncoder().encodeToString(askedKey)
+    private fun asked() = sentTo(5).copy(recipientKeyB64 = askedKeyB64)
+
+    @Test
+    fun answered_welcome_writes_the_contact_in_the_step_that_retires_the_sent_entry() {
+        val out = applyAnsweringWelcomes(emptyList(), listOf(asked()), mapOf(askedKeyB64 to "ab"), 1uL, "now")
+        assertTrue(out.sent.isEmpty())
+        assertTrue(out.acceptedChanged)
+        val row = out.accepted.single()
+        assertTrue(row.request.fromPubkey.contentEquals(askedKey))
+        assertEquals("ab", row.groupIdHex)
+        assertEquals(
+            asked().recipientAccountIdB64,
+            java.util.Base64.getEncoder().encodeToString(row.request.fromAccountId),
+        )
+    }
+
+    @Test
+    fun a_row_the_one_to_one_rule_wrote_first_gets_the_account_id() {
+        val first = adoptingOneToOnePeer(emptyList(), askedKey, null, "ab", 1uL, "now")!!
+        val out = applyAnsweringWelcomes(first, listOf(asked()), mapOf(askedKeyB64 to "ab"), 2uL, "now")
+        assertEquals(1, out.accepted.size)
+        assertTrue(out.acceptedChanged)
+        assertEquals(16, out.accepted.single().request.fromAccountId?.size)
+    }
+
+    @Test
+    fun a_welcome_from_someone_not_asked_writes_nothing_here() {
+        val out = applyAnsweringWelcomes(emptyList(), listOf(sentTo(6)), mapOf(askedKeyB64 to "ab"), 1uL, "now")
+        assertTrue(out.accepted.isEmpty())
+        assertFalse(out.acceptedChanged)
+        assertEquals(1, out.sent.size)
     }
 }

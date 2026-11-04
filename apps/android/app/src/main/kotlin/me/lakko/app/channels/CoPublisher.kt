@@ -154,14 +154,32 @@ public object CoPublisher {
         identity: Identity,
         publisherGroup: PublisherGroup,
         channelName: String? = null,
-    ): uniffi.lakko_ffi_uniffi.InviteLinkMint =
-        composeCoPublisherInviteCapability(
+    ): uniffi.lakko_ffi_uniffi.InviteLinkMint {
+        // ADR-0087 section 5 — the link names the PublisherGroup's knock key,
+        // derived from the owner's journal root seed (version 0, as for a
+        // group). Phase B moves the co-publisher join onto the sealed row.
+        val groupId = publisherGroup.groupId()
+        val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(identity.ed25519Seed(), groupId)
+        val knockPublicKey = try {
+            val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(root, me.lakko.app.chat.CURRENT_KNOCK_VERSION)
+            try {
+                uniffi.lakko_ffi_uniffi.groupKnockPublicKey(seed)
+            } finally {
+                seed.fill(0)
+            }
+        } finally {
+            root.fill(0)
+        }
+        return composeCoPublisherInviteCapability(
             identity.ed25519Seed(),
-            publisherGroup.groupId(),
+            groupId,
             0uL,
             publisherGroup.channelId(),
             channelName?.takeIf { it.isNotBlank() },
+            knockPublicKey,
+            me.lakko.app.chat.CURRENT_KNOCK_VERSION,
         )
+    }
 
     /** Upload a minted co-publisher link to the group-invite ledger like any
      *  `/g/` link and answer `<origin>/g/<id>#<secret>`. It was always the

@@ -33,6 +33,8 @@ public struct DevicesScreen: View {
     private let rotation: KeyRotationRunner?
 
     @ObservedObject private var l10n = Localization.shared
+    /// UX section 2.1 — the keys-not-sent line after a scan link.
+    @ObservedObject private var scanNotice = DeviceScanNotice.shared
 
     public init(
         authRepository: AuthRepository,
@@ -51,11 +53,12 @@ public struct DevicesScreen: View {
     }
 
     public var body: some View {
+        ScrollViewReader { proxy in
         List {
             if let session = DeviceSession.current(authRepository) {
-                // UX 17.5 — the same banner as on Chats (no `Open Devices`
-                // here), or the change-password line after a `New` device
-                // was removed.
+                // UX 17.5 — the explanation of the devices this visit
+                // highlights, or the change-password line after a `New`
+                // device was removed.
                 NewDeviceNoticeRow(onChangePassword: onChangePassword)
                 if authRepository.keysResetThisSession, !resetNoteDismissed {
                     // UX 15.3 — one dismissible note for the rest of this
@@ -87,10 +90,24 @@ public struct DevicesScreen: View {
                     accountIdBytes: session.accountIdBytes,
                     accountIdB64: session.accountIdB64,
                     sessionToken: session.sessionToken,
-                    onDeviceRemoved: onDeviceRemoved
+                    onDeviceRemoved: onDeviceRemoved,
+                    scrollProxy: proxy
                 )
+                if scanNotice.showsKeysNotSent(accountIdB64: session.accountIdB64) {
+                    // UX section 2.1 — the scan link added the device but
+                    // could not hand over the keys: said under the list until
+                    // `Add a device` is pressed again.
+                    Section {
+                        Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
+                            .foregroundStyle(Color.lakkoWarning)
+                            .font(.footnote)
+                    }
+                }
                 Section {
-                    Button(action: onAddDevice) {
+                    Button(action: {
+                        scanNotice.addDevicePressed()
+                        onAddDevice()
+                    }) {
                         Label(l10n.t("devices.add.title"), systemImage: "plus")
                     }
                 } footer: {
@@ -107,24 +124,30 @@ public struct DevicesScreen: View {
         // A UIKit-backed List keeps the mirroring it was built with, so it
         // is rebuilt when the layout direction changes.
         .id(l10n.layoutDirection)
+        }
         .navigationTitle(l10n.t("settings.devices.title"))
         .navigationBarTitleDisplayMode(.inline)
+        // UX 17.5 — opening this screen while a device is pending is the
+        // acknowledgement, for every pending device and for the whole
+        // account; the highlight stays until the screen is left.
+        .onAppear { NewDeviceNoticeCenter.shared.beginVisit() }
+        .onDisappear { NewDeviceNoticeCenter.shared.endVisit() }
     }
 }
 
 /// The session values every device flow needs, or `nil` when the session is
 /// not ready.
-/// The new-device notice as a row of the Devices list: present only while
-/// there is something to say, so no empty section is left behind.
+/// The new-device explanation as a row of the Devices list, above it:
+/// present only while there is something to say, so no empty section is
+/// left behind.
 private struct NewDeviceNoticeRow: View {
     @ObservedObject private var center = NewDeviceNoticeCenter.shared
     let onChangePassword: () -> Void
 
     var body: some View {
-        if center.banner != nil || center.showsRemovedLine {
+        if center.explanation != nil || center.showsRemovedLine {
             Section {
-                NewDeviceNoticeBanner(
-                    center: center, onOpenDevices: nil, onChangePassword: onChangePassword)
+                NewDeviceNoticeExplanation(center: center, onChangePassword: onChangePassword)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
             }
@@ -177,6 +200,11 @@ struct AddDeviceScreen: View {
     /// scan flow added it to the DeviceGroup; the composition root admits it
     /// to every chat.
     var onDeviceAdded: (Data) -> Void = { _ in }
+    /// UX section 2.1 (decided 2026-10-29) — the scan route linked the
+    /// device: back to the Devices list, where the new device's row already
+    /// carries its name. No result line (``DeviceScanNotice`` keeps the
+    /// keys-not-sent line for the list).
+    var onLinked: () -> Void = {}
 
     private enum Side: String, CaseIterable, Identifiable {
         case show
@@ -237,7 +265,8 @@ struct AddDeviceScreen: View {
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64,
                             sessionToken: session.sessionToken,
-                            onDeviceAdded: onDeviceAdded
+                            onDeviceAdded: onDeviceAdded,
+                            onLinked: onLinked
                         )
                     }
                 } else {
@@ -264,6 +293,8 @@ private struct PairView: View {
     @State private var state: PairState = .idle
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
+    /// UX section 2.1 — the city asked for when this screen opened.
+    @State private var place: PairingPlace?
     @ObservedObject private var l10n = Localization.shared
 
     private enum PairState: Equatable {
@@ -321,16 +352,34 @@ private struct PairView: View {
                 }
             }
         }
+        .onAppear {
+            if place == nil { place = DeviceCardCenter.shared.beginPairingPlace() }
+        }
         .onDisappear { cancel() }
     }
 
     private func start() {
         state = .preparing
+        let place = self.place ?? DeviceCardCenter.shared.beginPairingPlace()
+        self.place = place
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            // UX section 2.1 — the other device names this one by its card;
+            // the city is waited for at most the bound from the opening, and
+            // a QR once shown is never rebuilt.
+            let card = await DeviceCardCenter.shared.pairingCardEnvelope(waitingFor: place)
+            guard !Task.isCancelled, state == .preparing else { return }
+            show(deviceCardEnvelope: card)
+        }
+    }
+
+    private func show(deviceCardEnvelope: Data?) {
         do {
             let s = try PairingOrchestrator.prepareJoinFlow(
                 loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
-                accountIdB64: accountIdB64
+                accountIdB64: accountIdB64,
+                deviceCardEnvelope: deviceCardEnvelope
             )
             session = s
             state = .waiting(qrPayload: s.qrPayload)
@@ -374,8 +423,9 @@ private struct PairView: View {
         pollTask?.cancel()
         pollTask = nil
         session = nil
-        if case .waiting = state {
-            state = .idle
+        switch state {
+        case .waiting, .preparing: state = .idle
+        default: break
         }
     }
 }
@@ -393,6 +443,9 @@ private struct ScanView: View {
     let sessionToken: String
     /// ADR-0050 section 2.8 — the admission fan-out over every chat.
     let onDeviceAdded: (Data) -> Void
+    /// UX section 2.1 — the device was linked: leave the pairing flow for
+    /// the Devices list.
+    let onLinked: () -> Void
 
     private let authRepository: AuthRepository
     /// UX 17.4 — the proof block of `Link this device?` (absent while a
@@ -407,7 +460,8 @@ private struct ScanView: View {
         accountIdBytes: Data,
         accountIdB64: String,
         sessionToken: String,
-        onDeviceAdded: @escaping (Data) -> Void
+        onDeviceAdded: @escaping (Data) -> Void,
+        onLinked: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.ownLoginHandle = ownLoginHandle
@@ -415,6 +469,7 @@ private struct ScanView: View {
         self.accountIdB64 = accountIdB64
         self.sessionToken = sessionToken
         self.onDeviceAdded = onDeviceAdded
+        self.onLinked = onLinked
         self._proof = StateObject(
             wrappedValue: FreshAuthProofModel(surface: .addDeviceScan, repository: authRepository))
     }
@@ -425,12 +480,10 @@ private struct ScanView: View {
         /// A decoded pairing QR parks here until the user explicitly
         /// confirms: the scan transfers DeviceGroup membership AND the
         /// account's keys AND a session grant, so it must not run on a
-        /// bare camera glance.
-        case confirm(Data)
+        /// bare camera glance. `card` is what the payload says the new
+        /// device is (UX section 2.1), `nil` when it carries none.
+        case confirm(Data, card: StoredDeviceCard?)
         case processing
-        /// The device was added; `keysSent` says whether this device could
-        /// hand over the keys with it.
-        case done(keysSent: Bool)
         case error(UiText)
     }
 
@@ -460,19 +513,30 @@ private struct ScanView: View {
                         .padding(.top, 4)
                 }
 
-            case .confirm(let scannedBytes):
+            case .confirm(let scannedBytes, let card):
+                let lines = DevicePairingCopy.confirm(card, l10n: l10n)
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(l10n.t("devices.scan.confirm.title"))
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(lines.title)
+                            .font(.headline)
+                        // UX section 2.1 — the card's other lines, as its row
+                        // will show them.
+                        if !lines.detail.isEmpty {
+                            Text(lines.detail).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                        if !lines.place.isEmpty {
+                            Text(lines.place).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                        }
+                    }
                     Text(l10n.t("devices.scan.confirm.body"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     // UX 17.4 — the same block as "Is this you?", between
                     // the body and `Link device`. A failure leaves this step
                     // open with the scanned code kept.
-                    FreshAuthBlock(model: proof, onSubmit: { link(bytes: scannedBytes) })
+                    FreshAuthBlock(model: proof, onSubmit: { link(bytes: scannedBytes, card: card) })
                     HStack {
-                        Button(action: { link(bytes: scannedBytes) }) {
+                        Button(action: { link(bytes: scannedBytes, card: card) }) {
                             Text(l10n.t(proof.layout.working
                                 ? "common.checking" : "devices.scan.confirm.submit"))
                         }
@@ -489,15 +553,6 @@ private struct ScanView: View {
             case .processing:
                 ProgressView(l10n.t("device_link.request.adding"))
 
-            case .done(let keysSent):
-                Label(l10n.t("device_link.request.added"), systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.footnote)
-                if !keysSent {
-                    Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
-                        .foregroundStyle(Color.lakkoWarning)
-                        .font(.footnote)
-                }
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
@@ -519,23 +574,27 @@ private struct ScanView: View {
             return
         }
         // Park for explicit confirmation (lakko-security #1) rather
-        // than running the transfer on a bare decode.
-        state = .confirm(bytes)
+        // than running the transfer on a bare decode. UX section 2.1: the
+        // step names the device by the card in the payload; a payload this
+        // account cannot open names nothing (the transfer reports why).
+        let decoded = try? PairingCodec.parsePairingQrPayload(
+            wireBytes: bytes, expectedLoginHandle: ownLoginHandle)
+        state = .confirm(bytes, card: decoded.flatMap(PairingCodec.deviceCard(of:)))
     }
 
     /// `Link device`: the proof first; nothing of the hand-over starts
     /// before it passes.
-    private func link(bytes: Data) {
+    private func link(bytes: Data, card: StoredDeviceCard?) {
         guard proof.layout.ready else { return }
         Task { @MainActor in
             guard await proof.ensure() else { return }
             guard case .confirm = state else { return }
             proof.closed()
-            runTransfer(bytes: bytes)
+            runTransfer(bytes: bytes, card: card)
         }
     }
 
-    private func runTransfer(bytes: Data) {
+    private func runTransfer(bytes: Data, card: StoredDeviceCard?) {
         state = .processing
         Task { @MainActor in
             do {
@@ -548,7 +607,7 @@ private struct ScanView: View {
                 // grant mint carries exactly it.
                 guard let grant = authRepository.liveFreshGrant() else {
                     proof.proofExpired()
-                    state = .confirm(bytes)
+                    state = .confirm(bytes, card: card)
                     return
                 }
                 let token = authRepository.identitySecrets?.sessionToken ?? sessionToken
@@ -571,7 +630,11 @@ private struct ScanView: View {
                 // Not awaited here: it waits for the device to land and
                 // publish its KeyPackage, which is minutes.
                 onDeviceAdded(scanned.newDeviceKey)
-                state = .done(keysSent: scanned.keysSent)
+                // UX section 2.1 — no result line: back to the Devices list,
+                // which says so when the keys could not be handed over.
+                DeviceScanNotice.shared.linked(accountIdB64: accountIdB64, keysSent: scanned.keysSent)
+                state = .idle
+                onLinked()
             } catch {
                 state = .error(UiText { PairingScanFailure.userFacing(error) })
             }
@@ -610,6 +673,10 @@ private struct DevicesListView: View {
     let sessionToken: String
     /// The device was signed out at the server.
     let onDeviceRemoved: (Data) -> Void
+    /// UX 17.5 — scrolls the first highlighted row into view.
+    let scrollProxy: ScrollViewProxy?
+    /// The first highlighted row was scrolled to (once per screen).
+    @State private var scrolledToNew = false
 
     @State private var state: ListState = .loading
     /// The device whose remove sheet is open.
@@ -617,7 +684,7 @@ private struct DevicesListView: View {
     /// The line under the list after a removal or a `Finish removing`.
     @State private var note: DeviceRemovalNote?
     @ObservedObject private var l10n = Localization.shared
-    /// UX 17.5 — which rows carry `New`.
+    /// UX 17.5 — which rows are highlighted and carry `New`.
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
     /// ADR-0080 — what each device said about itself.
     @ObservedObject private var cards = DeviceCardCenter.shared
@@ -706,23 +773,17 @@ private struct DevicesListView: View {
     }
 
     /// ADR-0080 — the words a row needs, in the interface language.
-    private var rowWords: DeviceCards.Words {
-        let locale = l10n.locale
-        return DeviceCards.Words(
-            device: l10n.t("devices.row.device"),
-            online: l10n.t("devices.row.online"),
-            app: { version in
-                version.isEmpty ? l10n.t("devices.row.app_name") : l10n.t("devices.row.app", texts: ["version": version])
-            },
-            place: { city, country in l10n.t("devices.row.place", texts: ["city": city, "country": country]) },
-            countryName: { code in locale.localizedString(forRegionCode: code) ?? code })
-    }
+    private var rowWords: DeviceCards.Words { .interface(l10n) }
 
     private func rows(_ devices: [DeviceRemoval.DeviceListItem]) -> [DeviceCards.RowInput] {
-        devices.map { device in
+        // UX section 3 — this device's row is built from its own fields.
+        let ownCard = cards.ownRowCard()
+        return devices.map { device in
             let keyHex = hexEncode(device.signaturePublicKey)
             return DeviceCards.RowInput(
-                keyHex: keyHex, leafIndex: device.leafIndex, isSelf: device.isSelf, card: cards.cards[keyHex])
+                keyHex: keyHex, leafIndex: device.leafIndex, isSelf: device.isSelf,
+                card: DeviceCards.rowCard(
+                    keyHex: keyHex, isSelf: device.isSelf, cards: cards.cards, ownCard: ownCard))
         }
     }
 
@@ -744,6 +805,7 @@ private struct DevicesListView: View {
                 calendar: .current, locale: l10n.locale)
             let deviceIdB64 = device.signaturePublicKey.base64EncodedString()
             let run = rowRun[input.keyHex]
+            let highlighted = notice.isHighlighted(signaturePublicKey: device.signaturePublicKey)
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: Self.iconName(view.icon))
                     .foregroundStyle(Color.lakkoTextMuted)
@@ -753,7 +815,7 @@ private struct DevicesListView: View {
                         Text(view.title)
                             .font(.body)
                             .foregroundStyle(Color.lakkoText)
-                        if notice.isNew(signaturePublicKey: device.signaturePublicKey) {
+                        if highlighted {
                             // Text, not colour alone.
                             Text(l10n.t("settings.devices.new_badge"))
                                 .font(.caption.weight(.semibold))
@@ -822,7 +884,25 @@ private struct DevicesListView: View {
             }
             .padding(.vertical, 2)
             .accessibilityElement(children: .contain)
+            // UX 17.5 — a pending device's row is accent-tinted (and says
+            // `New` in text, so not colour alone).
+            .listRowBackground(highlighted ? Color.lakkoAccentSoft : nil)
+            .id(input.keyHex)
         }
+    }
+
+    /// UX 17.5 — scroll the first highlighted row into view, once.
+    private func scrollToFirstNew(_ devices: [DeviceRemoval.DeviceListItem]) {
+        guard !scrolledToNew, let scrollProxy else { return }
+        let ordered = DeviceCards.order(rows(devices))
+        guard let first = ordered.others.first(where: { input in
+            devices.contains {
+                hexEncode($0.signaturePublicKey) == input.keyHex
+                    && notice.isHighlighted(signaturePublicKey: $0.signaturePublicKey)
+            }
+        }) else { return }
+        scrolledToNew = true
+        withAnimation { scrollProxy.scrollTo(first.keyHex, anchor: .center) }
     }
 
     @ViewBuilder private var listFooter: some View {
@@ -897,6 +977,14 @@ private struct DevicesListView: View {
             }
         }
         .onAppear { refresh() }
+        .onChange(of: state) { _, next in
+            if case .ready(let devices) = next { scrollToFirstNew(devices) }
+        }
+        // UX section 3 — the list follows the account: a device that joined or
+        // left while this screen is open, on any route.
+        .onReceive(DeviceRosterChanges.publisher(accountIdB64: accountIdB64)) { _ in
+            followRoster()
+        }
         // A removal left unfinished (offline, a closed app) is retried while
         // this screen is up; the rows follow the runner's pending set.
         .task {
@@ -1031,6 +1119,21 @@ private struct DevicesListView: View {
         } catch {
             NSLog("[devices] WARN device list not loaded: \(error)")
             state = .error(.key("settings.devices.error.load"))
+        }
+    }
+
+    /// The list changed under the open screen: the rows follow it in place,
+    /// and a read that fails keeps them on screen.
+    private func followRoster() {
+        removal.reload()
+        do {
+            let list = try DeviceRemoval.listDevices(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64
+            )
+            state = .ready(list.devices)
+        } catch {
+            NSLog("[devices] WARN device list not re-read: \(error)")
         }
     }
 }
@@ -1303,5 +1406,71 @@ private struct RemoveAllDevicesSheet: View {
             proof.closed()
             onConfirmed()
         }
+    }
+}
+
+// MARK: - Device card words and pairing copy (ADR-0080, UX sections 2.1 and 3)
+
+extension DeviceCards.Words {
+    /// The words a Devices row needs, in the interface language. The pairing
+    /// confirm step uses the same words, so it shows exactly what the row
+    /// will show.
+    @MainActor
+    static func interface(_ l10n: Localization) -> DeviceCards.Words {
+        let locale = l10n.locale
+        return DeviceCards.Words(
+            device: l10n.t("devices.row.device"),
+            online: l10n.t("devices.row.online"),
+            app: { version in
+                version.isEmpty ? l10n.t("devices.row.app_name") : l10n.t("devices.row.app", texts: ["version": version])
+            },
+            place: { city, country in l10n.t("devices.row.place", texts: ["city": city, "country": country]) },
+            countryName: { code in locale.localizedString(forRegionCode: code) ?? code })
+    }
+}
+
+/// UX section 2.1 (decided 2026-10-29) — the scan route has no result line:
+/// once the device was linked it goes straight back to the Devices list,
+/// where the new device's row already carries its name from the payload card.
+/// When the keys could not be handed over, the existing keys-not-sent line is
+/// shown under the Devices list (the person must use a passkey or the phrase
+/// on the new device) until `Add a device` is pressed again.
+@MainActor
+final class DeviceScanNotice: ObservableObject {
+    static let shared = DeviceScanNotice()
+
+    /// The account whose last scan link sent no keys; `nil` when there is
+    /// nothing to say.
+    @Published private(set) var keysNotSentAccountB64: String?
+
+    init() {}
+
+    /// The scan route linked a device for `accountIdB64`.
+    func linked(accountIdB64: String, keysSent: Bool) {
+        keysNotSentAccountB64 = keysSent ? nil : accountIdB64
+    }
+
+    /// `Add a device` was pressed: the line goes.
+    func addDevicePressed() {
+        keysNotSentAccountB64 = nil
+    }
+
+    /// Whether the Devices list of `accountIdB64` shows the keys-not-sent line.
+    func showsKeysNotSent(accountIdB64: String) -> Bool {
+        keysNotSentAccountB64 == accountIdB64
+    }
+}
+
+/// UX section 2.1 — the signed-in device names the device being added by the
+/// card in its pairing payload; with no card, today's copy.
+@MainActor
+enum DevicePairingCopy {
+    /// The confirm step after a scanned code: title and the card's lines.
+    static func confirm(_ card: StoredDeviceCard?, l10n: Localization = .shared) -> DeviceCards.PairingConfirm {
+        DeviceCards.pairingConfirm(
+            card,
+            words: .interface(l10n),
+            titleNamed: { l10n.t("devices.scan.confirm.title_named", texts: ["name": $0]) },
+            titleUnnamed: l10n.t("devices.scan.confirm.title"))
     }
 }

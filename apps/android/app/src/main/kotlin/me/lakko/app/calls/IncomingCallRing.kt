@@ -13,8 +13,9 @@ import me.lakko.app.l10n.Strings
  *
  * `docs/ux/calls.md` section 2.1 asks for a call that rings with the app
  * backgrounded, closed, or the phone locked. Two halves were missing. The
- * outbound half landed with [shouldWakeForCallSignaling]: an offer and an end
- * now request a high-priority push wake. This file is the receiving half's
+ * outbound half landed with [shouldWakeForCallSignaling]: the dial offer and
+ * the end of a call that never connected now request a high-priority push
+ * wake ([OneToOneCallWakes]). This file is the receiving half's
  * vocabulary — every decision about ringing that does NOT need a
  * [android.content.Context], so it can be unit tested on a plain JVM where
  * neither the framework nor `liblakko_ffi_uniffi.so` exists.
@@ -103,19 +104,32 @@ public data class CallRingContent(val title: String, val body: String)
  * name, and one line saying what kind of call it is.
  *
  * The body is the kind and nothing else — never "Incoming Lakko call", never a
- * message preview. A caller this device cannot name falls back to the same word
- * the in-app banner has always used rather than to an account id, which would
- * be both meaningless and a leak onto a locked screen. The words are the
- * catalog's (ADR-0061), in the interface language.
+ * message preview. The title is the caller's name as stored on this device.
+ * A caller with none is a defect (every caller is a contact or a group
+ * member whose name is stored here): it is logged, with no identifier, and
+ * the title is the app's own name, as the generic banner of a wake that
+ * cannot be read; never a placeholder word and never an account id. The
+ * words are the catalog's (ADR-0061), in the interface language.
  */
 public fun callRingContent(
     callerName: String?,
     video: Boolean,
     strings: Strings = Localization.strings.value,
 ): CallRingContent = CallRingContent(
-    title = callerName?.trim()?.takeIf { it.isNotEmpty() } ?: strings["contacts.request.someone"],
+    title = callerName?.trim()?.takeIf { it.isNotEmpty() } ?: unnamedCallerTitle(),
     body = strings[if (video) "call.kind.video" else "call.kind.voice"],
 )
+
+/** The generic title of a ring whose caller has no stored name, logged as
+ *  the defect it is. */
+private fun unnamedCallerTitle(): String {
+    try {
+        android.util.Log.e("LakkoCall", "incoming call has no caller name on this device")
+    } catch (_: RuntimeException) {
+        // Host unit tests: android.util.Log is a stub.
+    }
+    return "Lakko"
+}
 
 /**
  * Milliseconds left in the ring window for an offer stamped [offeredAtMs], or

@@ -64,6 +64,12 @@ public fun RecoveryPhraseOnboarding(
     title: String = t("recovery_phrase.save.title"),
     lead: String = t("recovery_phrase.save.lede"),
     thirdStep: (@Composable (finish: () -> Unit) -> Unit)? = null,
+    /** The way out of the grid step, for a surface that can be left; `null`
+     *  has none. */
+    onLeave: (() -> Unit)? = null,
+    /** The three-word step of a surface whose [onDone] asks a server: it
+     *  stays on screen until the answer. `null` when [onDone] just closes. */
+    finish: PhraseFinish? = null,
 ) {
     val words = remember(phrase) { phraseWords(phrase) }
     var confirming by remember { mutableStateOf(false) }
@@ -79,7 +85,7 @@ public fun RecoveryPhraseOnboarding(
     }
 
     if (!confirming) {
-        AuthScaffold(title = title, onBack = null, modifier = modifier) {
+        AuthScaffold(title = title, onBack = onLeave, modifier = modifier) {
             StepLabel(current = 1, total = totalSteps)
             Lead(lead)
             Spacer(Modifier.height(16.dp))
@@ -102,10 +108,23 @@ public fun RecoveryPhraseOnboarding(
             onConfirmed = { if (thirdStep != null) third = true else onDone() },
             totalSteps = totalSteps,
             lastStep = thirdStep == null,
+            finish = finish,
             modifier = modifier,
         )
     }
 }
+
+/** What the three-word step shows while its surface finishes with a server. */
+public class PhraseFinish(
+    /** The server is being asked. */
+    public val busy: Boolean,
+    /** The line of a failed attempt; the step stays and its button retries. */
+    public val failure: String?,
+    /** The button can be pressed (a proof block above may have to be filled). */
+    public val enabled: Boolean,
+    /** Drawn above the button: the proof block of a proof that ran out. */
+    public val above: @Composable () -> Unit = {},
+)
 
 /** "Step 2 of 3" above a step's text. */
 @Composable
@@ -152,6 +171,7 @@ private fun ConfirmPhraseStep(
     onConfirmed: () -> Unit,
     totalSteps: Int,
     lastStep: Boolean,
+    finish: PhraseFinish?,
     modifier: Modifier = Modifier,
 ) {
     var answers by remember { mutableStateOf(positions.associateWith { "" }) }
@@ -198,13 +218,23 @@ private fun ConfirmPhraseStep(
                 else -> t("recovery_phrase.check.mismatch_many", mapOf("positions" to listPositions(mismatch)))
             },
         )
+        finish?.above?.invoke()
+        FormError(finish?.failure)
         Spacer(Modifier.height(16.dp))
         BusyButton(
-            label = if (lastStep) t("common.confirm") else t("common.continue"),
-            busy = false,
-            enabled = positions.all { answers[it].orEmpty().isNotBlank() },
+            label = when {
+                finish?.failure != null -> t("common.try_again")
+                lastStep -> t("common.confirm")
+                else -> t("common.continue")
+            },
+            busy = finish?.busy == true,
+            enabled = positions.all { answers[it].orEmpty().isNotBlank() } && finish?.enabled != false,
             onClick = ::submit,
         )
-        TextButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) { Text(t("recovery_phrase.check.back")) }
+        TextButton(
+            onClick = onBack,
+            enabled = finish?.busy != true,
+            modifier = Modifier.padding(top = 4.dp),
+        ) { Text(t("recovery_phrase.check.back")) }
     }
 }

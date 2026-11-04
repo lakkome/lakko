@@ -152,13 +152,24 @@ class SessionTokenProviderTest {
         val p = provider(FakeRefresher())
         val installed = install(p, pair(1, now + 900_000L))
 
-        p.reportSupersededFromBearerRoute()
-        p.reportSupersededFromBearerRoute()
+        p.reportSupersededFromBearerRoute(pair(1, now + 900_000L).accessToken)
+        p.reportSupersededFromBearerRoute(pair(1, now + 900_000L).accessToken)
 
         assertEquals(listOf(SessionRefusal.KeysReset), installed.refusals)
         // Nothing installed: nothing reported.
         val empty = provider(FakeRefresher())
-        empty.reportSupersededFromBearerRoute()
+        empty.reportSupersededFromBearerRoute("any")
+    }
+
+    @Test
+    fun `a superseded answer to a token already replaced reports nothing`() {
+        val p = provider(FakeRefresher())
+        val installed = install(p, pair(1, now + 900_000L))
+        p.update(pair(2, now + 900_000L))
+
+        p.reportSupersededFromBearerRoute(pair(1, now + 900_000L).accessToken)
+
+        assertTrue(installed.refusals.isEmpty())
     }
 
     @Test

@@ -322,41 +322,13 @@ public func rowAnnotation(
             ? "chat.members.pending.waiting_leave" : "chat.members.pending.waiting_removed")
 }
 
-/// The `Waiting to be added` rows — pending adds only, past the window.
-/// ADR-0045 S7 residual 2 — the queue an approve just grew, named to the person
-/// who grew it.
-///
-/// ## Why this line, and why only this line
-///
-/// Approving a join no longer admits anyone: it publishes an `Add` proposal into
-/// the member pending set, and that set is drained only by a sweep, which
-/// ADR-0045 decision 2 gives no deadline. So an admin can approve into a queue
-/// indefinitely, and before this the only feedback in the whole system was the
-/// core's cap refusal — which lands on **whoever proposes next**, who is very
-/// often somebody else entirely.
-///
-/// This does not bound anything and does not pretend to. Bounding needs a number
-/// this layer does not have: `MAX_PENDING_PROPOSALS` is `pub(crate)` in
-/// `lakko-mls` and is on neither FFI surface, and a client-side literal `64`
-/// would be exactly the stale-literal drift class this repo already names as
-/// failing in the dangerous direction. What it does is make the accumulation
-/// *visible at the moment it is caused*, which is the part a client can do
-/// honestly.
-///
-/// `nil` below two, because "1 change is now waiting" after making one change is
-/// noise rather than information.
-public func waitingQueueLine(_ pendingCount: Int) -> String? {
-    pendingCount < 2
-        ? nil
-        : Localization.text("chat.members.pending.queue", counts: ["count": UInt64(pendingCount)])
-}
-
 // The "Join requests are not saved" note that used to live here is gone with
 // the reason for it: since 2026-09-26 `Group::pending_external_joins` rides the
 // MLS storage snapshot (ADR-0027 update note), so a restart shows the same
 // list. Rows are still never aged out, which would hide something still live
 // for the joiner.
 
+/// The `Waiting to be added` rows — pending adds only, past the window.
 public func waitingToBeAdded(_ requests: [PendingRequest]) -> [PendingRequest] {
     requests.filter { $0.kind == .add && $0.state == .waiting }
 }
@@ -534,6 +506,26 @@ public final class PendingRequestStore {
         defaults.set(raw, forKey: key)
     }
 
+    /// ADR-0060 section 6 — note the committer envelope just published for the
+    /// Add of the person `personKeyB64`, on that Add's intent. No intent, no
+    /// note: the Add landed or stopped while the envelope was on its way, and
+    /// the record goes with the intent.
+    public func recordCommitterEnvelope(
+        accountIdB64: String, groupIdB64: String, personKeyB64: String,
+        _ sent: SentCommitterEnvelope
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        let slot = MembershipIntent.addSlot(personKeyB64: personKeyB64)
+        guard var raw = defaults.dictionary(forKey: key),
+              let row = raw[slot] as? [String: Any],
+              var intent = MembershipIntent(plist: row) else { return }
+        intent.lastEnvelope = sent
+        raw[slot] = intent.plist
+        defaults.set(raw, forKey: key)
+    }
+
     /// Forget the intent in `slot` — it landed, its subject left, or the
     /// re-request stopped.
     public func removeIntent(accountIdB64: String, groupIdB64: String, slot: String) {
@@ -602,18 +594,26 @@ public struct MembershipIntent: Equatable {
     public var request: Request
     /// The group epoch the request was proposed at.
     public var epoch: UInt64
+    /// ADR-0060 section 6 — for an add, the last committer envelope this
+    /// device published for the person. A re-request replaces the intent, and
+    /// with it this: the fresh proposal gets a fresh envelope.
+    public var lastEnvelope: SentCommitterEnvelope?
 
-    public init(request: Request, epoch: UInt64) {
+    public init(request: Request, epoch: UInt64, lastEnvelope: SentCommitterEnvelope? = nil) {
         self.request = request
         self.epoch = epoch
+        self.lastEnvelope = lastEnvelope
     }
+
+    /// The slot of an add of the person `personKeyB64`.
+    public static func addSlot(personKeyB64: String) -> String { "add:\(personKeyB64)" }
 
     /// One slot per subject and kind. Promote and demote of one member share a
     /// slot (the latest of them is the intent); every transfer shares one
     /// (there is one owner slot to move); leaving has one.
     public var slot: String {
         switch request {
-        case .add(let person, _, _): return "add:\(person)"
+        case .add(let person, _, _): return Self.addSlot(personKeyB64: person)
         case .approveJoin(let joiner): return "approve-join:\(joiner)"
         case .remove(let person): return "remove:\(person)"
         case .setAdmin(let person, _): return "role:\(person)"
@@ -626,6 +626,7 @@ public struct MembershipIntent: Equatable {
 
     var plist: [String: Any] {
         var out: [String: Any] = ["epoch": NSNumber(value: epoch)]
+        if let lastEnvelope { out["envelope"] = lastEnvelope.plist }
         switch request {
         case .add(let person, let account, let leaves):
             out["kind"] = "add"
@@ -689,7 +690,9 @@ public struct MembershipIntent: Equatable {
         case "device-remove": request = .ownDeviceRemove(deviceKeyB64: subject)
         default: return nil
         }
-        self.init(request: request, epoch: epoch)
+        self.init(
+            request: request, epoch: epoch,
+            lastEnvelope: (plist["envelope"] as? [String: Any]).flatMap(SentCommitterEnvelope.init(plist:)))
     }
 }
 

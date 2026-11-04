@@ -10,8 +10,8 @@
  * (ADR-0065) made it version 2, the link records (ADR-0079) version 3 and
  * the revocation seed in a link record (ADR-0079 reworked) version 4, the
  * shared flag in a link record version 5, and the saved message's own time
- * (ADR-0065, 2026-10-26) version 6; an older blob is refused, with no
- * migration. Two places read such bytes back: the sync runtime's seed from
+ * (ADR-0065, 2026-10-26) version 6, and the conversation ends (ADR-0087
+ * section 9) version 7; an older blob is refused, with no migration. Two places read such bytes back: the sync runtime's seed from
  * this device's own row, and the merge of a restored backup. Both go through
  * `openPersistedFold` / `mergeRestoredFoldBytes`, tested here: a refused blob
  * never throws, is logged once, and leaves the device on an empty fold whose
@@ -96,9 +96,9 @@ function versionOneBlobs(): Uint8Array[] {
 }
 
 describe("the encoding version", () => {
-  it("this build writes version 6", () => {
+  it("this build writes version 10", () => {
     const s = new wasm.SyncedState();
-    expect(s.toBytes()[0]).toBe(0x06);
+    expect(s.toBytes()[0]).toBe(0x0a);
     s.free();
   });
 
@@ -123,6 +123,12 @@ describe("the encoding version", () => {
   it("the core refuses the version 5 label (a saved message without its own time)", () => {
     const relabelled = foldWithFolder(F1, "Work");
     relabelled[0] = 0x05;
+    expect(() => wasm.SyncedState.fromBytes(relabelled)).toThrow();
+  });
+
+  it("the core refuses the version 6 label (a fold without conversation ends, the flag day)", () => {
+    const relabelled = foldWithFolder(F1, "Work");
+    relabelled[0] = 0x06;
     expect(() => wasm.SyncedState.fromBytes(relabelled)).toThrow();
   });
 });
@@ -175,12 +181,36 @@ describe("openPersistedFold", () => {
     // The next write is the fresh fold's bytes, which read back.
     const rewritten = decodeSyncState(encodeSyncState({ synced: fold.toBytes(), pending: [] }));
     fold.free();
-    expect(rewritten!.synced[0]).toBe(0x06);
+    expect(rewritten!.synced[0]).toBe(0x0a);
     warn.mockClear();
     const reopened = openPersistedFold(wasm, rewritten!.synced, "stored");
     expect(reopened).not.toBeNull();
     reopened!.free();
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("the flag day of ADR-0087 section 9", () => {
+  it("a version 6 row is none held: the device starts clean and carries on", () => {
+    const stored = foldWithFolder(F1, "Work");
+    stored[0] = 0x06;
+    expect(openPersistedFold(wasm, stored, "stored")).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    // What the sync runtime does next: a new fold, whose first write replaces
+    // the row, and which reads back in this build.
+    const fresh = new wasm.SyncedState();
+    const id = new Uint8Array(32).fill(9);
+    const ended = fresh.composeConversationEnded(mint(), 2, id, 7n);
+    expect(ended).toBeDefined();
+    const bytes = fresh.toBytes();
+    expect(bytes[0]).toBe(0x0a);
+    expect(openPersistedFold(wasm, bytes, "stored")).not.toBeNull();
+  });
+
+  it("a backup of the old version merges nothing and fails nothing", () => {
+    const backup = foldWithFolder(F1, "Work");
+    backup[0] = 0x06;
+    expect(mergeRestoredFoldBytes(wasm, null, backup)).toBeNull();
   });
 });
 
@@ -225,7 +255,7 @@ describe("mergeRestoredFoldBytes", () => {
       foldWithFolder(F2, "Backup"),
     );
     expect(out).not.toBeNull();
-    expect(out![0]).toBe(0x06);
+    expect(out![0]).toBe(0x0a);
     expect(folderNames(out!)).toEqual(["Backup", "Local"]);
     expect(warn).not.toHaveBeenCalled();
   });

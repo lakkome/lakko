@@ -8,6 +8,7 @@ import android.util.Log
 import me.lakko.app.storage.StorageClient
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 import uniffi.lakko_ffi_uniffi.ParsedBackupPayload
 import uniffi.lakko_ffi_uniffi.backupEnvelopeHash
 import uniffi.lakko_ffi_uniffi.buildBackupPayload
@@ -86,6 +87,11 @@ public class BackupClient(
         knownGroupIdsHex: List<String> = emptyList(),
         /** ADR-0058 section 5.2 — the folded synced state's bytes, or `null`. */
         syncedState: ByteArray? = null,
+        /** ADR-0074 section 3.7 — the account's own predecessors, oldest
+         *  first. The caller owns the seeds and zeroes them. */
+        ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
+        /** The own name, photo and the visibility setting. */
+        personal: BackupPersonal = BackupPersonal.NONE,
     ) {
         val createdAtMs = System.currentTimeMillis().toULong()
         val payload = buildBackupPayload(
@@ -98,6 +104,9 @@ public class BackupClient(
             // envelope.
             knownGroupIds = knownGroupIdsHex.mapNotNull(::groupIdBytesOrNull),
             syncedState = syncedState?.takeIf { it.isNotEmpty() },
+            ownPredecessors = ownPredecessors.takeIf { it.isNotEmpty() },
+            ownProfile = personal.ownProfile,
+            visibility = personal.visibility,
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -156,6 +165,8 @@ public class BackupClient(
         contacts: List<BackupContactRecord> = emptyList(),
         knownGroupIdsHex: List<String> = emptyList(),
         syncedState: ByteArray? = null,
+        ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
+        personal: BackupPersonal = BackupPersonal.NONE,
     ): UploadResult {
         val cached = PhraseStore.getPhrase(context, accountIdB64)
             ?: return UploadResult.CacheMiss
@@ -170,6 +181,8 @@ public class BackupClient(
                 accountIdB64 = accountIdB64,
                 knownGroupIdsHex = knownGroupIdsHex,
                 syncedState = syncedState,
+                ownPredecessors = ownPredecessors,
+                personal = personal,
             )
             return UploadResult.Uploaded
         } catch (cause: Throwable) {
@@ -278,6 +291,53 @@ public class BackupClient(
     }
 }
 
+/**
+ * What a backup carries about the person that no other part of it does: the own
+ * profile envelope and the visibility envelope, both with their original stamps
+ * ([ownProfile] and [visibility] `null` when never set). Opaque here; a restore
+ * decodes them and fails closed.
+ */
+public data class BackupPersonal(val ownProfile: ByteArray?, val visibility: ByteArray?) {
+    /** A short value that changes with either envelope. */
+    public fun changeKey(): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        ownProfile?.let(digest::update)
+        digest.update(0)
+        visibility?.let(digest::update)
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is BackupPersonal &&
+            ownProfile.contentEqualsOrNull(other.ownProfile) &&
+            visibility.contentEqualsOrNull(other.visibility)
+
+    override fun hashCode(): Int = (ownProfile?.contentHashCode() ?: 0) * 31 + (visibility?.contentHashCode() ?: 0)
+
+    public companion object {
+        public val NONE: BackupPersonal = BackupPersonal(null, null)
+
+        /** Read from this device's stores. A store that cannot be read gives
+         *  `null`, and that field is left out of this backup. */
+        public fun of(context: Context, accountIdB64: String): BackupPersonal {
+            val ownProfile = runCatching {
+                val accountId = me.lakko.app.auth.base64Decode(accountIdB64)
+                me.lakko.app.profile.ownProfileBackupEnvelope(
+                    me.lakko.app.profile.OwnProfileStore.load(context, accountId),
+                    accountId,
+                ) { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+            }.getOrNull()
+            val visibility = runCatching {
+                me.lakko.app.reach.ReachManager.get(context).visibilityEnvelopeFor(accountIdB64)
+            }.getOrNull()
+            return BackupPersonal(ownProfile, visibility)
+        }
+
+        private fun ByteArray?.contentEqualsOrNull(other: ByteArray?): Boolean =
+            if (this == null) other == null else other != null && contentEquals(other)
+    }
+}
+
 /** Discriminated outcome of [BackupClient.uploadFromCache]. */
 public sealed interface UploadResult {
     public data object Uploaded : UploadResult
@@ -343,6 +403,14 @@ public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
  * Lakko mints 32-byte ids; anything else names no conversation, so carrying it
  * would only put a name nobody can act on into the backup.
  */
+/**
+ * ADR-0074 section 3.7: the account's own predecessors as a backup carries
+ * them, oldest first, each with the time the account adopted its successor.
+ * Fresh copies of the seeds: the caller zeroes them and [rows] alike.
+ */
+internal fun ownPredecessorsForBackup(rows: List<me.lakko.app.auth.OwnPredecessor>): List<BackupOwnPredecessor> =
+    rows.map { BackupOwnPredecessor(seed = it.phraseSeed.copyOf(), adoptedAtMs = it.supersededAtMs.toULong()) }
+
 internal fun groupIdBytesOrNull(hex: String): ByteArray? {
     if (hex.length != 64) return null
     val out = ByteArray(32)

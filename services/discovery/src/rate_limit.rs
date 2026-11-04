@@ -5,7 +5,7 @@
 
 //! Token-bucket rate limiter for discovery's
 //! anonymous endpoints — OPRF evaluation, username
-//! lookup, channel-name lookup, the invite ledgers'
+//! and name lookup, the invite ledgers'
 //! fetch + consume — and for its session-gated writes.
 //! Anonymous requests with a valid session token are
 //! charged per account plus a per-IP ceiling; requests
@@ -16,8 +16,8 @@
 //! ## Threat model
 //!
 //! Since ADR-0054 S3 the per-action ration is an
-//! anonymous token (the OPRF evaluation, channel-name
-//! registration and the invite consumes spend one), and
+//! anonymous token (the OPRF evaluation, a group or
+//! channel name claim and the invite consumes spend one), and
 //! the session-gated writes carry no proof of work: this
 //! limiter caps **server CPU spent per source IP** on
 //! the OPRF compute (Ristretto255 scalar multiplication)

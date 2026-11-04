@@ -62,6 +62,11 @@ public object AvatarImages {
         }
     }
 
+    private val gone: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** The server answered that [blobIdHex] is gone (expired or deleted). */
+    public fun isGone(blobIdHex: String): Boolean = blobIdHex in gone
+
     /** A still decoded from memory, without any I/O, or `null`. */
     public fun cachedBitmap(blob: AvatarBlob): Bitmap? = bitmaps[blob.blobIdHex]
 
@@ -166,7 +171,12 @@ public object AvatarImages {
         val nonce = blob.nonce() ?: return null
         val ciphertext = withContext(Dispatchers.IO) {
             StorageClient().use { it.getBlob(id) }
-        } ?: return null
+        } ?: run {
+            // 404: the file expired or was deleted (ADR-0087 4.5.2 "gone").
+            gone.add(blob.blobIdHex)
+            mutableRevision.update { it + 1 }
+            return null
+        }
         // The AEAD tag is 16 bytes; anything longer than the bound allows is
         // refused before it is opened.
         if (ciphertext.size.toLong() != blob.size + AEAD_TAG_BYTES) return null

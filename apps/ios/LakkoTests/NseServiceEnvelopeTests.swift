@@ -1558,6 +1558,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
     }
 
     private struct StubDeps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         let group: NseThrowawayGroup
         let rows: [NseFetchedRow]
         let groupIdBytes = Data(repeating: 0xAA, count: 32)

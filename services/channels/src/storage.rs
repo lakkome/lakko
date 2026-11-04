@@ -36,6 +36,9 @@ use tokio::sync::RwLock;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
+use crate::feedback::{
+    Label, MemoryFeedback, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN,
+};
 
 /// Prune a per-subscriber `epoch -> envelope` map down to its
 /// highest `keep_n` epochs, dropping the lowest first
@@ -174,6 +177,92 @@ pub const OWNER_PUBKEY_LEN: usize = 32;
 
 /// Length of an owner request-proof nonce.
 pub const OWNER_NONCE_LEN: usize = 16;
+
+/// Length of a public channel's seed envelope
+/// (`lakko_channels::public_seed`, ADR-0087 section 6). Opaque here.
+pub const PUBLIC_SEED_LEN: usize = lakko_channels::PUBLIC_SEED_ENVELOPE_LEN;
+
+/// Length of a private channel subscriber's sealed admission ticket
+/// (`lakko_channels::invite`, ADR-0087 section 7). Opaque here: the service
+/// stores it and never opens it.
+pub const SEALED_TICKET_LEN: usize = lakko_channels::ADMISSION_TICKET_LEN;
+
+/// A sealed admission ticket.
+pub type SealedTicket = [u8; SEALED_TICKET_LEN];
+
+/// Length of an invite public key.
+pub const INVITE_KEY_LEN: usize = lakko_channels::INVITE_KEY_LEN;
+
+/// `max_uses` of an invite key that may be used any number of times. `0`
+/// means one use: the discovery ledger's rule, so a link's ledger row and its
+/// invite key carry the same number.
+pub const INVITE_USES_UNLIMITED: u32 = u32::MAX;
+
+/// A private channel's registered invite key (ADR-0087 section 7). Names no
+/// account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InviteKeyRow {
+    /// The Ed25519 invite public key.
+    pub invite_pk: [u8; INVITE_KEY_LEN],
+    /// Unix milliseconds after which the key admits nobody; `0` = never.
+    pub expiry_ms: u64,
+    /// `0` = one use, [`INVITE_USES_UNLIMITED`] = unlimited, else the
+    /// ceiling.
+    pub max_uses: u32,
+    /// How many new subscribers it let in.
+    pub used_count: u32,
+}
+
+impl InviteKeyRow {
+    /// Whether the key is past its expiry at `now_ms`.
+    #[must_use]
+    pub const fn is_expired(&self, now_ms: u64) -> bool {
+        self.expiry_ms != 0 && now_ms >= self.expiry_ms
+    }
+
+    /// Whether one more subscriber may come in under the key.
+    #[must_use]
+    pub const fn has_uses_left(&self) -> bool {
+        self.used_count < invite_use_ceiling(self.max_uses)
+    }
+
+    /// Whether a new subscriber may come in under the key at `now_ms`.
+    #[must_use]
+    pub const fn is_live(&self, now_ms: u64) -> bool {
+        !self.is_expired(now_ms) && self.has_uses_left()
+    }
+}
+
+/// The effective ceiling of a `max_uses` value: `0` is one use,
+/// [`INVITE_USES_UNLIMITED`] never runs out.
+#[must_use]
+pub const fn invite_use_ceiling(max_uses: u32) -> u32 {
+    if max_uses == 0 {
+        1
+    } else {
+        max_uses
+    }
+}
+
+/// One row of the paged subscriber list (ADR-0087 section 7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriberEntry {
+    /// The row number in insertion order; the page cursor.
+    pub seq: u64,
+    /// The subscriber key.
+    pub subscriber: SubscriberId,
+    /// The sealed admission ticket the row was filed with, if any.
+    pub sealed_ticket: Option<SealedTicket>,
+}
+
+/// What [`ChannelStore::put_public_seed`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicSeedOutcome {
+    /// The envelope was stored.
+    Stored,
+    /// The identical envelope was already stored for the epoch.
+    AlreadyStored,
+}
 
 /// A decoded listing as the directory stores it (ADR-0059 section 3). The
 /// canonical bytes are served back verbatim; the decoded fields feed the
@@ -341,6 +430,35 @@ pub enum StorageError {
         /// The epoch the refused card carries.
         got: u32,
     },
+    /// The operation is for public channels and the channel is private
+    /// (ADR-0087: a listing or a public seed on a private channel).
+    #[error("the channel is private")]
+    ChannelPrivate,
+    /// The operation is for private channels and the channel is public
+    /// (ADR-0087: a publisher removing a subscriber).
+    #[error("the channel is public")]
+    ChannelPublic,
+    /// A public seed for an epoch beyond `current_epoch + 1` (ADR-0087
+    /// section 6). The next epoch's seed may be filed before the rotation
+    /// commits, nothing further.
+    #[error("public seed epoch {got} is beyond the next epoch (current epoch is {current})")]
+    PublicSeedEpochInFuture {
+        /// The channel's live epoch at refusal time.
+        current: u32,
+        /// The epoch the caller named.
+        got: u32,
+    },
+    /// A different public seed is already stored for the epoch. A stored
+    /// seed is immutable (caches hold it).
+    #[error("a different public seed is stored for this epoch")]
+    PublicSeedConflict,
+    /// Registering one more invite key would exceed the per-channel cap.
+    #[error("too many invite keys for this channel")]
+    TooManyInviteKeys,
+    /// The channel holds no post at the cursor a reaction or comment names
+    /// (ADR-0087 section 13a).
+    #[error("post not found")]
+    UnknownPost,
     /// Database-level failure — connection lost, query
     /// timeout, constraint violation, anything sqlx
     /// surfaces. The string carries the underlying
@@ -368,7 +486,124 @@ pub trait ChannelStore: Send + Sync {
         &self,
         channel: ChannelId,
         owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError> {
+        self.create_with_access(channel, owner_pubkey, false).await
+    }
+
+    /// [`Self::create`] with the channel's flag (ADR-0087): `private` is
+    /// applied only when the row is created; re-creating an existing channel
+    /// never changes it ([`Self::set_private`] does, owner-signed).
+    async fn create_with_access(
+        &self,
+        channel: ChannelId,
+        owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+        private: bool,
     ) -> Result<(), StorageError>;
+
+    /// Whether `channel` is private; `None` for an unknown channel.
+    async fn is_private(&self, channel: ChannelId) -> Result<Option<bool>, StorageError>;
+
+    /// Set the channel's flag (ADR-0087 section 8). Going private withdraws
+    /// the listing and deletes every public seed in the same step, since a
+    /// private channel is never listed and its seeds are sealed to each key.
+    /// Going public changes only the flag. Returns whether the flag changed.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn set_private(&self, channel: ChannelId, private: bool) -> Result<bool, StorageError>;
+
+    /// File a public channel's seed envelope for `epoch` (ADR-0087 section
+    /// 6). Immutable once stored: the identical envelope again is
+    /// [`PublicSeedOutcome::AlreadyStored`], another is
+    /// [`StorageError::PublicSeedConflict`]. Storing epoch `e` marks every
+    /// lower epoch's seed superseded at `now_ms`, which starts its prune
+    /// clock.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`], [`StorageError::ChannelPrivate`],
+    /// [`StorageError::PublicSeedEpochInFuture`] (`epoch > current + 1`),
+    /// [`StorageError::PublicSeedConflict`].
+    async fn put_public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+        envelope: [u8; PUBLIC_SEED_LEN],
+        now_ms: u64,
+    ) -> Result<PublicSeedOutcome, StorageError>;
+
+    /// The public seed envelope of `(channel, epoch)`, if stored.
+    async fn public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+    ) -> Result<Option<[u8; PUBLIC_SEED_LEN]>, StorageError>;
+
+    /// Drop public seeds superseded before `cutoff_ms` (the post retention
+    /// cutoff: every post such a seed opens is gone by then). Returns how
+    /// many.
+    async fn prune_public_seeds_superseded_before(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError>;
+
+    /// Register or update an invite key (ADR-0087 section 7). A key already
+    /// registered keeps its use count and takes the new expiry and ceiling.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`]; [`StorageError::TooManyInviteKeys`]
+    /// when `max_keys` keys are registered and this one is new.
+    async fn put_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        expiry_ms: u64,
+        max_uses: u32,
+        max_keys: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Revoke an invite key. `Ok(false)` when it was not registered.
+    async fn delete_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<bool, StorageError>;
+
+    /// The registered invite key, if any.
+    async fn invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<Option<InviteKeyRow>, StorageError>;
+
+    /// Every registered invite key of `channel` (at most the cap), ascending
+    /// by key.
+    async fn list_invite_keys(&self, channel: ChannelId)
+        -> Result<Vec<InviteKeyRow>, StorageError>;
+
+    /// Count one use of the key if it is live at `now_ms`, atomically.
+    /// `Ok(false)` when it is not registered, expired or used up.
+    async fn claim_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Give back one use claimed by [`Self::claim_invite_use`] (the request
+    /// that claimed it was then refused). Never below zero.
+    async fn release_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<(), StorageError>;
+
+    /// Drop invite keys whose expiry is before `cutoff_ms` (never one with
+    /// no expiry). Returns how many.
+    async fn prune_invite_keys_expired_before(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
 
     /// The owner key registered for `channel`, `None` for an unknown
     /// channel.
@@ -520,7 +755,71 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
         subscriber: SubscriberId,
         server_ts_ms: u64,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        self.subscribe_with_ticket(channel, subscriber, server_ts_ms, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Register a subscriber with an optional sealed admission ticket
+    /// (ADR-0087 section 7). A new row gets the next row number and moves the
+    /// subscriber counter; an existing row is a re-subscribe (activity, and
+    /// the ticket replaced when one is given). Clears a removal record of the
+    /// key. Returns whether the row is new.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn subscribe_with_ticket(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        server_ts_ms: u64,
+        sealed_ticket: Option<SealedTicket>,
+    ) -> Result<bool, StorageError>;
+
+    /// A page of subscriber rows in insertion order, strictly after row
+    /// number `after_seq` (`0` = from the start), at most `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn list_subscriber_page(
+        &self,
+        channel: ChannelId,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<SubscriberEntry>, StorageError>;
+
+    /// The maintained count of the channel's subscriber rows.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn subscriber_count(&self, channel: ChannelId) -> Result<u64, StorageError>;
+
+    /// A publisher removes a subscriber from a private channel (ADR-0087
+    /// section 7): as [`Self::unsubscribe`], and the key is recorded as
+    /// removed so its envelope read answers so. Idempotent. Returns whether a
+    /// row was removed.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`], [`StorageError::ChannelPublic`].
+    async fn remove_subscriber(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Whether a publisher removed `subscriber` from `channel` (and it has
+    /// not subscribed again since).
+    async fn is_removed(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<bool, StorageError>;
 
     /// `true` if the subscriber is registered on the
     /// channel.
@@ -545,7 +844,9 @@ pub trait ChannelStore: Send + Sync {
 
     /// Delete every subscriber across every channel
     /// whose `last_active_at` is strictly less than
-    /// `cutoff_ms`. Returns the number of subscriber
+    /// `cutoff_ms`, moving each channel's subscriber counter,
+    /// and every removal record older than `cutoff_ms`.
+    /// Returns the number of subscriber
     /// rows removed (envelopes are cascaded out by the
     /// FK on the SQL side; the in-memory impl drops
     /// the matching envelope entries explicitly).
@@ -728,7 +1029,136 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
         subscriber: SubscriberId,
     ) -> Result<(), StorageError>;
+
+    // ---------------------------------------------------------
+    // Comments and reactions (ADR-0087 section 13a)
+    // ---------------------------------------------------------
+
+    /// Whether the channel holds a post at `post_cursor`: the check an add
+    /// runs before it spends a token. A keyed lookup.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn post_exists(&self, channel: ChannelId, post_cursor: u64)
+        -> Result<bool, StorageError>;
+
+    /// Store the reaction row `(post, writer_key, label)`. Returns whether it
+    /// is new (an existing row is left as it is).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownPost`] when the channel holds no post at
+    /// `post_cursor` (never stored, or pruned).
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Remove the reaction row; returns whether one was there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError>;
+
+    /// The label counts of each post in `post_cursors`, in that order (a post
+    /// with no rows, or none at all, gets an empty list). See
+    /// [`PostReactionCounts`] for the ranking.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError>;
+
+    /// Store a comment row and return its cursor.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownPost`].
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError>;
+
+    /// The write key of the comment at `comment_cursor` under the post, or
+    /// `None` when there is no such comment.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError>;
+
+    /// Remove the comment row; returns whether one was there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// The comments under the post with a cursor above `after`, ascending, at
+    /// most `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError>;
+
+    /// Record a write-proof nonce; `false` when it was seen before.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`].
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Forget write-proof nonces seen before `cutoff_ms`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`].
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
 }
+
+/// One channel's public seeds: epoch → (envelope, superseded at).
+type PublicSeeds = BTreeMap<u32, ([u8; PUBLIC_SEED_LEN], Option<u64>)>;
 
 /// In-memory state container. Cheap to clone — the inner
 /// state is behind an `Arc<RwLock<…>>`.
@@ -817,9 +1247,64 @@ struct Inner {
     first_listed_at: HashMap<ChannelId, u64>,
     /// Channel id → (blocked, reason, action time).
     moderation: HashMap<ChannelId, (bool, String, u64)>,
+    /// Channel id → private flag (ADR-0087); absent = public.
+    private: HashMap<ChannelId, bool>,
+    /// The last row number handed out (global, like the SQL
+    /// `AUTO_INCREMENT`).
+    last_seq: u64,
+    /// Channel id → row number → subscriber, the paged list's order.
+    subscriber_rows: HashMap<ChannelId, BTreeMap<u64, SubscriberId>>,
+    /// (Channel, Subscriber) → (row number, sealed ticket).
+    subscriber_meta: HashMap<(ChannelId, SubscriberId), (u64, Option<SealedTicket>)>,
+    /// Channel id → epoch → (public seed envelope, superseded at).
+    public_seeds: HashMap<ChannelId, PublicSeeds>,
+    /// Channel id → invite key → row.
+    invite_keys: HashMap<ChannelId, BTreeMap<[u8; INVITE_KEY_LEN], InviteKeyRow>>,
+    /// (Channel, Subscriber) removed by a publisher → when.
+    removed: HashMap<(ChannelId, SubscriberId), u64>,
+    /// Comments and reactions (ADR-0087 section 13a).
+    feedback: MemoryFeedback,
 }
 
 impl Inner {
+    fn has_post(&self, channel: ChannelId, post_cursor: u64) -> bool {
+        self.posts
+            .get(&channel)
+            .is_some_and(|posts| posts.iter().any(|p| p.cursor == post_cursor))
+    }
+}
+
+impl Inner {
+    /// Drop every trace of `(channel, subscriber)`: the row, its envelopes,
+    /// member card, registration time, row number and staged envelopes.
+    /// Returns whether a row was removed.
+    fn drop_subscriber(&mut self, channel: ChannelId, subscriber: SubscriberId) -> bool {
+        let removed = self
+            .subscribers
+            .get_mut(&channel)
+            .is_some_and(|set| set.remove(&subscriber).is_some());
+        self.envelopes.remove(&(channel, subscriber));
+        if let Some(cards) = self.member_cards.get_mut(&channel) {
+            cards.remove(&subscriber);
+        }
+        // The SQL store loses `registered_at` with the subscriber row; keep
+        // the directory growth signal the same in both stores (ADR-0059).
+        if let Some(map) = self.registered_at.get_mut(&channel) {
+            map.remove(&subscriber);
+        }
+        if let Some((seq, _)) = self.subscriber_meta.remove(&(channel, subscriber)) {
+            if let Some(rows) = self.subscriber_rows.get_mut(&channel) {
+                rows.remove(&seq);
+            }
+        }
+        for ((staged_channel, _), staged) in &mut self.staged_envelopes {
+            if *staged_channel == channel {
+                staged.remove(&subscriber);
+            }
+        }
+        removed
+    }
+
     fn entry_for(&self, channel: ChannelId, now_ms: u64) -> Option<DirectoryEntry> {
         let listing = self.listings.get(&channel)?;
         let since = now_ms.saturating_sub(GROWTH_WINDOW_MS);
@@ -861,10 +1346,11 @@ impl InMemoryChannelStore {
 
 #[async_trait]
 impl ChannelStore for InMemoryChannelStore {
-    async fn create(
+    async fn create_with_access(
         &self,
         channel: ChannelId,
         owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+        private: bool,
     ) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
         match guard.owners.get(&channel) {
@@ -872,6 +1358,7 @@ impl ChannelStore for InMemoryChannelStore {
             Some(_) => {},
             None => {
                 guard.owners.insert(channel, owner_pubkey);
+                guard.private.insert(channel, private);
             },
         }
         guard.posts.entry(channel).or_default();
@@ -966,6 +1453,14 @@ impl ChannelStore for InMemoryChannelStore {
             posts.retain(|p| p.server_ts_ms >= cutoff_ms);
             removed = removed.saturating_add((before - posts.len()) as u64);
         }
+        // A pruned post takes its comments and reactions with it, as the SQL
+        // foreign keys cascade.
+        let live: std::collections::HashSet<(ChannelId, u64)> = guard
+            .posts
+            .iter()
+            .flat_map(|(c, posts)| posts.iter().map(move |p| (*c, p.cursor)))
+            .collect();
+        guard.feedback.retain_posts(|c, p| live.contains(&(c, p)));
         Ok(removed)
     }
 
@@ -977,28 +1472,47 @@ impl ChannelStore for InMemoryChannelStore {
     ///
     /// Returns [`StorageError::UnknownChannel`] when the
     /// channel was never registered via [`Self::create`].
-    async fn subscribe(
+    async fn subscribe_with_ticket(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
         server_ts_ms: u64,
-    ) -> Result<(), StorageError> {
+        sealed_ticket: Option<SealedTicket>,
+    ) -> Result<bool, StorageError> {
         let mut guard = self.inner.write().await;
         if !guard.posts.contains_key(&channel) {
             return Err(StorageError::UnknownChannel);
         }
-        guard
+        let is_new = guard
             .subscribers
             .entry(channel)
             .or_default()
-            .insert(subscriber, server_ts_ms);
+            .insert(subscriber, server_ts_ms)
+            .is_none();
         guard
             .registered_at
             .entry(channel)
             .or_default()
             .entry(subscriber)
             .or_insert(server_ts_ms);
-        Ok(())
+        guard.removed.remove(&(channel, subscriber));
+        if is_new {
+            guard.last_seq = guard.last_seq.saturating_add(1);
+            let seq = guard.last_seq;
+            guard
+                .subscriber_rows
+                .entry(channel)
+                .or_default()
+                .insert(seq, subscriber);
+            guard
+                .subscriber_meta
+                .insert((channel, subscriber), (seq, sealed_ticket));
+        } else if let Some(ticket) = sealed_ticket {
+            if let Some(meta) = guard.subscriber_meta.get_mut(&(channel, subscriber)) {
+                meta.1 = Some(ticket);
+            }
+        }
+        Ok(is_new)
     }
 
     /// `true` if the subscriber is registered against the
@@ -1049,19 +1563,11 @@ impl ChannelStore for InMemoryChannelStore {
         // matching envelope. The SQL impl gets this for
         // free via FK ON DELETE CASCADE.
         for (channel, sub) in to_drop {
-            if let Some(set) = guard.subscribers.get_mut(&channel) {
-                if set.remove(&sub).is_some() {
-                    removed = removed.saturating_add(1);
-                }
-            }
-            guard.envelopes.remove(&(channel, sub));
-            if let Some(map) = guard.registered_at.get_mut(&channel) {
-                map.remove(&sub);
-            }
-            if let Some(cards) = guard.member_cards.get_mut(&channel) {
-                cards.remove(&sub);
+            if guard.drop_subscriber(channel, sub) {
+                removed = removed.saturating_add(1);
             }
         }
+        guard.removed.retain(|_, at| *at >= cutoff_ms);
         Ok(removed)
     }
 
@@ -1559,6 +2065,9 @@ impl ChannelStore for InMemoryChannelStore {
         if !guard.posts.contains_key(&channel) {
             return Err(StorageError::UnknownChannel);
         }
+        if guard.private.get(&channel).copied().unwrap_or(false) {
+            return Err(StorageError::ChannelPrivate);
+        }
         if guard.moderation.get(&channel).is_some_and(|(b, _, _)| *b) {
             return Err(StorageError::ListingBlocked);
         }
@@ -1688,24 +2197,143 @@ impl ChannelStore for InMemoryChannelStore {
         if !guard.posts.contains_key(&channel) {
             return Err(StorageError::UnknownChannel);
         }
-        if let Some(set) = guard.subscribers.get_mut(&channel) {
-            set.remove(&subscriber);
-        }
-        guard.envelopes.remove(&(channel, subscriber));
-        if let Some(cards) = guard.member_cards.get_mut(&channel) {
-            cards.remove(&subscriber);
-        }
-        // The SQL store loses `registered_at` with the subscriber row; keep
-        // the directory growth signal the same in both stores (ADR-0059).
-        if let Some(map) = guard.registered_at.get_mut(&channel) {
-            map.remove(&subscriber);
-        }
-        for ((staged_channel, _), staged) in &mut guard.staged_envelopes {
-            if *staged_channel == channel {
-                staged.remove(&subscriber);
-            }
-        }
+        guard.drop_subscriber(channel, subscriber);
         Ok(())
+    }
+
+    async fn post_exists(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.read().await.has_post(channel, post_cursor))
+    }
+
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        _now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.has_post(channel, post_cursor) {
+            return Err(StorageError::UnknownPost);
+        }
+        Ok(guard
+            .feedback
+            .add_reaction(channel, post_cursor, writer_key, label))
+    }
+
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.write().await.feedback.delete_reaction(
+            channel,
+            post_cursor,
+            writer_key,
+            label,
+        ))
+    }
+
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .reaction_counts(channel, post_cursors))
+    }
+
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.has_post(channel, post_cursor) {
+            return Err(StorageError::UnknownPost);
+        }
+        Ok(guard
+            .feedback
+            .add_comment(channel, post_cursor, writer_key, sealed, now_ms))
+    }
+
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .comment_writer(channel, post_cursor, comment_cursor))
+    }
+
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .delete_comment(channel, post_cursor, comment_cursor))
+    }
+
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .list_comments(channel, post_cursor, after, limit))
+    }
+
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .consume_nonce(nonce, now_ms))
+    }
+
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .feedback
+            .prune_nonces_older_than(cutoff_ms))
     }
 
     async fn list_member_cards(
@@ -1728,6 +2356,287 @@ impl ChannelStore for InMemoryChannelStore {
             .take(limit)
             .map(|(sub, (_, card))| (*sub, card.clone()))
             .collect())
+    }
+
+    async fn is_private(&self, channel: ChannelId) -> Result<Option<bool>, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Ok(None);
+        }
+        Ok(Some(guard.private.get(&channel).copied().unwrap_or(false)))
+    }
+
+    async fn set_private(&self, channel: ChannelId, private: bool) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let was = guard.private.insert(channel, private).unwrap_or(false);
+        if private {
+            guard.listings.remove(&channel);
+            guard.public_seeds.remove(&channel);
+        }
+        Ok(was != private)
+    }
+
+    async fn put_public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+        envelope: [u8; PUBLIC_SEED_LEN],
+        now_ms: u64,
+    ) -> Result<PublicSeedOutcome, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if guard.private.get(&channel).copied().unwrap_or(false) {
+            return Err(StorageError::ChannelPrivate);
+        }
+        let current = guard.current_epoch.get(&channel).copied().unwrap_or(0);
+        if epoch > current.saturating_add(1) {
+            return Err(StorageError::PublicSeedEpochInFuture {
+                current,
+                got: epoch,
+            });
+        }
+        let seeds = guard.public_seeds.entry(channel).or_default();
+        if let Some((stored, _)) = seeds.get(&epoch) {
+            return if *stored == envelope {
+                Ok(PublicSeedOutcome::AlreadyStored)
+            } else {
+                Err(StorageError::PublicSeedConflict)
+            };
+        }
+        for (_, (_, superseded)) in seeds.range_mut(..epoch) {
+            superseded.get_or_insert(now_ms);
+        }
+        // A seed stored after a higher epoch's is superseded at once.
+        let superseded = seeds.range(epoch..).next().map(|_| now_ms);
+        seeds.insert(epoch, (envelope, superseded));
+        Ok(PublicSeedOutcome::Stored)
+    }
+
+    async fn public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+    ) -> Result<Option<[u8; PUBLIC_SEED_LEN]>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .public_seeds
+            .get(&channel)
+            .and_then(|seeds| seeds.get(&epoch))
+            .map(|(envelope, _)| *envelope))
+    }
+
+    async fn prune_public_seeds_superseded_before(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        let mut removed: u64 = 0;
+        for seeds in guard.public_seeds.values_mut() {
+            let before = seeds.len();
+            seeds.retain(|_, (_, superseded)| !matches!(superseded, Some(at) if *at < cutoff_ms));
+            removed = removed.saturating_add((before - seeds.len()) as u64);
+        }
+        Ok(removed)
+    }
+
+    async fn put_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        expiry_ms: u64,
+        max_uses: u32,
+        max_keys: usize,
+        _now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let keys = guard.invite_keys.entry(channel).or_default();
+        if let Some(row) = keys.get_mut(&invite_pk) {
+            row.expiry_ms = expiry_ms;
+            row.max_uses = max_uses;
+            return Ok(());
+        }
+        if keys.len() >= max_keys {
+            return Err(StorageError::TooManyInviteKeys);
+        }
+        keys.insert(
+            invite_pk,
+            InviteKeyRow {
+                invite_pk,
+                expiry_ms,
+                max_uses,
+                used_count: 0,
+            },
+        );
+        Ok(())
+    }
+
+    async fn delete_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .await
+            .invite_keys
+            .get_mut(&channel)
+            .is_some_and(|keys| keys.remove(&invite_pk).is_some()))
+    }
+
+    async fn invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<Option<InviteKeyRow>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .invite_keys
+            .get(&channel)
+            .and_then(|keys| keys.get(&invite_pk))
+            .copied())
+    }
+
+    async fn list_invite_keys(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Vec<InviteKeyRow>, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        Ok(guard
+            .invite_keys
+            .get(&channel)
+            .map(|keys| keys.values().copied().collect())
+            .unwrap_or_default())
+    }
+
+    async fn claim_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        let Some(row) = guard
+            .invite_keys
+            .get_mut(&channel)
+            .and_then(|keys| keys.get_mut(&invite_pk))
+        else {
+            return Ok(false);
+        };
+        if !row.is_live(now_ms) {
+            return Ok(false);
+        }
+        row.used_count = row.used_count.saturating_add(1);
+        Ok(true)
+    }
+
+    async fn release_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if let Some(row) = guard
+            .invite_keys
+            .get_mut(&channel)
+            .and_then(|keys| keys.get_mut(&invite_pk))
+        {
+            row.used_count = row.used_count.saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    async fn prune_invite_keys_expired_before(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        let mut removed: u64 = 0;
+        for keys in guard.invite_keys.values_mut() {
+            let before = keys.len();
+            keys.retain(|_, row| row.expiry_ms == 0 || row.expiry_ms >= cutoff_ms);
+            removed = removed.saturating_add((before - keys.len()) as u64);
+        }
+        Ok(removed)
+    }
+
+    async fn list_subscriber_page(
+        &self,
+        channel: ChannelId,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<SubscriberEntry>, StorageError> {
+        use std::ops::Bound;
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let Some(rows) = guard.subscriber_rows.get(&channel) else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .range((Bound::Excluded(after_seq), Bound::Unbounded))
+            .take(limit)
+            .map(|(seq, sub)| SubscriberEntry {
+                seq: *seq,
+                subscriber: *sub,
+                sealed_ticket: guard
+                    .subscriber_meta
+                    .get(&(channel, *sub))
+                    .and_then(|(_, ticket)| *ticket),
+            })
+            .collect())
+    }
+
+    async fn subscriber_count(&self, channel: ChannelId) -> Result<u64, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        Ok(guard.subscribers.get(&channel).map_or(0, HashMap::len) as u64)
+    }
+
+    async fn remove_subscriber(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if !guard.private.get(&channel).copied().unwrap_or(false) {
+            return Err(StorageError::ChannelPublic);
+        }
+        let removed = guard.drop_subscriber(channel, subscriber);
+        guard.removed.insert((channel, subscriber), now_ms);
+        Ok(removed)
+    }
+
+    async fn is_removed(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .removed
+            .contains_key(&(channel, subscriber)))
     }
 }
 

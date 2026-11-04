@@ -31,7 +31,6 @@
  * session, so a `null` here is transient; the fallback panel offers a real
  * way back to the sign-in form.
  */
-import { useTranslation } from "../translation/context";
 import {
   createEffect,
   createMemo,
@@ -52,10 +51,8 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { deleteConversation } from "../chat/delete-chat";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { useLineage } from "../chat/use-lineage";
-import { heldSends, persistHeldSends } from "../chat/held-send-queue";
-import { usePins } from "../chat/PinContext";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import {
   loadLeaveRequestedAt,
@@ -66,6 +63,7 @@ import {
 import { ContactsClient } from "../contacts/client";
 import type { IncomingContactRequest } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
+import { contactBackTarget, coversOrigin } from "../chat/info-navigation";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
 import { contactsErrorText } from "../contacts/errors";
@@ -79,12 +77,13 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { useMailbox } from "../contacts/MailboxContext";
-import { forgetSentRequest, loadSentRequests } from "../contacts/sent-requests";
+import { forgetSentRequest, loadSentRequests, sentRequestsVersion } from "../contacts/sent-requests";
 import { forgetSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { onContactRemoved } from "../reach/reach-service";
+import { forgetChosenContact } from "../settings/visibility-actions";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
@@ -92,7 +91,7 @@ import { conversationWithContact } from "../contacts/contact-conversation";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
-import { acceptContactRequest } from "../contacts/accept-request";
+import { acceptContactRequest, acceptKeepsRequest } from "../contacts/accept-request";
 import {
   loadPendingContacts,
   pendingContacts,
@@ -146,8 +145,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const auth = useAuth();
   const chats = useChats();
   const lineageView = useLineage();
-  const pins = usePins();
-  const translation = useTranslation();
+  const membershipEnd = useMembershipEnd();
   const profiles = useProfiles();
   const navigate = useNavigate();
   // The Show wrapper above guarantees identitySecrets() is non-null on every
@@ -183,23 +181,23 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   });
 
   // ---- sent requests --------------------------------------------
-  const [sentVersion, setSentVersion] = createSignal(0);
   const sent = createMemo<SentRequestRecord[]>(() => {
-    sentVersion();
+    sentRequestsVersion();
     const account = accountIdB64();
     if (account === null) return [];
     const acceptedHexes = new Set<string>();
+    const acceptedKeys = new Set<string>();
     for (const c of accepted()) {
+      acceptedKeys.add(c.signaturePubkeyB64);
       if (c.accountIdHex !== undefined) acceptedHexes.add(c.accountIdHex);
     }
-    return waitingSentRequests(loadSentRequests(account), acceptedHexes);
+    return waitingSentRequests(loadSentRequests(account), acceptedHexes, acceptedKeys);
   });
   function onDismissSent(record: SentRequestRecord): void {
     const account = accountIdB64();
     if (account === null) return;
     forgetSentRequest(account, record.recipientAccountIdHex);
     void forgetSentIntro(account, record.recipientAccountIdHex);
-    setSentVersion((v) => v + 1);
   }
 
   // ---- incoming requests ----------------------------------------
@@ -214,11 +212,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     contact: AcceptedContact,
     peerAccountId: Uint8Array,
     peerPubkey: Uint8Array,
-    replyGrantB64: string | null = null,
   ): Promise<string> {
-    // ADR-0060 — accepting a request writes the 1:1 Welcome with the
-    // requester's `reply` grant; a contact we message later is reached with
-    // the grants we keep for them.
     const founded = await foundOneToOneWith({
       client: props.client,
       identity: requireIdentity(),
@@ -227,36 +221,52 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       contact,
       peerAccountId,
       peerPubkey,
-      replyGrantB64,
     });
     setAccepted(founded.accepted);
     return paths.chat(base64UrlEncodeNoPad(founded.conversation.group.groupId));
   }
 
+  /** The requests an Accept is running for, and those whose last Accept
+   *  failed: they stay listed, with a line, and Accept works again. */
+  const [accepting, setAccepting] = createSignal<ReadonlySet<number>>(new Set());
+  const [acceptFailed, setAcceptFailed] = createSignal<ReadonlySet<number>>(new Set());
+  const withId = (ids: ReadonlySet<number>, id: number): ReadonlySet<number> => new Set(ids).add(id);
+  const withoutId = (ids: ReadonlySet<number>, id: number): ReadonlySet<number> => {
+    const next = new Set(ids);
+    next.delete(id);
+    return next;
+  };
+
   async function onAccept(req: IncomingContactRequest): Promise<void> {
-    mailbox.removePending(req.messageId);
+    const account = accountIdB64();
+    if (account === null || accepting().has(req.messageId)) return;
     setAcceptError(null);
-    // The one accept path (`contacts/accept-request.ts`), shared with the
-    // device's own accept of a request through a live invite link
-    // (ADR-0079): contact first, then the 1:1 Welcome, then the ack.
-    const outcome = await acceptContactRequest(
-      { client: props.client, identity: requireIdentity(), chats, profiles },
-      req,
-    );
-    setAccepted(outcome.accepted);
-    if (outcome.legacy) {
-      setAcceptError(() => t("contacts.accept.error.old_version"));
-      return;
-    }
-    if (outcome.chatError !== null) {
-      // Don't unwind the acceptance; just surface the error.
-      setAcceptError(
-        contactsErrorText(
-          outcome.chatError,
-          "contacts.error.start_chat",
-          memberNameOf(profiles.resolve(req.fromPubkey)),
-        ),
+    setAccepting((ids) => withId(ids, req.messageId));
+    setAcceptFailed((ids) => withoutId(ids, req.messageId));
+    try {
+      // The one way a person's Accept runs (`contacts/accept-request.ts`).
+      const outcome = await acceptContactRequest(
+        {
+          client: props.client,
+          identity: requireIdentity(),
+          accountIdB64: account,
+          chats: {
+            add: (g) => chats.add(g),
+            persistHeld: () => chats.persistSnapshotDurable(account),
+          },
+          profiles,
+        },
+        req,
       );
+      setAccepted(outcome.accepted);
+      if (acceptKeepsRequest(outcome)) {
+        setAcceptFailed((ids) => withId(ids, req.messageId));
+        return;
+      }
+      mailbox.removePending(req.messageId);
+      if (outcome.status === "legacy") setAcceptError(() => t("contacts.accept.error.old_version"));
+    } finally {
+      setAccepting((ids) => withoutId(ids, req.messageId));
     }
   }
 
@@ -286,6 +296,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     // ADR-0060 section 1 — a removed contact keeps the `contact` key we handed
     // them; rotating it (and the `fof` key) makes it stop working at once.
     void onContactRemoved(base64Decode(contact.signaturePubkeyB64));
+    // Adding them back brings them in switched off (who-can-find-me 4.1).
+    if (contact.accountIdHex !== undefined) {
+      void forgetChosenContact(contact.accountIdHex).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("[privacy] a removed contact stayed in the chosen list", err);
+      });
+    }
   }
   /** ADR-0048 §5 — the viewer's LOCAL RENAME of a contact. A blank value
    *  clears it, so the contact's own name shows again. Re-upserts by the
@@ -317,6 +334,30 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // at `/contacts`.
       setSelectedKey(null);
     }
+  });
+  /**
+   * `docs/ux/conversation-info.md` section 3.1 — where the contact screen's
+   * back icon returns: the screen that opened it and that it covers (a
+   * conversation, a group's info, a search in Chats), recorded in the history
+   * entry's state (`chat/info-navigation.ts`). Only for the person that entry
+   * names: once another contact is picked from the list beside it, nothing is
+   * covered any more.
+   */
+  const backToOrigin = createMemo((): (() => void) | undefined => {
+    const origin = contactBackTarget(location.state);
+    if (origin === null || !coversOrigin(origin)) return undefined;
+    const slug = params.key;
+    if (slug === undefined) return undefined;
+    let named: string;
+    try {
+      named = base64Encode(base64UrlDecodeNoPad(slug));
+    } catch {
+      return undefined;
+    }
+    if (selectedKey() !== named) return undefined;
+    // The entry was pushed from the origin, so going back through it returns
+    // there with the origin's own history intact.
+    return () => navigate(-1);
   });
   /** Deselect, and stop the URL naming a person who is no longer shown. */
   function clearSelection(): void {
@@ -457,24 +498,14 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // ADR-0073 R.5 — every group of the conversation, the head last.
       const view = lineageView.resolve(g.groupIdB64);
       const held = view?.held ?? [g];
-      await deleteConversation({
-        accountIdB64: s.account.accountId,
+      await membershipEnd.deleteConversation({
         segments: held.map((segment) => ({
           groupIdB64: segment.groupIdB64,
           groupIdHex: syncGroupIdHex(segment.group.groupId),
         })),
         headGroupIdB64: view?.head.groupIdB64 ?? g.groupIdB64,
-        chats,
-        afterSegment: async (segment) => {
-          await pins.forgetConversation(segment.groupIdB64);
-          // ADR-0082 section 5 — no translated text or transcript outlives
-          // the conversation on this device.
-          await translation?.forgetConversation(segment.groupIdB64);
-        },
+        conversationHex: view?.conversationHex ?? syncGroupIdHex(g.group.groupId),
       });
-      // Nothing held for a conversation that is gone is ever sent.
-      const conversationHex = view?.conversationHex ?? syncGroupIdHex(g.group.groupId);
-      if (heldSends.take(conversationHex).length > 0) void persistHeldSends(s.account.accountId);
       // `clearSelection` navigates and deselects; only for a person still on
       // THIS contact.
       if (stillOn()) clearSelection();
@@ -571,14 +602,15 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       <ContactListPane
         filter={filter}
         onFilter={setFilter}
-        people={() => (
+        people={(listedKeysB64, anyListRow) => (
           // `docs/ux/who-can-find-me.md` section 6.1 - the same field as in
           // Chats; here it matches only people.
           <PeopleSearch
             scope="contacts"
             query={filter}
             groupPeopleKeys={groupPeopleKeys}
-            onSent={() => setSentVersion((v) => v + 1)}
+            listedB64={listedKeysB64}
+            noMatchLine={() => (anyListRow() ? t("search.nothing_found") : null)}
           />
         )}
         onAdd={(mode) => {
@@ -589,6 +621,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         pendingBusy={mailbox.busy}
         error={() => acceptError() ?? mailbox.error()}
         onAccept={(req) => void onAccept(req)}
+        accepting={(req) => accepting().has(req.messageId)}
+        acceptFailed={(req) => acceptFailed().has(req.messageId)}
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}
@@ -635,10 +669,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               localName={c().displayName}
               chatHref={chatWith(c())}
               canStartChat={c().accountIdHex !== undefined}
+              acceptedAtMs={c().acceptedAtMs}
               busy={detailBusy}
               error={detailError}
               myPubkey={() => chats.identity()?.signaturePublicKey ?? null}
               onBack={clearSelection}
+              onBackToOrigin={backToOrigin()}
               onMessage={() => void onMessage(c())}
               onCall={(withVideo) => onCall(c(), withVideo)}
               onRename={(name) => onRenameAccepted(c(), name)}
@@ -658,6 +694,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               // next opened.
               membershipEnded={chatMembershipEnded(c())}
               isContact={selectedIsContact()}
+              accountIdHex={c().accountIdHex ?? null}
               onAddContact={() => onAddBack(c())}
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null

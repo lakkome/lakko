@@ -7,6 +7,12 @@ import Foundation
 ///
 /// iOS mirror of the web reference `apps/web/src/chat/membership-ended.ts`.
 ///
+/// **Since ADR-0087 section 9 (2026-10-31) this presentation is what is left
+/// for a device whose own leaf was retired while its account stays in the
+/// group.** A person who is out of a group has none of it: the row, the history
+/// and the MLS group go (``MembershipEndRules``, `ChatRepository+MembershipEnd`).
+/// "Keep the history" below is about that retired leaf.
+///
 /// ## What this is for
 ///
 /// The commit that removes your own leaf arrives on an ordinary poll, merges,
@@ -281,6 +287,9 @@ public var composerWithdrawnMessage: String { Localization.text("chat.ended.comp
 /// §6.2.5 — the muted label above the preserved draft.
 public var unsentDraftLabel: String { Localization.text("chat.ended.unsent_draft") }
 
+/// UX 9.4 — the row of a group this device asked to leave, until it lands.
+public var waitingToLeaveLine: String { Localization.text("chat.members.pending.waiting_leave") }
+
 /// §6.2.7 — one line at the top of the frozen roster.
 ///
 /// A statement about the **list**, not about any row in it, and that is
@@ -297,12 +306,7 @@ public var deleteChatControl: String { Localization.text("chat.delete.control") 
 /// §6.2.4 — confirmation title.
 public var deleteChatTitle: String { Localization.text("chat.delete.title") }
 
-/// §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
-/// load-bearing: **the messages really are gone, and the dead MLS handle is
-/// not.** `Group` exposes no delete, so the inactive group's state stays in the
-/// provider snapshot as inert bytes — inert in the strong sense (it cannot
-/// send, decrypt, export or process) but not nothing. A `Group::delete` is a
-/// real, small core follow-up this does not ride free.
+/// §6.2.4 — confirmation body.
 public var deleteChatBody: String { Localization.text("chat.delete.body") }
 
 // MARK: - The state
@@ -654,5 +658,47 @@ public final class LeaveRequestStore {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(needle) {
             defaults.removeObject(forKey: key)
         }
+    }
+}
+
+// MARK: - The notice after a membership action
+
+/// `docs/ux/proposal-based-membership.md` section 2, "What 'tap, done'
+/// shows" (2026-10-29, with the maintainer's amendment of the same day).
+///
+/// Decided from the GROUP after the attempt, never from which path committed
+/// the change (a background sweep may have committed it first):
+/// - add, approving a join request, remove, make/remove admin and ownership
+///   transfer (owner or admin actions) show no notice at all, in effect or not; until such a change
+///   lands the member row's own annotation is the only sign;
+/// - leave shows `chat.leave.requested` only while this device is still a
+///   member, and that notice clears itself the moment the leave lands.
+public enum MembershipActionNotice {
+    public enum Action: Equatable {
+        case add
+        /// Approving a join request: an add (ADR-0027 on the ADR-0045 path).
+        case approveJoin
+        case remove
+        case setAdmin
+        case transferOwnership
+        case leave
+    }
+
+    /// The catalog key of the notice to show after `action`, or `nil` for
+    /// none. `inEffect`: the group, read after the attempt, already shows the
+    /// change (for a leave: this device's membership has ended).
+    public static func after(_ action: Action, inEffect: Bool) -> String? {
+        switch action {
+        case .add, .approveJoin, .remove, .setAdmin, .transferOwnership:
+            return nil
+        case .leave:
+            return inEffect ? nil : "chat.leave.requested"
+        }
+    }
+
+    /// Whether a shown leave notice goes: the leave landed (this device's
+    /// membership ended).
+    public static func leaveNoticeClears(shown: Bool, membershipEnded: Bool) -> Bool {
+        shown && membershipEnded
     }
 }

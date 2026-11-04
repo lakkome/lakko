@@ -198,4 +198,67 @@ class EveryonePublicationTest {
         assertEquals(EveryoneAction.NONE, everyoneAction(false, false, null, before))
         assertEquals(EveryoneAction.NOTE_WITHDRAWN, everyoneAction(false, null, null, before))
     }
+
+    @Test
+    fun `a rotation changes the publish key, so the record naming the old mailbox is replaced`() {
+        val before = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 1 })
+        val after = everyonePublishKey("Anna", "anna", certificate, ByteArray(97) { 2 })
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, true, before, after))
+    }
+
+    @Test
+    fun `the first refresh of a session in Everyone sends even with a matching note`() {
+        val key = everyonePublishKey("Anna", "anna", certificate)
+        assertEquals(EveryoneAction.PUT, everyoneActionForRefresh(true, true, key, key, firstOfSession = true))
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(true, true, key, key, firstOfSession = false))
+        // Outside Everyone nothing is forced: the note decides.
+        assertEquals(EveryoneAction.NONE, everyoneActionForRefresh(false, false, null, key, firstOfSession = true))
+    }
+
+    @Test
+    fun `an Everyone note after a restore sends whatever the setting says`() {
+        val restored = ReachDoc(publishedPublic = true, publishedKey = "old").withUnknownEveryoneNote()
+        assertEquals(EveryoneAction.PUT, everyoneAction(true, restored.publishedPublic, restored.publishedKey, "k"))
+        assertEquals(EveryoneAction.PUT, everyoneAction(false, restored.publishedPublic, restored.publishedKey, "k"))
+    }
+
+    @Test
+    fun `the own name's terms go out in one batch, the username first`() = runTest {
+        val r = Recorder()
+        val batches = mutableListOf<List<me.lakko.app.discovery.OwnTerm>>()
+        val base = ops(r, listOf("ann", "web"))
+        val batched = EveryoneOps(
+            nameSearchTerms = base.nameSearchTerms,
+            oprfNameTerm = base.oprfNameTerm,
+            oprfUsername = base.oprfUsername,
+            composePublicRecord = base.composePublicRecord,
+            putVisibility = base.putVisibility,
+            oprfOwnTerms = { own ->
+                batches += own
+                own.map { t ->
+                    val tag = if (t is me.lakko.app.discovery.OwnTerm.Username) "u:${t.value}" else "n:${t.value}"
+                    OprfResult(output(tag), lookup(tag))
+                }
+            },
+        )
+        val outcome = publishEveryone(
+            wantPublic = true,
+            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId, binding),
+            ops = batched,
+            nowMs = 1_000,
+        )
+        assertEquals(EveryoneOutcome.PUBLISHED, outcome)
+        assertEquals(1, batches.size)
+        assertEquals(
+            listOf(
+                me.lakko.app.discovery.OwnTerm.Username("anna"),
+                me.lakko.app.discovery.OwnTerm.NameTerm("ann"),
+                me.lakko.app.discovery.OwnTerm.NameTerm("web"),
+            ),
+            batches[0],
+        )
+        assertTrue(r.oprfNameCalls.isEmpty() && r.oprfUsernameCalls.isEmpty())
+        assertEquals(listOf("out:u:anna", "out:n:ann", "out:n:web"), r.composedOutputs.map { String(it) })
+        assertEquals(listOf("key:n:ann", "key:n:web"), r.puts.single().lookupKeys.map { String(it) })
+    }
 }

@@ -10,7 +10,7 @@
  * same unread state - without a second copy of how a row is named. Must be
  * called inside a component (it reads contexts and owns effects).
  */
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
@@ -27,7 +27,8 @@ import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
-import { chatListLine, membershipState, readIsActive } from "./membership-ended";
+import { chatListLine, loadLeaveRequestedAt, membershipState, readIsActive } from "./membership-ended";
+import { useMembershipEnd } from "./MembershipEndContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
@@ -57,6 +58,7 @@ export function createConversationRows() {
   // in a successor group keeps its row, and everything a person attached to
   // it (pin / mute / archive, folder, read position) stays keyed on its id.
   const lineageView = useLineage();
+  const membershipEnd = useMembershipEnd();
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -104,8 +106,9 @@ export function createConversationRows() {
       contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
       contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted(), aliases())
         ?.displayName,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
+      handle: groupNames.handleOf(g.groupIdB64)?.handle ?? null,
     });
   };
 
@@ -127,8 +130,17 @@ export function createConversationRows() {
     setLogSlots(log.groups);
   }
 
-  onMount(() => {
+  // Read again when the account lands and when the groups arrive: on a cold
+  // load the list mounts before either, the read then finds nothing, and with
+  // no time to go by every conversation stood at the bottom in no order until
+  // something new was written.
+  createEffect(() => {
+    accountId();
+    chats.groups().length;
     void reloadLog();
+  });
+
+  onMount(() => {
     const unsubscribe = subscribeMessageLogChanged((account) => {
       const s = auth.state();
       if (s.kind === "session" && s.account.accountId === account) {
@@ -176,7 +188,9 @@ export function createConversationRows() {
   }
 
   /** The last message's time as a sort key: the DS stamp, else the moment
-   *  the conversation was created on this device. */
+   *  the conversation was created or joined on this device. Only the
+   *  fallback: a device added to an account joins all its chats at once, and
+   *  the history it is handed must decide their order. */
   const lastActivityMs = (g: ActiveGroup): number => {
     const at = summaryFor(g.group.groupId).lastAt;
     if (at !== null) {
@@ -202,6 +216,13 @@ export function createConversationRows() {
   const subOf = (g: ActiveGroup): string => {
     const ended = endedLine(g);
     if (ended !== null) return ended;
+    // `docs/ux/group-and-channel-privacy.md` section 9.4 — the row stays
+    // while the request to leave waits; when it lands the row goes.
+    membershipEnd.leaveVersion();
+    const account = accountId();
+    if (account !== null && loadLeaveRequestedAt(account, g.groupIdB64) !== undefined) {
+      return t("chat.members.pending.waiting_leave");
+    }
     const s = summaryFor(g.group.groupId);
     const line = previewLine({
       preview: s.preview,
@@ -235,7 +256,8 @@ export function createConversationRows() {
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
     const posts = channelsState.postsByChannel();
-    return channelsState.channels().map((c) => {
+    const held = channelsState.channels().filter((c) => !membershipEnd.isChannelEnding(c.id));
+    return held.map((c) => {
       const lastPostMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
       const model = channelRowModel(
         {
@@ -257,6 +279,7 @@ export function createConversationRows() {
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
+        ...(c.localHandle !== undefined && c.localHandle.length > 0 ? { handle: c.localHandle } : {}),
         unread: channelUnread()(c.id),
         pinned: false,
         muted: false,
@@ -275,7 +298,7 @@ export function createConversationRows() {
     return sortConversations(
       [
       ...channelRows(),
-      ...lineageView.conversations().map((c) => {
+      ...lineageView.conversations().filter((c) => !membershipEnd.isEnding(c.head.groupIdB64)).map((c) => {
         const g = c.head;
         const f = flagsMap[c.conversationHex];
         return {
@@ -293,6 +316,10 @@ export function createConversationRows() {
           archived: f?.archived === true,
           // ADR-0084 - a one-to-one's circle is the person's photo.
           ...(kindOf(g) === "chat" ? { personKey: peerKeyOf(g) ?? undefined } : {}),
+          ...(() => {
+            const h = groupNames.handleOf(g.groupIdB64)?.handle;
+            return h === undefined ? {} : { handle: h };
+          })(),
         };
       }),
       ],

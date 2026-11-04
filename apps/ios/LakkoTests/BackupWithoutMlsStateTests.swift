@@ -121,15 +121,39 @@ final class BackupPayloadShapeTests: XCTestCase {
     }
 
     /// The parsed payload has exactly these fields. A snapshot field coming
-    /// back would be a seventh.
+    /// back would be an eighth.
     func testTheParsedPayloadHasNoMlsSnapshotField() throws {
         let parsed = try parsedBackup(accountId: randomBytes(16))
         let fields = Set(Mirror(reflecting: parsed).children.compactMap(\.label))
         XCTAssertEqual(fields, [
             "accountId", "createdAtMs", "ed25519Seed", "acceptedContacts",
-            "knownGroupIds", "syncedState",
+            "knownGroupIds", "syncedState", "ownPredecessors", "ownProfile", "visibility",
+            "receivedProfiles",
         ])
         XCTAssertFalse(fields.contains { $0.lowercased().contains("snapshot") })
+    }
+
+    /// D31, D37: the person's own profile and setting ride the backup as
+    /// opaque envelopes, and an empty field reads as none.
+    func testTheOwnEnvelopesTravelInThePayload() throws {
+        let profile = Data("profile envelope".utf8)
+        let setting = Data("visibility envelope".utf8)
+        func parsed(_ own: OwnBackupEnvelopes) throws -> ParsedBackupPayload {
+            try parseBackupPayload(wire: try BackupClient.composePayload(
+                accountId: randomBytes(16),
+                createdAtMs: 1,
+                ed25519Seed: Data(repeating: 0x5E, count: 32),
+                contacts: [],
+                knownGroupIdsHex: [],
+                syncedState: nil,
+                own: own))
+        }
+        let both = try parsed(OwnBackupEnvelopes(ownProfile: profile, visibility: setting))
+        XCTAssertEqual(both.ownProfile, profile)
+        XCTAssertEqual(both.visibility, setting)
+        let neither = try parsed(OwnBackupEnvelopes())
+        XCTAssertTrue(neither.ownProfile.isEmpty)
+        XCTAssertTrue(neither.visibility.isEmpty)
     }
 
     func testARowThatIsNotAGroupIdIsDroppedAndTheRestIsKept() throws {
@@ -147,6 +171,143 @@ final class BackupPayloadShapeTests: XCTestCase {
 }
 
 // MARK: - B. A restore never loads MLS state
+
+/// Section 7.2 of `docs/ux/identity-recovery.md` — what the chat list says
+/// about a restored device (D34), and the marker behind it.
+final class RestoredListNoticeTests: XCTestCase {
+
+    private func record(known: Int, awaiting: Bool = true) -> RestoredDeviceStore.Record {
+        RestoredDeviceStore.Record(knownConversations: known, awaitingFirstConversation: awaiting)
+    }
+
+    func testNoOtherDeviceAndAKnownConversationShowsTheCard() {
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: false),
+            .card)
+    }
+
+    func testAnotherDeviceShowsTheBanner() {
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: true),
+            .banner)
+    }
+
+    func testARestoredDeviceThatKnewNoConversationShowsTheOrdinaryList() {
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: record(known: 0), listEmpty: true, otherDeviceSignedIn: false),
+            .none)
+    }
+
+    func testNothingShowsOverAConversationOrWhileNothingIsKnown() {
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: false, otherDeviceSignedIn: false),
+            .none)
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: record(known: 2), listEmpty: true, otherDeviceSignedIn: nil),
+            .none)
+        XCTAssertEqual(
+            RestoredListNotice.decide(record: nil, listEmpty: true, otherDeviceSignedIn: false), .none)
+    }
+
+    func testTheFirstConversationEndsItForGood() throws {
+        let suite = "restored-device-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let account = "acct-\(UUID().uuidString)"
+
+        RestoredDeviceStore.noteRestored(accountIdB64: account, knownConversations: 3, defaults: defaults)
+        XCTAssertEqual(
+            RestoredListNotice.decide(
+                record: RestoredDeviceStore.load(accountIdB64: account, defaults: defaults),
+                listEmpty: true, otherDeviceSignedIn: false),
+            .card)
+
+        RestoredDeviceStore.noteConversationArrived(accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(
+            RestoredListNotice.decide(
+                record: RestoredDeviceStore.load(accountIdB64: account, defaults: defaults),
+                listEmpty: true, otherDeviceSignedIn: false),
+            .none, "the list emptying later does not bring it back")
+    }
+
+    func testTheProfileRepublishIsOwedOnce() throws {
+        let suite = "restored-device-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let account = "acct-\(UUID().uuidString)"
+        XCTAssertFalse(RestoredDeviceStore.takeProfileRepublish(accountIdB64: account, defaults: defaults))
+        RestoredDeviceStore.noteRestored(accountIdB64: account, knownConversations: 0, defaults: defaults)
+        XCTAssertTrue(RestoredDeviceStore.takeProfileRepublish(accountIdB64: account, defaults: defaults))
+        XCTAssertFalse(RestoredDeviceStore.takeProfileRepublish(accountIdB64: account, defaults: defaults))
+    }
+}
+
+/// D5: the channel id of a claimed handle is kept until the channel exists.
+final class PendingChannelHandleTests: XCTestCase {
+
+    func testARetryFindsTheIdAndAFinishedChannelForgetsIt() throws {
+        let suite = "pending-handles-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let account = "acct-\(UUID().uuidString)"
+
+        XCTAssertNil(PendingChannelHandleStore.channelId(
+            forHandle: "news", accountIdB64: account, defaults: defaults))
+        PendingChannelHandleStore.keep(
+            handle: "@News", channelIdHex: "aabb", accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(
+            PendingChannelHandleStore.channelId(forHandle: "news", accountIdB64: account, defaults: defaults),
+            "aabb", "the same handle however it was typed")
+        XCTAssertNil(PendingChannelHandleStore.channelId(
+            forHandle: "news", accountIdB64: "other", defaults: defaults), "per account")
+
+        PendingChannelHandleStore.forget(handle: "NEWS", accountIdB64: account, defaults: defaults)
+        XCTAssertNil(PendingChannelHandleStore.channelId(
+            forHandle: "news", accountIdB64: account, defaults: defaults))
+    }
+}
+
+/// ADR-0087 UX 3.1: Create needs a well-formed @name and, when public, a
+/// name; nobody has to be picked.
+final class NewGroupCreateRuleTests: XCTestCase {
+    func testCreateNeedsAWellFormedNameAndAPublicGroupANamedOne() {
+        XCTAssertTrue(NewGroupScreen.canCreate(name: "", handle: "group_k3x9", isPublic: false))
+        XCTAssertTrue(NewGroupScreen.canCreate(name: "Book club", handle: "book_club", isPublic: true))
+        XCTAssertFalse(NewGroupScreen.canCreate(name: "   ", handle: "book_club", isPublic: true))
+        XCTAssertFalse(NewGroupScreen.canCreate(name: "Book club", handle: "ab", isPublic: false))
+    }
+}
+
+/// D32: which line a contact with no chat reads.
+final class ContactNoChatLineTests: XCTestCase {
+
+    private func contact(messageId: Int64, accountId: Data?) -> AcceptedContact {
+        AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: messageId, fromPubkey: Data(repeating: 1, count: 32),
+                fromAccountId: accountId, fromPseudonym: Data(count: 32), validAfterMs: 0,
+                intro: nil, createdAt: ""),
+            groupIdHex: nil)
+    }
+
+    func testAJustAcceptedContactReadsChatStarting() {
+        XCTAssertEqual(
+            ContactDetailScreen.noChatLineKey(contact(messageId: 4, accountId: Data(repeating: 2, count: 16))),
+            "contacts.detail.chat_starting")
+    }
+
+    func testAContactWithNoKnownAccountCannotBeMessagedFromHere() {
+        XCTAssertEqual(
+            ContactDetailScreen.noChatLineKey(contact(messageId: 4, accountId: nil)),
+            "contacts.detail.message_unavailable")
+    }
+
+    func testAContactABackupBroughtBackWaits() {
+        XCTAssertEqual(
+            ContactDetailScreen.noChatLineKey(contact(messageId: -3, accountId: Data(repeating: 2, count: 16))),
+            "chats.new_chat.not_available")
+    }
+}
 
 @MainActor
 final class BackupApplyTests: XCTestCase {
@@ -185,7 +346,7 @@ final class BackupApplyTests: XCTestCase {
             contacts: [contactRecord(0x01, "Alice")],
             groupIds: [g1],
             syncedState: try syncedStateBytes(pinning: g1))
-        XCTAssertEqual(parsed.syncedState.first, 0x06)
+        XCTAssertEqual(parsed.syncedState.first, 0x0A)
         parsed.syncedState[parsed.syncedState.startIndex] = 0x01
 
         let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)
@@ -519,6 +680,21 @@ final class PhraseRouteBackupTests: XCTestCase {
         // And no MLS state came with the backup.
         XCTAssertNil(IdentitySnapshotStore().getSnapshot(accountIdB64: accountIdB64))
         XCTAssertTrue(KnownGroupsStore().load(accountIdB64: accountIdB64).isEmpty)
+    }
+
+    /// ADR-0074 section 3.7 — the route stores the predecessors BEFORE the
+    /// session lands, so the first binding is minted under the oldest.
+    func testThePhrasePromptStoresTheOwnPredecessorsBeforeTheSessionLands() async throws {
+        let oldest = Data(repeating: 0xA0, count: 64)
+        var parsed = try parsedBackup(accountId: accountId)
+        parsed.ownPredecessors = [BackupOwnPredecessor(seed: oldest, adoptedAtMs: 1_000)]
+        let h = try await parkedAtThePhrasePrompt(outcomes: [.restored(parsed)])
+        defer { KeychainOwnPredecessorStore().clear(accountIdB64: accountIdB64) }
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: phrase)
+
+        XCTAssertEqual(h.repository.state, landed)
+        XCTAssertEqual(KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64), [oldest])
     }
 
     func testAnAccountWithNoBackupSignsInAndOwesNoRetry() async throws {
@@ -1067,9 +1243,7 @@ final class RestoredKnownGroupsLifecycleTests: XCTestCase {
             accountIdentitySeed: seed,
             sessionToken: "t",
             sessionExpiresAtMs: 0))
-        XCTAssertTrue(
-            repo.state.threads.contains { $0.groupIdHex == groupIdHex },
-            "the fixture holds the group")
+        XCTAssertNotNil(repo.groups[groupIdHex], "the fixture holds the group")
         return Fixture(repo: repo, groupIdHex: groupIdHex, accountIdB64: accountIdB64)
     }
 

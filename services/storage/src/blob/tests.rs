@@ -544,6 +544,7 @@ async fn an_imported_row_cannot_be_deleted() {
                 created_day: 1,
                 last_access_day: 1,
                 delete_pk: None,
+                idle_days: None,
             }],
             "local",
             1,
@@ -625,4 +626,54 @@ async fn the_routes_work_over_the_mariadb_index() {
         send(&app, get_req("GET", &hex, &read)).await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+/// ADR-0087 section 13: an upload may name its own idle life, which the row
+/// keeps; a malformed value is refused before the pass is charged.
+#[tokio::test]
+async fn an_upload_names_its_idle_life() {
+    let (state, _tmp) = state();
+    let index = state.index.clone();
+    let app = build_app(state);
+    let up = take(&app, "upload", TokenContext::BlobUpload).await;
+    let payload = b"a channel file";
+    let (id, hex) = sha256(payload);
+
+    for bad in ["0", "256", "-1", "+45", " 45", "4 5", "", "1000"] {
+        let mut req = put_req(&hex, Some(&up), payload);
+        req.headers_mut().insert(
+            IDLE_DAYS_HEADER,
+            header::HeaderValue::from_str(bad).unwrap(),
+        );
+        let (s, b, _) = send(&app, req).await;
+        assert_eq!(
+            (s, code(&b).as_str()),
+            (StatusCode::BAD_REQUEST, "blob-idle-days-invalid"),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(index.get(&id).await.unwrap(), None);
+
+    let mut req = put_req(&hex, Some(&up), payload);
+    req.headers_mut()
+        .insert(IDLE_DAYS_HEADER, header::HeaderValue::from_static("45"));
+    assert_eq!(send(&app, req).await.0, StatusCode::CREATED);
+    assert_eq!(index.get(&id).await.unwrap().unwrap().idle_days, Some(45));
+
+    // A repeated upload without the header keeps the first idle life.
+    assert_eq!(
+        send(&app, put_req(&hex, Some(&up), payload)).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(index.get(&id).await.unwrap().unwrap().idle_days, Some(45));
+
+    // Without the header a blob has none.
+    let (other, other_hex) = sha256(b"a chat file");
+    assert_eq!(
+        send(&app, put_req(&other_hex, Some(&up), b"a chat file"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(index.get(&other).await.unwrap().unwrap().idle_days, None);
 }

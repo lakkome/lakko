@@ -24,6 +24,7 @@
  * A small in-memory IndexedDB shim (multi-store + `getKey`) + the real
  * `crypto.subtle` (Node WebCrypto) exercise the actual store code path.
  */
+import { type DeviceCipher, WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -197,11 +198,11 @@ import {
   putWakeBinding,
 } from "./group-routing-store";
 
-async function makeDeviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+async function makeDeviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 }
 
 const ACCT = "YWNjb3VudC1pZC0wMDAwMDAwMDAwMDA=";
@@ -389,7 +390,7 @@ describe("group-routing-store — two accounts in one group (ADR-0042, 2026-09-3
   // decrypted as the wrong account; keyed by (account, push_gid), each has its
   // own row.
   const OTHER_ACCT = "b3RoZXItYWNjb3VudC0wMDAwMA==";
-  async function putFor(accountId: string, deviceKey: CryptoKey): Promise<void> {
+  async function putFor(accountId: string, deviceKey: DeviceCipher): Promise<void> {
     await putGroupRouting(
       {
         accountId,

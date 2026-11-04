@@ -262,6 +262,16 @@ public final class ChannelsUiState: ObservableObject {
 
     // MARK: - Mutations
 
+    /// ADR-0087 section 9 — this device unsubscribed, or subscribed to a
+    /// channel. Wired by the signed-in shell, which reaches the account's
+    /// other devices.
+    public var onUnsubscribedHere: ((String) -> Void)?
+    public var onSubscribedHere: ((String) -> Void)?
+    /// A newer shared record (name, description) was accepted for a channel:
+    /// the owner's device republishes the channel's public record
+    /// (`group-and-channel-privacy.md` 4.5.4).
+    public var onSharedMetaAccepted: ((_ channelId: String, _ meta: SharedChannelMeta) -> Void)?
+
     public func addChannel(_ handle: ChannelHandle) {
         // Id-idempotent: re-adding refreshes the local
         // metadata rather than appending a duplicate.
@@ -346,6 +356,7 @@ public final class ChannelsUiState: ObservableObject {
             sharedListed: meta.listed
         )
         persistChannelLog()
+        onSharedMetaAccepted?(channelId, meta)
         return true
     }
 

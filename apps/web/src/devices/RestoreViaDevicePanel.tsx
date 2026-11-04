@@ -42,6 +42,7 @@ import {
   type InitiatorView,
   type LinkText,
 } from "./device-link";
+import { startPairingLocate, type PairingPlace } from "./device-card-runtime";
 import type { JoinRecoveryOutcome } from "./orchestrator";
 import type { WelcomeOutcome } from "./welcome-courier";
 
@@ -51,6 +52,9 @@ import type { WelcomeOutcome } from "./welcome-courier";
 export interface DeviceRestoreFlowHandle {
   /** Wire-format pairing QR bytes. */
   readonly qrPayload: Uint8Array;
+  /** The payload the device link seals after the code is typed
+   *  (`JoinSession.pairingPayloadAtSeal`); absent: `qrPayload`. */
+  readonly pairingPayloadAtSeal?: () => Promise<Uint8Array>;
   /** Long-poll the rendezvous mailbox for the Welcome. */
   awaitWelcome(signal?: AbortSignal): Promise<WelcomeOutcome>;
   /** Join + consume the recovery row; `null` when the scanner
@@ -65,8 +69,10 @@ export interface DeviceRestoreFlowHandle {
 
 export default function RestoreViaDevicePanel(props: {
   /** Build the join flow (lookup / key load happens inside; throw
-   *  with a user-facing message on failure). */
-  readonly prepare: () => Promise<DeviceRestoreFlowHandle>;
+   *  with a user-facing message on failure). `place` is the city of this
+   *  pairing, started when the code screen opened; pass it to the join
+   *  flow. */
+  readonly prepare: (place: PairingPlace) => Promise<DeviceRestoreFlowHandle>;
   /** Complete the restore from a received recovery outcome. The
    *  flow handle is still alive when this runs (so a path-(b)
    *  caller can persist join state from inside); the panel
@@ -128,6 +134,10 @@ export default function RestoreViaDevicePanel(props: {
    *  timer or lands a session on a screen the person has left. */
   let disposed = false;
   let statusTimer: ReturnType<typeof setInterval> | null = null;
+  /** docs/ux/second-device.md section 2.1: the one locate request of this
+   *  screen, started when the code screen first opens and kept for every
+   *  attempt on it. */
+  let place: PairingPlace | null = null;
   const stopStatusPolling = (): void => {
     if (statusTimer !== null) {
       clearInterval(statusTimer);
@@ -172,7 +182,13 @@ export default function RestoreViaDevicePanel(props: {
           if (attempt === attemptSeq && link() === initiator) onLinkView(v);
         },
       },
-      { loginHandle: handle, pairingPayload: flow.qrPayload },
+      {
+        loginHandle: handle,
+        pairingPayload: flow.qrPayload,
+        ...(flow.pairingPayloadAtSeal !== undefined
+          ? { pairingPayloadAtSeal: flow.pairingPayloadAtSeal }
+          : {}),
+      },
     );
     if (attempt !== attemptSeq) {
       initiator.dispose();
@@ -238,9 +254,10 @@ export default function RestoreViaDevicePanel(props: {
 
   async function start(): Promise<void> {
     setState({ kind: "preparing" });
+    place ??= startPairingLocate();
     let flow: DeviceRestoreFlowHandle;
     try {
-      flow = await props.prepare();
+      flow = await props.prepare(place);
     } catch (err) {
       setState({ kind: "error", error: err });
       return;

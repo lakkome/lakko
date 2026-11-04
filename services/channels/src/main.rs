@@ -18,6 +18,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lakko_anon_token_server::{AnonTokenServerConfig, TokenVerifier};
+use lakko_svc_channels::api::INVITE_KEY_GRACE_MS;
 use lakko_svc_channels::internal::{internal_router, load_internal_secret};
 use lakko_svc_channels::owner_auth::OWNER_NONCE_RETENTION_MS;
 use lakko_svc_channels::{
@@ -187,6 +188,23 @@ async fn run_prune_loop(
                 },
                 Err(e) => warn!(error = %e, "prune: posts tick failed"),
             }
+            // A public seed superseded before the post cutoff opens no post
+            // that is left (ADR-0087 section 6).
+            match store.prune_public_seeds_superseded_before(cutoff_ms).await {
+                Ok(removed) if removed > 0 => info!(removed, "prune: public seeds tick complete"),
+                Ok(_) => {},
+                Err(e) => warn!(error = %e, "prune: public seeds tick failed"),
+            }
+        }
+
+        // Invite keys a grace period past their expiry (ADR-0087 section 7).
+        match store
+            .prune_invite_keys_expired_before(now_ms.saturating_sub(INVITE_KEY_GRACE_MS))
+            .await
+        {
+            Ok(removed) if removed > 0 => info!(removed, "prune: invite keys tick complete"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "prune: invite keys tick failed"),
         }
 
         // Owner request-proof nonces older than twice the proof window can
@@ -198,6 +216,18 @@ async fn run_prune_loop(
             Ok(removed) if removed > 0 => info!(removed, "prune: owner nonces tick complete"),
             Ok(_) => {},
             Err(e) => warn!(error = %e, "prune: owner nonces tick failed"),
+        }
+
+        // Write-proof nonces (ADR-0087 section 13a), likewise.
+        match store
+            .prune_write_nonces_older_than(
+                now_ms.saturating_sub(lakko_svc_channels::feedback_api::WRITE_NONCE_RETENTION_MS),
+            )
+            .await
+        {
+            Ok(removed) if removed > 0 => info!(removed, "prune: write nonces tick complete"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "prune: write nonces tick failed"),
         }
 
         // Stale-subscriber retention — bulk DELETE +

@@ -46,6 +46,7 @@ class CallSignalingWakeTest {
         CallSignalingBodyKind.GROUP_START to 14,
         CallSignalingBodyKind.GROUP_JOIN to 15,
         CallSignalingBodyKind.GROUP_LEAVE to 16,
+        CallSignalingBodyKind.SCREEN_SHARE to 17,
     )
 
     private val callId: ByteArray = ByteArray(16) { (0xA0 + it).toByte() }
@@ -127,6 +128,20 @@ class CallSignalingWakeTest {
         // A lone 0x82 without its continuation byte is not a group-leave tag.
         assertNull(callSignalingBodyKind(byteArrayOf(0x82.toByte())))
         assertNull(callSignalingBodyKind(byteArrayOf(0x82.toByte(), 0x02)))
+        assertNull(callSignalingBodyKind(byteArrayOf(0x8A.toByte())))
+    }
+
+    /** ADR-0083: a one-to-one call's screen-share state, seen live as a
+     *  garbage chat bubble on 2026-10-29 while the table did not know field 17.
+     *  Its body is signed, so its length is often a two-byte varint. */
+    @Test
+    fun screen_share_state_is_call_signaling_and_never_wakes() {
+        val short = frame(CallSignalingBodyKind.SCREEN_SHARE)
+        val long = frame(CallSignalingBodyKind.SCREEN_SHARE, ByteArray(200) { 0x42 })
+        assertEquals(0x8A, long[0].toInt() and 0xFF)
+        assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(short))
+        assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(long))
+        assertFalse(shouldWakeForCallSignaling(long, CallSignalingWake.CALL))
     }
 
     // -----------------------------------------------------------------
@@ -135,49 +150,115 @@ class CallSignalingWakeTest {
 
     @Test
     fun `an offer wakes — it is the ring itself`() {
-        assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.OFFER)))
+        assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.OFFER), CallSignalingWake.CALL))
         // A video offer is the same body with more fields set after call_id.
         val withSdp = frame(CallSignalingBodyKind.OFFER, trailing = byteArrayOf(0x12, 0x03) + "v=0".toByteArray())
-        assertTrue(shouldWakeForCallSignaling(withSdp))
+        assertTrue(shouldWakeForCallSignaling(withSdp, CallSignalingWake.CALL))
     }
 
     @Test
     fun `an end wakes — so a cancelled call stops ringing a closed app`() {
-        assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END)))
+        assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END), CallSignalingWake.CALL))
         // Every end reason is the same body; the reason is a later field.
         for (reason in 0..5) {
             val trailing = if (reason == 0) ByteArray(0) else byteArrayOf(0x10, reason.toByte())
-            assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END, trailing)))
+            assertTrue(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END, trailing), CallSignalingWake.CALL))
         }
     }
 
     @Test
     fun `answer and candidate stay silent — the peer is already awake`() {
-        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.ANSWER)))
-        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.CANDIDATE)))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.ANSWER), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.CANDIDATE), CallSignalingWake.CALL))
     }
 
     @Test
     fun `the group-call control frames stay silent`() {
-        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_START)))
-        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_JOIN)))
-        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_LEAVE)))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_START), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_JOIN), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.GROUP_LEAVE), CallSignalingWake.CALL))
         // And the fixtures the group-call path actually publishes.
-        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupStart()))
-        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupJoin()))
-        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupLeave()))
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupStart(), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupJoin(), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupLeave(), CallSignalingWake.CALL))
     }
 
     @Test
     fun `exactly two of the seven bodies wake`() {
-        val waking = bodyFieldNumbers.keys.filter { shouldWakeForCallSignaling(frame(it)) }.toSet()
+        val waking = bodyFieldNumbers.keys.filter { shouldWakeForCallSignaling(frame(it), CallSignalingWake.CALL) }.toSet()
         assertEquals(setOf(CallSignalingBodyKind.OFFER, CallSignalingBodyKind.END), waking)
     }
 
     @Test
+    fun `an offer or an end the session did not ask a wake for stays silent`() {
+        // A mid-call renegotiation offer and the End of a connected call carry
+        // the same tags as the dial and the cancel; the intent separates them.
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.OFFER), CallSignalingWake.NONE))
+        assertFalse(shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END), CallSignalingWake.NONE))
+        val none = bodyFieldNumbers.keys.filter {
+            shouldWakeForCallSignaling(frame(it), CallSignalingWake.NONE)
+        }
+        assertTrue(none.isEmpty())
+    }
+
+    // -----------------------------------------------------------------
+    // What a 1x1 session asks for each frame
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `the dial offer asks for a wake`() {
+        assertEquals(CallSignalingWake.CALL, OneToOneCallWakes().dialOffer())
+    }
+
+    @Test
+    fun `a renegotiation offer does not ask for a wake`() {
+        val wakes = OneToOneCallWakes()
+        wakes.markConnected()
+        assertEquals(CallSignalingWake.NONE, wakes.renegotiationOffer())
+        // Not even one sent while still connecting: it is past the dial.
+        assertEquals(CallSignalingWake.NONE, OneToOneCallWakes().renegotiationOffer())
+    }
+
+    @Test
+    fun `the end of a call that never connected asks for a wake`() {
+        // The caller cancelling before an answer, the callee declining or
+        // missing a ring, a callee that accepted but never connected: one
+        // fact decides all of them.
+        assertEquals(CallSignalingWake.CALL, OneToOneCallWakes().end())
+    }
+
+    @Test
+    fun `the end of a connected call does not ask for a wake`() {
+        val wakes = OneToOneCallWakes()
+        wakes.markConnected()
+        assertEquals(CallSignalingWake.NONE, wakes.end())
+    }
+
+    @Test
+    fun `a group-call end publishes with no wake, like every group-control frame`() {
+        // A group call never rings a closed device, so its End stops no ring;
+        // its wake reached iPhones as a VoIP push and showed a phantom call.
+        assertEquals(CallSignalingWake.NONE, GROUP_CALL_CONTROL_WAKE)
+        for (reason in 0..5) {
+            val trailing = if (reason == 0) ByteArray(0) else byteArrayOf(0x10, reason.toByte())
+            assertFalse(
+                shouldWakeForCallSignaling(frame(CallSignalingBodyKind.END, trailing), GROUP_CALL_CONTROL_WAKE),
+            )
+        }
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupStart(), GROUP_CALL_CONTROL_WAKE))
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupJoin(), GROUP_CALL_CONTROL_WAKE))
+        assertFalse(shouldWakeForCallSignaling(GroupCallWireFixtures.groupLeave(), GROUP_CALL_CONTROL_WAKE))
+    }
+
+    @Test
+    fun `answers and candidates never ask for a wake`() {
+        assertEquals(CallSignalingWake.NONE, OneToOneCallWakes().inCall())
+    }
+
+    @Test
     fun `bytes that are not call signaling fail toward silence`() {
-        assertFalse(shouldWakeForCallSignaling(ByteArray(0)))
-        assertFalse(shouldWakeForCallSignaling("""{"v":1,"text":"hi"}""".toByteArray(Charsets.UTF_8)))
-        assertFalse(shouldWakeForCallSignaling("lakko/group-name/v1".toByteArray(Charsets.UTF_8)))
+        assertFalse(shouldWakeForCallSignaling(ByteArray(0), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling("""{"v":1,"text":"hi"}""".toByteArray(Charsets.UTF_8), CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling("lakko/group-name/v1".toByteArray(Charsets.UTF_8), CallSignalingWake.CALL))
     }
 }

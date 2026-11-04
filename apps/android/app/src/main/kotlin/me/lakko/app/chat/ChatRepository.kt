@@ -14,7 +14,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.BindingEpoch
@@ -86,6 +89,13 @@ import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
  * worst-case chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`.
  */
 internal const val POLL_ALL_CONCURRENCY: Int = 3
+
+/** ADR-0087 section 9 — pages of a journal read for a held Welcome before the
+ *  pass gives up and tries again later. Chosen, not measured. */
+private const val MAX_HELD_WELCOME_PAGES: Int = 50
+
+/** ADR-0087 section 9 — the wait before a read another poll held. */
+private const val HELD_WELCOME_RETRY_DELAY_MS: Long = 250L
 
 /** Characters of a group's DS pseudonym that identify it in a log line. Enough
  *  to follow one conversation through a run, never enough to name it. */
@@ -459,6 +469,25 @@ public class ChatRepository(
     private var messageLogAccount: String? = null
 
     /**
+     * The log's slots for groups not in [groups]: a pairing history bundle
+     * lands before the Welcomes do. [persistMessageLogBestEffort] writes them
+     * back, and a join takes its slot ([registerJoinedGroup]). Guarded by
+     * `synchronized(groups)`, like [messageLogAccount].
+     */
+    private val waitingLogSlots = WaitingLogSlots()
+
+    /** Bound at construction, dropped at [close]; see [adoptHistoryBundle]. */
+    private val historyBundleSink: (String, Map<String, PersistedGroup>) -> Unit = { account, slots ->
+        adoptHistoryBundle(account, slots)
+    }
+
+    init {
+        // After the property above: a history bundle landing while this
+        // repository runs comes here.
+        me.lakko.app.devices.HistoryBundleCodec.liveLogSink = historyBundleSink
+    }
+
+    /**
      * ADR-0050 — the ACCOUNT identity (phrase-seeded), kept beside the DEVICE
      * identity [canonicalIdentity] for what is about the person rather than a
      * leaf: invite capabilities and their revocation. Every group, every
@@ -805,13 +834,19 @@ public class ChatRepository(
      * conversation key replaces the one in the directory.
      *
      * `false` when nothing was loaded for that account (the next
-     * [bootstrap] reads the predecessor store itself) or the loaded
-     * conversation key already is the stored one.
+     * [bootstrap] reads the predecessor store itself), the loaded
+     * conversation key already is the stored one, or this device holds a
+     * conversation: its leaves carry the binding it has, and a new mint would
+     * split it between two account keys ([me.lakko.app.auth.BindingVerdict]).
      */
     public suspend fun rebindConversationIdentity(secrets: IdentitySecrets): Boolean =
         withContext(mlsDispatcher) {
             val accountIdB64 = base64UrlSafe(secrets.accountId)
             if (currentAccountIdB64.get() != accountIdB64) return@withContext false
+            if (knownGroupsStore.load(accountIdB64).isNotEmpty()) {
+                android.util.Log.i("ChatRepository", "ADR-0074: this device holds conversations; its binding stays")
+                return@withContext false
+            }
             val seed = me.lakko.app.auth.conversationAccountSeedOf(
                 applicationContext,
                 accountIdB64,
@@ -868,6 +903,39 @@ public class ChatRepository(
         }
     }
 
+    /** The key the account publishes now and its own predecessor keys, oldest
+     *  first ([me.lakko.app.auth.bindingVerdict]'s inputs). */
+    private fun ownBindingKeys(accountIdB64: String, currentSeed: ByteArray): Pair<ByteArray, List<ByteArray>> {
+        val current = me.lakko.app.auth.SessionSecretWipe.use(currentSeed) { seed ->
+            Identity.fromSeed(seed).use { it.signaturePublicKey() }
+        }
+        val rows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        return current to rows.map { it.signaturePubkey.copyOf() }.also { rows.forEach { row -> row.zero() } }
+    }
+
+    /** The identity of this account whose key is [key]: an own predecessor,
+     *  or the current one. `null` when it is neither. */
+    private fun ownIdentityNamed(accountIdB64: String, currentSeed: ByteArray, key: ByteArray): Identity? {
+        val rows = try {
+            me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        try {
+            rows.firstOrNull { it.signaturePubkey.contentEquals(key) }?.let { return Identity.fromSeed(it.phraseSeed) }
+        } finally {
+            rows.forEach { it.zero() }
+        }
+        val current = me.lakko.app.auth.SessionSecretWipe.use(currentSeed) { Identity.fromSeed(it) }
+        if (current.signaturePublicKey().contentEquals(key)) return current
+        current.close()
+        return null
+    }
+
     private suspend fun bootstrapOnMlsThread(secrets: IdentitySecrets, bound: me.lakko.app.Binding) {
         val newAccountIdB64 = base64UrlSafe(secrets.accountId)
         // Refresh the publish credentials even on the same-account early
@@ -918,20 +986,23 @@ public class ChatRepository(
         val conversationSeed = me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { seed ->
             me.lakko.app.auth.conversationAccountSeedOf(applicationContext, newAccountIdB64, seed)
         }
-        val account = try {
+        val conversationIdentity = try {
             Identity.fromSeed(conversationSeed)
         } finally {
             conversationSeed.fill(0)
         }
-        refreshPublishedAccountIdentity(secrets.accountIdentitySeed, conversation = account)
         ensureOwnProvenChainBestEffort(newAccountIdB64, secrets.accountIdentitySeed)
         // ADR-0050: every conversation leaf is this device's identity, bound to
         // the account key. A missing device seed falls back to a second unbound
         // instance of the account identity (the pre-ADR-0050 behaviour).
+        val ownKeys = ownBindingKeys(newAccountIdB64, secrets.accountIdentitySeed)
         val identity = me.lakko.app.auth.SessionIdentities.deviceIdentity(
             applicationContext,
             newAccountIdB64,
-            account,
+            conversationIdentity,
+            currentKey = ownKeys.first,
+            predecessorKeys = ownKeys.second,
+            holdsConversations = knownGroupsStore.load(newAccountIdB64).isNotEmpty(),
         ) ?: me.lakko.app.auth.SessionSecretWipe.use(secrets.accountIdentitySeed) { current ->
             me.lakko.app.auth.conversationAccountSeedOf(applicationContext, newAccountIdB64, current)
         }.let { seed ->
@@ -941,6 +1012,15 @@ public class ChatRepository(
                 seed.fill(0)
             }
         }
+        // ADR-0074 part 3 - a kept binding that names another of the account's
+        // own keys than the oldest ([me.lakko.app.auth.BindingVerdict]): the
+        // chat layer acts as the key its leaves actually carry.
+        val account = identity.accountPublicKey()
+            ?.takeIf { bound -> !bound.contentEquals(conversationIdentity.signaturePublicKey()) }
+            ?.let { bound -> ownIdentityNamed(newAccountIdB64, secrets.accountIdentitySeed, bound) }
+            ?.also { conversationIdentity.close() }
+            ?: conversationIdentity
+        refreshPublishedAccountIdentity(secrets.accountIdentitySeed, conversation = account)
         // Cold start: the restore below is the single heaviest thing the app
         // does before its lists can render — the Keystore unwrap of the
         // snapshot, `restoreStorage` of the whole provider, one `loadGroup`
@@ -1023,6 +1103,7 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            UnseenReactions.bind(applicationContext, newAccountIdB64)
             feedRefresh.bind(newAccountIdB64)
             seedGroupCalls(persistedGroupCalls)
 
@@ -1086,12 +1167,18 @@ public class ChatRepository(
                     record.seed(messages = seeded, cursor = persisted.cursor)
                     // ADR-0063 section 5 — what the feed showed of this group.
                     record.seedFeedSeen(persisted.feedSeen.toSet(), persisted.feedSeenThrough)
+                    // "History is not news" — this group's pairing-history floor.
+                    record.raiseSyncedThrough(persisted.syncedThroughMessageId)
                 }
                 publishThreadList()
             }
-            // From here the records hold everything the log on disk does, so
-            // a persist may replace it (see [messageLogAccount]).
-            synchronized(groups) { messageLogAccount = newAccountIdB64 }
+            // From here the records and the waiting slots hold everything the
+            // log on disk does, so a persist may replace it (see
+            // [messageLogAccount]).
+            synchronized(groups) {
+                waitingLogSlots.fillFrom(log?.groups.orEmpty(), groups.keys.toSet())
+                messageLogAccount = newAccountIdB64
+            }
 
             // [clear] ran while the region above was installing this account
             // (it takes no lock): take everything back out, still under the
@@ -1100,11 +1187,18 @@ public class ChatRepository(
                 standDownStaleBootstrap(newAccountIdB64, publishAccount)
                 return
             }
+            // ADR-0087 section 9 — an end owed from before: its row is gone
+            // from the list from the first frame, and nothing polls it.
+            loadOwedEndsBestEffort(newAccountIdB64)
             mutableState.update { it.copy(bootstrapped = true) }
             // ADR-0073 R.7 case 1 — the messages held when the process died.
             restoreHeldSends()
+            // State bundle v3 — the display copies already in a one-to-one.
+            restoreHeldCopies()
         }
         if (!bound.isCurrent) return
+        // ADR-0087 section 9 — the launch sweep over the stored groups.
+        pushScope.launchSession { sweepMembershipEnds() }
         // ADR-0053 — sign reads of both own mailboxes and claim them.
         claimOwnMailboxesBestEffort()
         // ADR-0060 — bind the reach keys to this account and reconcile its
@@ -1203,8 +1297,7 @@ public class ChatRepository(
         /** ADR-0060 §6 — what authorises the Welcome into the recipient's
          *  closed mailbox when the caller holds it for this flow only (the
          *  link grant of an `/i/` link, its binding already verified, ADR-0078).
-         *  `null` picks from the grants this device holds for the recipient
-         *  (their reply key after an accept, their contact key). */
+         *  `null` picks from the grants this device holds for the recipient. */
         recipientReach: me.lakko.app.contacts.MailboxDest? = null,
     ): String =
         forSession {
@@ -1280,6 +1373,77 @@ public class ChatRepository(
         return registerFoundedGroup(identity, created.group, created.groupId)
     }
 
+    /**
+     * A group with nobody else in it yet (`docs/ux` scenario 14): the owner
+     * alone, plus this account's other devices. People are added afterwards
+     * as in any group.
+     */
+    public suspend fun startGroupAlone(
+        /** ADR-0087 sections 3 and 10 — run with the new group's id and knock
+         *  public key BEFORE anything about the group leaves this device (the
+         *  @name claim): a throw here creates nothing. */
+        beforePublish: (suspend (groupId: ByteArray, knockPublicKey: ByteArray) -> Unit)? = null,
+    ): String = forSession { startGroupAloneOnMlsThread(beforePublish) }
+
+    private suspend fun startGroupAloneOnMlsThread(
+        beforePublish: (suspend (groupId: ByteArray, knockPublicKey: ByteArray) -> Unit)? = null,
+    ): String {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val created = foundGroupOnMlsThread(identity, ownOtherDevices(identity), GroupKind.GROUP)
+        val createdHex = DsClient.pseudonymHex(created.groupId)
+        persistFoundedGroupBeforeWelcome(created.group, createdHex)
+        if (beforePublish != null) {
+            try {
+                val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+                val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), created.groupId)
+                val knock = try {
+                    val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(root, CURRENT_KNOCK_VERSION)
+                    try {
+                        uniffi.lakko_ffi_uniffi.groupKnockPublicKey(seed)
+                    } finally {
+                        seed.fill(0)
+                    }
+                } finally {
+                    root.fill(0)
+                }
+                beforePublish(created.groupId, knock)
+            } catch (e: Throwable) {
+                currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, createdHex) } }
+                runCatching { created.group.close() }
+                throw e
+            }
+        }
+        for (account in created.recipientAccounts) {
+            try {
+                publishWelcomeToMailbox(
+                    welcomeMailboxFor(account),
+                    created.welcomeEnvelope,
+                    createdHex,
+                    null,
+                    accountIdHint = null,
+                )
+            } catch (e: Throwable) {
+                currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, createdHex) } }
+                runCatching { created.group.close() }
+                throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
+            }
+        }
+        val registered = registerFoundedGroup(identity, created.group, created.groupId)
+        // Section 10 — the creation row of a group this device founded.
+        currentAccountIdB64.get()?.let { GroupSettingsStore.markCreated(applicationContext, it, registered) }
+        return registered
+    }
+
+    /** Whether the directory lists another device of this account. A failed
+     *  read counts as none. */
+    public suspend fun ownOtherDeviceListed(): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        return ownOtherDevices(identity).isNotEmpty()
+    }
+
     /** ADR-0079 - one-to-ones founded for a won invite-link request and not
      *  yet held, by hex id. In memory; after a restart the group is loaded
      *  from the MLS snapshot the founding persisted. */
@@ -1327,6 +1491,13 @@ public class ChatRepository(
             )
         }
 
+    /** A founding that could not be recorded: nothing was sent and nobody
+     *  will carry it on, so it does not stand. */
+    public fun abandonPreparedOneToOne(groupIdHex: String) {
+        currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, groupIdHex) } }
+        preparedLinkGroups.remove(groupIdHex)?.let { runCatching { it.close() } }
+    }
+
     /** ADR-0079 - make the founded one-to-one a held conversation (after a
      *  restart, from the MLS snapshot the founding persisted). `false` when
      *  it cannot be brought up; the next pass tries again. */
@@ -1363,7 +1534,9 @@ public class ChatRepository(
      * ADR-0079 - write the founded one-to-one's Welcome in the recorded order
      * (this account's own mailbox first). A failure throws out of the loop:
      * the requester is never written after a failed own write. One write per
-     * mailbox (two keys of one person are one mailbox).
+     * mailbox (two keys of one person are one mailbox). The requester's write
+     * is the answer to their request: their reply grant, then a `contact`
+     * grant, and nothing else.
      */
     public suspend fun deliverLinkWelcome(
         founded: me.lakko.app.contacts.LinkClaims.Founded,
@@ -1381,6 +1554,11 @@ public class ChatRepository(
                     welcome,
                     founded.groupIdHex,
                     accountIdHint = recipientAccountId.takeIf { target.isRecipient },
+                    purpose = if (target.isRecipient) {
+                        me.lakko.app.reach.WritePurpose.REPLY
+                    } else {
+                        me.lakko.app.reach.WritePurpose.WELCOME
+                    },
                 )
             }
         }
@@ -1401,6 +1579,7 @@ public class ChatRepository(
                 java.util.Base64.getDecoder().decode(note.welcomeB64),
                 note.groupIdHex,
                 accountIdHint = recipientAccountId,
+                purpose = me.lakko.app.reach.WritePurpose.REPLY,
             )
             note.groupIdHex.takeIf { groups[it] != null }
         }
@@ -1462,6 +1641,12 @@ public class ChatRepository(
                 reconcileAppointmentsBestEffort(groupIdHex, force = true)
                 persistKnownGroupBestEffort(groupIdHex)
                 persistSnapshotBestEffort()
+                // Section 10 of the group privacy spec — creation counts as
+                // activity. Only if absent: this also runs for a founded group
+                // brought back after a restart.
+                currentAccountIdB64.get()?.let {
+                    ConversationJoinedStore.saveIfAbsent(applicationContext, it, groupIdHex, System.currentTimeMillis())
+                }
                 // ADR-0042 — the founder is the OWNER: mint the push-routing
                 // secret + distribute it + subscribe under the derived push_gid.
                 // G-37 — kept INSIDE the provider critical section because it
@@ -1505,7 +1690,19 @@ public class ChatRepository(
                 IllegalStateException("fetchKeyPackages returned no device bound to the expected key"),
             )
         }
-        val devices = recipientDevices + ownOtherDevices(identity)
+        return foundGroupOnMlsThread(identity, recipientDevices + ownOtherDevices(identity), kind)
+    }
+
+    /**
+     * The founding [prepareGroupOnMlsThread] and [startGroupAloneOnMlsThread]
+     * share: the group with [devices] added in one commit (none: the founder
+     * alone, no commit and no Welcome), its journal claimed, nothing sent.
+     */
+    private suspend fun foundGroupOnMlsThread(
+        identity: Identity,
+        devices: List<me.lakko.app.discovery.DeviceKeyPackage>,
+        kind: GroupKind,
+    ): CreatedGroup {
         // The directory answered for the account that asked; nothing is
         // created for another one.
         ensureSession()
@@ -1522,13 +1719,15 @@ public class ChatRepository(
             // to each leaf's own mailbox. One commit per device would strand
             // every device but the last at a Welcome epoch nobody could reach.
             val addResult = try {
-                group.addMembersFromWire(identity, devices.map { it.keyPackage })
+                devices.takeIf { it.isNotEmpty() }?.let { added ->
+                    group.addMembersFromWire(identity, added.map { it.keyPackage })
+                }
             } catch (e: FfiException) {
                 group.close()
                 throw ChatError("addMembersFromWire failed", e)
             }
             // ADR-0078: the raw Welcome; it is sealed per mailbox when written.
-            val welcomeEnvelope = addResult.welcome
+            val welcomeEnvelope = addResult?.welcome ?: ByteArray(0)
             // ADR-0060 §6 — one Welcome write per added ACCOUNT, into its
             // account mailbox (ADR-0050 §2.7 as amended): the recipient's and,
             // when this account has other devices, this account's own.
@@ -1641,12 +1840,19 @@ public class ChatRepository(
      * predecessor, so it is resolved first and the CURRENT key's mailbox is
      * addressed, with the grants held for that person (ADR-0074 3.5a).
      */
-    private fun welcomeMailboxFor(accountKey: ByteArray): ByteArray {
+    private fun welcomeMailboxFor(accountKey: ByteArray, groupIdHex: String? = null): ByteArray {
         val current = mailboxAccountKeyOf(accountKey)
         // ADR-0078: the mailbox key comes from a binding verified against the
-        // person's current account key; none known writes nothing.
+        // person's current account key; none known writes nothing. In a
+        // group ([groupIdHex], the sweep's Welcome) a committer that holds
+        // no grant for the person finds it in the delegation that names it,
+        // or in the binding of a person found in Everyone (ADR-0060
+        // section 6) — before, such a committer threw here and its
+        // delegation was never used.
         val mailbox = try {
-            me.lakko.app.reach.ReachManager.get(applicationContext).mailboxAddressFor(current)
+            me.lakko.app.reach.ReachManager.get(applicationContext)
+                .welcomeMailboxPkFor(current, groupIdHex)
+                ?.let(mailboxCrypto::address)
         } catch (_: Throwable) {
             null
         } ?: throw me.lakko.app.contacts.MailboxUnknown()
@@ -1685,6 +1891,9 @@ public class ChatRepository(
      *   * otherwise (the direct add and group-creation paths, unchanged) — no
      *     grant at all goes unsigned, which an open mailbox takes; grants that
      *     were all refused re-throw the last refusal.
+     *
+     * [purpose] `REPLY` is the Welcome that answers a contact request: only
+     * their reply grant, then a `contact` grant, never unsigned.
      */
     private suspend fun publishWelcomeToMailbox(
         mailbox: ByteArray,
@@ -1694,6 +1903,7 @@ public class ChatRepository(
         requireGrant: Boolean = false,
         /** The added person's account id when the caller holds it (rule 6). */
         accountIdHint: ByteArray? = null,
+        purpose: me.lakko.app.reach.WritePurpose = me.lakko.app.reach.WritePurpose.WELCOME,
     ): PublishResult {
         // ADR-0074 section 3.5a rule 6 - a refused write re-checks the
         // person's address once: their identity bundle through the gate
@@ -1702,7 +1912,7 @@ public class ChatRepository(
         val person = welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)]
         var target = mailbox
         return me.lakko.app.reach.writeRecheckingAddress(
-            write = { publishWelcomeOnce(target, bytes, groupIdHex, explicit, requireGrant) },
+            write = { publishWelcomeOnce(target, bytes, groupIdHex, explicit, requireGrant, purpose) },
             isRefusal = { it is me.lakko.app.ds.DsReachRefusedError || it is WelcomeUndeliverable },
             recheck = recheck@{
                 val account = person ?: return@recheck false
@@ -1718,7 +1928,7 @@ public class ChatRepository(
                     false
                 }
                 val next = try {
-                    welcomeMailboxFor(account)
+                    welcomeMailboxFor(account, groupIdHex)
                 } catch (_: me.lakko.app.contacts.MailboxUnknown) {
                     target
                 }
@@ -1761,6 +1971,7 @@ public class ChatRepository(
         groupIdHex: String?,
         explicit: me.lakko.app.contacts.MailboxDest?,
         requireGrant: Boolean,
+        purpose: me.lakko.app.reach.WritePurpose,
     ): PublishResult {
         // Called once per recipient, each after the previous publish: the
         // grants below are the ones the signed-in account holds, and a
@@ -1779,9 +1990,10 @@ public class ChatRepository(
             return writeSealedWelcome(own, bytes)
         }
         val accountHex = DsClient.pseudonymHex(account)
+        val answering = purpose == me.lakko.app.reach.WritePurpose.REPLY
         return try {
             writeWelcomeWithGrants(
-                candidates = reach.reachAuthCandidates(account, me.lakko.app.reach.WritePurpose.WELCOME, groupIdHex),
+                candidates = reach.reachAuthCandidates(account, purpose, groupIdHex),
                 write = { dest ->
                     val target = dest ?: run {
                         android.util.Log.i("ChatRepository", "ADR-0060: Welcome written without a reach grant")
@@ -1793,8 +2005,23 @@ public class ChatRepository(
                     writeSealedWelcome(target, bytes)
                 },
                 isRefusal = { it is me.lakko.app.ds.DsReachRefusedError },
-                requireGrant = requireGrant,
+                requireGrant = requireGrant || answering,
                 accountKeyHex = accountHex,
+                // ADR-0060 section 6 (amended 2026-10-29) — only when this
+                // device holds no grant or delegation for the person at all
+                // (a refused one keeps the Welcome owed): a person found in
+                // Everyone, named by this device's record or a kept
+                // no-delegation envelope, is written proofless into their
+                // open mailbox (one `mailbox-write` token). Never for anyone
+                // else.
+                openFallback = groupIdHex?.takeUnless { answering }?.let { group ->
+                    {
+                        reach.openWelcomeMailboxPk(group, account)?.let {
+                            android.util.Log.i("ChatRepository", "ADR-0060: Welcome written to an open mailbox")
+                            me.lakko.app.contacts.MailboxDest(it, null)
+                        }
+                    }
+                },
             )
         } catch (undeliverable: WelcomeUndeliverable) {
             if (groupIdHex != null) {
@@ -1823,6 +2050,9 @@ public class ChatRepository(
     /** A grant (or delegation) for [ownerKey] was kept: retry the Welcomes
      *  owed to that account. Launched, never awaited. */
     private fun retryOwedWelcomesFor(ownerKey: ByteArray) {
+        // ADR-0060 section 6 — a person with nothing to send may have just
+        // gained a grant: the next poll asks again.
+        committerEnvelopeNothingToSend.forgetAll()
         val groupsOwed = undeliveredWelcomeGroups.remove(DsClient.pseudonymHex(ownerKey)) ?: return
         for (groupIdHex in groupsOwed) {
             pushScope.launchSession {
@@ -1862,7 +2092,7 @@ public class ChatRepository(
         )
         sweepWelcomesWritten[key]?.let { return it }
         val mailbox = try {
-            welcomeMailboxFor(account)
+            welcomeMailboxFor(account, groupIdHex)
         } catch (_: me.lakko.app.contacts.MailboxUnknown) {
             undeliveredWelcomeGroups.getOrPut(DsClient.pseudonymHex(mailboxAccountKeyOf(account))) {
                 java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -1871,6 +2101,9 @@ public class ChatRepository(
         }
         val id = publishWelcomeToMailbox(mailbox, bytes, groupIdHex, requireGrant = true).id
         sweepWelcomesWritten[key] = id
+        // The reply grant stays until it expires (7 days): a Welcome re-sent
+        // after a crash, or after a refused write and an address re-check,
+        // needs it. It is withdrawn only when the request is refused.
         return id
     }
 
@@ -1880,31 +2113,40 @@ public class ChatRepository(
 
     /**
      * ADR-0060 §6 — an Add this device proposed for [addedAccount]: when this
-     * device is the added person's contact, sign one delegation per committer
-     * candidate ([candidates], owner first, then admins by rank) and send them
-     * in the group, so whichever of them sweeps the Add can deliver the
-     * Welcome into the added person's closed mailbox. Nothing is sent when
-     * this device holds no contact grant for them (another path must carry
-     * the Welcome: their reply key, or their setting).
+     * device holds a grant for the added person (their contact key, or a
+     * group, channel or contacts-of-contacts key, a grant a search found them
+     * through included), sign one delegation per committer candidate
+     * ([candidates], owner first, then admins by rank) and send them in the
+     * group, so whichever of them sweeps the Add can deliver the Welcome into
+     * the added person's closed mailbox. For a person found in Everyone (no
+     * grant, a binding this device recorded for this add) the envelope
+     * carries the binding and no delegation: the committer writes the
+     * Welcome into their open mailbox (amended 2026-10-29). Nothing is sent
+     * when neither is held (another path must carry the Welcome).
+     *
+     * The row of [noteCommitterEnvelopeOwed] is written first, so a send that
+     * fails stays due for [resendCommitterEnvelopesIfDue]. [deviceKey] is the
+     * device the Add names: what ties the row to its own-request intent.
      */
     private fun sendCommitterDelegationsBestEffort(
         groupIdHex: String,
         addedAccount: ByteArray,
+        deviceKey: ByteArray,
         candidates: List<ByteArray>,
     ) {
         if (candidates.isEmpty()) return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val addedKeyB64 = outboxB64(addedAccount)
+        noteCommitterEnvelopeOwed(
+            store = sentCommitterEnvelopes,
+            accountIdB64 = accountIdB64,
+            groupIdHex = groupIdHex,
+            addedKeyB64 = addedKeyB64,
+            deviceKeyB64 = outboxB64(deviceKey),
+        )
         reachScope.launchSession {
             try {
-                val envelope = me.lakko.app.reach.ReachManager.get(applicationContext)
-                    .composeDelegations(addedAccount, candidates) ?: return@launchSession
-                val identity = canonicalIdentity.get() ?: return@launchSession
-                val record = groups[groupIdHex] ?: return@launchSession
-                broadcastControlToGroup(
-                    identity = identity,
-                    groupIdHex = groupIdHex,
-                    group = record.group,
-                    envelope = envelope,
-                )
+                sendCommitterEnvelope(accountIdB64, groupIdHex, addedKeyB64, candidates)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
@@ -1912,6 +2154,132 @@ public class ChatRepository(
             }
         }
     }
+
+    /** [sendCommitterEnvelopeOnce] against the live group and reach manager:
+     *  the one send, first and re-send alike. Takes the per-group lock, so it
+     *  is never awaited under it. */
+    private suspend fun sendCommitterEnvelope(
+        accountIdB64: String,
+        groupIdHex: String,
+        addedKeyB64: String,
+        candidates: List<ByteArray>,
+    ): CommitterEnvelopeSend {
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        return sendCommitterEnvelopeOnce(
+            store = sentCommitterEnvelopes,
+            accountIdB64 = accountIdB64,
+            groupIdHex = groupIdHex,
+            addedKeyB64 = addedKeyB64,
+            candidatesB64 = candidates.map(::outboxB64),
+            inFlight = committerEnvelopesInFlight,
+            nothingToSend = committerEnvelopeNothingToSend,
+            compose = { reach.composeDelegations(outboxUnb64(addedKeyB64), candidates, groupIdHex) },
+            publish = { envelope ->
+                val identity = canonicalIdentity.get()
+                val record = groups[groupIdHex]
+                val published = identity != null && record != null &&
+                    broadcastControlToGroup(
+                        identity = identity,
+                        groupIdHex = groupIdHex,
+                        group = record.group,
+                        envelope = envelope,
+                    ) != null
+                ensureSession()
+                published
+            },
+            nowMs = System::currentTimeMillis,
+        )
+    }
+
+    /** ADR-0060 section 6 — what this device sent for the Adds it proposed. */
+    private val sentCommitterEnvelopes: SentCommitterEnvelopeStore by lazy {
+        SharedPrefsSentCommitterEnvelopeStore(applicationContext)
+    }
+
+    /** The envelopes being sent now, by (account, group, added person): a poll
+     *  tail must not send a second one beside a first send still queued on
+     *  the per-group lock. */
+    private val committerEnvelopesInFlight: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private val committerEnvelopeNothingToSend = CommitterEnvelopeNothingToSend()
+
+    /** Groups a re-send pass is running for: a second tail skips. */
+    private val committerEnvelopeResendRunning: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * The committers who may sweep an Add, in rank order (owner, then admins),
+     * as far as one envelope carries them: what [sendCommitterEnvelopeOnce]
+     * covers, so a group with more candidates than an envelope holds does not
+     * read as due at every poll. Under the provider lock. Empty on a failed
+     * read.
+     */
+    private fun committerCandidatesLocked(group: Group): List<ByteArray> =
+        try {
+            group.groupRoles()?.let { roles ->
+                (listOf(roles.owner) + roles.admins)
+                    .sortedBy { group.committerRank(it)?.toLong() ?: Long.MAX_VALUE }
+            }.orEmpty().take(uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt())
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+    /**
+     * ADR-0060 section 6 — at the tail of a poll, a fresh committer envelope
+     * for each Add this device proposed that still waits, when the core's
+     * rule says one is due. A delegation lives 23 hours and a proposal has no
+     * deadline, so without this an Add that waits longer loses its way to the
+     * person. A group with no record costs one store read.
+     */
+    private suspend fun resendCommitterEnvelopesIfDue(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        if (sentCommitterEnvelopes.load(accountIdB64, groupIdHex).isEmpty()) return
+        if (deadOneToOne(groupIdHex)) return
+        val record = groups[groupIdHex] ?: return
+        if (!committerEnvelopeResendRunning.add(groupIdHex)) return
+        try {
+            // One provider region, so the roster, the pending set and the role
+            // table describe the same epoch.
+            val (snapshot, candidates) = providerLock.sessionLock {
+                supersededSnapshotLocked(record) to committerCandidatesLocked(record.group)
+            }
+            val result = runCommitterEnvelopeResend(
+                store = sentCommitterEnvelopes,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                ownIntents = loadOwnRequestIntents(pendingRequestObservations, accountIdB64, groupIdHex),
+                snapshot = snapshot,
+                candidatesB64 = candidates.map(::outboxB64),
+                nowMs = System.currentTimeMillis(),
+                due = ::committerEnvelopeIsDue,
+                send = { addedKeyB64 -> sendCommitterEnvelope(accountIdB64, groupIdHex, addedKeyB64, candidates) },
+                onFailure = { cause ->
+                    android.util.Log.w("ChatRepository", "ADR-0060 delegations not re-sent: ${cause.javaClass.simpleName}")
+                },
+            )
+            if (result.sent > 0) {
+                android.util.Log.i("ChatRepository", "ADR-0060 re-sent ${result.sent} committer envelope(s)")
+            }
+        } finally {
+            committerEnvelopeResendRunning.remove(groupIdHex)
+        }
+    }
+
+    /** The core's rule (`committerEnvelopeDue`). A row that cannot be read
+     *  asks nothing. */
+    private fun committerEnvelopeIsDue(row: SentCommitterEnvelope, candidatesB64: List<String>, nowMs: Long): Boolean =
+        try {
+            uniffi.lakko_ffi_uniffi.committerEnvelopeDue(
+                row.sentAtMs?.toULong(),
+                row.signed,
+                row.coveredB64.map(::outboxUnb64),
+                candidatesB64.map(::outboxUnb64),
+                nowMs.toULong(),
+            )
+        } catch (_: Throwable) {
+            false
+        }
 
     /** See [pollKnocksIfOwnerOrAdmin]. Runs under the provider lock. */
     private fun keepJoinerReplyGrantsBestEffort(record: GroupRecord, rows: List<me.lakko.app.ds.MailboxMessage>) {
@@ -1935,6 +2303,8 @@ public class ChatRepository(
             // resolves to); one that does not is not kept.
             if (!me.lakko.app.contacts.grantBindsTo(attr.replyGrant, account, mailboxCrypto)) continue
             reach.keepHeld(account, attr.replyGrant, scopeHex = "")
+            // Recorded per group, so it is cleared when the request is refused.
+            recordKnockReply(DsClient.pseudonymHex(groupId), account, attr.replyGrant)
         }
     }
 
@@ -1986,6 +2356,10 @@ public class ChatRepository(
             // now and on the periodic re-check.
             runIntroductionsBestEffort()
             startIntroductionTicker()
+            // ADR-0060 §5 — a session in Everyone says so to the server, so a
+            // publication a rotation, a restore or a failed send left behind
+            // does not stay behind.
+            refreshEveryoneBestEffort()
             // ADR-0060 §5 — the username certificate this account's profile
             // carries, so a viewer shows the username without a lookup. A
             // first certificate republishes the profile everywhere.
@@ -2024,6 +2398,11 @@ public class ChatRepository(
         publishOwnProfileToAllGroups()
         visibilityListener?.invoke(setting)
     }
+
+    /** The account id of the contact holding a one-to-one peer's key, when
+     *  one is known. Installed by the contacts repository. */
+    @Volatile
+    internal var contactAccountId: ((peerKey: ByteArray) -> ByteArray?)? = null
 
     /** ADR-0060 §5 / §4 — Everyone publication and introduction offers,
      *  installed by the app shell. */
@@ -2086,13 +2465,16 @@ public class ChatRepository(
             forAnotherDevice = isWelcomeForAnotherDevice(e)
             throw e
         } finally {
-            // After EVERY other attempt, success or failure. A successful join
-            // consumed the published KeyPackage (OpenMLS deletes its private
-            // key; the directory holds one row per account), so the row is now
-            // dead. A failed join is often the symptom of a dead row — e.g.
-            // one minted before this fix by a throwaway identity — and a fresh
-            // one is the only way the NEXT adder can succeed. Numbered here,
-            // after the join, so it is served by a KeyPackage minted after it.
+            // After every other attempt. A KeyPackage is a last-resort package
+            // (ADR-0050 section 2.6): a join leaves it in the directory, one
+            // row per device, and this keeps the row fresh rather than replacing
+            // a dead one. A failed join can still be the symptom of a row that
+            // no longer opens anything, and a fresh one is the only way the
+            // NEXT adder can succeed. A Welcome refused for a group this device
+            // still holds as active consumed nothing and is kept
+            // ([holdWelcome]); the republish it costs is harmless. Numbered
+            // here, after the join, so it is served by a KeyPackage minted
+            // after it.
             if (!forAnotherDevice) requestKeyPackageRepublish()
         }
     }
@@ -2106,33 +2488,68 @@ public class ChatRepository(
         // not known until the join has run, so the provider lock alone covers
         // it. Nothing else can be operating on a group this device is only now
         // learning about.
-        val groupIdHex = providerLock.sessionLock {
-            val group = try {
-                Group.joinFromWelcome(welcomeBytes, identity)
-            } catch (e: FfiException) {
-                throw ChatError("joinFromWelcome failed", e)
+        var joinedFresh = false
+        var joinedEpoch: ULong? = null
+        var joinedGroup: Group? = null
+        // ADR-0087 section 9 — one at a time with an end's run, which reads the
+        // registry and the stored group across several regions: a join lands
+        // before a run or after it, never between its delete and its drop.
+        val groupIdHex = membershipEndRun.sessionLock {
+            val joinedHex = providerLock.sessionLock {
+                val group = try {
+                    Group.joinFromWelcome(welcomeBytes, identity)
+                } catch (e: FfiException) {
+                    throw ChatError("joinFromWelcome failed", e)
+                }
+                val groupId = group.groupId()
+                val groupIdHex = DsClient.pseudonymHex(groupId)
+                // ADR-0087 section 9 — a Welcome replaces an ended group. What it
+                // replaces decides what the new record starts with.
+                val old = groups[groupIdHex]
+                val replacement = joinReplacement(
+                    oldHeld = old != null,
+                    endOwed = groupIdHex.lowercase() in endingGroups,
+                    accountStillInRoster = old?.let { accountInRosterOrNull(it.group) },
+                )
+                joinedFresh = replacement == JoinReplacement.FRESH
+                joinedEpoch = runCatching { group.epoch() }.getOrNull()
+                joinedGroup = group
+                if (replacement == JoinReplacement.KEEP_HISTORY && old != null) {
+                    // A retired leaf came back: same conversation, new handle.
+                    old.replaceGroup(group)
+                } else {
+                    registerJoinedGroup(groupIdHex, GroupRecord(group = group, groupId = groupId))
+                }
+                // ADR-0053 — sign this journal's requests from now on, and claim it
+                // at the epoch the Welcome brought us to (idempotent).
+                openJournal(groupIdHex)
+                persistKnownGroupBestEffort(groupIdHex)
+                persistSnapshotBestEffort()
+                // ADR-0042 — a joiner is not the owner: `ensure` defers the
+                // subscription (never under group_id) until the owner's
+                // distribution envelope arrives on the journal, unless this
+                // device already holds the secret (e.g. a prior receive).
+                // G-37 — kept INSIDE the provider critical section: it reads
+                // `group.ownRole` / `group.groupId` synchronously and only LAUNCHES
+                // the routing work, so no locks nest here. After a replacement
+                // whose stores are about to go, the secret goes with them: that
+                // path provisions below, once they have.
+                if (!joinedFresh) ensurePushRoutingBestEffort(group, identity)
+                groupIdHex
             }
-            val groupId = group.groupId()
-            val groupIdHex = DsClient.pseudonymHex(groupId)
-            groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
-            // ADR-0053 — sign this journal's requests from now on, and claim it
-            // at the epoch the Welcome brought us to (idempotent).
-            openJournal(groupIdHex)
-            persistKnownGroupBestEffort(groupIdHex)
-            persistSnapshotBestEffort()
-            // ADR-0042 — a joiner is not the owner: `ensure` defers the
-            // subscription (never under group_id) until the owner's
-            // distribution envelope arrives on the journal, unless this
-            // device already holds the secret (e.g. a prior receive).
-            // G-37 — kept INSIDE the provider critical section: it reads
-            // `group.ownRole` / `group.groupId` synchronously and only LAUNCHES
-            // the routing work, so no locks nest here.
-            ensurePushRoutingBestEffort(group, identity)
-            groupIdHex
+            // What was left of the membership that ended goes before anything
+            // of the new one arrives.
+            settleJoinedOverEnd(joinedHex, identity, joinedFresh, joinedGroup, joinedEpoch)
+            joinedHex
         }
         // ADR-0024 — a group re-joined under the same id keeps the read state
         // this device already persisted for it. Read outside the provider lock.
         seedReadWatermarksBestEffort(groupIdHex)
+        // Written after the settling above, which wipes what is left of a
+        // membership that ended: a rejoin gets a new moment.
+        currentAccountIdB64.get()?.let {
+            ConversationJoinedStore.save(applicationContext, it, groupIdHex, System.currentTimeMillis())
+        }
         publishThreadList()
         // ADR-0048 §2 — publish this device's profile into the group it just
         // joined: nobody there knows its name yet.
@@ -2142,10 +2559,26 @@ public class ChatRepository(
         // this join lands never re-sends. Launched, never awaited: the publish
         // takes the per-group lock itself.
         profileRequestScope.launchSession { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
+        // The sweep in flight listed its groups before this one existed and
+        // holds them for up to its whole long poll, so this group's first rows
+        // (the other person's name among them) would wait for the next sweep:
+        // up to 30 s of a contact under a fingerprint and no first message.
+        profileRequestScope.launchSession { pollJoinedGroup(groupIdHex) }
         // ADR-0060 §4 — a new one-to-one gets the introduction record and the
         // relayed bundle.
         runIntroductionsBestEffort()
         return groupIdHex
+    }
+
+    private suspend fun pollJoinedGroup(groupIdHex: String) {
+        try {
+            repeat(JOINED_GROUP_POLLS) { pollGroup(groupIdHex, waitSecs = JOINED_GROUP_POLL_WAIT_SECS) }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            // The next sweep lists this group.
+            android.util.Log.w("ChatRepository", "first poll of a joined group failed: ${cause.javaClass.simpleName}")
+        }
     }
 
     /**
@@ -2659,7 +3092,13 @@ public class ChatRepository(
             return false
         }
         try {
-            publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+            // No group-call frame wakes anyone, an End included: a group call
+            // never rings a closed device, so there is no ring to stop.
+            publishApplicationMessage(
+                groupIdHex = groupIdHex,
+                plaintextBytes = bytes,
+                wake = me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE,
+            )
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -3239,14 +3678,7 @@ public class ChatRepository(
                     // rank order (owner, then admins), so this device can
                     // hand each of them a delegation for the added person's
                     // closed mailbox. Read under the provider lock.
-                    val candidates = try {
-                        record.group.groupRoles()?.let { roles ->
-                            (listOf(roles.owner) + roles.admins)
-                                .sortedBy { record.group.committerRank(it)?.toLong() ?: Long.MAX_VALUE }
-                        }.orEmpty()
-                    } catch (_: Throwable) {
-                        emptyList()
-                    }
+                    val candidates = committerCandidatesLocked(record.group)
                     val addedAccount = try {
                         uniffi.lakko_ffi_uniffi.keyPackageAccountKey(keyPackageBytes)
                     } catch (_: Throwable) {
@@ -3271,7 +3703,7 @@ public class ChatRepository(
                         )
                         // Launched: the broadcast takes the per-group lock this
                         // step is still inside.
-                        sendCommitterDelegationsBestEffort(groupIdHex, addedAccount, candidates)
+                        sendCommitterDelegationsBestEffort(groupIdHex, addedAccount, deviceKey, candidates)
                         publishThreadList()
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome?
                     }
@@ -3473,6 +3905,15 @@ public class ChatRepository(
         groups[groupIdHex]?.sawUnkeptExternalJoin = false
     }
 
+    /** Section 8 — where a waiting request came from, or `null`. */
+    public fun knockOriginFor(groupIdHex: String, joinerSignatureKey: ByteArray): KnockOrigin? =
+        GroupSettingsStore.knockOrigin(
+            applicationContext,
+            currentAccountIdB64.get(),
+            groupIdHex,
+            me.lakko.app.ds.hexOf(joinerSignatureKey),
+        )
+
     /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
      *  member minted the `/g/` link it arrived on, and whether that issuer is in
      *  the current roster. */
@@ -3605,6 +4046,8 @@ public class ChatRepository(
                 // this device's own pending store, and a refused persist
                 // publishes nothing ([persistProposalOrThrow]).
                 persistProposalOrThrow()
+                // Section 5 — the approved row is behind the knock position.
+                saveKnockCursorBestEffort(groupIdHex, record.knockCursor)
                 Pair(record.groupId, bytes)
             }
             val publish = try {
@@ -3659,6 +4102,7 @@ public class ChatRepository(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
         // G-37 — local-only (no DS call): provider work start to finish.
+        var refusedAccount: ByteArray? = null
         groupLock(groupIdHex).sessionLock {
             providerLock.sessionLock {
                 val record = groups[groupIdHex]
@@ -3666,14 +4110,51 @@ public class ChatRepository(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
+                // The account behind the request, read before it goes, for
+                // its reply grant.
+                refusedAccount = try {
+                    record.group.pendingExternalJoinAccountKey(proposalRef)
+                } catch (_: Throwable) {
+                    null
+                } ?: proposalRef
                 try {
                     record.group.rejectExternalJoin(identity, proposalRef)
                 } catch (e: FfiException) {
                     throw ChatError("rejectExternalJoin failed", e)
                 }
-                persistSnapshotBestEffort()
+                // Section 5 — durably refused, then the knock position: the
+                // refused row is behind it, so a restart does not keep it again.
+                val durable = try {
+                    persistSnapshotDurableOrThrow()
+                    true
+                } catch (cause: Throwable) {
+                    persistSnapshotBestEffort()
+                    false
+                }
+                if (durable) saveKnockCursorBestEffort(groupIdHex, record.knockCursor)
             }
         }
+        refusedAccount?.let { releaseKnockReply(groupIdHex, it) }
+    }
+
+    /** ADR-0087 section 5 — more requests wait on the server than the pending
+     *  set holds. */
+    public fun knockQueueFull(groupIdHex: String): Boolean = groups[groupIdHex]?.knockQueueFull ?: false
+
+    /**
+     * ADR-0087 section 5 — `Reject all`: every retained request is rejected
+     * here, and the server deletes the knock rows up to the newest this device
+     * read (a request that arrived after stays).
+     */
+    public suspend fun rejectAllJoinRequests(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        for (key in pendingExternalJoins(groupIdHex)) rejectExternalJoin(groupIdHex, key)
+        val through = maxOf(record.lastSeenKnockId, record.knockCursor)
+        if (through > 0) dsClient.deleteKnocks(record.groupId, through)
+        record.knockCursor = through
+        saveKnockCursorBestEffort(groupIdHex, through)
+        record.knockQueueFull = false
+        record.sawUnkeptExternalJoin = false
     }
 
     /**
@@ -3710,6 +4191,10 @@ public class ChatRepository(
         val members = (memberCount(groupIdHex) ?: 0).coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort()
         val seed = identity.ed25519Seed()
         val groupId = record.group.groupId()
+        // ADR-0087 section 5 — the link names the group's knock key; an admin
+        // the owner has not handed the seed to yet cannot mint one.
+        val (knockPublicKey, knockVersion) = providerLock.sessionLock { groupKnockKeyFor(record, groupIdHex) }
+            ?: throw ChatError("no knock key for this group yet", IllegalStateException("no knock seed"))
         val mint = try {
             uniffi.lakko_ffi_uniffi.composeGroupInviteCapabilityWithPreview(
                 seed,
@@ -3718,6 +4203,8 @@ public class ChatRepository(
                 groupName,
                 inviterName,
                 members,
+                knockPublicKey,
+                knockVersion,
             )
         } catch (e: FfiException) {
             // A stored name that fails the display-name rule (it should not:
@@ -3732,6 +4219,8 @@ public class ChatRepository(
                     null,
                     null,
                     members,
+                    knockPublicKey,
+                    knockVersion,
                 )
             } catch (again: FfiException) {
                 throw ChatError("composeGroupInviteCapabilityWithPreview failed", again)
@@ -3963,11 +4452,18 @@ public class ChatRepository(
         }
         val groupId: ByteArray
         val valid: Boolean
+        val knockKey: uniffi.lakko_ffi_uniffi.FfiGroupKnockKey?
         try {
             valid = cap.isValidNow(nowMs)
             groupId = cap.groupId()
+            knockKey = cap.knock()
         } finally {
             cap.close()
+        }
+        // ADR-0087 section 5 — the request is sealed to the knock key the link
+        // names; a link without one cannot carry a request.
+        if (knockKey == null) {
+            throw ChatError("group invite link names no knock key", IllegalStateException("no knock key"))
         }
         if (!valid) {
             throw ChatError(
@@ -4016,49 +4512,33 @@ public class ChatRepository(
         } catch (e: Throwable) {
             throw ChatError(dsErrorMessage(e, "Could not prepare the request. Try again."), e)
         }
-        // ADR-0053 section 4 / client contract point 6 — a claimed journal
-        // answers only its members, so the joiner never reads it: an empty
-        // knock learns the epoch, and a second knock carries the attribution
-        // (advisory, ADR-0028 OQ2) and the proposal built for that epoch. Each
-        // knock spends its own `ds-knock` token (ADR-0054).
+        // ADR-0087 section 5 — the request is a fresh KeyPackage sealed to the
+        // group's knock key with the reply grant, a profile and the link's
+        // capability; it carries no epoch, so it waits through every commit.
+        // One knock, one `ds-knock` token (ADR-0054).
         try {
-            runLinkJoinKnock(
-                knock = { payloads ->
-                    dsClient.knock(groupId, payloads).epoch
-                },
-                buildProposal = { epoch ->
-                    providerLock.sessionLock {
-                        val proposal = identity.createExternalJoinProposal(groupId, epoch)
-                        // The proposal's KeyPackage private key is the only thing
-                        // that can open the Welcome the sweep will send later.
-                        // Durable BEFORE the knock, fail-closed: a persist that
-                        // failed or was refused (the session ended) throws here,
-                        // and the proposal never leaves the device. Published
-                        // with nothing on disk, an approval would send a Welcome
-                        // this device cannot open after a restart.
-                        persistSnapshotDurableOrThrow()
-                        proposal
-                    }
-                },
-                buildAttribution = {
-                    uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
-                        identity.ed25519Seed(),
-                        capabilityWire,
-                        // ADR-0060 §6 — this account's reply key, registered on
-                        // its mailbox before the knock, so the committer can
-                        // write the Welcome in. Retired once the group arrives.
-                        joinReplyGrant,
-                    )
-                },
-            )
+            val row = providerLock.sessionLock {
+                val keyPackage = identity.createKeyPackage()
+                // The KeyPackage's private key is the only thing that can open
+                // the Welcome the sweep sends later: durable BEFORE the knock,
+                // fail-closed.
+                persistSnapshotDurableOrThrow()
+                uniffi.lakko_ffi_uniffi.sealKnockRow(
+                    knockKey.publicKey,
+                    knockKey.version,
+                    keyPackage,
+                    joinReplyGrant,
+                    ownKnockProfile(),
+                    capabilityWire,
+                )
+            }
+            dsClient.knock(groupId, listOf(row))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (e: GroupNotAcceptingRequests) {
-            throw ChatError(GROUP_NOT_ACCEPTING_REQUESTS, e)
         } catch (e: FfiException) {
-            throw ChatError("createExternalJoinProposal failed", e)
+            throw ChatError("knock row could not be sealed", e)
         } catch (e: Throwable) {
-            throw ChatError(dsErrorMessage(e, "DS knock (external-join request) failed"), e)
+            throw ChatError(dsErrorMessage(e, "DS knock (request to join) failed"), e)
         }
         return Pair(groupId, identity.signaturePublicKey())
     }
@@ -4097,25 +4577,33 @@ public class ChatRepository(
      * Publish a raw application payload — a call-signaling frame, a service
      * envelope — with no chat bubble and no message log entry.
      *
-     * Fires a push wake for exactly the two call-signaling frames
-     * [me.lakko.app.calls.shouldWakeForCallSignaling] names (an offer and an
-     * end) and for nothing else, so a backgrounded or closed callee rings
-     * (`docs/ux/calls.md` §2.1 / §7). The decision is taken from the composed
-     * bytes here rather than passed in by the caller, so there is no second
-     * place a caller could get it wrong: the group-call control frames that
-     * reach this same method through [publishGroupCallSignal] stay silent
-     * because their tag is not an offer or an end, not because someone
-     * remembered to say so.
+     * Fires a push wake when the caller asked for one ([wake]) AND the frame
+     * is a call offer or end ([me.lakko.app.calls.shouldWakeForCallSignaling]),
+     * so a backgrounded or closed callee rings (`docs/ux/calls.md` §2.1 / §7).
+     * A 1x1 session asks only for its dial offer and for the End of a call
+     * that never connected: a renegotiation offer and the End of a connected
+     * call carry the same tags, and a wake on either rang the peer's iPhone.
+     * The group-call control frames that reach this method through
+     * [publishGroupCallSignal] ask for no wake, an End included
+     * ([me.lakko.app.calls.GROUP_CALL_CONTROL_WAKE]).
      */
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit =
-        forSession { publishApplicationMessageOnMlsThread(groupIdHex = groupIdHex, plaintextBytes = plaintextBytes) }
+        forSession {
+            publishApplicationMessageOnMlsThread(
+                groupIdHex = groupIdHex,
+                plaintextBytes = plaintextBytes,
+                wake = wake,
+            )
+        }
 
     private suspend fun publishApplicationMessageOnMlsThread(
         groupIdHex: String,
         plaintextBytes: ByteArray,
+        wake: me.lakko.app.calls.CallSignalingWake,
     ): Unit {
         // ADR-0073 R.7 case 1 — nothing goes into a dead one-to-one but the claim.
         if (deadOneToOne(groupIdHex)) throw deadSessionError()
@@ -4149,17 +4637,18 @@ public class ChatRepository(
             }
             // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
             // ADR-0054 — the wake rides this signed publish as a header and the
-            // DS fans it out after appending the row; only an offer and an end
-            // ask for one, every other frame published here stays silent.
-            val wake = sealedWakeFor(
+            // DS fans it out after appending the row; only an offer or an end
+            // the caller asked a wake for gets one, every other frame published
+            // here stays silent.
+            val sealedWake = sealedWakeFor(
                 groupIdHex,
-                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
+                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes, wake)) DsWakeKind.CALL else null,
             )
             // ADR-0045 — the publish is INSIDE the per-group lock (see
             // [runGroupSend]): a message sealed at one epoch and published on the
             // far side of a commit is permanently undecryptable for every
             // recipient, because `lakko-mls` retains no past-epoch secrets.
-            chatClient.publishPreparedSend(prepared, wake = wake)
+            chatClient.publishPreparedSend(prepared, wake = sealedWake)
         }
     }
 
@@ -4173,6 +4662,9 @@ public class ChatRepository(
          *  is a forward. A forward never carries a quote, so the two are not
          *  set together. */
         forward: ForwardRef? = null,
+        /** The message's row is in the conversation (it reads "Sending...",
+         *  then "Not sent" with a Retry when the publish fails). */
+        onRowShown: () -> Unit = {},
     ): Unit =
         forSession {
             sendMessageOnMlsThread(
@@ -4181,6 +4673,7 @@ public class ChatRepository(
                 attachments = attachments,
                 reply = reply,
                 forward = forward,
+                onRowShown = onRowShown,
             )
         }
 
@@ -4190,6 +4683,7 @@ public class ChatRepository(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
+        onRowShown: () -> Unit = {},
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -4226,6 +4720,7 @@ public class ChatRepository(
             forward = forward,
         )
         publishThreadList()
+        onRowShown()
         try {
             sendLocked(
                 groupIdHex = groupIdHex,
@@ -4316,6 +4811,7 @@ public class ChatRepository(
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
     ) {
+        flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
             // 1.19c4: build the JSON envelope before
             // encrypting. `composeEnvelopeBytes` routes through
@@ -4571,13 +5067,17 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
         emoji: String,
+        add: Boolean = true,
     ): Unit =
-        forSession { reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji) }
+        forSession {
+            reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji, add = add)
+        }
 
     private suspend fun reactToMessageOnMlsThread(
         groupIdHex: String,
         targetMessageId: Long,
         emoji: String,
+        add: Boolean,
     ): Unit {
         // ADR-0073 R.5 — a row of an older segment is read-only history: its
         // on-screen id is negative and names no message of this group.
@@ -4586,7 +5086,7 @@ public class ChatRepository(
         // applied on this device alone and never sent ([opRoute]): its target
         // exists only in the old session.
         if (deadOneToOne(groupIdHex)) {
-            applyOwnOpLocally(groupIdHex, MessageOp.Reaction, targetMessageId, "", emoji)
+            applyOwnOpLocally(groupIdHex, MessageOp.Reaction, targetMessageId, "", emoji, reactionAdd = add)
             return
         }
         val identity = canonicalIdentity.get()
@@ -4596,10 +5096,26 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
+        // reactions-and-emoji section 12 — the op names the target's author
+        // (the account key this device holds for it), so the author's devices
+        // can tell from the background that a reaction is to their message.
+        val targetAuthor = record.messageAuthorKey(targetMessageId)?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it).takeIf { b -> b.size == 32 }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        // An add wakes the conversation like a message; taking one off stays
+        // quiet.
+        val wake = if (add) sealedWakeFor(groupIdHex, DsWakeKind.MESSAGE) else null
+        flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReactionEnvelope(
                 target = targetMessageId,
                 emoji = emoji,
+                action = if (add) uniffi.lakko_ffi_uniffi.ReactionAction.ADD else uniffi.lakko_ffi_uniffi.ReactionAction.REMOVE,
+                targetAuthor = targetAuthor,
             )
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
@@ -4617,13 +5133,15 @@ public class ChatRepository(
                 val ownKey = ownIdentity(record.group)
                 prepared to ownKey
             }
-            chatClient.publishPreparedSend(prepared)
+            val sent = chatClient.publishPreparedSend(prepared, wake = wake)
             record.applyOwnOp(
                 op = MessageOp.Reaction,
                 target = targetMessageId,
                 text = "",
                 emoji = emoji,
                 ownKey = ownKey,
+                reactionAdd = add,
+                opId = sent.messageId,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -4836,6 +5354,23 @@ public class ChatRepository(
             publish = { groupIdHex -> publishOwnProfile(groupIdHex) },
         )
 
+    /**
+     * ADR-0048 §2 — the own profile goes before this device's next message
+     * into [groupIdHex] when one is owed there (a newcomer this device has
+     * not yet named itself to, or a join publish that failed): published at
+     * once and awaited, with no jitter, OUTSIDE the group lock it takes
+     * itself. A failure does not hold the message back; it stays owed.
+     */
+    private suspend fun flushOwedProfileBeforeSend(groupIdHex: String) {
+        try {
+            profileRepublish.flushBeforeSend(groupIdHex)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0048 owed profile not flushed before a send")
+        }
+    }
+
     /** This account's own profile name, or `null` when none is set. The call
      *  host puts it on the user's own tile (`docs/ux/calls.md` section 4.4). */
     public fun ownDisplayName(): String? {
@@ -5010,71 +5545,144 @@ public class ChatRepository(
      * (the server refuses Everyone without a record).
      */
     private fun refreshEveryoneBestEffort() {
-        val account = keyPackageAccount.get() ?: return
+        val account = keyPackageAccount.get()
+        if (account == null) {
+            // Before a session bootstrapped: the bootstrap refreshes.
+            android.util.Log.i("ChatRepository", "ADR-0060 Everyone refresh waits for the session")
+            return
+        }
         reachScope.launchSession {
+            if (!everyoneMutex.tryLock()) {
+                everyoneAgain = true
+                return@launchSession
+            }
             try {
-                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-                val setting = reach.currentVisibility() ?: return@launchSession
-                val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
-                val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
-                val name = own?.displayName?.takeIf { it.isNotBlank() }
-                val certificate = own?.username?.let { reach.usernameCertificate() }
-                val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate)
-                val (published, publishedKey) = reach.publishedEveryone()
-                when (me.lakko.app.reach.everyoneAction(everyone, published, publishedKey, key)) {
-                    me.lakko.app.reach.EveryoneAction.NONE -> return@launchSession
-                    me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
-                        // Never published: nothing to withdraw beyond the default.
-                        reach.notePublishedEveryone(false, null)
-                        return@launchSession
-                    }
-                    me.lakko.app.reach.EveryoneAction.PUT -> Unit
-                }
-                val outcome = keyPackageDiscoveryFactory().use { client ->
-                    client.setSessionToken(account.sessionToken)
-                    me.lakko.app.reach.publishEveryone(
-                        wantPublic = everyone,
-                        who = me.lakko.app.reach.EveryoneIdentity(
-                            displayName = name,
-                            username = own?.username,
-                            certificate = certificate,
-                            identityPk = reach.ownAccountKey(),
-                            accountId = account.accountId,
-                            mailboxBinding = reach.ownMailboxBinding(),
-                        ),
-                        ops = me.lakko.app.reach.EveryoneOps(
-                            nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
-                            oprfNameTerm = { client.oprfNameTerm(it) },
-                            oprfUsername = { client.oprfUsername(it) },
-                            composePublicRecord = { payload, outputs, issuedAt ->
-                                uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
-                            },
-                            putVisibility = { public, lookupKeys, record ->
-                                client.putVisibility(public, lookupKeys, record)
-                            },
-                        ),
-                        nowMs = System.currentTimeMillis(),
-                    )
-                }
-                // What was published is noted for the account that published
-                // it; the reach manager may hold another one by now.
-                ensureSession()
-                when (outcome) {
-                    me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
-                    me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
-                    me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH ->
-                        android.util.Log.i(
-                            "ChatRepository",
-                            "ADR-0060 Everyone not published: no name, no certified username or no identity",
-                        )
-                }
+                do {
+                    everyoneAgain = false
+                    refreshEveryone(account)
+                } while (everyoneAgain)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}")
+                me.lakko.app.reach.ReachManager.get(applicationContext).noteEveryoneStuck()
+            } finally {
+                everyoneMutex.unlock()
             }
         }
     }
+
+    /** One refresh at a time: the setting, the name and the note are read
+     *  once for each send, so a run that started earlier can never overwrite
+     *  the server with a choice the person has since changed. */
+    private val everyoneMutex = kotlinx.coroutines.sync.Mutex()
+
+    @Volatile
+    private var everyoneAgain = false
+
+    /** Set by the first Everyone refresh of a session
+     *  ([me.lakko.app.reach.everyoneActionForRefresh]). */
+    private val everyoneCheckedThisSession = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private suspend fun refreshEveryone(account: KeyPackageAccount) {
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        val setting = reach.currentVisibility()
+        if (setting == null) {
+            android.util.Log.i("ChatRepository", "ADR-0060 Everyone refresh: no session bound to the setting")
+            return
+        }
+        val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
+        val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
+        val name = own?.displayName?.takeIf { it.isNotBlank() }
+        var certificate = own?.username?.let { reach.usernameCertificate() }
+        // The certificate is what publishes the username. A session that has
+        // none yet (a restore, a rotation) fetches it here rather than leave
+        // a person with no name out of the search.
+        if (everyone && certificate == null && own?.username != null) {
+            certificate = fetchUsernameCertificate(account, reach)
+        }
+        val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate, reach.ownMailboxBinding())
+        val (published, publishedKey) = reach.publishedEveryone()
+        val first = everyoneCheckedThisSession.compareAndSet(false, true)
+        when (me.lakko.app.reach.everyoneActionForRefresh(everyone, published, publishedKey, key, first)) {
+            me.lakko.app.reach.EveryoneAction.NONE -> return
+            me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
+                // Never published: nothing to withdraw beyond the default.
+                reach.notePublishedEveryone(false, null)
+                return
+            }
+            me.lakko.app.reach.EveryoneAction.PUT -> Unit
+        }
+        val outcome = keyPackageDiscoveryFactory().use { client ->
+            client.setSessionToken(account.sessionToken)
+            me.lakko.app.reach.publishEveryone(
+                wantPublic = everyone,
+                who = me.lakko.app.reach.EveryoneIdentity(
+                    displayName = name,
+                    username = own?.username,
+                    certificate = certificate,
+                    identityPk = reach.ownAccountKey(),
+                    accountId = account.accountId,
+                    mailboxBinding = reach.ownMailboxBinding(),
+                ),
+                ops = me.lakko.app.reach.EveryoneOps(
+                    nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
+                    oprfNameTerm = { t -> reach.keptOprf("n:$t") { client.oprfNameTerm(t) } },
+                    oprfUsername = { u -> reach.keptOprf("u:$u") { client.oprfUsername(u) } },
+                    composePublicRecord = { payload, outputs, issuedAt ->
+                        uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
+                    },
+                    putVisibility = { public, lookupKeys, record ->
+                        client.putVisibility(public, lookupKeys, record)
+                    },
+                    // Publishing the own name: the terms not yet held, in one
+                    // batch with one register token.
+                    oprfOwnTerms = { own ->
+                        val keys = own.map { t ->
+                            when (t) {
+                                is me.lakko.app.discovery.OwnTerm.Username -> "u:${t.value}"
+                                is me.lakko.app.discovery.OwnTerm.NameTerm -> "n:${t.value}"
+                            }
+                        }
+                        reach.keptOprfBatch(keys) { missing -> client.oprfOwnTerms(missing.map { own[it] }) }
+                    },
+                ),
+                nowMs = System.currentTimeMillis(),
+            )
+        }
+        // What was published is noted for the account that published
+        // it; the reach manager may hold another one by now.
+        ensureSession()
+        when (outcome) {
+            me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
+            me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
+            me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH -> {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "ADR-0060 Everyone not published: no name, no certified username or no identity",
+                )
+                reach.noteEveryoneStuck()
+            }
+        }
+    }
+
+    /** The username certificate, fetched and kept; `null` when there is none. */
+    private suspend fun fetchUsernameCertificate(
+        account: KeyPackageAccount,
+        reach: me.lakko.app.reach.ReachManager,
+    ): ByteArray? =
+        try {
+            val cert = keyPackageDiscoveryFactory().use { client ->
+                client.setSessionToken(account.sessionToken)
+                client.fetchUsernameCertificate()
+            }
+            cert?.also { reach.keepUsernameCertificate(it) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.i("ChatRepository", "ADR-0060: username certificate not fetched: ${cause.javaClass.simpleName}")
+            null
+        }
 
     // -----------------------------------------------------------------
     // ADR-0060 §4 — contacts of contacts: offer and relay
@@ -5136,12 +5744,10 @@ public class ChatRepository(
         val fof = uniffi.lakko_ffi_uniffi.allowsContactsOfContacts(setting)
         val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
         val username = own?.username?.takeIf { it.isNotEmpty() }
-        val oneToOnes = synchronized(groups) { groups.entries.toList() }
-            .filter { (_, record) ->
-                readIsActive { record.group.isActive() } != false && isOneToOne(record.group)
-            }
-            .map { it.key }
-            .sorted()
+        val active = synchronized(groups) { groups.entries.toList() }
+            .filter { (_, record) -> readIsActive { record.group.isActive() } != false }
+        val oneToOnes = active.filter { (_, record) -> isOneToOne(record.group) }.map { it.key }.sorted()
+        askForMissingIntroductions(active.map { it.key }.sorted(), identity, reach, bound)
         keyPackageDiscoveryFactory().use { client ->
             me.lakko.app.reach.publishIntroductions(
                 initial = reach.introPublicationState(),
@@ -5156,12 +5762,19 @@ public class ChatRepository(
                     accountId = account.accountId,
                     offeredRecordsHex = reach.offeredIntroductionRecordsHex(),
                     oneToOneGroups = oneToOnes,
+                    offerGroups = me.lakko.app.reach.offerGroups(
+                        form = setting.contactsForm,
+                        oneToOneGroups = oneToOnes,
+                        peerAccountId = { g -> oneToOnePeerKey(g)?.let { contactAccountId?.invoke(it) } },
+                        allowsContact = { uniffi.lakko_ffi_uniffi.allowsContact(setting, it) },
+                    ),
                     nowMs = System.currentTimeMillis(),
                 ),
                 ops = me.lakko.app.reach.IntroPublicationOps(
                     nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
                     oprfNameTerm = { client.oprfNameTerm(it) },
                     oprfUsername = { client.oprfUsername(it) },
+                    oprfOwnTerms = { client.oprfOwnTerms(it) },
                     composeIntroduction = { payload, outputs, issuedAt ->
                         uniffi.lakko_ffi_uniffi.composeIntroduction(payload, outputs, issuedAt)
                     },
@@ -5190,6 +5803,51 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0060 section 4, "A device that holds nothing asks": an offer and a
+     * bundle go out once per conversation, so a device that missed them would
+     * never get them. It asks with the field-less profile request, in the
+     * store that request already uses: at most once a day, or once a week
+     * while it holds a contact grant from that person.
+     */
+    private suspend fun askForMissingIntroductions(
+        groupIds: List<String>,
+        identity: Identity,
+        reach: me.lakko.app.reach.ReachManager,
+        bound: me.lakko.app.Binding,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        me.lakko.app.reach.askForIntroductions(
+            heldByGroup = groupIds.associateWith { groupIdHex ->
+                oneToOnePeerKey(groupIdHex)?.let(reach::introductionsHeldFrom)
+            },
+            decide = { groupIdHex, held ->
+                me.lakko.app.reach.introductionsAskStamp(
+                    held = held,
+                    lastMs = profileRequestStore.lastRequestedAtMs(accountIdB64, groupIdHex),
+                    nowMs = System.currentTimeMillis().toULong(),
+                    noGrantRule = { last, now -> uniffi.lakko_ffi_uniffi.shouldRequestProfiles(false, 1u, last, now) },
+                )
+            },
+            send = { groupIdHex ->
+                val record = groups[groupIdHex] ?: throw IllegalStateException("conversation gone")
+                broadcastControlToGroup(
+                    identity = identity,
+                    groupIdHex = groupIdHex,
+                    group = record.group,
+                    envelope = uniffi.lakko_ffi_uniffi.composeProfileRequest(),
+                ) != null
+            },
+            record = { groupIdHex, stamp ->
+                bound.ensureCurrent()
+                profileRequestPolicy.recordSent(accountIdB64, groupIdHex, stamp)
+            },
+            noteFailure = { cause ->
+                android.util.Log.w("ChatRepository", "ADR-0060 introductions ask not published", cause)
+            },
+        )
+    }
+
     /** Start the periodic introductions re-check for this session. */
     private fun startIntroductionTicker() {
         introductionTicker?.cancel()
@@ -5197,6 +5855,8 @@ public class ChatRepository(
             while (true) {
                 kotlinx.coroutines.delay(INTRODUCTIONS_TICK_MS)
                 runIntroductionsBestEffort()
+                val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+                if (reach.everyonePublicationStuck()) refreshEveryoneBestEffort()
             }
         }
     }
@@ -5254,6 +5914,33 @@ public class ChatRepository(
         }
         if (own != null && own == senderKey) return
         profileRepublish.onGrowth(groupIdHex)
+        reopenIntroductionsBestEffort(groupIdHex, oneToOne = isOneToOne(group), fromOtherPerson = own != null)
+    }
+
+    /**
+     * ADR-0060 section 4 — the other person of a one-to-one asked: forget this
+     * conversation in the sent records, so the offer and the bundle go out
+     * again, at most once an hour. The profile answer above is what carries the
+     * contact grant. Under the run's mutex: a run in progress holds a copy of
+     * the state and would write these records back.
+     */
+    private fun reopenIntroductionsBestEffort(groupIdHex: String, oneToOne: Boolean, fromOtherPerson: Boolean) {
+        if (!oneToOne || !fromOtherPerson) return
+        reachScope.launchSession {
+            val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+            val reopened = introductionMutex.sessionLock {
+                val next = me.lakko.app.reach.reopenedByAsk(
+                    state = reach.introPublicationState(),
+                    groupHex = groupIdHex,
+                    oneToOne = oneToOne,
+                    fromOtherPerson = fromOtherPerson,
+                    nowMs = System.currentTimeMillis(),
+                ) ?: return@sessionLock false
+                reach.saveIntroPublicationState(next)
+                true
+            }
+            if (reopened) runIntroductionsBestEffort()
+        }
     }
 
     /**
@@ -5295,7 +5982,7 @@ public class ChatRepository(
             me.lakko.app.profile.countUnnamedMembers(
                 memberKeys = rows.map { it.signaturePublicKey },
                 ownKey = ownKey,
-                isPlaceholder = { key -> profileDirectory.resolve(key).isPlaceholder },
+                isPlaceholder = { key -> profileDirectory.awaitsProfile(key) },
             )
         }
         val stamp = profileRequestPolicy.decide(
@@ -5423,8 +6110,7 @@ public class ChatRepository(
             val senderBytes = senderKey?.let { java.util.Base64.getDecoder().decode(it) } ?: return
             when (kind) {
                 me.lakko.app.reach.ScopedEnvelopeKind.COMMITTER_DELEGATION -> {
-                    val isMember = personKeysOf(group.members()).contains(senderKey)
-                    if (isMember) {
+                    if (me.lakko.app.reach.keepsCommitterDelegation(senderKey, personKeysOf(group.members()))) {
                         me.lakko.app.reach.ReachManager.get(applicationContext)
                             .keepDelegation(groupIdHex, senderBytes, bytes)
                     }
@@ -5456,14 +6142,19 @@ public class ChatRepository(
         previousMemberKeys: List<String>?,
         currentMemberKeys: List<String>?,
         selfEvicted: Boolean,
+        ownAdd: Boolean = false,
     ) {
         if (selfEvicted) return
         if (me.lakko.app.profile.membershipGrew(previousMemberKeys, currentMemberKeys)) {
             profileRepublish.onGrowth(groupIdHex)
             // ADR-0051 §3 — the newcomer cannot read the earlier envelope, so
             // an owner / admin holding the name re-sends it (original stamp),
-            // on the same throttled + jittered schedule.
-            groupNameRepublish.onGrowth(groupIdHex)
+            // on the same throttled + jittered schedule. The device that
+            // committed the add sends at once: the newcomer's list has no name
+            // until it does, and the schedule exists for the other members.
+            if (ownAdd) groupNameRepublish.publishNow(groupIdHex) else groupNameRepublish.onGrowth(groupIdHex)
+            // ADR-0087 18.1 — and the photo, the reactions and the @name.
+            if (ownAdd) groupSettingsRepublish.publishNow(groupIdHex) else groupSettingsRepublish.onGrowth(groupIdHex)
             // ADR-0052 decision 3 — and the shared pins, verbatim with their
             // original stamps, on the same schedule.
             pinRepublish.onGrowth(groupIdHex)
@@ -5898,6 +6589,7 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0051 group name not stored", cause)
         }
+        owePublicRecordRepublish(groupIdHex)
     }
 
     /**
@@ -5933,6 +6625,7 @@ public class ChatRepository(
             )
         }
         if (!storeFirst) GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, row)
+        owePublicRecordRepublish(groupIdHex)
         publishThreadList()
     }
 
@@ -5979,6 +6672,1176 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0051 group name not re-sent", cause)
             false
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0087 — the group photo (18.1), the allowed reactions
+    // (reactions-and-emoji section 9), the @name inside the group (11) and
+    // the knock key (5).
+    // -----------------------------------------------------------------
+
+    /** The growth re-send of the photo, the reactions and the handle, on the
+     *  group-name schedule (one per-group throttle + jitter). */
+    private val groupSettingsRepublish: me.lakko.app.profile.ProfileRepublishScheduler =
+        me.lakko.app.profile.ProfileRepublishScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            publish = { groupIdHex -> republishGroupSettingsIfHolder(groupIdHex) },
+        )
+
+    /** Admin knock seeds this session already sent, `groupHex:adminHex`. */
+    private val knockSeedsSent: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** The group's stored photo, or `null`. */
+    public fun groupPhoto(groupIdHex: String): StoredGroupPhoto? =
+        GroupSettingsStore.photo(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** What [groupIdHex]'s messages take. A one-to-one always takes every
+     *  reaction (reactions-and-emoji section 9). */
+    public fun groupAllowedReactions(groupIdHex: String): AllowedReactions {
+        val record = groups[groupIdHex] ?: return AllowedReactions.All
+        val oneToOne = try {
+            record.group.groupKind() == GroupKind.ONE_TO_ONE
+        } catch (_: Throwable) {
+            false
+        }
+        if (oneToOne) return AllowedReactions.All
+        return GroupSettingsStore.reactions(applicationContext, currentAccountIdB64.get(), groupIdHex)?.reactions
+            ?: AllowedReactions.All
+    }
+
+    /** The group's @name, or `null` while none is held or the one held is not
+     *  verified (ADR-0087 section 3: fail closed, an unverifiable name is not
+     *  shown). */
+    public fun groupHandle(groupIdHex: String): StoredGroupHandle? =
+        GroupSettingsStore.handle(applicationContext, currentAccountIdB64.get(), groupIdHex)?.takeIf { it.verified }
+
+    /** When a handle verification last ran per group (in memory). */
+    private val handleVerifyAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    @Volatile
+    private var handleCertKeyCache: ByteArray? = null
+
+    /** The username / handle certificate verifying key: the build-time pin,
+     *  else the well-known key fetched once (the ADR-0060 username path). */
+    private suspend fun handleCertKey(): ByteArray? {
+        handleCertKeyCache?.let { return it }
+        val pinned = me.lakko.app.BuildConfig.LAKKO_USERNAME_CERT_KEY
+        val key = if (pinned.isNotBlank()) {
+            try {
+                me.lakko.app.auth.base64UrlDecodeNoPad(pinned).takeIf { it.size == 32 }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        } else {
+            try {
+                discovery.fetchUsernameCertKey()
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        handleCertKeyCache = key
+        return key
+    }
+
+    /**
+     * ADR-0087 section 3 — check a received @name's certificate against
+     * discovery's verifying key and the lookup key of the name it shows (one
+     * `discovery-lookup` token), and that the certificate's write key is the
+     * key that signed the in-group value. At most once a minute per group;
+     * a name that cannot be checked stays hidden.
+     */
+    private suspend fun verifyGroupHandleIfDue(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex) ?: return
+        if (stored.verified) return
+        val now = System.currentTimeMillis()
+        val last = handleVerifyAtMs[groupIdHex]
+        if (last != null && now - last < HANDLE_VERIFY_RETRY_MS) return
+        handleVerifyAtMs[groupIdHex] = now
+        val key = handleCertKey() ?: return
+        val lookupKey = try {
+            discovery.oprfUsername(stored.handle).lookupKey
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            return
+        }
+        val ok = try {
+            val cert = uniffi.lakko_ffi_uniffi.verifyHandleBinding(stored.certificate, key, lookupKey)
+            cert.writePk.contentEquals(
+                stored.certificate.copyOfRange(HANDLE_CERT_WRITE_KEY_START, HANDLE_CERT_WRITE_KEY_END),
+            )
+        } catch (_: Throwable) {
+            false
+        }
+        if (!ok) {
+            android.util.Log.i("ChatRepository", "ADR-0087 conversation handle certificate refused")
+            return
+        }
+        // Only if the row did not change while the check ran.
+        val now2 = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+        if (now2 == stored) {
+            GroupSettingsStore.saveHandle(applicationContext, accountIdB64, groupIdHex, stored.copy(verified = true))
+            publishThreadList()
+        }
+    }
+
+    /** A stamp strictly above [stored] and not below the clock. */
+    private fun nextSettingStamp(stored: ULong?): ULong {
+        val now = System.currentTimeMillis().toULong()
+        return if (stored != null && stored >= now) stored + 1u else now
+    }
+
+    private fun receiveGroupSettingBestEffort(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        kind: GroupSettingKind,
+        bytes: ByteArray,
+    ) {
+        try {
+            receiveGroupSetting(group, groupIdHex, senderKey, kind, bytes)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 group setting ${kind.name} not applied", cause)
+        }
+    }
+
+    /**
+     * ADR-0087 — the receive gate of a group setting, inside the poll's locked
+     * apply region (per-group lock + provider lock held), so the role-table
+     * read, the stored-row read, the verdict and the write are one
+     * read-decide-write against CURRENT state (C-62 sub-invariant 5).
+     */
+    private fun receiveGroupSetting(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        kind: GroupSettingKind,
+        bytes: ByteArray,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val senderBytes = senderKey?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val groupKind = try {
+            group.groupKind()
+        } catch (_: Throwable) {
+            null
+        }
+        when (kind) {
+            GroupSettingKind.PHOTO -> {
+                if (!groupNameAppliesTo(groupKind)) return
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeGroupPhotoEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val stored = GroupSettingsStore.photo(applicationContext, accountIdB64, groupIdHex)
+                val incoming = StoredGroupPhoto(me.lakko.app.profile.avatarRefsOf(decoded.avatar), decoded.updatedAtMs)
+                val verdict = ownerOrAdminVerdict(
+                    senderKey = senderBytes,
+                    owner = roleTableOwner(group),
+                    hasStored = stored != null,
+                    identical = stored == incoming,
+                    newer = { uniffi.lakko_ffi_uniffi.groupPhotoIsNewer(incoming.updatedAtMs, stored!!.updatedAtMs) },
+                )
+                if (!verdict.accepts || verdict == GroupNameVerdict.ACCEPT_IDENTICAL) {
+                    if (!verdict.accepts) android.util.Log.i("ChatRepository", "ADR-0087 group photo refused: $verdict")
+                    return
+                }
+                GroupSettingsStore.savePhoto(applicationContext, accountIdB64, groupIdHex, incoming)
+                deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, incoming.avatar)
+                // 4.5.4 — an admin's photo reaches the owner's device here.
+                owePublicRecordRepublish(groupIdHex)
+            }
+            GroupSettingKind.REACTIONS -> {
+                if (!groupNameAppliesTo(groupKind)) return
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeGroupReactionsEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val stored = GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)
+                val incoming = StoredGroupReactions(allowedReactionsOf(decoded.reactions), decoded.updatedAtMs)
+                val verdict = ownerOrAdminVerdict(
+                    senderKey = senderBytes,
+                    owner = roleTableOwner(group),
+                    hasStored = stored != null,
+                    identical = stored == incoming,
+                    newer = { uniffi.lakko_ffi_uniffi.groupReactionsIsNewer(incoming.updatedAtMs, stored!!.updatedAtMs) },
+                )
+                if (!verdict.accepts || verdict == GroupNameVerdict.ACCEPT_IDENTICAL) {
+                    if (!verdict.accepts) android.util.Log.i("ChatRepository", "ADR-0087 group reactions refused: $verdict")
+                    return
+                }
+                GroupSettingsStore.saveReactions(applicationContext, accountIdB64, groupIdHex, incoming)
+            }
+            GroupSettingKind.HANDLE -> {
+                // Section 11 — no role check: the handle key's signature over
+                // the group id and the fields proves it, so any member relays
+                // it. The key is the one the certificate names
+                // (`version(1) ‖ lookup_key(64) ‖ write_pk(32) ‖ ...`).
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeConversationHandleEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val cert = decoded.certificate
+                if (cert.size < HANDLE_CERT_WRITE_KEY_END) return
+                val writeKey = cert.copyOfRange(HANDLE_CERT_WRITE_KEY_START, HANDLE_CERT_WRITE_KEY_END)
+                val groupId = try {
+                    group.groupId()
+                } catch (_: Throwable) {
+                    return
+                }
+                try {
+                    uniffi.lakko_ffi_uniffi.verifyConversationHandle(decoded, groupId, writeKey)
+                } catch (_: Throwable) {
+                    android.util.Log.i("ChatRepository", "ADR-0087 conversation handle refused: signature")
+                    return
+                }
+                val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                if (stored != null &&
+                    !uniffi.lakko_ffi_uniffi.conversationHandleIsNewer(decoded.updatedAtMs, stored.updatedAtMs)
+                ) {
+                    return
+                }
+                // A re-sent name with the same certificate keeps its check.
+                val sameCert = stored != null && stored.verified && stored.handle == decoded.handle &&
+                    stored.certificate.contentEquals(decoded.certificate)
+                GroupSettingsStore.saveHandle(
+                    applicationContext,
+                    accountIdB64,
+                    groupIdHex,
+                    StoredGroupHandle(
+                        handle = decoded.handle,
+                        public = decoded.public,
+                        updatedAtMs = decoded.updatedAtMs,
+                        certificate = decoded.certificate,
+                        signature = decoded.signature,
+                        verified = sameCert,
+                    ),
+                )
+                if (!sameCert) {
+                    handleVerifyAtMs.remove(groupIdHex)
+                    pushScope.launchSession {
+                        try {
+                            verifyGroupHandleIfDue(groupIdHex)
+                        } catch (cause: kotlinx.coroutines.CancellationException) {
+                            throw cause
+                        } catch (cause: Throwable) {
+                            android.util.Log.w("ChatRepository", "ADR-0087 handle verify failed", cause)
+                        }
+                    }
+                }
+                publishThreadList()
+            }
+            GroupSettingKind.KNOCK_SEED -> {
+                // Section 5 — the owner hands one admin `knock_seed(v)`, sealed
+                // to that admin's account key. Kept only when addressed to this
+                // account and sent by the live role table's owner (C-68).
+                val decoded = try {
+                    uniffi.lakko_ffi_uniffi.decodeKnockSeedEnvelope(bytes)
+                } catch (_: Throwable) {
+                    return
+                }
+                val groupId = try {
+                    group.groupId()
+                } catch (_: Throwable) {
+                    return
+                }
+                if (!decoded.journalId.contentEquals(groupId)) return
+                val own = ownAccountKey() ?: return
+                if (!decoded.memberAccountKey.contentEquals(own)) return
+                val owner = roleTableOrNull(group)?.owner ?: return
+                if (senderBytes == null || !owner.contentEquals(senderBytes)) return
+                val account = accountIdentity.get() ?: return
+                val seed = try {
+                    uniffi.lakko_ffi_uniffi.openKnockSeedEnvelope(bytes, account)
+                } catch (_: Throwable) {
+                    return
+                }
+                try {
+                    // The first seed given for a version is kept: a device of
+                    // the owner that derived a version from the wrong root
+                    // (before it learned of a rotation) cannot replace it.
+                    val held = GroupSettingsStore.knockSeed(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion)
+                    if (held == null) {
+                        GroupSettingsStore.saveKnockSeed(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion, seed)
+                    } else {
+                        held.fill(0)
+                    }
+                    // Section 5 — a newer version is the one new links carry.
+                    if (decoded.knockVersion > GroupSettingsStore.knockVersion(applicationContext, accountIdB64, groupIdHex)) {
+                        GroupSettingsStore.saveKnockVersion(applicationContext, accountIdB64, groupIdHex, decoded.knockVersion)
+                    }
+                } finally {
+                    seed.fill(0)
+                }
+            }
+        }
+    }
+
+    /**
+     * ADR-0087 18.1 — set (or with a `null` [avatar] remove) the group photo:
+     * compose, publish into the group, then store. Owner or admin only (the
+     * peers refuse anyone else); throws on a refused value or a failed send.
+     */
+    public suspend fun setGroupPhoto(groupIdHex: String, avatar: me.lakko.app.profile.AvatarRefs?) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        // 4.5.2 — demoted while the crop screen was open: nothing is sent.
+        if (!mayChangeGroupSettings(groupIdHex)) throw GroupPhotoNotAllowed()
+        val ffi = avatar?.let { it.toFfi() ?: throw IllegalStateException("malformed photo") }
+        val stored = groupPhoto(groupIdHex)
+        val stamp = nextSettingStamp(stored?.updatedAtMs)
+        val envelope = forSession {
+            uniffi.lakko_ffi_uniffi.composeGroupPhotoEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupPhoto(avatar = ffi, updatedAtMs = stamp),
+            )
+        }
+        try {
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException || !isNetworkFailure(cause)) throw cause
+            // 4.5.2 — uploaded, the device went offline: kept owed and sent
+            // when the device is back, also after a restart.
+            GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, StoredGroupPhoto(avatar, stamp))
+            throw GroupPhotoOwed()
+        }
+        GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, null)
+        GroupSettingsStore.savePhoto(applicationContext, accountIdB64, groupIdHex, StoredGroupPhoto(avatar, stamp))
+        if (avatar != null) {
+            val own = GroupSettingsStore.owedDeletes(applicationContext, accountIdB64, groupIdHex)
+            val mine = listOfNotNull(avatar.still, avatar.video).map { it.blobIdHex }
+            GroupSettingsStore.saveOwedDeletes(applicationContext, accountIdB64, groupIdHex, own + mine)
+        }
+        deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, avatar)
+        owePublicRecordRepublish(groupIdHex)
+        publishThreadList()
+    }
+
+    /** Owner or admin of the group (or a group with no role table): may set
+     *  the photo, the reactions and the name. */
+    private suspend fun mayChangeGroupSettings(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        return providerLock.sessionLock {
+            try {
+                when (record.group.ownRole(identity)) {
+                    Role.OWNER, Role.ADMIN -> true
+                    Role.MEMBER -> false
+                    null -> record.group.groupRoles() == null
+                }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+    }
+
+    private fun isNetworkFailure(cause: Throwable): Boolean {
+        var c: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (c != null && seen.add(c)) {
+            if (c is me.lakko.app.ds.DsNetworkError || c is java.io.IOException) return true
+            c = c.cause
+        }
+        return false
+    }
+
+    /** 4.5.2 — send an owed photo once the device is back. Best effort. */
+    private suspend fun sendOwedGroupPhotoIfAny(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val owed = GroupSettingsStore.owedPhoto(applicationContext, accountIdB64, groupIdHex) ?: return
+        try {
+            setGroupPhoto(groupIdHex, owed.avatar)
+        } catch (_: GroupPhotoNotAllowed) {
+            GroupSettingsStore.saveOwedPhoto(applicationContext, accountIdB64, groupIdHex, null)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            // Still owed.
+        }
+    }
+
+    /** The photo shown while it is owed, for the header. */
+    public fun owedGroupPhoto(groupIdHex: String): StoredGroupPhoto? =
+        GroupSettingsStore.owedPhoto(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /**
+     * ADR-0087 18.5 — a photo this account uploaded that is no longer the
+     * group's goes from the server. The record of own uploads is this
+     * account's; [me.lakko.app.storage.BlobLifetime] keeps the delete owed
+     * and retries it.
+     */
+    private fun deleteReplacedOwnGroupPhotoBlobs(
+        accountIdB64: String,
+        groupIdHex: String,
+        current: me.lakko.app.profile.AvatarRefs?,
+    ) {
+        val own = GroupSettingsStore.owedDeletes(applicationContext, accountIdB64, groupIdHex)
+        if (own.isEmpty()) return
+        val keep = listOfNotNull(current?.still, current?.video).map { it.blobIdHex }.toSet()
+        val gone = own.filter { it !in keep }
+        if (gone.isEmpty()) return
+        val ids = gone.mapNotNull { hexToBytes(it)?.takeIf { b -> b.size == 32 } }
+        try {
+            if (ids.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(applicationContext, ids)
+        } finally {
+            GroupSettingsStore.saveOwedDeletes(applicationContext, accountIdB64, groupIdHex, own.filter { it in keep })
+        }
+    }
+
+    /** ADR-0065 / ADR-0087 18.5 — the blob ids of the photos of the groups
+     *  this device owns or administers, for the keep tick. */
+    public suspend fun conversationPhotoBlobIds(): List<ByteArray> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
+        val identity = canonicalIdentity.get() ?: return emptyList()
+        val out = ArrayList<ByteArray>()
+        for (groupIdHex in GroupSettingsStore.photoGroups(applicationContext, accountIdB64)) {
+            val record = groups[groupIdHex] ?: continue
+            val keeps = providerLock.sessionLock {
+                try {
+                    val role = record.group.ownRole(identity)
+                    role == Role.OWNER || role == Role.ADMIN
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            if (!keeps) continue
+            out += me.lakko.app.profile.avatarBlobIds(groupPhoto(groupIdHex)?.avatar)
+        }
+        return out
+    }
+
+    /**
+     * Reactions-and-emoji section 9 — set what the group's messages take.
+     * Owner or admin only; throws on a refused value or a failed send.
+     */
+    public suspend fun setGroupReactions(groupIdHex: String, reactions: AllowedReactions) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val ffi = reactions.toFfiAllowed()
+        uniffi.lakko_ffi_uniffi.validateAllowedReactions(ffi)
+        val stored = GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)
+        val stamp = nextSettingStamp(stored?.updatedAtMs)
+        val envelope = forSession {
+            uniffi.lakko_ffi_uniffi.composeGroupReactionsEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupReactions(reactions = ffi, updatedAtMs = stamp),
+            )
+        }
+        forSession { broadcastControlToGroup(identity, groupIdHex, record.group, envelope) }
+        GroupSettingsStore.saveReactions(applicationContext, accountIdB64, groupIdHex, StoredGroupReactions(reactions, stamp))
+        publishThreadList()
+    }
+
+    /**
+     * The growth re-send: an owner / admin re-sends the stored photo and
+     * reactions with their ORIGINAL stamps; any member relays the stored
+     * handle verbatim (its signature is the owner's).
+     */
+    private suspend fun republishGroupSettingsIfHolder(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        if (readIsActive { record.group.isActive() } == false) return false
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        val mayResend = try {
+            when (record.group.ownRole(identity)) {
+                Role.OWNER, Role.ADMIN -> true
+                Role.MEMBER -> false
+                null -> record.group.groupRoles() == null
+            }
+        } catch (_: Throwable) {
+            false
+        }
+        val envelopes = ArrayList<ByteArray>()
+        if (mayResend) {
+            GroupSettingsStore.photo(applicationContext, accountIdB64, groupIdHex)?.let { p ->
+                val ffi = p.avatar?.toFfi()
+                if (p.avatar == null || ffi != null) {
+                    runCatching {
+                        uniffi.lakko_ffi_uniffi.composeGroupPhotoEnvelope(
+                            uniffi.lakko_ffi_uniffi.FfiGroupPhoto(avatar = ffi, updatedAtMs = p.updatedAtMs),
+                        )
+                    }.getOrNull()?.let(envelopes::add)
+                }
+            }
+            GroupSettingsStore.reactions(applicationContext, accountIdB64, groupIdHex)?.let { r ->
+                runCatching {
+                    uniffi.lakko_ffi_uniffi.composeGroupReactionsEnvelope(
+                        uniffi.lakko_ffi_uniffi.FfiGroupReactions(reactions = r.reactions.toFfiAllowed(), updatedAtMs = r.updatedAtMs),
+                    )
+                }.getOrNull()?.let(envelopes::add)
+            }
+        }
+        GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)?.let { h ->
+            runCatching { uniffi.lakko_ffi_uniffi.composeConversationHandleEnvelope(h.toFfi()) }
+                .getOrNull()?.let(envelopes::add)
+        }
+        if (envelopes.isEmpty()) return false
+        var sent = false
+        for (envelope in envelopes) {
+            try {
+                broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                sent = true
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 group setting not re-sent", cause)
+            }
+        }
+        return sent
+    }
+
+    /**
+     * ADR-0087 — whether this account is the group's owner, for the knock key,
+     * links and handle writes. The role table names the owner by an account
+     * key; after an ADR-0074 rotation that may be the conversation key this
+     * device's leaf is bound under rather than the current identity key, so
+     * every key this account answers to is accepted. Provider critical path.
+     */
+    private fun ownsGroupAsOwner(group: Group): Boolean {
+        val owner = roleTableOrNull(group)?.owner ?: return false
+        val candidates = listOfNotNull(
+            ownAccountKey(),
+            try {
+                publishedAccountIdentity.get()?.signaturePublicKey()
+            } catch (_: Throwable) {
+                null
+            },
+            ownIdentity(group)?.let {
+                try {
+                    java.util.Base64.getDecoder().decode(it)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            },
+        )
+        return candidates.any { it.contentEquals(owner) }
+    }
+
+    /** Section 5 — the knock seed of [version] this device can read rows
+     *  with: derived when this account owns the journal, else the one the
+     *  owner handed this admin. The caller wipes it. */
+    private fun knockSeedFor(record: GroupRecord, groupIdHex: String, version: UShort): ByteArray? {
+        // A stored seed first: one the owner handed this admin, or a version
+        // derived from a predecessor's root before an ADR-0074 rotation moved
+        // the root (section 5).
+        GroupSettingsStore.knockSeed(applicationContext, currentAccountIdB64.get(), groupIdHex, version)?.let { return it }
+        if (ownsGroupAsOwner(record.group)) {
+            val account = rootAccountIdentity() ?: return null
+            val root = try {
+                uniffi.lakko_ffi_uniffi.dsJournalRootSeed(account.ed25519Seed(), record.groupId)
+            } catch (_: Throwable) {
+                return null
+            }
+            return try {
+                uniffi.lakko_ffi_uniffi.groupKnockSeed(root, version)
+            } catch (_: Throwable) {
+                null
+            } finally {
+                root.fill(0)
+            }
+        }
+        return null
+    }
+
+    /** Section 5 — the knock key a link names (the group's current version),
+     *  or with [version] a given one; `null` when this device holds no seed. */
+    private fun groupKnockKeyFor(
+        record: GroupRecord,
+        groupIdHex: String,
+        version: UShort = GroupSettingsStore.knockVersion(applicationContext, currentAccountIdB64.get(), groupIdHex),
+    ): Pair<ByteArray, UShort>? {
+        val seed = knockSeedFor(record, groupIdHex, version) ?: return null
+        return try {
+            uniffi.lakko_ffi_uniffi.groupKnockPublicKey(seed) to version
+        } catch (_: Throwable) {
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /** Section 5 — the owner hands each admin the knock seed, once per session
+     *  per admin (the receiver keeps the newest; a repeat is harmless). */
+    private suspend fun deliverKnockSeedsBestEffort(
+        identity: Identity,
+        record: GroupRecord,
+        groupIdHex: String,
+        admins: List<ByteArray>,
+    ) {
+        val own = ownAccountKey() ?: return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        // Section 5 — removing an admin bumps the version: the owner hands the
+        // next seed only to the admins who remain, and new links carry it.
+        // Older versions stay derivable, so requests sealed to them still open.
+        val current = admins.filter { !it.contentEquals(own) }.map { me.lakko.app.ds.hexOf(it) }.toSet()
+        val held = GroupSettingsStore.knockVersion(applicationContext, accountIdB64, groupIdHex)
+        val version = nextKnockVersion(GroupSettingsStore.knockAdmins(applicationContext, accountIdB64, groupIdHex), current, held)
+        if (version != held) {
+            GroupSettingsStore.saveKnockVersion(applicationContext, accountIdB64, groupIdHex, version)
+            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            // The account's other devices learn the bump from the seeds this
+            // device addresses to its own account (owed until sent).
+            GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, true)
+            // The public record is republished after a bump: recorded owed now,
+            // durably, and sent by the handle maintenance until it lands.
+            GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)?.takeIf { it.public }?.let { h ->
+                if (GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex) == null) {
+                    GroupSettingsStore.saveOwedTypeChange(applicationContext, accountIdB64, groupIdHex, true to h.handle)
+                }
+            }
+        }
+        GroupSettingsStore.saveKnockAdmins(applicationContext, accountIdB64, groupIdHex, current)
+        // Every version up to the current one, so rows from older links (and
+        // from before a rotation) still open on an admin's device; a removed
+        // admin gets nothing new.
+        val versions = (0..version.toInt()).map { it.toUShort() }
+        // Section 5 — after a bump or a rotation on THIS device, the owner's
+        // other devices are told: the seeds of every version it holds, sealed
+        // to the own account key. A receiving device of the account keeps them
+        // as given seeds and raises its current version from them.
+        if (GroupSettingsStore.knockSelfOwed(applicationContext, accountIdB64, groupIdHex)) {
+            try {
+                val x25519 = accountIdentity.get()?.x25519PublicKey()
+                if (x25519 != null) {
+                    for (v in versions) {
+                        val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                        val envelope = try {
+                            uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(record.groupId, own, x25519, v, seed)
+                        } finally {
+                            seed.fill(0)
+                        }
+                        broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                    }
+                    GroupSettingsStore.saveKnockSelfOwed(applicationContext, accountIdB64, groupIdHex, false)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 own knock seeds not delivered; still owed", cause)
+            }
+        }
+        for (admin in admins) {
+            if (admin.contentEquals(own)) continue
+            val tag = groupIdHex + ":" + me.lakko.app.ds.hexOf(admin)
+            if (tag in knockSeedsSent) continue
+            try {
+                val x25519 = memberX25519KeyOrNull(admin) ?: continue
+                for (v in versions) {
+                    val seed = knockSeedFor(record, groupIdHex, v) ?: continue
+                    val envelope = try {
+                        uniffi.lakko_ffi_uniffi.composeKnockSeedEnvelope(
+                            record.groupId,
+                            admin,
+                            x25519,
+                            v,
+                            seed,
+                        )
+                    } finally {
+                        seed.fill(0)
+                    }
+                    broadcastControlToGroup(identity, groupIdHex, record.group, envelope)
+                }
+                knockSeedsSent.add(tag)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 knock seed not delivered", cause)
+            }
+        }
+    }
+
+    /** What one sealed knock row opened to. */
+    private class OpenedKnock(
+        val joinerSignatureKey: ByteArray,
+        val keyPackage: ByteArray,
+        val replyGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
+        /** The `/g/` link's issuer key when the request came by a link. */
+        val linkIssuer: ByteArray? = null,
+    )
+
+    /**
+     * Section 5 — open one sealed knock row and keep its KeyPackage as a
+     * request to join. A private group takes a row only with a capability of
+     * this group; a full queue stops the cursor before the row.
+     */
+    private fun openSealedKnock(
+        record: GroupRecord,
+        groupIdHex: String,
+        identity: Identity,
+        bytes: ByteArray,
+    ): Pair<SealedKnockStep, OpenedKnock?> {
+        val version = uniffi.lakko_ffi_uniffi.knockRowVersion(bytes) ?: return SealedKnockStep.DROP to null
+        val seed = knockSeedFor(record, groupIdHex, version) ?: return SealedKnockStep.DROP to null
+        val request = try {
+            uniffi.lakko_ffi_uniffi.openKnockRow(seed, bytes)
+        } catch (_: Throwable) {
+            return SealedKnockStep.DROP to null
+        } finally {
+            seed.fill(0)
+        }
+        val capability = request.capability
+        val linkIssuer: ByteArray? = capability?.let {
+            try {
+                uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(it).use { cap ->
+                    cap.issuerSignaturePubkey().takeIf { cap.groupId().contentEquals(record.groupId) }
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        val byLink = linkIssuer != null
+        val public = groupHandle(groupIdHex)?.public == true
+        if (!byLink && !public) return SealedKnockStep.DROP to null
+        val kept = try {
+            record.group.retainJoinRequest(identity, request.keyPackage)
+        } catch (_: Throwable) {
+            return SealedKnockStep.DROP to null
+        }
+        return when (kept.outcome) {
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED,
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING,
+            -> SealedKnockStep.KEEP to OpenedKnock(kept.joinerSignatureKey, request.keyPackage, request.replyGrant, linkIssuer)
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.QUEUE_FULL -> SealedKnockStep.STOP to null
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_MEMBER,
+            uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.NOT_ADMISSIBLE,
+            -> SealedKnockStep.DROP to null
+        }
+    }
+
+    /** ADR-0060 section 6 — keep the reply key a knock carried for the
+     *  joiner's account, so the sweep can write the Welcome into its closed
+     *  mailbox. Awaited: the knock position is saved only after it is kept.
+     *  The grant is also recorded per group, so it is cleared when the
+     *  request is refused ([releaseKnockReply]). */
+    private suspend fun keepKnockReplyGrant(groupIdHex: String, opened: OpenedKnock) {
+        if (opened.replyGrant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) return
+        val account = try {
+            uniffi.lakko_ffi_uniffi.keyPackageAccountKey(opened.keyPackage)
+        } catch (_: Throwable) {
+            null
+        } ?: opened.joinerSignatureKey
+        if (!me.lakko.app.contacts.grantBindsTo(opened.replyGrant, account, mailboxCrypto)) return
+        me.lakko.app.reach.ReachManager.get(applicationContext).fileHeld(account, opened.replyGrant, scopeHex = "")
+        recordKnockReply(groupIdHex, account, opened.replyGrant)
+    }
+
+    /** Record a join request's reply grant for [account] in [groupIdHex], so
+     *  it is cleared when the request is refused. */
+    private fun recordKnockReply(groupIdHex: String, account: ByteArray, grant: uniffi.lakko_ffi_uniffi.FfiReachGrant) {
+        val acct = currentAccountIdB64.get() ?: return
+        try {
+            GroupSettingsStore.saveKnockReply(
+                applicationContext,
+                acct,
+                groupIdHex,
+                me.lakko.app.ds.hexOf(account),
+                me.lakko.app.reach.reachHex(uniffi.lakko_ffi_uniffi.encodeReachGrant(grant)),
+            )
+        } catch (_: Throwable) {
+            // The grant is kept; only its release on refuse is lost.
+        }
+    }
+
+    /**
+     * group-and-channel-privacy.md section 8 / ADR-0060 §6 — the person who
+     * asked to join [groupIdHex] was refused: the reply grant their request
+     * carried is no longer needed and is dropped. Best effort. An admitted
+     * person's grant is kept until it expires, for a Welcome re-sent later.
+     */
+    private suspend fun releaseKnockReply(groupIdHex: String, account: ByteArray) {
+        val acct = currentAccountIdB64.get() ?: return
+        val accountHex = me.lakko.app.ds.hexOf(account)
+        try {
+            val wireHex = GroupSettingsStore.knockReply(applicationContext, acct, groupIdHex, accountHex) ?: return
+            val wire = me.lakko.app.reach.reachUnhex(wireHex)
+            if (wire != null) {
+                me.lakko.app.reach.ReachManager.get(applicationContext)
+                    .withdrawHeldGrant(account, me.lakko.app.reach.ReachKind.REPLY, wire)
+            }
+            GroupSettingsStore.saveKnockReply(applicationContext, acct, groupIdHex, accountHex, null)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 a join reply grant not released: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** Section 5 — save the knock position once everything read up to it is
+     *  saved (the MLS snapshot with the retained requests is durable). */
+    private fun saveKnockCursorBestEffort(groupIdHex: String, cursor: Long) {
+        val acct = currentAccountIdB64.get() ?: return
+        try {
+            GroupSettingsStore.saveKnockCursor(applicationContext, acct, groupIdHex, cursor)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 knock position not saved: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** The profile a knock carries: name and photo, no grants. Empty when
+     *  none is stored. */
+    private fun ownKnockProfile(): ByteArray {
+        val accountIdB64 = currentAccountIdB64.get() ?: return ByteArray(0)
+        val accountId = try {
+            java.util.Base64.getDecoder().decode(accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            return ByteArray(0)
+        }
+        return try {
+            me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)
+                ?.toFfi(accountId = accountId, shareUsername = false)
+                ?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+                ?: ByteArray(0)
+        } catch (_: Throwable) {
+            ByteArray(0)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0087 sections 2-5, 8 and 11 — the group's @name and type, and a
+    // request to join from search
+    // -----------------------------------------------------------------
+
+    /**
+     * group-and-channel-privacy.md 4.5.4 — the public record carries the
+     * group's name and photo, so a change to either, whoever made it, owes a
+     * republish of the record. Recorded durably here and sent by
+     * [maintainGroupHandleIfDue] at the tail of the group's polls, until it
+     * lands; only the owner's device (it holds the handle key) acts on it.
+     * A type change already owed carries the same republish and is kept.
+     */
+    private fun owePublicRecordRepublish(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            val handle = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                ?.takeIf { it.public } ?: return
+            if (GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex) == null) {
+                GroupSettingsStore.saveOwedTypeChange(applicationContext, accountIdB64, groupIdHex, true to handle.handle)
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 4.5.4 record republish not recorded", cause)
+        }
+    }
+
+    /** What a public record of [groupIdHex] says, or `null` when the group
+     *  has no name (a public group needs one) or no knock key. */
+    private suspend fun publicFactsFor(groupIdHex: String): PublicGroupFacts? {
+        val record = groups[groupIdHex] ?: return null
+        val name = groupName(groupIdHex)?.name?.takeIf { it.isNotBlank() } ?: return null
+        // Section 5 — the record names the group's current knock key and its
+        // version; a searcher seals to that version.
+        val knock = providerLock.sessionLock { groupKnockKeyFor(record, groupIdHex) } ?: return null
+        return PublicGroupFacts(
+            name = name,
+            description = "",
+            memberCount = memberCount(groupIdHex) ?: 1,
+            knockPublicKey = knock.first,
+            avatar = groupPhoto(groupIdHex)?.avatar,
+            knockVersion = knock.second,
+        )
+    }
+
+    /**
+     * Section 11 — `Delete group`, for an owner alone: retire the @name (a
+     * network failure throws and changes nothing), then end the conversation
+     * as section 9 does, so the `conversation_ended` register reaches every
+     * device of the account and each wipes it (`deleteAfterEndedElsewhere`).
+     */
+    public suspend fun deleteSoloGroup(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        groupHandle(groupIdHex)?.let { h ->
+            retireGroupHandle(discovery, account.ed25519Seed(), record.groupId, h.handle)
+        }
+        val epoch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrDefault(0uL) }
+        val hex = groupIdHex.lowercase()
+        if (!membershipEnds.save(accountIdB64, appliedEnd(hex, groupName(hex)?.name.orEmpty(), true, epoch))) {
+            throw IllegalStateException("end not recorded")
+        }
+        endingGroups += hex
+        publishThreadList()
+        pushScope.launchSession { runOwedMembershipEnds() }
+    }
+
+    /** Section 3.3 — the live check while typing a public @name: `true` when
+     *  the name answers a lookup, `null` when it could not be asked. */
+    public suspend fun handleVisiblyTaken(handle: String): Boolean? = try {
+        discovery.nameAnswers(canonicalHandleInput(handle))
+    } catch (cause: kotlinx.coroutines.CancellationException) {
+        throw cause
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Section 5 — the public groups and channels matching [query]. */
+    public suspend fun searchPublicConversations(query: String): List<FoundConversation> =
+        me.lakko.app.chat.searchPublicConversations(discovery, query)
+
+    /** Section 10 — whether this device created the group. */
+    public fun createdGroup(groupIdHex: String): Boolean =
+        GroupSettingsStore.created(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** Whether this device holds the group [groupIdHex] (search's `Open`).
+     *  A held group also clears its `Requests sent` row (joined, 6.2). */
+    public fun holdsGroup(groupIdHex: String): Boolean {
+        val held = groups.containsKey(groupIdHex.lowercase())
+        if (held) RequestsSentStore.drop(applicationContext, groupIdHex)
+        return held
+    }
+
+    /** Section 6.2 — the requests this device sent, opened for the bound
+     *  account; joined ones leave. */
+    public fun requestsSent(): StateFlow<List<SentRequest>> {
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        for (r in RequestsSentStore.rows.value) {
+            if (groups.containsKey(r.idHex)) RequestsSentStore.drop(applicationContext, r.idHex)
+        }
+        return RequestsSentStore.rows
+    }
+
+    /** Section 3.1 — the @name claim a New group form runs before the group
+     *  leaves the device ([startGroupAlone]'s hook). */
+    public suspend fun claimHandleForNewGroup(
+        groupId: ByteArray,
+        handle: String,
+        public: Boolean,
+        facts: PublicGroupFacts?,
+    ): SignedGroupHandle {
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        return claimGroupHandle(discovery, account.ed25519Seed(), groupId, handle, public, facts)
+    }
+
+    /** Store a handle this owner just wrote and send it into the group. */
+    public suspend fun adoptSignedHandle(groupIdHex: String, signed: SignedGroupHandle) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        // The owner's own write: the certificate came from discovery in the
+        // answer to this device's own signed statement.
+        GroupSettingsStore.saveHandle(applicationContext, accountIdB64, groupIdHex, signed.stored.copy(verified = true))
+        // Section 3 — the lease the write answered.
+        val lease = signed.leaseUntilMs ?: (System.currentTimeMillis() + HANDLE_LEASE_MS)
+        GroupSettingsStore.saveLeaseUntil(applicationContext, accountIdB64, groupIdHex, lease)
+        publishThreadList()
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        try {
+            forSession { broadcastControlToGroup(identity, groupIdHex, record.group, signed.envelope) }
+        } catch (cause: Throwable) {
+            // The growth re-send relays it later; the name is held either way.
+            android.util.Log.w("ChatRepository", "ADR-0087 handle envelope not sent", cause)
+        }
+    }
+
+    /**
+     * Section 3.1 / 4.4 — take [handle] for a group this account owns, public
+     * or private, and tell the members. Throws [me.lakko.app.discovery.HandleWriteError]
+     * (`name-taken`, ...) or a network error; the caller maps it to copy.
+     */
+    public suspend fun claimHandleForGroup(groupIdHex: String, handle: String, public: Boolean) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        val facts = if (public) publicFactsFor(groupIdHex) ?: throw IllegalStateException("public group needs a name") else null
+        val signed = claimGroupHandle(discovery, account.ed25519Seed(), record.groupId, handle, public, facts)
+        adoptSignedHandle(groupIdHex, signed)
+    }
+
+    /**
+     * Section 4.1 / 8 — the owner's Group type screen: flip public / private
+     * and, when [newHandle] differs, move to it. Going private re-sends the
+     * photo under a fresh key (18.3).
+     */
+    public suspend fun changeGroupType(groupIdHex: String, public: Boolean, newHandle: String) {
+        // Section 8 — recorded as owed before the first step, retried until it
+        // lands ([maintainGroupHandleIfDue]).
+        currentAccountIdB64.get()?.let {
+            GroupSettingsStore.saveOwedTypeChange(applicationContext, it, groupIdHex, public to canonicalHandleInput(newHandle))
+        }
+        changeGroupTypeNow(groupIdHex, public, newHandle)
+    }
+
+    private suspend fun changeGroupTypeNow(groupIdHex: String, public: Boolean, newHandle: String) {
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
+        val current = groupHandle(groupIdHex)
+        val facts = if (public) publicFactsFor(groupIdHex) ?: throw IllegalStateException("public group needs a name") else null
+        val wanted = canonicalHandleInput(newHandle)
+        val signed = when {
+            current == null -> claimGroupHandle(discovery, account.ed25519Seed(), record.groupId, wanted, public, facts)
+            current.handle != wanted ->
+                replaceGroupHandle(discovery, account.ed25519Seed(), record.groupId, current.handle, wanted, public, facts)
+            else -> updateGroupHandle(discovery, account.ed25519Seed(), record.groupId, wanted, public, facts)
+        }
+        adoptSignedHandle(groupIdHex, signed)
+        currentAccountIdB64.get()?.let { GroupSettingsStore.saveOwedTypeChange(applicationContext, it, groupIdHex, null) }
+        if (current?.public == true && !public) reuploadGroupPhotoBestEffort(groupIdHex)
+    }
+
+    /** Lease renewals this session (section 3: at most 20 per foreground
+     *  session). */
+    private val leaseRenewalsThisSession = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Section 3 / 8 — at the tail of a poll on an owner device: retry an owed
+     * public / private change, and renew a handle whose lease has fewer than
+     * 90 days left (at most 20 renewals a session). Best effort.
+     */
+    private suspend fun maintainGroupHandleIfDue(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        val owner = providerLock.sessionLock { ownsGroupAsOwner(record.group) }
+        if (!owner) return
+        // Section 3 — a rekey owed after the owner's rotation goes first: every
+        // other handle write is signed with the new key.
+        GroupSettingsStore.owedRekeySeed(applicationContext, accountIdB64, groupIdHex)?.let { oldSeed ->
+            try {
+                val stored = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                if (stored == null) {
+                    GroupSettingsStore.saveOwedRekeySeed(applicationContext, accountIdB64, groupIdHex, null)
+                } else {
+                    val account = rootAccountIdentity() ?: return
+                    val signed = rekeyGroupHandle(
+                        discovery,
+                        oldSeed,
+                        account.ed25519Seed(),
+                        record.groupId,
+                        stored.handle,
+                        stored.public,
+                    )
+                    // Re-sends the in-group envelope under the new key.
+                    adoptSignedHandle(groupIdHex, signed)
+                    GroupSettingsStore.saveOwedRekeySeed(applicationContext, accountIdB64, groupIdHex, null)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0087 owed handle rekey not applied yet")
+                return
+            } finally {
+                oldSeed.fill(0)
+            }
+        }
+        GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex)?.let { (public, handle) ->
+            try {
+                changeGroupTypeNow(groupIdHex, public, handle)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0087 owed type change not applied yet")
+            }
+            return
+        }
+        val handle = groupHandle(groupIdHex) ?: return
+        val until = GroupSettingsStore.leaseUntil(applicationContext, accountIdB64, groupIdHex)
+        val now = System.currentTimeMillis()
+        if (until != null && until - now > HANDLE_RENEW_BEFORE_MS) return
+        if (leaseRenewalsThisSession.incrementAndGet() > HANDLE_RENEWALS_PER_SESSION) return
+        try {
+            changeGroupTypeNow(groupIdHex, handle.public, handle.handle)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.i("ChatRepository", "ADR-0087 handle lease not renewed yet")
+        }
+    }
+
+    /** 18.3 — a group that went private sends its photo again under a fresh
+     *  key, so the keys the public record carried open nothing new. */
+    private suspend fun reuploadGroupPhotoBestEffort(groupIdHex: String) {
+        val photo = groupPhoto(groupIdHex)?.avatar ?: return
+        try {
+            val stillBytes = me.lakko.app.avatar.AvatarImages.cache(applicationContext).get(photo.still.blobIdHex) ?: return
+            val still = AttachmentBridge.encryptAndUpload(bytes = stillBytes, mime = "image/jpeg", name = null)
+            val stillBlob = me.lakko.app.profile.avatarBlobOf(still.blobId, still.key, still.nonce, stillBytes.size.toLong(), photo.still.side)
+            me.lakko.app.avatar.AvatarImages.putOwn(applicationContext, stillBlob, stillBytes)
+            setGroupPhoto(groupIdHex, me.lakko.app.profile.AvatarRefs(still = stillBlob))
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 18.3 photo not re-sent", cause)
+        }
+    }
+
+    /** Section 11 — retire the group's @name (Delete group), best effort. */
+    public suspend fun retireGroupHandleBestEffort(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: return
+        val handle = groupHandle(groupIdHex) ?: return
+        val account = rootAccountIdentity() ?: return
+        try {
+            retireGroupHandle(discovery, account.ed25519Seed(), record.groupId, handle.handle)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 handle not retired", cause)
+        }
+    }
+
+    /**
+     * Section 5 / UX 5.1 — ask to join a public group found in search: a
+     * fresh KeyPackage sealed to the knock key its record names, with a
+     * reply grant and the own profile, no capability. One `ds-knock` token.
+     */
+    public suspend fun requestToJoinPublicGroup(found: FoundConversation) {
+        sendKnockFromSearch(found.id, found.knockOrReadKey, found.knockVersion, found.kind)
+        val hex = found.id.joinToString("") { "%02x".format(it) }
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        RequestsSentStore.record(
+            applicationContext,
+            SentRequest(
+                idHex = hex,
+                name = found.name,
+                handle = found.handle,
+                sentAtMs = System.currentTimeMillis(),
+                avatar = found.avatar,
+                knockKeyB64 = java.util.Base64.getEncoder().encodeToString(found.knockOrReadKey),
+                knockVersion = found.knockVersion.toInt(),
+            ),
+        )
+    }
+
+    /** Section 6.2 — `Ask again` on a request older than 7 days. */
+    public suspend fun askAgain(request: SentRequest) {
+        val id = hexToBytes(request.idHex) ?: throw IllegalArgumentException("bad id")
+        val key = java.util.Base64.getDecoder().decode(request.knockKeyB64)
+        sendKnockFromSearch(id, key, request.knockVersion.toUShort(), uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP)
+        RequestsSentStore.record(applicationContext, request.copy(sentAtMs = System.currentTimeMillis()))
+    }
+
+    private suspend fun sendKnockFromSearch(
+        groupId: ByteArray,
+        knockKey: ByteArray,
+        knockVersion: UShort,
+        kind: uniffi.lakko_ffi_uniffi.FfiHandleRecordKind,
+    ) {
+        val found = object {
+            val id = groupId
+            val knockOrReadKey = knockKey
+            val kind = kind
+        }
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        if (found.kind != uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP || found.id.size != 32) {
+            throw IllegalArgumentException("not a group")
+        }
+        ensureSession()
+        val grant = me.lakko.app.reach.ReachManager.get(applicationContext).mintReply(toKey = found.id)
+        val row = forSession {
+            providerLock.sessionLock {
+                val keyPackage = identity.createKeyPackage()
+                persistSnapshotDurableOrThrow()
+                uniffi.lakko_ffi_uniffi.sealKnockRow(
+                    found.knockOrReadKey,
+                    knockVersion,
+                    keyPackage,
+                    grant,
+                    ownKnockProfile(),
+                    null,
+                )
+            }
+        }
+        dsClient.knock(found.id, listOf(row))
     }
 
     // -----------------------------------------------------------------
@@ -6108,11 +7971,19 @@ public class ChatRepository(
         targetMessageId: Long,
         text: String,
         emoji: String?,
+        reactionAdd: Boolean = true,
     ) {
         val record = groups[groupIdHex] ?: return
         groupLock(groupIdHex).withLock {
             val ownKey = providerLock.withLock { ownIdentity(record.group) }
-            record.applyOwnOp(op = op, target = targetMessageId, text = text, emoji = emoji, ownKey = ownKey)
+            record.applyOwnOp(
+                op = op,
+                target = targetMessageId,
+                text = text,
+                emoji = emoji,
+                ownKey = ownKey,
+                reactionAdd = reactionAdd,
+            )
             persistMessageLogBestEffort()
             publishThreadList()
         }
@@ -6168,14 +8039,108 @@ public class ChatRepository(
         return true
     }
 
-    /** What was written to the pending contact [queueKey], in order. */
-    public fun pendingInvitedMessages(queueKey: String): List<PersistedHeldSend> =
-        pendingInvitedHeld[queueKey]?.let { synchronized(it) { it.toList() } }.orEmpty()
+    /** What was written to the pending contact [queueKey], in order: what
+     *  this device holds to send, and the display-only copies of what was
+     *  written on another of this account's devices ([HeldCopyStore], state
+     *  bundle v3), which this device never sends. */
+    public fun pendingInvitedMessages(queueKey: String): List<PersistedHeldSend> {
+        val own = pendingInvitedHeld[queueKey]?.let { synchronized(it) { it.toList() } }.orEmpty()
+        val account = currentAccountIdB64.get() ?: return own
+        val copies = try {
+            heldCopyStore.copies(account, queueKey)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        if (copies.isEmpty()) return own
+        val shown = copies.map {
+            PersistedHeldSend(conversationHex = queueKey, groupIdHex = queueKey, heldAtMs = it.heldAtMs, text = it.text)
+        }
+        return (own + shown).sortedBy { it.heldAtMs }
+    }
 
     /** B deletes a pending contact, or the account is wiped: what was
-     *  written to them goes. */
+     *  written to them goes, and so do the display copies. */
     public fun clearPendingInvitedMessages(queueKey: String) {
         if (pendingInvitedHeld.remove(queueKey) != null) persistHeldSends()
+        val account = currentAccountIdB64.get() ?: return
+        try {
+            heldCopyStore.clear(account, queueKey)
+        } catch (_: Throwable) {
+            // best-effort
+        }
+    }
+
+    // ---- display copies of messages held on another device (bundle v3) ----
+
+    /** The copy store (sealed, per account). */
+    private val heldCopyStore: HeldCopyStore = HeldCopyStore.onDevice(applicationContext)
+
+    /** The rows the display copies show in a one-to-one, by group id hex:
+     *  each copy with the local id of its waiting row. In memory; rebuilt
+     *  from [heldCopyStore] at every bootstrap ([restoreHeldCopies]). */
+    private val heldCopyRows = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<HeldCopy, Long>>>()
+
+    /** Show [copies] in [record] as own outgoing rows in the waiting state.
+     *  Never enqueued: this device does not send them. */
+    private fun showHeldCopies(groupIdHex: String, record: GroupRecord, copies: List<HeldCopy>) {
+        if (copies.isEmpty()) return
+        val rows = heldCopyRows.getOrPut(groupIdHex) { java.util.Collections.synchronizedList(ArrayList()) }
+        for (copy in copies) {
+            val localId = record.nextLocalId()
+            record.appendPending(
+                localId = localId,
+                text = copy.text,
+                attachments = emptyList(),
+                createdAt = java.time.Instant.ofEpochMilli(copy.heldAtMs).toString(),
+                authorKey = null,
+            )
+            rows += copy to localId
+        }
+    }
+
+    /** At bootstrap: the copies already moved to a one-to-one show again. */
+    private fun restoreHeldCopies() {
+        val account = currentAccountIdB64.get() ?: return
+        if (heldCopyRows.isNotEmpty()) return
+        val all = try {
+            heldCopyStore.load(account)
+        } catch (_: Throwable) {
+            return
+        }
+        var shown = false
+        for ((key, copies) in all) {
+            if (PendingInvitedQueue.isQueueKey(key)) continue
+            val record = groups[key] ?: continue
+            showHeldCopies(key, record, copies)
+            shown = true
+        }
+        if (shown) publishThreadList()
+    }
+
+    /**
+     * A message from this account's OTHER device landed in [groupIdHex]: it
+     * replaces the first display copy with the same text and the same number
+     * of attachments (the real message is what shows now). Called after the
+     * batch was consumed; this device's own sends never arrive here (they are
+     * own-echo filtered).
+     */
+    private fun settleHeldCopies(groupIdHex: String, record: GroupRecord, events: List<IncomingChatEvent>) {
+        val rows = heldCopyRows[groupIdHex] ?: return
+        val account = currentAccountIdB64.get() ?: return
+        val own = ownIdentity(record.group) ?: return
+        for (event in events) {
+            if (event !is IncomingChatEvent.Application || event.senderKey != own) continue
+            val removed = try {
+                heldCopyStore.replace(account, groupIdHex, event.text, event.attachments.size)
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            synchronized(rows) {
+                val at = rows.indexOfFirst { it.first == removed }
+                if (at >= 0) record.removeLocal(rows.removeAt(at).second)
+            }
+        }
+        if (rows.isEmpty()) heldCopyRows.remove(groupIdHex)
     }
 
     /**
@@ -6204,6 +8169,17 @@ public class ChatRepository(
             enqueueHeld(HeldMessage(toGroupIdHex, localId, now, row.text, emptyList(), null, null), persist = false)
         }
         persistHeldSends()
+        // State bundle v3 — what was written on another device moves too, as
+        // display-only waiting rows (never sent from here).
+        val copies = currentAccountIdB64.get()?.let { account ->
+            try {
+                heldCopyStore.move(account, queueKey, toGroupIdHex)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }.orEmpty()
+        showHeldCopies(toGroupIdHex, record, copies)
+        if (copies.isNotEmpty() && rows.isEmpty()) publishThreadList()
         if (rows.isNotEmpty()) {
             publishThreadList()
             val conversation = lineageNow().conversationOf(toGroupIdHex.lowercase())
@@ -6657,20 +8633,104 @@ public class ChatRepository(
         accountKeysAfter: List<String>?,
     ): Boolean {
         val account = currentAccountIdB64.get() ?: return false
+        // No early return for an account that never saw a key reset: a commit
+        // that only adds or retires DEVICE leaves (ADR-0050) leaves the set of
+        // people equal, and that alone suppresses the row.
         val superseded = supersededKeys()
-        if (superseded.isEmpty() && continuityStore.row(account).swapping[groupIdHex].isNullOrEmpty()) return false
+        val awaited = continuityStore.row(account).swapping[groupIdHex].orEmpty()
         val currentToAccount = HashMap<String, String>()
-        for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        if (superseded.isNotEmpty()) {
+            for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        }
         val verdict = deviceSwapAcrossCommits(
             personKeysBefore = accountKeysBefore,
             personKeysAfter = accountKeysAfter,
             accountOfKey = { k -> superseded[k] ?: currentToAccount[k] },
             isSuperseded = { it in superseded },
-            awaited = continuityStore.row(account).swapping[groupIdHex].orEmpty(),
+            awaited = awaited,
             nowMs = System.currentTimeMillis(),
         )
-        continuityStore.update(account) { it.withAwaitedSwaps(groupIdHex, verdict.awaited) }
+        if (verdict.awaited != awaited) {
+            continuityStore.update(account) { it.withAwaitedSwaps(groupIdHex, verdict.awaited) }
+        }
         return verdict.suppress
+    }
+
+    /**
+     * `docs/ux/second-device.md` section 4 — the row of this device's OWN
+     * merged commit (the ADR-0045 sweep). The DS never hands a device its own
+     * commit back (the echo is dropped), so the named row a receiver writes
+     * from the batch is written here, at the commit's DS message id (the
+     * ADR-0081 commit route's answer): the people before the sweep against
+     * the people after the merge, in a group only.
+     */
+    private suspend fun recordOwnCommitRowBestEffort(
+        record: GroupRecord,
+        groupIdHex: String,
+        commitMessageId: Long,
+        accountKeysBefore: List<String>?,
+    ) {
+        try {
+            val change = providerLock.sessionLock {
+                val after = memberAccountKeysOrNull(record.group)
+                val suppressed = suppressMembersChangedRow(groupIdHex, accountKeysBefore, after)
+                membershipChangeForGroup(groupIdHex, accountKeysBefore, after, suppressed)
+            } ?: return
+            if (record.appendOwnCommitRow(commitMessageId, java.time.Instant.now().toString(), change)) {
+                persistMessageLogBestEffort()
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "own commit row not written: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * `docs/ux/second-device.md` section 4 — the people one receive batch
+     * added and removed, to be recorded on its last commit row: only for a
+     * batch that carries a commit, only in a GROUP (a kind that cannot be read
+     * counts as a group, as [conversationKindOf] does), never when the
+     * device-swap verdict suppressed the batch, never naming this account.
+     */
+    private fun membershipRowChange(
+        groupIdHex: String,
+        events: List<IncomingChatEvent>,
+        accountKeysBefore: List<String>?,
+        accountKeysAfter: List<String>?,
+        swapSuppressed: Boolean,
+    ): MembershipChange? {
+        if (events.none { it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit }) return null
+        return membershipChangeForGroup(groupIdHex, accountKeysBefore, accountKeysAfter, swapSuppressed)
+    }
+
+    /** [membershipRowChange] for a change already known to come from a
+     *  commit (a received batch, or this device's own merged sweep). */
+    private fun membershipChangeForGroup(
+        groupIdHex: String,
+        accountKeysBefore: List<String>?,
+        accountKeysAfter: List<String>?,
+        swapSuppressed: Boolean,
+    ): MembershipChange? {
+        if (conversationKind(groupIdHex) != ConversationKind.Group) return null
+        val superseded = if (accountKeysBefore != null && accountKeysAfter != null &&
+            accountKeysBefore.toSet() != accountKeysAfter.toSet()
+        ) {
+            supersededKeys()
+        } else {
+            emptyMap()
+        }
+        val currentToAccount = HashMap<String, String>()
+        if (superseded.isNotEmpty()) {
+            for ((id, key) in pinnedKeysByAccount(superseded.values.toSet())) currentToAccount[key] = id
+        }
+        return membershipChangeOf(
+            personKeysBefore = accountKeysBefore,
+            personKeysAfter = accountKeysAfter,
+            accountOfKey = { k -> superseded[k] ?: currentToAccount[k] },
+            swapSuppressed = swapSuppressed,
+            ownPersonKey = ownPersonKeyB64(),
+        )
     }
 
     /**
@@ -7050,8 +9110,13 @@ public class ChatRepository(
         } catch (_: Throwable) {
             emptyList()
         }
-        val keys = me.lakko.app.contacts.keysOfPerson(pin.pinnedSignaturePubkeyB64, links)
-        return keys.take(keys.indexOf(pin.pinnedSignaturePubkeyB64) + 1)
+        return provenChainEndingAt(pin.pinnedSignaturePubkeyB64, links)
+    }
+
+    /** [keyB64] with its proven predecessors, [keyB64] last. */
+    private fun provenChainEndingAt(keyB64: String, links: List<me.lakko.app.contacts.ProvenLink>): List<String> {
+        val keys = me.lakko.app.contacts.keysOfPerson(keyB64, links)
+        return keys.take(keys.indexOf(keyB64) + 1)
     }
 
     /** The account id each of [personKeysB64] is CLAIMED or known under (a
@@ -8053,6 +10118,9 @@ public class ChatRepository(
         // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
         // the rejoin path's question, not this one's.
         if (readIsActive { record.group.isActive() } == false) return GroupPollOutcome.UNAVAILABLE
+        // ADR-0087 section 9 — and for one this device is out of on another
+        // device's word: its handle still reads active, nothing here reads it.
+        if (groupIdHex.lowercase() in endingGroups) return GroupPollOutcome.UNAVAILABLE
 
         // ADR-0073 R.5 "the old segment after the move" — a one-to-one's old
         // journal is not read at all once the conversation moved (its only
@@ -8100,6 +10168,9 @@ public class ChatRepository(
             },
         ) { after, raw ->
             MainThreadGuard.assertOffMain("pollGroup apply")
+            // ADR-0087 section 9 — a Welcome replaced this record during the
+            // fetch and closed its handle: the rows are read by the new one.
+            if (groups[groupIdHex] !== record) return@runSplitPoll
             // A long poll is the call most likely to be out when the account
             // leaves. What it fetched is applied to the group, the reach
             // manager, the profile directory and the per-account stores of the
@@ -8139,6 +10210,10 @@ public class ChatRepository(
             // dropped here, before any sink, row or call route sees it
             // ([supersededActDropped]). MLS frames were applied above.
             val batchEvents = withoutSupersededSenders(record.group, groupIdHex, result.events)
+            // ADR-0073 R.7 case 2 — read once: the verdict keeps per-group
+            // memory of a reset's devices swapping across two batches.
+            val accountKeysAfterPoll = memberAccountKeysOrNull(record.group)
+            val swapSuppressed = suppressMembersChangedRow(groupIdHex, accountKeysBeforePoll, accountKeysAfterPoll)
             // R.7 case 1 — one predicate for the rows and for the unread
             // count: a re-send whose original is held is neither.
             val heldResend = heldResendPredicate(groupIdHex, batchEvents)
@@ -8159,6 +10234,10 @@ public class ChatRepository(
                 scopedSink = { senderKey, kind, bytes ->
                     receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                 },
+                groupSettingSink = { senderKey, kind, bytes ->
+                    // ADR-0087 — inside the locked apply region (C-62 sub-invariant 5).
+                    receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
+                },
                 groupNameSink = { senderKey, name ->
                     // ADR-0051 — inside the poll's locked apply region, where
                     // the role table read and the store write are serialized
@@ -8172,7 +10251,17 @@ public class ChatRepository(
                     // read-decide-write (C-62 sub-invariant 5).
                     receiveSuccessorClaim(record.group, groupIdHex, messageId, senderKey, closed)
                 },
-                suppressCommitRows = suppressMembersChangedRow(groupIdHex, accountKeysBeforePoll, memberAccountKeysOrNull(record.group)),
+                // UX second-device.md section 4 — a batch of commits that
+                // changed the PEOPLE of a group names them on its last commit
+                // row; a device change or a one-to-one records nothing.
+                membershipChange = membershipRowChange(
+                    groupIdHex,
+                    batchEvents,
+                    accountKeysBeforePoll,
+                    accountKeysAfterPoll,
+                    swapSuppressed,
+                ),
+                suppressCommitRows = swapSuppressed,
                 heldResend = heldResend,
                 pinSink = { senderKey, op ->
                     // ADR-0052 decision 3 — same critical section as the group
@@ -8236,6 +10325,9 @@ public class ChatRepository(
                     )
                 },
             )
+            // State bundle v3 — a message from another own device replaces
+            // its display copy.
+            settleHeldCopies(groupIdHex, record, batchEvents)
             // ADR-0057 S2 finding 1 — the ownership moved away from this
             // account in this batch: hand the journal root over (scheduled).
             noteOwnerTransition(groupIdHex, ownerBeforeBatch, roleTableOrNull(record.group)?.owner)
@@ -8250,7 +10342,10 @@ public class ChatRepository(
             // while this chat is not on screen (see [LocalUnreadCounter]).
             localUnread.onIncomingApplied(
                 groupIdHex,
-                batchEvents.count { it is IncomingChatEvent.Application && heldResend?.invoke(it) != true },
+                batchEvents.filterIsInstance<IncomingChatEvent.Application>()
+                    .filter { heldResend?.invoke(it) != true }
+                    .map { it.messageId },
+                record.syncedThroughMessageId,
             )
             // THE ORDERING RULE — persist first, advance the cursor second, and
             // hold the cursor when the write does not land. See [DurableCursorGate]
@@ -8308,6 +10403,9 @@ public class ChatRepository(
             // The local group has ended: the backup stops naming it on the
             // strength of an earlier restore.
             if (evictedByBatch) dropRestoredKnownGroupBestEffort(groupIdHex)
+            // ADR-0087 section 9 — the one seam: record the end durably here,
+            // in the region that read the state. The steps run at the tail.
+            if (evictedByBatch) recordEndIfOutLocked(groupIdHex, record)
             rotatePushRoutingIfShrankBestEffort(
                 groupIdHex = groupIdHex,
                 group = record.group,
@@ -8351,6 +10449,12 @@ public class ChatRepository(
         // sweep prelude and the re-admission check here would only burn the
         // provider lock and FFI reads on a result that cannot have changed.
         if (outcome != SplitPollOutcome.APPLIED) return outcome.toGroupPollOutcome()
+        // ADR-0087 section 9 — this batch took the account out of the group:
+        // nothing below applies to it. Outside both locks.
+        if (groupIdHex.lowercase() in endingGroups) {
+            runOwedMembershipEnds()
+            return GroupPollOutcome.APPLIED
+        }
         // ADR-0057 obligation 3 — outside both locks; launched, best effort,
         // and only when the batch moved the epoch (a no-op for a non-owner).
         val epochAfterBatch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrNull() }
@@ -8385,6 +10489,28 @@ public class ChatRepository(
             throw cause
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0050 superseded re-request pass failed", cause)
+        }
+        // ADR-0060 section 6 — an Add of this device's that still waits gets a
+        // fresh committer envelope when one is due. After the two steps above,
+        // which may have landed the Add or re-requested it; outside both
+        // locks, because the broadcast takes the per-group lock itself.
+        try {
+            resendCommitterEnvelopesIfDue(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0060 committer envelope pass failed", cause)
+        }
+        // ADR-0087 sections 3 and 8 — the owner's lease renewal and any owed
+        // public / private change. Best effort.
+        try {
+            sendOwedGroupPhotoIfAny(groupIdHex)
+            verifyGroupHandleIfDue(groupIdHex)
+            maintainGroupHandleIfDue(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 handle maintenance failed", cause)
         }
         // ADR-0053 client contract point 7 — an owner / admin also reads what
         // non-members knocked, into the same classifier. Best effort.
@@ -8427,6 +10553,15 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return
         val now = System.currentTimeMillis()
         if (now - record.lastKnockPollMs < KNOCK_POLL_MIN_INTERVAL_MS) return
+        // Section 5 — resume from the saved position, so a decided request
+        // is not read (and kept) again after a restart.
+        if (!record.knockCursorLoaded) {
+            record.knockCursor = maxOf(
+                record.knockCursor,
+                GroupSettingsStore.knockCursor(applicationContext, currentAccountIdB64.get(), groupIdHex),
+            )
+            record.knockCursorLoaded = true
+        }
         val ownerOrAdmin = providerLock.sessionLock {
             try {
                 readsKnocks(record.group.ownRole(identity))
@@ -8439,6 +10574,9 @@ public class ChatRepository(
         val after = record.knockCursor
         val raw = dsClient.fetchKnocks(record.groupId, after = after, waitSecs = 0)
         if (raw.messages.isEmpty()) return
+        // What the pass kept, filed after the locks, then the position saved.
+        var keptKnocks: List<OpenedKnock> = emptyList()
+        var savedThrough: Long? = null
         groupLock(groupIdHex).sessionLock {
             providerLock.sessionLock {
                 // Another pass moved the cursor while this one fetched.
@@ -8447,31 +10585,75 @@ public class ChatRepository(
                 // the ordinary receive path: a knock is an unauthenticated
                 // write, and a member could knock a real commit (see
                 // `KnockGate.kt`). A refused row is dropped, the cursor moves.
-                val drained = drainKnockRows(raw.messages, after) { bytes ->
-                    record.group.processKnock(identity, bytes)
+                // ADR-0087 section 5 — a knock row is a KeyPackage sealed to
+                // the group's knock key: opened with the seed of the row's own
+                // version and kept through `retainJoinRequest`. A full pending
+                // set stops the cursor before the row.
+                val drained = drainSealedKnockRows(raw.messages, after) { bytes ->
+                    openSealedKnock(record, groupIdHex, identity, bytes)
                 }
-                val events = drained.accepted.mapNotNull { (row, processed) ->
-                    if (processed !is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal) {
-                        return@mapNotNull null
-                    }
+                val events = drained.accepted.map { (row, opened) ->
                     IncomingChatEvent.ExternalJoinRequest(
                         messageId = row.id,
-                        joinerSignatureKey = processed.joinerSignatureKey,
-                        retained = processed.retained,
+                        joinerSignatureKey = opened.joinerSignatureKey,
+                        retained = true,
                         createdAt = row.createdAt,
                     )
                 }
                 record.consumeEvents(events = events)
-                // ADR-0060 §6 — a `/g/` joiner's attribution carries its reply
-                // key: kept for the joiner's account (named by the retained
-                // KeyPackage's device binding), so the sweep that admits it
-                // can write the Welcome into its closed mailbox.
-                keepJoinerReplyGrantsBestEffort(record, raw.messages)
-                // The retained request set lives in the provider (ADR-0027).
-                if (drained.accepted.isNotEmpty()) persistSnapshotBestEffort()
+                // ADR-0060 §6 — the knock carries the joiner's reply key: kept
+                // for the joiner's account (after the locks), so the sweep that
+                // admits it can write the Welcome into its closed mailbox.
+                keptKnocks = drained.accepted.map { it.second }
+                // Section 8 — where each request came from, for the line
+                // under it: the row's stamp, and the link's issuer.
+                currentAccountIdB64.get()?.let { acct ->
+                    for ((row, opened) in drained.accepted) {
+                        try {
+                            GroupSettingsStore.saveKnockOrigin(
+                                applicationContext,
+                                acct,
+                                groupIdHex,
+                                me.lakko.app.ds.hexOf(opened.joinerSignatureKey),
+                                KnockOrigin(
+                                    askedAtMs = me.lakko.app.ui.chat.parseMessageTimeMs(row.createdAt),
+                                    issuerKeyB64 = opened.linkIssuer?.let { java.util.Base64.getEncoder().encodeToString(it) },
+                                ),
+                            )
+                        } catch (_: Throwable) {
+                            // The line is informative; a failed write shows none.
+                        }
+                    }
+                }
+                record.knockQueueFull = drained.cursor < (raw.messages.lastOrNull()?.id ?: drained.cursor)
+                record.lastSeenKnockId = maxOf(record.lastSeenKnockId, raw.messages.lastOrNull()?.id ?: 0L)
+                // The retained request set lives in the provider (ADR-0027),
+                // durably before the position may be saved past its rows.
+                val durable = drained.accepted.isEmpty() || try {
+                    persistSnapshotDurableOrThrow()
+                    true
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0087 retained requests not saved: ${cause.javaClass.simpleName}")
+                    false
+                }
                 record.knockCursor = drained.cursor
+                if (durable) savedThrough = drained.cursor
             }
         }
+        // The reply grants, then the position: a restart before either reads
+        // the rows again and keeps them again.
+        var grantsKept = true
+        for (opened in keptKnocks) {
+            try {
+                keepKnockReplyGrant(groupIdHex, opened)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                grantsKept = false
+                android.util.Log.w("ChatRepository", "ADR-0060 a join reply grant not kept: ${cause.javaClass.simpleName}")
+            }
+        }
+        savedThrough?.takeIf { grantsKept }?.let { saveKnockCursorBestEffort(groupIdHex, it) }
         publishThreadList()
     }
 
@@ -8728,9 +10910,20 @@ public class ChatRepository(
         } else {
             null
         }
+        // A verified binding is followed along its proven steps as a pin is
+        // (ADR-0074 section 3.7): the conversation link names the key this
+        // person's conversations stay under.
+        val bindingChain = binding?.let { key ->
+            val links = try {
+                owner?.let { me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(it.accountIdB64) }
+            } catch (_: Throwable) {
+                null
+            }
+            provenChainEndingAt(key, links.orEmpty())
+        }
         return me.lakko.app.contacts.addFilterKeys(
             expectedKeyB64 = expectedKeyB64,
-            pinnedChainB64 = chain,
+            pinnedChainB64 = chain ?: bindingChain,
             bindingKeyB64 = binding,
             retiredKeysB64 = supersededKeys().keys,
         )
@@ -9007,11 +11200,6 @@ public class ChatRepository(
             },
         )
         val pins = me.lakko.app.contacts.PeerPinStore.forBoundAccount(applicationContext)
-        val provenLinks = try {
-            me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(account.accountIdB64)
-        } catch (_: Throwable) {
-            emptyList()
-        }
         // The key a looked-up account's devices must be bound to, per person
         // key the planner files them under (rule 2 of the mirror brief).
         val expectedKeyOf = HashMap<String, Set<String>>()
@@ -9027,13 +11215,14 @@ public class ChatRepository(
             // still learns of a reset within the interval. An accepted reset
             // re-pins there; its answer is read back from the stores it
             // writes.
-            contactIdentityCheck?.let { check ->
+            val identityCheck = contactIdentityCheck?.let { check ->
                 try {
                     check(id, candidate.rosterKeyB64)
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (_: Throwable) {
                     // best-effort
+                    null
                 }
             }
             val pin = try {
@@ -9041,18 +11230,33 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 null
             }
-            val chain = pin?.let { me.lakko.app.contacts.keysOfPerson(it.pinnedSignaturePubkeyB64, provenLinks) }
-                ?.let { keys -> keys.take(keys.indexOf(pin.pinnedSignaturePubkeyB64) + 1) }
+            // Read after the check above: the conversation link it may just
+            // have recorded (ADR-0074 section 3.7) counts in this same round.
+            val provenLinks = try {
+                me.lakko.app.contacts.SharedPrefsProvenLinkStore(applicationContext).load(account.accountIdB64)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val chain = pin?.let { provenChainEndingAt(it.pinnedSignaturePubkeyB64, provenLinks) }
+            val bindingKey = if (pin == null) {
+                verifiedBindingStore.read(account.accountIdB64, candidate.accountIdB64)?.keyB64
+            } else {
+                null
+            }
             val standing = DeviceReadmission.lookupStanding(
                 rosterKeyB64 = candidate.rosterKeyB64,
                 pinnedChainB64 = chain,
                 supersededKeysB64 = supersededKeys().filterValues { it == candidate.accountIdB64 }.keys,
-                bindingKeyB64 = if (pin == null) {
-                    verifiedBindingStore.read(account.accountIdB64, candidate.accountIdB64)?.keyB64
-                } else {
-                    null
-                },
+                bindingKeyB64 = bindingKey,
+                bindingChainB64 = bindingKey?.let { provenChainEndingAt(it, provenLinks) }.orEmpty(),
             )
+            if (standing == DeviceReadmission.LookupStanding.SKIP) {
+                android.util.Log.i(
+                    "ChatRepository",
+                    "ADR-0050 re-admission: a member is not followed: check=$identityCheck " +
+                        "pinned=${pin != null} chain=${chain?.size}",
+                )
+            }
             when (standing) {
                 DeviceReadmission.LookupStanding.SKIP -> continue
                 DeviceReadmission.LookupStanding.SAME_PERSON -> {
@@ -9119,6 +11323,11 @@ public class ChatRepository(
         if (supersededKeys().isNotEmpty()) {
             scheduleResetRepair(groupIdHex)
         }
+        android.util.Log.i(
+            "ChatRepository",
+            "ADR-0050 re-admission check: candidates=${candidates.size} followed=${lookups.size - 1} " +
+                "unreadable=${accounts.count { it.devices == null }} admit=${plan.admit.size} retire=${plan.retire.size}",
+        )
         if (plan.admit.isEmpty() && plan.retire.isEmpty()) return
         var proposed = 0
         for (d in plan.admit) {
@@ -9216,7 +11425,12 @@ public class ChatRepository(
         // device has all been removed from would return instantly, forever.
         // Filtering first lets the empty case take one honest long-poll-shaped
         // pause instead.
-        val active = groupIds.filter { isGroupActive(it) != false }
+        val active = groupIds.filter { isGroupActive(it) != false && it.lowercase() !in endingGroups }
+        // ADR-0087 section 9 — an end that stopped on a failed step, and a
+        // Welcome kept for a group that may have ended since, are retried by
+        // every sweep.
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+        resolveHeldWelcomes()
         if (active.isEmpty()) {
             if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
             return me.lakko.app.feed.SourceCheck.NONE
@@ -9271,11 +11485,14 @@ public class ChatRepository(
         // Keyed by group id alone, so the next account on this phone that is
         // a member of the same group would inherit them.
         supersededCheckedEpoch.clear()
+        endingGroups.clear()
         appointmentAttemptAtMs.clear()
         undeliveredWelcomeGroups.clear()
+        committerEnvelopeNothingToSend.forgetAll()
         lastBeaconAtMs.clear()
         localUnread.clear()
         keyPackageAccount.set(null)
+        everyoneCheckedThisSession.set(false)
         snapshotUnreadable.set(false)
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
@@ -9333,6 +11550,9 @@ public class ChatRepository(
         // The repository is done: its background work (the lineage collector
         // started at construction, the push legs) goes with it.
         pushScope.cancel()
+        if (me.lakko.app.devices.HistoryBundleCodec.liveLogSink === historyBundleSink) {
+            me.lakko.app.devices.HistoryBundleCodec.liveLogSink = null
+        }
         if (chatClientLazy.isInitialized()) chatClient.close()
         if (dsClientLazy.isInitialized()) dsClient.close()
         if (discoveryLazy.isInitialized()) discovery.close()
@@ -9369,12 +11589,14 @@ public class ChatRepository(
     private fun wipeInMemoryState() {
         synchronized(groups) {
             messageLogAccount = null
+            waitingLogSlots.clear()
             for (rec in groups.values) rec.group.close()
             groups.clear()
             for (g in preparedGroups.values) runCatching { g.close() }
             preparedGroups.clear()
             heldSends.clear()
             pendingInvitedHeld.clear()
+            heldCopyRows.clear()
         }
         // An unsent text belongs to the session that typed it.
         composerCarry.clear()
@@ -9395,6 +11617,8 @@ public class ChatRepository(
         profileRepublish.reset()
         // ADR-0051 — and the group-name re-send timing with it.
         groupNameRepublish.reset()
+        groupSettingsRepublish.reset()
+        knockSeedsSent.clear()
         // ADR-0052 decision 3 — and the pin re-send timing.
         pinRepublish.reset()
         // A previous session's group-call records name calls in groups this
@@ -10270,6 +12494,8 @@ public class ChatRepository(
                 ensureSession()
                 result.sentSet?.let { sentRegistrarSets[groupIdHex] = it }
                 store.put(accountIdB64, groupIdHex, result.delivered)
+                // ADR-0087 section 5 — and the knock seed to each admin.
+                deliverKnockSeedsBestEffort(identity, record, groupIdHex, table.admins)
                 if (result.complete) appointmentAttemptAtMs.remove(groupIdHex) else appointmentAttemptAtMs[groupIdHex] = now
                 android.util.Log.i(
                     "ChatRepository",
@@ -10743,6 +12969,9 @@ public class ChatRepository(
             val oldAccountSeed = Identity.fromSeed(predecessorSeed).use { it.ed25519Seed() }
             try {
                 for ((groupIdHex, groupId) in owned) {
+                    // ADR-0087 sections 3 and 5 — the moved root moves every
+                    // knock seed and the handle key: owed steps of the rotation.
+                    moveKnockAndHandleOnRotation(accountIdB64, groupIdHex, groupId, oldAccountSeed)
                     val held = journalOwnershipStore.pendingRootSeeds.get(accountIdB64, groupIdHex)
                     if (held != null) {
                         // An earlier run (or an ownership handover) already
@@ -10771,6 +13000,77 @@ public class ChatRepository(
             android.util.Log.i("ChatRepository", "ADR-0074: ${owned.size} owned journal root transfer(s) scheduled")
             owned.size
         }
+
+    /**
+     * ADR-0087 section 5 (added 2026-11-03) and section 3 — on the owner's
+     * ADR-0074 rotation: versions up to the current `v` stay derived from the
+     * predecessor's root (kept as stored seeds), the version is bumped so the
+     * next and later ones derive from the new root, the boundary is recorded,
+     * the new seed goes to the admins, a public group's record is republished
+     * (owed), and the held @name owes a `rekey` signed with the old handle
+     * seed. Idempotent: a re-run for the same predecessor changes nothing.
+     * Throws when a write did not land, so the caller keeps its step owed.
+     */
+    private fun moveKnockAndHandleOnRotation(
+        accountIdB64: String,
+        groupIdHex: String,
+        groupId: ByteArray,
+        oldAccountSeed: ByteArray,
+    ) {
+        val oldRoot = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(oldAccountSeed, groupId)
+        try {
+            val ctx = applicationContext
+            val boundary = GroupSettingsStore.knockBoundary(ctx, accountIdB64, groupIdHex)
+            if (boundary != null) {
+                val stored = GroupSettingsStore.knockSeed(ctx, accountIdB64, groupIdHex, boundary)
+                val derived = uniffi.lakko_ffi_uniffi.groupKnockSeed(oldRoot, boundary)
+                val applied = stored != null && stored.contentEquals(derived)
+                stored?.fill(0)
+                derived.fill(0)
+                if (applied) return
+            }
+            val current = GroupSettingsStore.knockVersion(ctx, accountIdB64, groupIdHex)
+            for (v in 0..current.toInt()) {
+                val version = v.toUShort()
+                val held = GroupSettingsStore.knockSeed(ctx, accountIdB64, groupIdHex, version)
+                if (held != null) {
+                    held.fill(0)
+                    continue
+                }
+                val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(oldRoot, version)
+                try {
+                    GroupSettingsStore.saveKnockSeed(ctx, accountIdB64, groupIdHex, version, seed)
+                } finally {
+                    seed.fill(0)
+                }
+            }
+            GroupSettingsStore.saveKnockBoundary(ctx, accountIdB64, groupIdHex, current)
+            if (current < UShort.MAX_VALUE) {
+                GroupSettingsStore.saveKnockVersion(ctx, accountIdB64, groupIdHex, (current + 1u).toUShort())
+            }
+            GroupSettingsStore.saveKnockSelfOwed(ctx, accountIdB64, groupIdHex, true)
+            knockSeedsSent.removeAll { it.startsWith("$groupIdHex:") }
+            val handle = GroupSettingsStore.handle(ctx, accountIdB64, groupIdHex)
+            if (handle != null) {
+                val oldHandleSeed = uniffi.lakko_ffi_uniffi.handleWriteSeed(oldRoot)
+                try {
+                    GroupSettingsStore.saveOwedRekeySeed(ctx, accountIdB64, groupIdHex, oldHandleSeed)
+                } finally {
+                    oldHandleSeed.fill(0)
+                }
+                if (handle.public) {
+                    GroupSettingsStore.saveOwedTypeChange(ctx, accountIdB64, groupIdHex, true to handle.handle)
+                }
+            }
+            // The store's writes report nothing: read the bump back.
+            if (GroupSettingsStore.knockBoundary(ctx, accountIdB64, groupIdHex) != current) {
+                throw IllegalStateException("the knock boundary was not kept")
+            }
+        } finally {
+            oldRoot.fill(0)
+        }
+        reconcileAppointmentsBestEffort(groupIdHex, force = true)
+    }
 
     /** Groups whose takeover is running now. */
     private val takeoverInFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -11313,6 +13613,20 @@ public class ChatRepository(
      */
     public fun noteOwnLeaveRequested(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
+        // ADR-0087 UX 9.4 — an admin's own sweep can land the leave before this
+        // runs. A person who asked is told nothing, and a record written now
+        // would read "Waiting to leave." on a later membership.
+        val hex = groupIdHex.lowercase()
+        val landed = membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }
+        if (landed != null) {
+            if (landed.stage == EndStage.NOTICE_ONLY) {
+                membershipEnds.remove(accountIdB64, hex)
+            } else {
+                membershipEnds.save(accountIdB64, landed.copy(noticeClosed = true))
+            }
+            publishEndState()
+            return
+        }
         recordLeaveRequested(
             store = leaveRecords,
             accountIdB64 = accountIdB64,
@@ -11366,82 +13680,445 @@ public class ChatRepository(
         }
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0087 section 9 — the end of a membership.
+    //
+    // Every rule lives in `MembershipEnd.kt`, where the host suite runs it;
+    // what is here feeds it live group state and supplies the ports.
+    // -----------------------------------------------------------------
+
+    private val membershipEnds: MembershipEndStore by lazy { SharedPrefsMembershipEndStore(applicationContext) }
+
+    private val heldWelcomes: HeldWelcomeStore by lazy { SharedPrefsHeldWelcomeStore(applicationContext) }
+
+    /** The groups an end is running for (lower-case hex): gone from the lists
+     *  and from every poll, sweep and beacon. Rows of the durable store, kept
+     *  here because the poll path asks on every call. */
+    private val endingGroups: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** One run at a time, so two tails never walk one row together. */
+    private val membershipEndRun = Mutex()
+
+    private val heldWelcomeRun = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val membershipEndListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(groupIdHex: String) -> Unit>()
+
     /**
-     * §6.2.4 — `Delete this chat`.
-     *
-     * Removes this group's transcript from the message log, its pending-request
-     * observations, its durable leave record, its known-groups entry and its
-     * in-memory record. The REGISTRY row goes LAST, so a failure above leaves
-     * the chat reachable rather than orphaning a transcript behind a row the
-     * user can no longer open.
-     *
-     * **What it does NOT remove, which is why [DELETE_CHAT_BODY] is exact
-     * rather than sweeping:** the inactive MLS group stays in the provider
-     * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
-     * is a real (small) core follow-up rather than something this rides free.
-     *
-     * The push subscription is already gone by this point: the §6.2.8 teardown
-     * retires it at the moment of the eviction, not at the moment of the
-     * delete, so a user who never presses this button still stops being woken.
+     * Observe the moment this account is out of a group, before anything of it
+     * is deleted: a call in it ends here. Called on the end run's coroutine; a
+     * listener only hands the event off. Returns the unsubscribe.
      */
-    public fun deleteEndedChat(groupIdHex: String) {
-        // ADR-0073 R.5 — deleting a conversation deletes every segment this
-        // device holds, the older ones first and the one asked for last
-        // ([conversationDeleteOrder]).
-        for (hex in olderSegmentsOf(groupIdHex)) deleteOneSegment(hex)
-        deleteOneSegment(groupIdHex)
+    public fun addMembershipEndListener(listener: (groupIdHex: String) -> Unit): () -> Unit {
+        membershipEndListeners += listener
+        return { membershipEndListeners -= listener }
     }
 
-    private fun deleteOneSegment(groupIdHex: String) {
+    init {
+        // After the fields above, and declared before nothing it reads: the
+        // collector does nothing until a bootstrap has finished. The register
+        // arrives on the sync runtime's own schedule, and a value here is also
+        // what an end waiting for an open synced state resumes on.
+        pushScope.launch {
+            combine(
+                mutableState.map { it.bootstrapped }.distinctUntilChanged(),
+                ConversationEndsMirror.registers,
+            ) { ready, heard -> heard.takeIf { ready } }.collect { heard ->
+                if (heard == null) return@collect
+                try {
+                    pushScope.launchSession { reactToHeardEnds(heard) }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0087: register not acted on: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    /** The conversation reference a register names a group with. */
+    private fun groupRefOf(groupIdHex: String): uniffi.lakko_ffi_uniffi.FolderConversationRef? =
+        hexToBytes(groupIdHex)?.let {
+            uniffi.lakko_ffi_uniffi.FolderConversationRef(
+                kind = uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP,
+                id = it,
+            )
+        }
+
+    /**
+     * Every key this account's leaves may be bound under: the conversation
+     * identity, the published one, the proven predecessors. Empty when any of
+     * it cannot be read, which reads as "not out": a key left out here is a
+     * person's history.
+     */
+    private fun ownAccountKeysB64(): Set<String> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptySet()
+        return try {
+            val keys = LinkedHashSet<String>()
+            ownAccountKey()?.let { keys += outboxB64(it) } ?: return emptySet()
+            rootAccountIdentity()?.let { keys += outboxB64(it.signaturePublicKey()) }
+            val rows = me.lakko.app.auth.OwnPredecessorStore.onDevice(applicationContext).load(accountIdB64)
+            try {
+                rows.forEach { keys += outboxB64(it.signaturePubkey) }
+            } finally {
+                rows.forEach { it.zero() }
+            }
+            keys
+        } catch (_: Throwable) {
+            emptySet()
+        }
+    }
+
+    /** Does a leaf of this account stand in [group]'s roster? `null` when it
+     *  cannot be told. On the provider critical path. */
+    private fun accountInRosterOrNull(group: Group): Boolean? {
+        val roster = memberAccountKeysOrNull(group) ?: return null
+        val own = ownAccountKeysB64()
+        if (own.isEmpty()) return null
+        return roster.any { it in own }
+    }
+
+    /**
+     * The seam: called after a commit was applied, and over the stored groups
+     * at launch. Writes the owed record of an end this device has just seen,
+     * and nothing else. On the provider critical path (it reads the roster),
+     * and it runs no step, because the steps take that lock themselves.
+     */
+    private fun recordEndIfOutLocked(groupIdHex: String, record: GroupRecord) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        if (hex in endingGroups) return
+        val isActive = readIsActive { record.group.isActive() }
+        if (isActive != false) return
+        val out = membershipFullyEnded(
+            isActive = isActive,
+            isGroupKind = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.GROUP,
+            rosterAccountKeys = memberAccountKeysOrNull(record.group),
+            ownAccountKeys = ownAccountKeysB64(),
+        )
+        if (!out) return
+        val epoch = runCatching { record.group.epoch() }.getOrNull() ?: return
+        val row = appliedEnd(
+            idHex = hex,
+            name = GroupNameStore.name(applicationContext, accountIdB64, groupIdHex).orEmpty(),
+            left = loadLeaveRequestedAt(leaveRecords, accountIdB64, groupIdHex) != null,
+            epoch = epoch,
+        )
+        // Not saved: nothing ran, and the launch sweep sees this state again.
+        if (!membershipEnds.save(accountIdB64, row)) return
+        endingGroups += hex
+        android.util.Log.i("ChatRepository", "ADR-0087: this account is out of a group")
+    }
+
+    /** Whether an end of this group is recorded and not yet carried out. */
+    public fun isEndOwed(groupIdHex: String): Boolean = groupIdHex.lowercase() in endingGroups
+
+    /** Fill [endingGroups] and the state from the durable rows. */
+    private fun loadOwedEndsBestEffort(accountIdB64: String) {
+        val rows = try {
+            membershipEnds.load(accountIdB64)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        endingGroups += endingIdsOf(rows)
+        mutableState.update { it.copy(endNotices = endNoticesOf(rows), endingIds = endingGroups.toSet()) }
+    }
+
+    /** Publish what the durable rows say, and the list without what is ending. */
+    private fun publishEndState() {
+        currentAccountIdB64.get()?.let { loadOwedEndsBestEffort(it) }
+        publishThreadList()
+    }
+
+    /** The launch sweep: stored groups, owed rows, the register, held Welcomes. */
+    private suspend fun sweepMembershipEnds() {
+        val records = synchronized(groups) { groups.toMap() }
+        providerLock.sessionLock {
+            for ((hex, record) in records) recordEndIfOutLocked(hex, record)
+        }
+        publishEndState()
+        ConversationEndsMirror.registers.value?.let { reactToHeardEnds(it) }
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+        resolveHeldWelcomes()
+    }
+
+    /**
+     * Rule 4 of the register: compare epochs before anything stops. Read after
+     * every change to the synced state and at launch, and idempotent: a wiped
+     * group has nothing left to act on.
+     */
+    private suspend fun reactToHeardEnds(heard: HeardConversationEnds) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        if (heard.accountIdB64 != accountIdB64) return
+        for (end in heard.ends) {
+            if (end.channel || end.idHex in endingGroups) continue
+            val record = groups[end.idHex]
+            val read = record?.let {
+                providerLock.sessionLock {
+                    readIsActive { it.group.isActive() } to runCatching { it.group.epoch() }.getOrNull()
+                }
+            }
+            when (heardEndVerdict(record != null, read?.first, read?.second, end.epoch)) {
+                HeardEndVerdict.NOTHING -> Unit
+                HeardEndVerdict.ANSWER_JOINED -> {
+                    val ref = groupRefOf(end.idHex) ?: continue
+                    val epoch = read?.second ?: continue
+                    me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.publishConversationJoined(ref, epoch)
+                }
+                HeardEndVerdict.ACT -> {
+                    val name = GroupNameStore.name(applicationContext, accountIdB64, end.idHex).orEmpty()
+                    if (membershipEnds.save(accountIdB64, heardEnd(end.idHex, name, end.epoch))) {
+                        endingGroups += end.idHex
+                    }
+                }
+            }
+        }
+        if (endingGroups.isNotEmpty()) runOwedMembershipEnds()
+    }
+
+    /**
+     * Walk every owed row. Never under a group or provider lock: the steps take
+     * them. A row that stopped on a failed step stays owed, and the next sweep
+     * of the groups comes back to it.
+     */
+    private suspend fun runOwedMembershipEnds() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        publishEndState()
+        membershipEndRun.sessionLock {
+            for (row in membershipEnds.load(accountIdB64)) {
+                if (row.stage == EndStage.NOTICE_ONLY) continue
+                // Recorded, and then the snapshot that holds the commit did not
+                // land: the commit comes round again, and the seam with it.
+                val record = groups[row.idHex]
+                if (row.source == EndSource.APPLIED && record != null &&
+                    readIsActive { record.group.isActive() } == true
+                ) {
+                    membershipEnds.remove(accountIdB64, row.idHex)
+                    endingGroups -= row.idHex
+                    continue
+                }
+                val outcome = runMembershipEnd(accountIdB64, row, membershipEnds, membershipEndPorts)
+                if (outcome == EndRun.DONE || outcome == EndRun.ABANDONED) endingGroups -= row.idHex
+            }
+        }
+        publishEndState()
+        resolveHeldWelcomes()
+    }
+
+    private val membershipEndPorts: MembershipEndPorts = object : MembershipEndPorts {
+        override suspend fun publishEnded(row: OwedEnd): EndPublish {
+            val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active ?: return EndPublish.NOT_OPEN
+            val ref = groupRefOf(row.idHex) ?: return EndPublish.NOTHING_TO_TELL
+            return sync.publishConversationEnded(ref, row.epochValue)
+        }
+
+        override suspend fun stop(row: OwedEnd) {
+            for (listener in membershipEndListeners) {
+                try {
+                    listener(row.idHex)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "membership end listener failed", cause)
+                }
+            }
+            for (hex in olderSegmentsOf(row.idHex) + row.idHex) {
+                val retired = try {
+                    groups[hex] != null && retirePushSubscriptionAfterEviction(hex)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    false
+                }
+                if (!retired) keepPushRetireOwed(hex)
+            }
+        }
+
+        override suspend fun wipeStores(row: OwedEnd) {
+            val segments = olderSegmentsOf(row.idHex) + row.idHex
+            // A chosen delete has no stop step: whatever the screen's teardown
+            // did not retire is kept owed before the route row goes.
+            if (row.source == EndSource.CHOSEN) segments.forEach { keepPushRetireOwed(it) }
+            for (hex in segments) wipeSegmentStores(hex)
+            // A person's own choice on a device whose account may still be in
+            // the group says nothing to the account's other devices.
+            if (row.source != EndSource.CHOSEN) {
+                val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+                for (hex in segments) groupRefOf(hex)?.let { sync?.clearConversationRegisters(it) }
+            }
+        }
+
+        override suspend fun deleteMls(row: OwedEnd): MlsDelete {
+            val identity = canonicalIdentity.get() ?: return MlsDelete.FAILED
+            return groupLock(row.idHex).sessionLock {
+                providerLock.sessionLock {
+                    for (older in olderSegmentsOf(row.idHex)) {
+                        val record = groups[older] ?: continue
+                        // A superseded group this device is still in stays in
+                        // the provider, inert: only a register may delete a
+                        // group that reads active, and none names it.
+                        if (readIsActive { record.group.isActive() } == false) {
+                            runCatching { record.group.deleteLocally(identity) }
+                        }
+                    }
+                    val record = groups[row.idHex] ?: return@sessionLock MlsDelete.DELETED
+                    try {
+                        when (row.source) {
+                            EndSource.HEARD -> record.group.deleteAfterEndedElsewhere(identity, row.epochValue)
+                            EndSource.APPLIED, EndSource.CHOSEN -> record.group.deleteLocally(identity)
+                        }
+                        MlsDelete.DELETED
+                    } catch (_: FfiException.MembershipGroupStillActive) {
+                        MlsDelete.STILL_ACTIVE
+                    } catch (cause: FfiException) {
+                        android.util.Log.w("ChatRepository", "ADR-0087: group not deleted (${cause.javaClass.simpleName})")
+                        MlsDelete.FAILED
+                    }
+                }
+            }
+        }
+
+        override suspend fun persistDurably(): Boolean = providerLock.sessionLock {
+            try {
+                persistSnapshotDurableOrThrow()
+                true
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087: snapshot not persisted (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+
+        override suspend fun dropRegistry(row: OwedEnd) {
+            for (hex in olderSegmentsOf(row.idHex)) dropGroupRecord(hex)
+            dropGroupRecord(row.idHex)
+        }
+
+        override suspend fun cameBack(row: OwedEnd) {
+            val record = groups[row.idHex] ?: return
+            val ref = groupRefOf(row.idHex) ?: return
+            val epoch = providerLock.sessionLock { runCatching { record.group.epoch() }.getOrNull() } ?: return
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.publishConversationJoined(ref, epoch)
+        }
+    }
+
+    /**
+     * A retire that could not run or land: the route row goes with the wipe, so
+     * the subscription id is kept for the next unsubscribe, and a wake that
+     * still arrives finds no route and opens nothing (ADR-0078).
+     */
+    private fun keepPushRetireOwed(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
-            MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex)
+            val secret = PushRoutingSecretStore.get(applicationContext, accountIdB64, groupIdHex) ?: return
+            val gidHex = DsClient.pseudonymHex(uniffi.lakko_ffi_uniffi.derivePushGid(secret))
+            pushRouteStore.subscriptionId(accountIdB64, gidHex)?.let {
+                me.lakko.app.push.PendingPushUnsubscribes(applicationContext).stash(listOf(it))
+            }
+            pushRouteStore.remove(accountIdB64, gidHex)
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: message log", cause)
+            android.util.Log.w("ChatRepository", "ADR-0087: push retire not kept: ${cause.javaClass.simpleName}")
         }
-        try {
-            // The whole row, own request intents included: the prune keeps
-            // those, and they describe a group this device is deleting.
-            pendingRequestObservations.save(accountIdB64, groupIdHex, emptyMap())
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: observations", cause)
+    }
+
+    /**
+     * The local half of ending one group: every store keyed by it, and the
+     * in-memory state, the record's timeline first so a log persist of another
+     * group cannot write it back. Idempotent. Profiles are not tied to a group
+     * and stay; the synced registers go by their own tombstones.
+     */
+    private fun wipeSegmentStores(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        fun step(what: String, block: () -> Unit) {
+            try {
+                block()
+            } catch (ended: me.lakko.app.StaleBindingException) {
+                throw ended
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087 wipe: $what (${cause.javaClass.simpleName})")
+            }
         }
-        try {
-            unappliedRequests.clearForGroup(accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: unapplied rows", cause)
+        val record = groups[groupIdHex]
+        record?.wipeTimeline()
+        synchronized(groups) { waitingLogSlots.take(groupIdHex) }
+        step("message log") { MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex) }
+        // The whole row, own request intents included: the prune keeps those,
+        // and they describe a group this device is deleting.
+        step("observations") { pendingRequestObservations.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("sent envelopes") { sentCommitterEnvelopes.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("unapplied rows") { unappliedRequests.clearForGroup(accountIdB64, groupIdHex) }
+        step("leave record") { leaveRecords.clear(accountIdB64, groupIdHex) }
+        step("pins") { PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("shared channels") { sharedChannels.forgetGroup(groupIdHex) }
+        step("claim state") {
+            successorClaims.remove(accountIdB64, hex)
+            invalidateDeadSession(groupIdHex)
         }
-        try {
-            leaveRecords.clear(accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: leave record", cause)
+        step("continuity") { continuityStore.update(accountIdB64) { it.withoutGroup(hex) } }
+        step("read watermarks") { readWatermarkStore.deleteGroup(accountIdB64, groupIdHex) }
+        step("group call") {
+            mutableGroupCalls.update { it - groupIdHex }
+            synchronized(groupCallPersistLock) { groupCallStore.save(accountIdB64, groupIdHex, null) }
         }
+        step("call log") {
+            me.lakko.app.calls.CallHistoryStore.deleteConversation(applicationContext, accountIdB64, conversationIdOf(hex))
+            me.lakko.app.calls.CallHistoryStore.deleteConversation(applicationContext, accountIdB64, hex)
+        }
+        step("own echoes") { if (chatClientLazy.isInitialized()) chatClient.forgetOwnEchoesOf(groupIdHex) }
+        step("group name") { GroupNameStore.delete(applicationContext, accountIdB64, groupIdHex) }
+        // ADR-0087 section 9 — and its photo, reactions setting, @name and
+        // knock seeds, and its unseen reactions.
+        step("group settings") { GroupSettingsStore.deleteGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("unseen reactions") { UnseenReactions.clear(groupIdHex) }
+        step("joined moment") { ConversationJoinedStore.delete(applicationContext, accountIdB64, groupIdHex) }
+        step("push secret") { PushRoutingSecretStore.remove(applicationContext, accountIdB64, groupIdHex) }
+        step("held") {
+            val conversation = conversationIdOf(hex)
+            val dropped = listOf(conversation, hex).map { heldSends.remove(it) != null }.any { it }
+            if (dropped) persistHeldSends()
+            heldCopyRows.remove(groupIdHex)
+            heldCopyStore.clear(accountIdB64, groupIdHex)
+        }
+        step("journal seeds") {
+            journalOwnershipStore.remove(accountIdB64, groupIdHex)
+            journalOwnershipStore.rootHeld.clear(accountIdB64, groupIdHex)
+            journalOwnershipStore.appointments.put(accountIdB64, groupIdHex, emptyMap())
+            journalOwnershipStore.registrarList.put(accountIdB64, groupIdHex, emptyMap())
+            clearHandoverOwed(accountIdB64, groupIdHex)
+        }
+        step("commit outbox") {
+            hexToBytes(hex)?.let { id ->
+                for (entry in CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, outboxB64(id))) {
+                    CommitOutboxStore.deleteEntry(applicationContext, entry.id)
+                }
+            }
+        }
+        step("beacons") { beaconObservations.save(accountIdB64, groupIdHex, emptyMap()) }
+        step("last owner") { lastObservedOwnerStore.clear(accountIdB64, groupIdHex) }
+        step("profile requests") { profileRequestStore.deleteGroup(accountIdB64, groupIdHex) }
+        step("readmission") { DeviceReadmission.clearGroup(applicationContext, accountIdB64, groupIdHex) }
+        step("reach grants") { me.lakko.app.reach.ReachManager.peek()?.forgetHeldScope(hex) }
+        // In memory, per group.
+        localUnread.forget(groupIdHex)
+        composerCarry.forget(conversationIdOf(hex))
+        supersededCheckedEpoch.remove(groupIdHex)
+        appointmentAttemptAtMs.remove(groupIdHex)
+        lastBeaconAtMs.remove(groupIdHex)
+        peerCheckedAt.remove(groupIdHex)
+    }
+
+    /** LAST: dropping the record is what makes a group unreachable, and the
+     *  known-groups row is what brings it back at the next start. */
+    private fun dropGroupRecord(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             knownGroupsStore.remove(accountIdB64, groupIdHex)
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: known groups", cause)
+            android.util.Log.w("ChatRepository", "ADR-0087: known groups row kept", cause)
         }
         // And from the ids a restored backup named, or the next upload would
-        // list a conversation the person deleted.
+        // list a conversation the person no longer has.
         dropRestoredKnownGroupBestEffort(groupIdHex)
-        // ADR-0052 decision 3 — the pins are wiped with the conversation.
-        try {
-            PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0052 delete chat: pins", cause)
-        }
-        // ADR-0059 section 6 — and the channel lists shared in it.
-        sharedChannels.forgetGroup(groupIdHex)
-        // ADR-0073 R.6 — the claim state goes with the conversation.
-        try {
-            successorClaims.remove(accountIdB64, groupIdHex.lowercase())
-            invalidateDeadSession(groupIdHex)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0073 delete chat: claim state", cause)
-        }
-        // LAST, and only after everything above had its chance: dropping the
-        // registry row is what makes the chat unreachable, so it must not
-        // happen while a transcript is still behind it.
         val removed = synchronized(groups) { groups.remove(groupIdHex) }
         dsSigners.remove(dsGroupKeyHex(groupIdHex))
         try {
@@ -11449,7 +14126,177 @@ public class ChatRepository(
         } catch (_: Throwable) {
             // best-effort — releasing the Rust-side Arc must not fail a delete.
         }
+        // Again, now that no record can write it: a log persist that read the
+        // records before the timeline went may have landed since.
+        try {
+            MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex)
+        } catch (_: Throwable) {
+            // best-effort — a join refuses a slot of a group the register ended
+        }
+    }
+
+    /**
+     * What a join owes the membership it replaced, and the register. [fresh]:
+     * the person was out, so what is left of that membership goes before any
+     * row of the new one is read. Any row owed for the group goes, its notice
+     * too: the sentence is no longer true. Failures here never fail the join.
+     */
+    private suspend fun settleJoinedOverEnd(
+        groupIdHex: String,
+        identity: Identity,
+        fresh: Boolean,
+        group: Group?,
+        epoch: ULong?,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        val ref = groupRefOf(groupIdHex)
+        val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+        if (fresh) {
+            try {
+                retirePushSubscriptionAfterEviction(groupIdHex)
+                wipeSegmentStores(groupIdHex)
+                if (ref != null) sync?.clearConversationRegisters(ref)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0087: join over an end: ${cause.javaClass.simpleName}")
+            }
+            if (group != null) providerLock.sessionLock { ensurePushRoutingBestEffort(group, identity) }
+        }
+        val owed = hex in endingGroups || membershipEnds.load(accountIdB64).any { it.idHex == hex }
+        if (owed) {
+            membershipEnds.remove(accountIdB64, hex)
+            endingGroups -= hex
+            publishEndState()
+        }
+        // A first join finds no register and writes none. Launched: the join
+        // of a person back into a group does not wait for the DeviceGroup.
+        if (ref != null && epoch != null && sync != null) {
+            pushScope.launchSession { sync.publishConversationJoined(ref, epoch) }
+        }
+    }
+
+    /** The notice was closed: the name goes with it. */
+    public fun dismissEndNotice(idHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = idHex.lowercase()
+        if (membershipEnds.load(accountIdB64).any { it.idHex == hex && it.stage == EndStage.NOTICE_ONLY }) {
+            membershipEnds.remove(accountIdB64, hex)
+        } else {
+            // Still running: the steps finish without saying anything.
+            membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }?.let {
+                membershipEnds.save(accountIdB64, it.copy(noticeClosed = true))
+            }
+        }
+        publishEndState()
+    }
+
+    /** A channel went on another device (ADR-0087 section 9.5): the channel
+     *  layer dropped it, and the person is told like for a group. */
+    public fun noteChannelEndHeard(channelIdHex: String, name: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val row = heardEnd(channelIdHex, name, 0u).copy(stage = EndStage.NOTICE_ONLY)
+        if (membershipEnds.save(accountIdB64, row)) publishEndState()
+    }
+
+    /**
+     * A Welcome the core refused because this device holds the group as active.
+     * Kept durably before the mailbox cursor moves past it; `false` when it did
+     * not reach the disk, and the caller then keeps the cursor.
+     */
+    public fun holdWelcome(groupIdHex: String, welcomeBytes: ByteArray): Boolean {
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        val saved = heldWelcomes.add(accountIdB64, HeldWelcome(groupIdHex.lowercase(), outboxB64(welcomeBytes)))
+        if (saved) pushScope.launchSession { resolveHeldWelcomes() }
+        return saved
+    }
+
+    /** Read [groupIdHex]'s journal to its end. `false` when a read did not
+     *  answer: nothing may be concluded from a read that failed. */
+    private suspend fun journalDrained(groupIdHex: String): Boolean {
+        repeat(MAX_HELD_WELCOME_PAGES) {
+            val record = groups[groupIdHex] ?: return true
+            val before = record.cursor
+            val outcome = try {
+                pollGroup(groupIdHex, waitSecs = 0, joinInFlight = true)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                return false
+            }
+            when (outcome) {
+                GroupPollOutcome.APPLIED -> if (groups[groupIdHex]?.cursor == before) return true
+                GroupPollOutcome.UNAVAILABLE -> return true
+                else -> delay(HELD_WELCOME_RETRY_DELAY_MS)
+            }
+        }
+        return false
+    }
+
+    /**
+     * Each held Welcome: read its group's journal and retry the join once the
+     * group ended, drop it when the journal is drained and the group is still
+     * active (a duplicate or a forgery: the core does not report a Welcome's
+     * epoch, so no client can tell sooner), keep it when a read failed.
+     */
+    private suspend fun resolveHeldWelcomes() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        if (heldWelcomes.load(accountIdB64).isEmpty()) return
+        if (!heldWelcomeRun.compareAndSet(false, true)) return
+        try {
+            for (held in heldWelcomes.load(accountIdB64)) {
+                val hex = held.groupIdHex
+                // An end still running decides this on a later pass.
+                if (hex in endingGroups) continue
+                val drained = journalDrained(hex)
+                if (hex in endingGroups) continue
+                when (heldWelcomeVerdict(drained, isGroupActive(hex))) {
+                    HeldWelcomeVerdict.KEEP -> Unit
+                    HeldWelcomeVerdict.DROP -> {
+                        android.util.Log.i("ChatRepository", "a held Welcome was dropped: the group is still active")
+                        heldWelcomes.remove(accountIdB64, held)
+                    }
+                    HeldWelcomeVerdict.RETRY -> try {
+                        joinGroupFromWelcome(outboxUnb64(held.welcomeB64))
+                        heldWelcomes.remove(accountIdB64, held)
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (cause: Throwable) {
+                        // Still refused: the next pass reads the journal again.
+                        if (groupStillActiveHex(cause) == null) {
+                            android.util.Log.w("ChatRepository", "a held Welcome failed", cause)
+                            heldWelcomes.remove(accountIdB64, held)
+                        }
+                    }
+                }
+            }
+        } finally {
+            heldWelcomeRun.set(false)
+        }
+    }
+
+    /**
+     * §6.2.4 — `Delete this chat`, on what stays ended on this device: a
+     * one-to-one, or a group whose account is still in it on another device.
+     *
+     * The same walk as an end ([runMembershipEnd]), from the wipe on: every
+     * segment of the conversation, its stores, the MLS group, the provider
+     * snapshot, and the known-groups row and the record last. The row goes at
+     * once; the rest resumes after a crash. No register and no tombstone, since
+     * the account's other devices are not in the state this one is.
+     *
+     * The push subscription is already gone by this point: the §6.2.8 teardown
+     * retires it at the moment of the eviction, not at the moment of the
+     * delete, so a user who never presses this button still stops being woken.
+     */
+    public fun deleteEndedChat(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val hex = groupIdHex.lowercase()
+        if (!membershipEnds.save(accountIdB64, chosenEnd(hex, 0u))) return
+        endingGroups += hex
         publishThreadList()
+        pushScope.launchSession { runOwedMembershipEnds() }
     }
 
     /**
@@ -11484,6 +14331,24 @@ public class ChatRepository(
      * panel showing nothing is a strictly better failure than the panel showing
      * a request that is not there.
      */
+    /** What the members panel shows, in a form that changes when it does: the
+     *  roster, the role table and the pending set. `null` when not readable. */
+    public fun membersPanelSignature(groupIdHex: String): List<String>? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            val roles = record.group.groupRoles()
+            buildList {
+                record.group.members().forEach { add(outboxB64(it.signaturePublicKey)) }
+                add("owner:" + (roles?.owner?.let(::outboxB64) ?: ""))
+                roles?.admins?.forEach { add("admin:" + outboxB64(it)) }
+                add("pending:" + record.group.pendingProposals().size)
+                add("joins:" + record.group.pendingExternalJoins().size)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     public fun pendingMembershipRequests(groupIdHex: String): List<PendingRequest> {
         val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
         val record = groups[groupIdHex] ?: return emptyList()
@@ -11712,8 +14577,10 @@ public class ChatRepository(
             // being retried on every tick. The ticker is stopped too (the
             // §6.2.8 one-shot teardown), so this is belt and braces — but it is
             // the half that is a GATE, and the gate is what makes a surviving
-            // ticker harmless rather than merely unlikely.
-            membershipEnded = readIsActive { record.group.isActive() } == false,
+            // ticker harmless rather than merely unlikely. ADR-0087 section 9:
+            // a group left on another device's word still reads active here.
+            membershipEnded = readIsActive { record.group.isActive() } == false ||
+                groupIdHex.lowercase() in endingGroups,
             canRegister = canRegister,
         )
         if (verdict != BeaconEmitVerdict.EMIT) return verdict.name
@@ -11774,6 +14641,8 @@ public class ChatRepository(
     private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
         // ADR-0073 R.7 case 1 — a dead one-to-one commits nothing.
         if (deadOneToOne(groupIdHex)) return null
+        // ADR-0087 section 9 — and nor does a group this account is out of.
+        if (groupIdHex.lowercase() in endingGroups) return null
         val identity = canonicalIdentity.get() ?: return null
         val record = groups[groupIdHex] ?: return null
         if (currentAccountIdB64.get() == null) return null
@@ -11782,6 +14651,7 @@ public class ChatRepository(
         // window cannot race the shrink diff. Lock order is always group first,
         // provider second.
         var membersBefore: List<String>? = null
+        var accountKeysBeforeSweep: List<String>? = null
         val outcome = try {
             groupLock(groupIdHex).sessionLock {
                 MainThreadGuard.assertOffMain("sweepIfCommitter")
@@ -11791,6 +14661,10 @@ public class ChatRepository(
                 // carried this account's ownership transfer is seen.
                 var ownerBeforeSweep: ByteArray? = null
                 membersBefore = providerLock.sessionLock {
+                    // UX second-device.md section 4 — the people before the
+                    // sweep: this device never receives its own commit back,
+                    // so it writes the named row itself once the commit merges.
+                    accountKeysBeforeSweep = memberAccountKeysOrNull(record.group)
                     // ADR-0050 section 2.5a — a sweep run outside a poll (after
                     // a membership action) still counts as an observed commit
                     // for the superseded check at the next poll tail, which
@@ -11831,6 +14705,7 @@ public class ChatRepository(
             return null
         }
         if (outcome !is SweepOutcome.Committed) return outcome
+        recordOwnCommitRowBestEffort(record, groupIdHex, outcome.commitMessageId, accountKeysBeforeSweep)
         publishThreadList()
         // ADR-0057 obligation 3 — the sweep landed a membership or role change:
         // the owner appoints the newcomers, re-ranks, and drops the departed.
@@ -11848,6 +14723,8 @@ public class ChatRepository(
         val membersAfterSweep = providerLock.sessionLock { memberSignatureKeysOrNull(record.group) }
         val evictedBySweep = readIsActive { record.group.isActive() } == false
         if (evictedBySweep) dropRestoredKnownGroupBestEffort(groupIdHex)
+        // ADR-0087 section 9 — the seam on the path that merges its own commit.
+        if (evictedBySweep) providerLock.sessionLock { recordEndIfOutLocked(groupIdHex, record) }
         rotatePushRoutingIfShrankBestEffort(
             groupIdHex = groupIdHex,
             group = record.group,
@@ -11863,11 +14740,13 @@ public class ChatRepository(
             previousMemberKeys = membersBefore,
             currentMemberKeys = membersAfterSweep,
             selfEvicted = evictedBySweep,
+            ownAdd = outcome.addedCount > 0,
         )
         // ADR-0042 — a swept ADD needs the current routing secret, exactly as
         // the direct add path re-broadcasts it. No-op when this device holds
         // none.
         if (outcome.addedCount > 0) redistributePushRoutingBestEffort(groupIdHex)
+        if (groupIdHex.lowercase() in endingGroups) runOwedMembershipEnds()
         return outcome
     }
 
@@ -11946,6 +14825,9 @@ public class ChatRepository(
                     // The MLS apply is what the verdict reads, so it is deliberately
                     // OUTSIDE the guard below: a throw here must reach `adjudicate`,
                     // which skips the row exactly as the poll loop does.
+                    // The people before the row, so a swept commit that only
+                    // changes devices draws no `Members changed` row.
+                    val accountKeysBeforeRow = memberAccountKeysOrNull(record.group)
                     val processed =
                         record.group.processIncomingVerifyingRoles(identity, row.payload)
                     try {
@@ -11969,9 +14851,21 @@ public class ChatRepository(
                         )
                         // R.5 / R.8 — the same drop as the poll's.
                         val sweptEvents = withoutSupersededSenders(record.group, groupIdHex, listOf(sweptEvent))
+                        val accountKeysAfterRow = memberAccountKeysOrNull(record.group)
+                        val sweptSuppressed = sweptEvents.any {
+                            it is IncomingChatEvent.System && it.systemKind == SystemKind.Commit
+                        } && suppressMembersChangedRow(groupIdHex, accountKeysBeforeRow, accountKeysAfterRow)
                         record.consumeEvents(
                             events = sweptEvents,
                             heldResend = heldResendPredicate(groupIdHex, sweptEvents),
+                            suppressCommitRows = sweptSuppressed,
+                            membershipChange = membershipRowChange(
+                                groupIdHex,
+                                sweptEvents,
+                                accountKeysBeforeRow,
+                                accountKeysAfterRow,
+                                sweptSuppressed,
+                            ),
                             callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                                 routeIncomingCallSignaling(
                                     groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
@@ -11984,6 +14878,9 @@ public class ChatRepository(
                             },
                             scopedSink = { senderKey, kind, bytes ->
                                 receiveScopedEnvelopeBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
+                            },
+                            groupSettingSink = { senderKey, kind, bytes ->
+                                receiveGroupSettingBestEffort(record.group, groupIdHex, senderKey, kind, bytes)
                             },
                             groupNameSink = { senderKey, name ->
                                 receiveGroupName(record.group, groupIdHex, senderKey, name)
@@ -12031,11 +14928,13 @@ public class ChatRepository(
                             },
                         )
                         persistReadWatermarksIfReceipts(groupIdHex, record, sweptEvents)
+                        settleHeldCopies(groupIdHex, record, sweptEvents)
                         // A swept chat message counts toward the chat list's
                         // unread badge exactly as a polled one does.
                         localUnread.onIncomingApplied(
                             groupIdHex,
-                            sweptEvents.count { it is IncomingChatEvent.Application },
+                            sweptEvents.filterIsInstance<IncomingChatEvent.Application>().map { it.messageId },
+                            record.syncedThroughMessageId,
                         )
                         // Per row, and deliberately not deferred to the end of the
                         // sweep: this is what pushes `record.messages` into the
@@ -12410,6 +15309,13 @@ public class ChatRepository(
                 // attempt; the poll tail retries continuously.
                 android.util.Log.w("ChatRepository", "ADR-0045 owed verdict unresolved", cause)
             }
+            // ADR-0087 section 9 — that verdict may have merged this account's
+            // own removal.
+            providerLock.sessionLock { recordEndIfOutLocked(groupIdHex, record) }
+            if (groupIdHex.lowercase() in endingGroups) {
+                runOwedMembershipEnds()
+                return
+            }
             // A sweep whose verdict SETTLED but whose Welcome never reached the
             // wire owes only the fan-out. It is invisible to every other recovery
             // path — the merge cleared `hasStagedSweep()` and emptied the pending
@@ -12704,6 +15610,7 @@ public class ChatRepository(
     private fun persistMessageLogBestEffort() {
         var accountIdB64: String? = null
         val slots = mutableMapOf<String, PersistedGroup>()
+        var waiting: Map<String, PersistedGroup> = emptyMap()
         // G-37 — `groups` is a `synchronizedMap`, whose iterators are NOT
         // self-synchronising: iterating it while another coroutine registers a
         // group can throw ConcurrentModificationException. The old
@@ -12723,14 +15630,69 @@ public class ChatRepository(
                     messages = persistableMessages(record.snapshot()),
                     feedSeen = record.feedSeen.sorted(),
                     feedSeenThrough = record.feedSeenThrough,
+                    syncedThroughMessageId = record.syncedThroughMessageId,
                 )
             }
+            waiting = waitingLogSlots.snapshot()
         }
         MessageLogStore.putLog(
             context = applicationContext,
             accountIdB64 = accountIdB64 ?: return,
-            payload = MessageLogPayload(groups = slots),
+            payload = MessageLogPayload(groups = composeMessageLog(slots, waiting)),
         )
+    }
+
+    /**
+     * A joined group goes into [groups] together with what the log holds for
+     * it, under one monitor: the persist that follows a join writes the whole
+     * log, and a record registered empty would write this group's history
+     * bundle away.
+     */
+    private fun registerJoinedGroup(groupIdHex: String, record: GroupRecord) {
+        // ADR-0087 section 9 — a group this account came back to starts empty,
+        // so a slot a stale log write left behind is not history for it.
+        val cameBack = groupRefOf(groupIdHex)?.let {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.isConversationEnded(it)
+        } == true
+        val replaced = synchronized(groups) {
+            val previous = groups.put(groupIdHex, record)
+            val slot = waitingLogSlots.take(groupIdHex)
+            if (!cameBack && previous == null) slot?.let { record.adoptHistory(it) }
+            previous
+        }
+        // The ended group's handle: nothing reads it any more, and every poll
+        // that held it checks the map before it applies.
+        if (replaced != null && replaced !== record) {
+            try {
+                replaced.group.close()
+            } catch (_: Throwable) {
+                // best-effort — releasing the stale Rust Arc must not fail a join.
+            }
+        }
+    }
+
+    /**
+     * A history bundle landed while this account's chat layer runs (a device
+     * pairing while signed in, or one whose Welcomes came first): the rows go
+     * to the record of a group this device holds, else they wait for its
+     * join. [slots] are the bundle's own rows, so a persist that ran since the
+     * bundle reached the disk cost nothing.
+     */
+    private fun adoptHistoryBundle(accountIdB64: String, slots: Map<String, PersistedGroup>) {
+        synchronized(groups) {
+            if (messageLogAccount != accountIdB64) return
+            for ((groupIdHex, slot) in slots) {
+                val record = groups[groupIdHex]
+                if (record == null) {
+                    waitingLogSlots.add(groupIdHex, slot)
+                } else {
+                    record.adoptHistory(slot)
+                    slot.syncedThroughMessageId?.let { localUnread.onSyncedThrough(groupIdHex, it) }
+                }
+            }
+        }
+        persistMessageLogBestEffort()
+        publishThreadList()
     }
 
     /** Snapshot the per-group state into the public StateFlow.
@@ -12742,11 +15704,20 @@ public class ChatRepository(
         // the handle's own `Mutex`, blocking on it while holding the `groups`
         // monitor would stall every unrelated lookup behind whatever MLS call
         // happens to hold the handle.
+        // ADR-0087 section 9 — the row goes the moment the end is recorded,
+        // whatever the steps behind it still have to do.
         val records = synchronized(groups) { groups.values.toList() }
+            .filter { DsClient.pseudonymHex(it.groupId).lowercase() !in endingGroups }
+        val leaveAccount = currentAccountIdB64.get()
         val threads = records.map { record ->
             val thread = record.toThread()
             val unread = localUnread.snapshot(thread.groupIdHex)
             thread.copy(
+                leaveWaiting = !thread.membershipEnded && leaveAccount != null &&
+                    loadLeaveRequestedAt(leaveRecords, leaveAccount, thread.groupIdHex) != null,
+                joinedAtMs = leaveAccount?.let {
+                    ConversationJoinedStore.load(applicationContext, it, thread.groupIdHex)
+                },
                 localUnread = unread.count,
                 unreadViewedThisSession = unread.viewedThisSession,
             )
@@ -12825,7 +15796,7 @@ public class ChatRepository(
                     contiguous = contiguous,
                 )
                 record.seedFeedSeen(result.state.feedSeen, result.state.through)
-                if (result.newlySeen > 0) localUnread.onSeenElsewhere(hex, result.newlySeen)
+                if (result.newlySeen > 0) localUnread.onSeenElsewhere(hex, ids)
                 result.advancedTo?.let { advanced[hex] = it }
                 changed = true
             }
@@ -12888,6 +15859,12 @@ public data class ChatRepositoryState(
      * stays one entry per MLS group for everything that walks groups.
      */
     val conversations: List<ChatThread> = emptyList(),
+    /** ADR-0087 section 9 — "You are no longer in {name}.", each owed once on
+     *  this device. */
+    val endNotices: List<MembershipEndNotice> = emptyList(),
+    /** ADR-0087 section 9 — the conversations on their way out on this device
+     *  (lower-case hex): gone from every list, with their steps still running. */
+    val endingIds: Set<String> = emptySet(),
 )
 
 /** One conversation thread — keyed by hex group id. */
@@ -12929,6 +15906,14 @@ public data class ChatThread(
      * (see [membershipState]).
      */
     val membershipEnded: Boolean = false,
+    /** ADR-0087 UX 9.4 — this device asked to leave and the request has not
+     *  landed: the row says so. */
+    val leaveWaiting: Boolean = false,
+    /** The moment this device created or joined this group
+     *  ([ConversationJoinedStore]), which is what the list sorts a
+     *  conversation with no message by. Carried here so a thread that gains it
+     *  counts as changed and the row is built again. */
+    val joinedAtMs: Long? = null,
     /** Incoming chat messages this device applied while the chat was not on
      *  screen, since it was last shown or since the process started (in
      *  memory). The chat list folds it with the cross-device read cursor. */
@@ -12941,6 +15926,11 @@ public data class ChatThread(
     val feedSeen: Set<Long> = emptySet(),
     /** ADR-0063 section 5 — the feed's own contiguous-seen watermark. */
     val feedSeenThrough: Long? = null,
+    /** `docs/ux/second-device.md` section 2 — the pairing-history floor per
+     *  group of this thread (lower-case hex; a folded thread holds its older
+     *  segments' too): a row at or below it is never unread on this device
+     *  ([rowInPairingHistory]). Local, never sent. */
+    val syncedThrough: Map<String, Long> = emptyMap(),
     /** ADR-0073 R.5 — the conversation this group belongs to (the hex of the
      *  lineage's first group): the key of every person-facing store. */
     val conversationHex: String = groupIdHex,
@@ -13002,10 +15992,11 @@ public data class ChatMessage(
      *  tombstoned the message; the UI renders a muted "message
      *  deleted" placeholder and drops the text + attachments. */
     val deleted: Boolean = false,
-    /** ADR-0023 — accumulated reactions, attributed per reactor identity.
-     *  Rendered as emoji chips with counts; re-sending the same
-     *  `(reactor, emoji)` toggles it off. */
+    /** What is held after the fold of [reactionOps] (reactions-and-emoji
+     *  section 10): per person, at most three, ordered by the add. */
     val reactions: List<Reaction> = emptyList(),
+    /** The reaction ops that reached this message, in DS order. */
+    val reactionOps: List<ReactionOpRecord> = emptyList(),
     /**
      * `docs/ux/calls.md` section 6 — set when this row is a finished call
      * rather than a message. Always a [Direction.System] row, so every existing
@@ -13080,6 +16071,16 @@ public data class ChatMessage(
      * publish returned no id still moves it ([nextLastOpId]).
      */
     val lastOpId: Long = 0,
+    /**
+     * `docs/ux/second-device.md` section 4 — on a group's commit row, the
+     * person keys the receive batch it closed added ([membershipChangeOf]).
+     * Empty on every other row and on a commit that changed no people; a
+     * commit row with both lists empty is never drawn. Names are resolved
+     * when drawn, never stored.
+     */
+    val membershipJoined: List<MemberIdentity> = emptyList(),
+    /** The same, for the person keys that left. */
+    val membershipLeft: List<MemberIdentity> = emptyList(),
 ) {
     /** Whether this is a read-only row of an older segment. */
     val isHistory: Boolean get() = historyOf != null
@@ -13158,9 +16159,21 @@ public enum class Ack {
 public data class Reaction(
     val reactor: MemberIdentity,
     val emoji: String,
+    /** The DS message id of the add that gave it (orders chips); 0 when
+     *  unknown. */
+    val at: Long = 0L,
 )
 
 public enum class Direction { Outgoing, Incoming, System }
+
+/**
+ * An identity no row of [messages] holds: negative, and below every [ChatMessage.rowId]
+ * there, sent rows included. A sent row keeps its local id as its identity, so counting
+ * below `messageId` hands a call row the id of the message before it, and two rows with
+ * one key bring the timeline down.
+ */
+internal fun nextLocalRowId(messages: List<ChatMessage>): Long =
+    minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
 
 /** Internal per-group record holding the live MLS handle +
  *  the timeline mutations the StateFlow surfaces.
@@ -13195,8 +16208,29 @@ private class GroupRecord(
     @Volatile
     var knockCursor: Long = 0L
 
+    /** Whether [knockCursor] was raised to the saved position yet. */
+    @Volatile
+    var knockCursorLoaded: Boolean = false
+
     @Volatile
     var lastKnockPollMs: Long = 0L
+
+    /** ADR-0087 section 5 — the knock cursor stopped on a full pending set:
+     *  more requests wait on the server (the `64+` heading). */
+    @Volatile
+    var knockQueueFull: Boolean = false
+
+    /** The newest knock row id this device read (`Reject all`'s `through`). */
+    @Volatile
+    var lastSeenKnockId: Long = 0L
+
+    /** reactions-and-emoji section 10 — the core's reaction fold (a test may
+     *  swap it; the host JVM has no native library). */
+    var reactionFold: ReactionFold = NativeReactionFold
+
+    /** The stored author identity of message [messageId], or `null`. */
+    fun messageAuthorKey(messageId: Long): MemberIdentity? =
+        synchronized(messages) { messages.firstOrNull { it.messageId == messageId }?.authorKey }
 
     /**
      * ADR-0040 F1 (lakko-security) — swap in a freshly-[loadGroup]ed handle after a
@@ -13287,7 +16321,7 @@ private class GroupRecord(
      * field for a row that has not landed yet - a call row and an unsent
      * message both live down here.
      */
-    fun nextLocalId(): Long = minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
+    fun nextLocalId(): Long = nextLocalRowId(messages)
 
     /**
      * Put a message the user just wrote into the conversation, before it has
@@ -13416,8 +16450,12 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         ownKey: MemberIdentity?,
-        /** The op's own DS id, when the publish returned one (0 = unknown). */
-        opId: Long = 0L,
+        /** Reactions: add (`true`) or take off. */
+        reactionAdd: Boolean = true,
+        /** The op's DS message id, `null` when the publish returned none or
+         *  the op is local-only. Reactions order by it; ADR-0082 edit / delete
+         *  stamp it as [ChatMessage.lastOpId]. */
+        opId: Long? = null,
     ) {
         applyOpInternal(
             op = op,
@@ -13425,6 +16463,7 @@ private class GroupRecord(
             text = text,
             emoji = emoji,
             sender = if (op == MessageOp.Reaction) ownKey ?: OWN_REACTION_SENTINEL else ownKey,
+            reactionAdd = reactionAdd,
             opId = opId,
         )
     }
@@ -13467,11 +16506,16 @@ private class GroupRecord(
         sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
+        groupSettingSink: ((MemberIdentity?, GroupSettingKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
         /** ADR-0073 R.7 case 2 / UX 16.5 — the batch changed which devices the
          *  group holds and not which PEOPLE: its commit rows are not drawn
          *  ([deviceSwapAcrossCommits]). */
         suppressCommitRows: Boolean = false,
+        /** `docs/ux/second-device.md` section 4 — the people this batch
+         *  added and removed in a GROUP ([membershipChangeOf]), recorded on
+         *  the batch's LAST commit row; `null` records nothing. */
+        membershipChange: MembershipChange? = null,
         /** ADR-0073 R.7 case 1 — whether a received message is a RE-SEND
          *  whose original this device already holds ([resendVerdict]): such a
          *  row is dropped before storage, so it is shown, counted and
@@ -13482,9 +16526,11 @@ private class GroupRecord(
         // incoming row (another leaf sealed it) but is ours: it renders on our
         // side, exactly as if this device had sent it.
         val ownPersonKey by lazy { ownIdentity(group) }
-        for (event in events) {
+        // The batch's last commit row carries the membership change.
+        val membershipRowIndex = membershipRowIndex(events, membershipChange, suppressCommitRows)
+        for ((eventIndex, event) in events.withIndex()) {
             when (event) {
-                is IncomingChatEvent.Application -> if (heldResend?.invoke(event) != true) messages.add(
+                is IncomingChatEvent.Application -> if (heldResend?.invoke(event) != true) addUnlessFromBundle(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = if (event.senderKey != null && event.senderKey == ownPersonKey) {
@@ -13517,6 +16563,7 @@ private class GroupRecord(
                     text = event.text,
                     emoji = event.emoji,
                     sender = event.senderKey,
+                    reactionAdd = event.reactionAdd,
                     opId = event.messageId,
                 )
                 is IncomingChatEvent.Typing -> applyTyping(
@@ -13534,6 +16581,16 @@ private class GroupRecord(
                         direction = Direction.System,
                         text = systemRowText(event.systemKind),
                         createdAt = event.createdAt,
+                        membershipJoined = if (eventIndex == membershipRowIndex) {
+                            membershipChange?.joined.orEmpty()
+                        } else {
+                            emptyList()
+                        },
+                        membershipLeft = if (eventIndex == membershipRowIndex) {
+                            membershipChange?.left.orEmpty()
+                        } else {
+                            emptyList()
+                        },
                     ),
                 )
                 is IncomingChatEvent.ServiceEnvelope -> {
@@ -13603,6 +16660,11 @@ private class GroupRecord(
                     // row; the sink runs the addressee + owner gate against the
                     // live role table and stores the seed only on accept.
                     registrarSeedSink?.invoke(event.senderKey, event.envelope)
+                }
+                is IncomingChatEvent.GroupSetting -> {
+                    // ADR-0087 — a group setting. Not a timeline row; the sink
+                    // decodes it and runs its gate under the per-group lock.
+                    groupSettingSink?.invoke(event.senderKey, event.kind, event.bytes)
                 }
                 is IncomingChatEvent.ScopedDiscovery -> {
                     // ADR-0060 — a scoped-discovery service envelope. Not a
@@ -13711,9 +16773,10 @@ private class GroupRecord(
         text: String,
         emoji: String?,
         sender: MemberIdentity?,
-        /** ADR-0082 — the op's own DS id, so a stored translation or
-         *  transcript of the edited message is known to be stale. */
-        opId: Long = 0L,
+        reactionAdd: Boolean = true,
+        /** The op's own DS id (`null` = unknown): orders reactions and, for
+         *  ADR-0082, marks a stored translation of the edited message stale. */
+        opId: Long? = null,
     ) {
         synchronized(messages) {
             val idx = messages.indexOfFirst { it.messageId == target }
@@ -13744,11 +16807,38 @@ private class GroupRecord(
                     )
                 }
                 MessageOp.Reaction -> {
+                    // reactions-and-emoji section 10 — the op is kept and the
+                    // held set is the core's fold over every op, so every
+                    // member draws the same chips whatever order the rows
+                    // were applied in.
                     val e = emoji ?: return
                     if (sender == null) return
-                    messages[idx] = current.copy(
-                        reactions = toggleReaction(current.reactions, sender, e),
+                    val ops = appendReactionOp(
+                        current.reactionOps,
+                        ReactionOpRecord(
+                            person = sender,
+                            emoji = e,
+                            add = reactionAdd,
+                            at = opId ?: localOpId(current.reactionOps),
+                        ),
                     )
+                    val held = reactionFold.fold(ops) ?: current.reactions
+                    messages[idx] = current.copy(reactions = held, reactionOps = ops)
+                    // Section 12 — someone else's new reaction on one of this
+                    // person's own messages is an unseen reaction.
+                    val author = current.authorKey
+                    if (reactionAdd && author != null && sender != author &&
+                        held.any { it.reactor == sender && it.emoji == e }
+                    ) {
+                        val own = try {
+                            ownIdentity(group)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (own != null && own == author) {
+                            UnseenReactions.mark(groupId.joinToString("") { "%02x".format(it) }, target)
+                        }
+                    }
                 }
             }
         }
@@ -13818,6 +16908,9 @@ private class GroupRecord(
     fun toThread(): ChatThread = ChatThread(
         groupIdHex = DsClient.pseudonymHex(groupId),
         messages = messages.toList(),
+        syncedThrough = syncedThroughMessageId
+            ?.let { mapOf(DsClient.pseudonymHex(groupId).lowercase() to it) }
+            .orEmpty(),
         cursor = cursor,
         feedSeen = feedSeen,
         feedSeenThrough = feedSeenThrough,
@@ -13834,6 +16927,17 @@ private class GroupRecord(
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
 
+    /** ADR-0087 section 9 — the record stays a little longer than what it
+     *  showed: a log persist of another group writes this one from here. */
+    fun wipeTimeline() {
+        messages.clear()
+        seedFeedSeen(emptySet(), null)
+        synchronized(presenceLock) {
+            typingByMember = emptyMap()
+            readUpToByMember = emptyMap()
+        }
+    }
+
     /** ADR-0063 section 5 — ids the feed kept on screen above the watermark. */
     @Volatile
     var feedSeen: Set<Long> = emptySet()
@@ -13848,6 +16952,43 @@ private class GroupRecord(
     fun seedFeedSeen(ids: Set<Long>, through: Long?) {
         feedSeen = ids
         feedSeenThrough = through
+    }
+
+    /** "History is not news" (`docs/ux/second-device.md` section 2) — the
+     *  highest id a pairing bundle carried for this group; `null` when none
+     *  did. Moves up only. */
+    @Volatile
+    var syncedThroughMessageId: Long? = null
+        private set
+
+    fun raiseSyncedThrough(floor: Long?) {
+        syncedThroughMessageId = higherFloor(syncedThroughMessageId, floor)
+    }
+
+    /**
+     * Take in what the log held for this group: the rows of a history bundle
+     * and its floor. The floor and the rows move under the monitor
+     * [addUnlessFromBundle] takes, so a polled row is never added beside the
+     * same row of a bundle landing at that moment.
+     */
+    fun adoptHistory(slot: PersistedGroup) {
+        val rows = slot.messages.mapNotNull { it.toChatMessage() }
+        synchronized(messages) {
+            raiseSyncedThrough(slot.syncedThroughMessageId)
+            val merged = mergeHistoryRows(messages.toList(), rows)
+            messages.clear()
+            messages.addAll(merged)
+        }
+        if (slot.feedSeen.isNotEmpty() || slot.feedSeenThrough != null) {
+            seedFeedSeen(feedSeen + slot.feedSeen, higherFloor(feedSeenThrough, slot.feedSeenThrough))
+        }
+    }
+
+    /** A polled message, unless the history bundle already brought it. */
+    private fun addUnlessFromBundle(row: ChatMessage) {
+        synchronized(messages) {
+            if (!heldFromBundle(syncedThroughMessageId, row.messageId, messages)) messages.add(row)
+        }
     }
 
     /**
@@ -13868,10 +17009,9 @@ private class GroupRecord(
      */
     fun appendCallRow(entry: me.lakko.app.calls.CallTranscriptEntry, createdAt: String) {
         synchronized(messages) {
-            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
             messages.add(
                 ChatMessage(
-                    messageId = minOf(0L, lowest) - 1L,
+                    messageId = nextLocalId(),
                     direction = Direction.System,
                     text = me.lakko.app.calls.callRowText(entry),
                     createdAt = createdAt,
@@ -13888,12 +17028,18 @@ private class GroupRecord(
      * no DS row can take, no author), rendered in the interface language of
      * the moment it is written, as a call row is.
      */
+    fun appendOwnCommitRow(messageId: Long, createdAt: String, change: MembershipChange): Boolean =
+        synchronized(messages) {
+            val at = ownCommitRowInsertIndex(messages, messageId) ?: return@synchronized false
+            messages.add(at, ownCommitRow(messageId, createdAt, change))
+            true
+        }
+
     fun appendLocalSystemRow(text: me.lakko.app.l10n.UiText) {
         synchronized(messages) {
-            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
             messages.add(
                 ChatMessage(
-                    messageId = minOf(0L, lowest) - 1L,
+                    messageId = nextLocalId(),
                     direction = Direction.System,
                     text = text.render(),
                     createdAt = java.time.Instant.now().toString(),
@@ -13915,8 +17061,8 @@ private class GroupRecord(
     }
 
     private fun systemRowText(kind: SystemKind): String = when (kind) {
-        SystemKind.Commit -> "[mls commit]"
-        SystemKind.ExternalJoinProposal -> "[mls external join]"
+        SystemKind.Commit -> COMMIT_ROW_TEXT
+        SystemKind.ExternalJoinProposal -> EXTERNAL_JOIN_ROW_TEXT
     }
 
     companion object {
@@ -13960,10 +17106,34 @@ private class GroupRecord(
 }
 
 /**
- * ADR-0082 — the [ChatMessage.lastOpId] after an op with DS id [opId] (0 when
- * the caller has none). A real id is used as it is (idempotent when the same
- * op is applied twice); without one the value still rises, so the edit makes
- * a stored result stale.
+ * ADR-0082 — the [ChatMessage.lastOpId] after an op with DS id [opId] (`null`
+ * or 0 when the caller has none). A real id is used as it is (idempotent when
+ * the same op is applied twice); without one the value still rises, so the
+ * edit makes a stored result stale.
  */
-internal fun nextLastOpId(current: ChatMessage, opId: Long): Long =
-    if (opId > 0L) maxOf(opId, current.lastOpId) else current.effectiveOpId + 1
+internal fun nextLastOpId(current: ChatMessage, opId: Long?): Long =
+    if (opId != null && opId > 0L) maxOf(opId, current.lastOpId) else current.effectiveOpId + 1
+
+/** How many long polls a newly joined group gets of its own, and how long each
+ *  waits: its first rows are this device's own profile, then the other
+ *  person's. Together about one sweep. Chosen, not measured. */
+private const val JOINED_GROUP_POLLS: Int = 3
+private const val JOINED_GROUP_POLL_WAIT_SECS: Int = 10
+
+/** ADR-0087 section 3 — renew a handle with fewer than 90 days left. */
+private const val HANDLE_RENEW_BEFORE_MS: Long = 90L * 24 * 60 * 60 * 1000
+
+/** Section 3 — the lease a write grants when its answer named none. */
+private const val HANDLE_LEASE_MS: Long = 180L * 24 * 60 * 60 * 1000
+
+/** Section 3 — at most this many renewals in one foreground session. */
+private const val HANDLE_RENEWALS_PER_SESSION: Int = 20
+
+/** ADR-0087 4.5.2 — the device is no longer owner or admin: nothing sent. */
+public class GroupPhotoNotAllowed : IllegalStateException("not allowed to change the group photo")
+
+/** ADR-0087 4.5.2 — uploaded, not sent yet (offline): kept owed. */
+public class GroupPhotoOwed : IllegalStateException("group photo owed")
+
+/** ADR-0087 section 3 — wait before checking an unverified @name again. */
+private const val HANDLE_VERIFY_RETRY_MS: Long = 60_000L

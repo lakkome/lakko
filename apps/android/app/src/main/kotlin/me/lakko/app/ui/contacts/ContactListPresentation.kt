@@ -29,6 +29,35 @@ public data class ContactRowModel(
 /** A letter section of the alphabetical list: the header and its rows. */
 public data class ContactSection(val letter: String, val rows: List<ContactRowModel>)
 
+/** What a row of Contacts > Sent says: [title], then [username] when it is more
+ *  than the title already said. */
+public data class SentRowText(val title: String, val username: String?)
+
+/** A Sent row for the name a person was found under and their username (empty
+ *  for a person found by name alone). */
+public fun sentRowText(name: String?, username: String): SentRowText {
+    val handle = username.takeIf { it.isNotEmpty() }?.let { "@$it" }
+    val shown = name?.trim()?.takeIf { it.isNotEmpty() }
+    return when {
+        shown == null -> SentRowText(handle.orEmpty(), null)
+        shown == handle -> SentRowText(shown, null)
+        else -> SentRowText(shown, handle)
+    }
+}
+
+/**
+ * The people [sections] lists, as standard base64 account keys. The People part
+ * under the list leaves each of them out, whatever their reach, so one person
+ * stands once (`docs/ux/who-can-find-me.md` section 6.1). A contact's key comes
+ * from [contactKeyB64] by row key; a pending contact's row carries it in
+ * [ContactRowModel.personKey].
+ */
+public fun listedPersonKeys(
+    sections: List<ContactSection>,
+    contactKeyB64: (rowKey: String) -> String?,
+): Set<String> =
+    sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row -> contactKeyB64(row.key) ?: row.personKey }
+
 /** The header for rows whose name does not start with a letter. */
 public const val OTHER_SECTION: String = "#"
 

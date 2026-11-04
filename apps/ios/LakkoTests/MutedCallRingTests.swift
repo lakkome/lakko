@@ -263,6 +263,93 @@ final class MutedCallRingTests: XCTestCase {
             .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: otherGroup)))
     }
 
+    /// A wake for a conversation this device is already in a call in — its own
+    /// echo, a renegotiation offer, the end of the call on screen — is reported
+    /// and ended at once, and still fetched. Any other conversation rings.
+    func testAWakeForAConversationWithACallHereIsSilent() {
+        let group = String(repeating: "a", count: 64)
+        let otherGroup = String(repeating: "b", count: 64)
+        let routes = PushRoutingStore(defaults: defaults)
+        let inCall: @MainActor (String) -> Bool = { $0 == group }
+        XCTAssertEqual(
+            VoipPushRegistrar.decide(
+                wake(group), binding: binding, routes: routes, defaults: defaults,
+                callWakeSuppressed: inCall),
+            .silent(VoipWakeTarget(accountIdB64: acct, groupIdHex: group)))
+        XCTAssertEqual(
+            VoipPushRegistrar.decide(
+                wake(otherGroup), binding: binding, routes: routes, defaults: defaults,
+                callWakeSuppressed: inCall),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: otherGroup)))
+        // The account gate still comes first.
+        XCTAssertEqual(
+            VoipPushRegistrar.decide(
+                wake(group), binding: nil, routes: routes, defaults: defaults,
+                callWakeSuppressed: { _ in true }),
+            .refuse)
+    }
+
+    /// The composition root's answer: either host's, or a conversation known
+    /// to be a group. An unknown kind decides nothing.
+    func testAnySourceSilencesAndAnUnknownKindDecidesNothing() {
+        XCTAssertFalse(CallWakeSuppression.anySource(oneToOne: false, groupCall: false, kind: nil))
+        XCTAssertFalse(CallWakeSuppression.anySource(oneToOne: false, groupCall: false, kind: .oneToOne))
+        XCTAssertTrue(CallWakeSuppression.anySource(oneToOne: false, groupCall: false, kind: .group))
+        XCTAssertTrue(CallWakeSuppression.anySource(oneToOne: true, groupCall: false, kind: .oneToOne))
+        XCTAssertTrue(CallWakeSuppression.anySource(oneToOne: false, groupCall: true, kind: nil))
+    }
+
+    // MARK: - A placeholder whose row rang nothing
+
+    private func pending(_ uuid: UUID, group: String = "aa11", pointer: Int64 = 7) -> PendingVoipWake {
+        PendingVoipWake(uuid: uuid, groupIdHex: group, pointer: pointer)
+    }
+
+    /// The poll applied the wake's row and no call took the placeholder over
+    /// (this account's own offer, an end for a call not known here, a group
+    /// frame): it is ended at once instead of ringing to its timeout.
+    func testAPlaceholderWhoseRowRangNothingIsEndedOnceTheRowIsApplied() {
+        let uuid = UUID()
+        XCTAssertEqual(
+            VoipPushRegistrar.placeholderToEnd(
+                pending: pending(uuid), groupIdHex: "AA11", appliedThrough: 7, pendingPlaceholder: uuid),
+            uuid)
+        XCTAssertEqual(
+            VoipPushRegistrar.placeholderToEnd(
+                pending: pending(uuid), groupIdHex: "aa11", appliedThrough: 9, pendingPlaceholder: uuid),
+            uuid, "the row was already applied before the wake arrived")
+    }
+
+    func testAPlaceholderIsKeptUntilItsRowIsAppliedAndNeverAfterACallAdoptedIt() {
+        let uuid = UUID()
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: pending(uuid), groupIdHex: "aa11", appliedThrough: 6, pendingPlaceholder: uuid),
+            "the row is not fetched yet")
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: pending(uuid), groupIdHex: "aa11", appliedThrough: nil, pendingPlaceholder: uuid),
+            "the group is not loaded")
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: pending(uuid), groupIdHex: "bb22", appliedThrough: 9, pendingPlaceholder: uuid),
+            "another conversation's poll")
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: pending(uuid), groupIdHex: "aa11", appliedThrough: 9, pendingPlaceholder: nil),
+            "a ringing call adopted it")
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: pending(uuid), groupIdHex: "aa11", appliedThrough: 9, pendingPlaceholder: UUID()),
+            "a later wake superseded it")
+        XCTAssertNil(VoipPushRegistrar.placeholderToEnd(
+            pending: nil, groupIdHex: "aa11", appliedThrough: 9, pendingPlaceholder: uuid))
+    }
+
+    /// An offer from this account's other device is its outgoing call, never
+    /// an incoming one here. An unresolved key never counts as this account.
+    func testOnlyAResolvedOwnKeyIsThisAccountsSender() {
+        XCTAssertTrue(ChatRepository.isOwnAccountSender(senderKey: "me", ownKey: "me"))
+        XCTAssertFalse(ChatRepository.isOwnAccountSender(senderKey: "them", ownKey: "me"))
+        XCTAssertFalse(ChatRepository.isOwnAccountSender(senderKey: nil, ownKey: "me"))
+        XCTAssertFalse(ChatRepository.isOwnAccountSender(senderKey: "me", ownKey: nil))
+    }
+
     /// Another account's mute never silences this one's call: the mute flag
     /// read is the BOUND account's.
     func testAnotherAccountsMuteNeverSilencesTheBoundAccount() {

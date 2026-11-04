@@ -28,7 +28,9 @@
 //!   conversation-lineage registers (ADR-0073), the account's recovery
 //!   email register (ADR-0075) and its own-username register (ADR-0076),
 //!   each carried between devices by its own
-//!   DeviceGroup service envelope.
+//!   DeviceGroup service envelope, plus the saved-message register
+//!   (ADR-0065) and the conversation-end register (ADR-0087), which ride
+//!   the same change set as a folder edit.
 //!
 //! ## Why no character-level CRDT
 //!
@@ -85,7 +87,8 @@ pub mod fuzz_api {
     use crate::synced::{
         compose_lineage_envelope, compose_link_record_envelope, compose_own_username_envelope,
         compose_recovery_email_envelope, decode_lineage_envelope, decode_link_record_envelope,
-        decode_own_username_envelope, decode_recovery_email_envelope,
+        decode_own_username_envelope, decode_recovery_email_envelope, ApplyOutcome, BoundsError,
+        ConversationEnd, Stamped, SyncEntry,
     };
     use crate::{EditChain, EditOp, Hlc, HybridLogicalClock, SyncedState};
 
@@ -103,15 +106,22 @@ pub mod fuzz_api {
     ///   removal), fold to exactly that register, and not apply twice.
     /// * [`decode_own_username_envelope`] — the account's own username
     ///   register, reached the same way, held to the same properties.
+    /// * `decode_quick_reaction_envelope` — the account's quick reaction (UX
+    ///   reactions-and-emoji D3), reached the same way, held to the same
+    ///   properties.
     /// * [`decode_link_record_envelope`] — the account's invite links
     ///   (ADR-0079), reached the same way. Whatever decodes must re-encode to
     ///   the identical bytes, hold records within their bounds, and fold so
     ///   that every revoked record it carries is held revoked.
+    /// * `decode_device_ack_envelope` — the device-acknowledgement registers
+    ///   (identity-recovery 17.5), reached the same way: canonical, folding
+    ///   to exactly its keys, not applying twice.
     /// * [`SyncedState::from_bytes`] — reached from local persistence and
     ///   from the backup payload a storage tier serves. Whatever decodes
-    ///   must persist to bytes that read back as the same state, and its
+    ///   must persist to bytes that read back as the same state, its
     ///   recovery email and own-username registers must be valid and travel
-    ///   by their envelopes.
+    ///   by their envelopes, and its conversation-end registers must read
+    ///   back, travel in the snapshot, and yield writes that take effect.
     ///
     /// None may panic. Returns `false` when a property is violated.
     #[must_use]
@@ -119,8 +129,81 @@ pub mod fuzz_api {
         lineage_envelope_holds(bytes)
             && recovery_email_envelope_holds(bytes)
             && own_username_envelope_holds(bytes)
+            && quick_reaction_envelope_holds(bytes)
             && link_record_envelope_holds(bytes)
+            && device_ack_envelope_holds(bytes)
+            && channel_reaction_envelope_holds(bytes)
+            && channel_comment_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The own channel-reaction envelope (ADR-0087 section 13a): canonical,
+    /// within its bounds, folds to exactly its registers, is carried back by
+    /// `channel_reaction_envelopes`, does not apply twice, and a prune far
+    /// past every post leaves none of it.
+    fn channel_reaction_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_reaction_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_channel_reaction_envelope(&entries).as_deref()
+            == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_REACTION_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_channel_reaction_envelope(bytes) == Ok(true)
+            && state.channel_reaction_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_reaction_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state.has_channel_reaction(&e.value.channel_id, e.value.post_cursor, &e.value.emoji)
+                    == e.value.reacted
+            });
+        held && {
+            let n = state.len();
+            state.prune_channel_activity(u64::MAX) == n && state.is_empty()
+        }
+    }
+
+    /// The own-comments envelope (ADR-0087 section 13a): canonical, folds to
+    /// exactly its registers, is carried back by `channel_comment_envelopes`,
+    /// does not apply twice, lists exactly its live nonces, and a prune past
+    /// every post removes it all.
+    fn channel_comment_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_comment_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let held = crate::synced::compose_channel_comment_envelope(&entries).as_deref()
+            == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_COMMENT_ENVELOPE_MAX_LEN
+            && state.apply_channel_comment_envelope(bytes) == Ok(true)
+            && state.channel_comment_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_comment_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state
+                    .channel_comments_on(&e.value.channel_id, e.value.post_cursor)
+                    .contains(&e.value.comment_nonce)
+                    != e.value.deleted
+            });
+        held && {
+            let n = state.len();
+            state.prune_channel_activity(u64::MAX) == n && state.is_empty()
+        }
+    }
+
+    /// The device-acknowledgement envelope (identity-recovery 17.5):
+    /// canonical, folds to exactly its keys, carried back by
+    /// `device_ack_envelopes`, and does not apply twice.
+    fn device_ack_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_device_ack_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        let keys: Vec<[u8; 32]> = entries.iter().map(|e| e.value.device_key).collect();
+        crate::synced::compose_device_ack_envelope(&entries).as_deref() == Ok(bytes)
+            && state.apply_device_ack_envelope(bytes) == Ok(true)
+            && state.acknowledged_devices() == keys
+            && state.device_ack_envelopes() == vec![bytes.to_vec()]
+            && state.apply_device_ack_envelope(bytes) == Ok(false)
     }
 
     /// The link-record envelope (ADR-0079): canonical, within bounds, and a
@@ -186,6 +269,23 @@ pub mod fuzz_api {
             && state.apply_own_username_envelope(bytes) == Ok(false)
     }
 
+    /// The quick-reaction envelope (UX reactions-and-emoji D3): canonical,
+    /// within its bounds, folds to exactly its own register, and a re-send is
+    /// not an update.
+    fn quick_reaction_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(register) = crate::synced::decode_quick_reaction_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_quick_reaction_envelope(&register).as_deref() == Ok(bytes)
+            && register.value.validate().is_ok()
+            && bytes.len() <= crate::synced::QUICK_REACTION_ENVELOPE_MAX_LEN
+            && state.apply_quick_reaction_envelope(bytes) == Ok(true)
+            && state.quick_reaction_register().as_ref() == Some(&register)
+            && state.quick_reaction_envelope().as_deref() == Some(bytes)
+            && state.apply_quick_reaction_envelope(bytes) == Ok(false)
+    }
+
     /// The persisted state: it reads back as itself, and each
     /// envelope-carried register is valid and rebuilt by its envelope.
     fn persisted_state_holds(bytes: &[u8]) -> bool {
@@ -193,6 +293,9 @@ pub mod fuzz_api {
             return true;
         };
         if SyncedState::from_bytes(&state.to_bytes()).as_ref() != Ok(&state) {
+            return false;
+        }
+        if !conversation_ends_hold(&state) {
             return false;
         }
         let mut rebuilt = SyncedState::new();
@@ -211,21 +314,80 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        if let Some(envelope) = state.quick_reaction_envelope() {
+            if rebuilt.apply_quick_reaction_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
         for envelope in state.link_record_envelopes() {
             if rebuilt.apply_link_record_envelope(&envelope).is_err() {
                 return false;
             }
         }
+        for envelope in state.channel_reaction_envelopes() {
+            if rebuilt.apply_channel_reaction_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
+        for envelope in state.channel_comment_envelopes() {
+            if rebuilt.apply_channel_comment_envelope(&envelope).is_err() {
+                return false;
+            }
+        }
+        let reactions = |s: &SyncedState| {
+            s.entries()
+                .into_iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        SyncEntry::ChannelReaction(_) | SyncEntry::ChannelComment(_)
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if reactions(&rebuilt) != reactions(&state) {
+            return false;
+        }
         rebuilt.all_lineage() == state.all_lineage()
             && rebuilt.all_link_records() == state.all_link_records()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
+            && rebuilt.quick_reaction_register() == state.quick_reaction_register()
             && !state
                 .recovery_email_register()
                 .is_some_and(|r| r.value.validate().is_err())
             && !state
                 .own_username_register()
                 .is_some_and(|r| r.value.validate().is_err())
+    }
+
+    /// The conversation-end registers of a persisted state (ADR-0087 section
+    /// 9): what the reads list is what the state holds, the snapshot carries
+    /// every one, and a register a writer composes takes effect, which is
+    /// what lets a client read `None` as "nothing to tell".
+    fn conversation_ends_hold(state: &SyncedState) -> bool {
+        // `Ok(None)` is an answer too; a refused reference is the failure.
+        let takes_effect = |composed: Result<Option<Stamped<ConversationEnd>>, BoundsError>| {
+            composed.is_ok_and(|register| {
+                register.map_or(true, |r| {
+                    state
+                        .clone()
+                        .apply(r.hlc, SyncEntry::ConversationEnd(r.value))
+                        == Ok(ApplyOutcome::Applied)
+                })
+            })
+        };
+        let mut late = SyncedState::new();
+        late.apply_all(state.snapshot().stamped_entries());
+        state.ended_conversations().iter().all(|e| {
+            let conversation = &e.value.conversation;
+            let raised = e.value.epoch.saturating_add(1);
+            state.is_conversation_ended(conversation)
+                && late.is_conversation_ended(conversation)
+                && e.value.validate().is_ok()
+                && takes_effect(state.compose_conversation_ended(0, conversation, raised))
+                && takes_effect(state.compose_conversation_joined(0, conversation, raised))
+        })
     }
 
     /// Upper bound on decoded events — caps allocation so a short
@@ -405,6 +567,22 @@ mod fuzz_api_tests {
             .unwrap();
         let links = removed.link_record_envelopes().remove(0);
         let persisted_links = removed.to_bytes();
+        let reacted = removed
+            .set_channel_reaction(10, [3; 16], 7, "\u{1F44D}", true, 1_000)
+            .unwrap()
+            .unwrap();
+        let unreacted = removed
+            .set_channel_reaction(11, [3; 16], 7, "\u{1F44D}", false, 1_000)
+            .unwrap()
+            .unwrap();
+        let persisted_reactions = removed.to_bytes();
+        let commented = removed
+            .record_channel_comment(12, [3; 16], 7, [9; 16], 1_000)
+            .unwrap();
+        let uncommented = removed
+            .delete_channel_comment(13, [3; 16], 7, [9; 16], 1_000)
+            .unwrap();
+        let persisted_comments = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -416,6 +594,12 @@ mod fuzz_api_tests {
             &persisted_unnamed,
             &links,
             &persisted_links,
+            &reacted,
+            &unreacted,
+            &persisted_reactions,
+            &commented,
+            &uncommented,
+            &persisted_comments,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

@@ -74,6 +74,48 @@ public enum RefusedMailboxWrite {
     }
 }
 
+extension RefusedMailboxWrite {
+
+    /// ADR-0050 section 2.5a item 7 — one write under each key in turn, moving
+    /// on at a refusal: one key the owner rotated away must not cost a write
+    /// another key still opens. No key: one write without a proof. A failure
+    /// other than a refusal ends it, since the next key would meet the same
+    /// network. Every key refused: the last refusal.
+    public static func tryingCandidates<Output>(
+        _ candidates: [DsMailboxWriteAuth],
+        publish: (DsMailboxWriteAuth?) async throws -> Output
+    ) async throws -> Output {
+        guard !candidates.isEmpty else { return try await publish(nil) }
+        var refusal: Error?
+        for candidate in candidates {
+            do {
+                return try await publish(candidate)
+            } catch let error where isRefusal(error) {
+                refusal = error
+            }
+        }
+        throw refusal ?? MailboxUnknown()
+    }
+
+    /// ``tryingCandidates(_:publish:)`` across several mailboxes, in order: a
+    /// plan whose keys were all refused moves on to the next plan. No plan:
+    /// ``MailboxUnknown``, and nothing is written.
+    public static func tryingPlans<Output>(
+        _ plans: [MailboxWritePlan],
+        publish: (MailboxWritePlan) async throws -> Output
+    ) async throws -> Output {
+        var refusal: Error?
+        for plan in plans {
+            do {
+                return try await publish(plan)
+            } catch let error where isRefusal(error) {
+                refusal = error
+            }
+        }
+        throw refusal ?? MailboxUnknown()
+    }
+}
+
 /// One attempt at a mailbox write: the verified mailbox it goes to
 /// (ADR-0078) and how it is signed.
 public struct MailboxWriteAttempt: Equatable {
@@ -94,14 +136,38 @@ public struct MailboxWriteAttempt: Equatable {
 public struct SweepWelcomeAttempt: Equatable {
     public let target: MailboxTarget?
     public let candidates: [DsMailboxWriteAuth]
+    /// ADR-0060 section 6 — the Welcome goes to `target` WITHOUT a proof,
+    /// spending one `mailbox-write` token: the person was found in Everyone
+    /// and this device holds no grant or delegation for them.
+    public let openUnsigned: Bool
 
-    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth]) {
+    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth], openUnsigned: Bool = false) {
         self.target = target
         self.candidates = candidates
+        self.openUnsigned = openUnsigned
     }
 
     /// The address the row is posted under, `nil` when no mailbox is known.
     public var mailbox: Data? { target?.address }
+
+    /// How a sweep Welcome to one person goes (ADR-0050 2.5a item 7 with the
+    /// exception of ADR-0060 section 6). The signed order first: `plan` is
+    /// this device's own mailbox, an explicit grant, the held grants and the
+    /// delegation naming this account (``ReachCenter/writePlan(toAccountKey:groupIdHex:)``).
+    /// Only when it offers no signed candidate at all, and `open` (a kept
+    /// no-delegation envelope or this device's own record naming the person)
+    /// is known, the Welcome goes to that mailbox unsigned. Neither: nothing
+    /// is written and the Welcome stays owed. A grant or delegation that is
+    /// held but refused never falls back to an unsigned write.
+    public static func decide(plan: MailboxWritePlan?, open: MailboxTarget?) -> SweepWelcomeAttempt {
+        if let plan, !plan.candidates.isEmpty {
+            return SweepWelcomeAttempt(target: plan.target, candidates: plan.candidates)
+        }
+        if let open {
+            return SweepWelcomeAttempt(target: open, candidates: [], openUnsigned: true)
+        }
+        return SweepWelcomeAttempt(target: plan?.target, candidates: [])
+    }
 }
 
 /// The production re-check of rule 6.

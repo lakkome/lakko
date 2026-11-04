@@ -48,6 +48,16 @@ data class OprfResponse(
     val evaluated: String,
 )
 
+/** Body of `POST /discovery/oprf/batch`: the own name's terms, 1..=66
+ *  blinded elements, one `discovery-register` token for all of them. */
+@Serializable
+data class OprfBatchRequest(val blinded: List<String>)
+
+/** Response of `POST /discovery/oprf/batch`: one evaluation per element, in
+ *  the order sent. */
+@Serializable
+data class OprfBatchResponse(val evaluated: List<String>)
+
 // ----------------------------------------------------------------------------
 // /discovery/register  (services/discovery/src/registry.rs)
 // ----------------------------------------------------------------------------
@@ -133,8 +143,11 @@ data class NameLookupRequest(
  *  `NameLookupResult`). */
 @Serializable
 data class NameLookupResult(
-    /** Standard base64 of the 16-byte account id. */
-    val account_id_b64: String,
+    /** ADR-0087 section 1 — `"person"`, or `"handle"` for a public group or
+     *  channel, which names no account. */
+    val kind: String = "person",
+    /** Standard base64 of the 16-byte account id (a person only). */
+    val account_id_b64: String? = null,
     /** Standard base64 of their public record; the searcher opens it with
      *  the OPRF OUTPUT of the term it looked up (`openPublicRecord`). */
     val public_record_b64: String? = null,
@@ -162,7 +175,10 @@ data class LookupRequest(
  *  this type only describes the 200-OK path. */
 @Serializable
 data class LookupResponse(
-    val account_id: String,
+    /** ADR-0087 section 1 — `"person"`, or `"handle"` for a public group or
+     *  channel (no account id; its ids are inside the sealed record). */
+    val kind: String = "person",
+    val account_id: String? = null,
     /** ADR-0060 §5 — standard base64 of the account's public record, opened
      *  with the OPRF output of the username the lookup used. */
     val public_record_b64: String? = null,
@@ -249,13 +265,18 @@ data class IdentityUploadRequest(
      *  attest flag defaults OFF, so the leaf still appends). Preserved across
      *  non-rotation re-uploads server-side via `COALESCE`, like [leaf_auth]. */
     val genesis_attest: String? = null,
-    /** ADR-0073: base64 of the optional 177-byte key-reset attestation auth
+    /** ADR-0073: base64 of the optional 145-byte key-reset attestation auth
      *  minted in `POST /account/keys/reset/finish`. Required for a key
      *  change that carries no supersession proof; the server verifies it
      *  under the pinned attest key, requires a strictly greater generation
      *  than it stored, and deletes every KeyPackage row of the account in the
      *  same transaction. */
     val key_reset_attest: String? = null,
+    /** ADR-0074 section 3.7: standard base64 of the 201-byte conversation
+     *  link a rotation mints: the key the account's conversations are bound
+     *  to and the key it publishes, each signing the other. Opaque to the
+     *  server. */
+    val conversation_link: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */
@@ -284,6 +305,10 @@ data class IdentityFetchResponse(
      *  change is accepted as a reset. After a later PROVEN rotation it no
      *  longer binds the served key, and that path never reads it. */
     val key_reset_attest: String? = null,
+    /** ADR-0074 section 3.7: standard base64 of the account's conversation
+     *  link, absent when it never rotated. Opaque to discovery; verified
+     *  locally against the key the gate left trusted, ignored when refused. */
+    val conversation_link: String? = null,
 )
 
 // ----------------------------------------------------------------------------
@@ -376,6 +401,10 @@ data class InviteFetchResponse(
     /** Standard base64 of the sealed link; opened locally under the URL
      *  fragment's secret. */
     val sealed: String,
+    /** Every use is spent. Served anyway: a person who used it must still
+     *  reach "already in your contacts", which only consume can tell. Read
+     *  by a visitor with no session only. */
+    val used_up: Boolean = false,
 )
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`

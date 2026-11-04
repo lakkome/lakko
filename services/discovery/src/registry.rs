@@ -28,7 +28,7 @@
 //!     on 2026-10-26, ADR-0084 amendment).
 //!   * A retired row answers no lookup and no name search, its `is_public`
 //!     is cleared, and it still occupies its hash: nobody else can register
-//!     or rename to it (`409 username-taken`) until the hourly pruner deletes
+//!     or rename to it (`409 name-taken`) until the hourly pruner deletes
 //!     it, [`NamePolicy::retired_hold_secs`] after it was retired (30 days by
 //!     default). Freed at once, a stranger could take the name the same hour
 //!     and be mistaken for the person. The account that retired it may take
@@ -36,8 +36,11 @@
 //!   * **An account holds at most one retired name.** A rename frees every
 //!     earlier retired name of the account at once and retires only the name
 //!     it leaves, so renaming in a loop cannot hold a stock of names.
-//!   * First-come-first-served: a hash that is present is `409
-//!     username-taken`, whoever holds it.
+//!   * First-come-first-served across ONE namespace (ADR-0087 section 1): a
+//!     name is claimed in `name_claims` in the transaction that binds it, so
+//!     a person and a group or channel can never hold one name. A name that
+//!     is held, by anyone, current or retired, is `409 name-taken` on every
+//!     path.
 //!   * A rename takes the account out of Everyone (its public record and
 //!     name terms are keyed over the old name): the client publishes again.
 //!
@@ -65,11 +68,17 @@ pub(crate) const RETIRED_HOLD_VAR: &str = "LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SEC
 /// (migration `0028`), as the database names it in a duplicate-key error.
 const CURRENT_ACCOUNT_KEY: &str = "uq_usernames_current_account";
 
+/// `name_claims.kind` of a person's username (ADR-0087 section 1).
+pub(crate) const CLAIM_PERSON: u8 = 1;
+
+/// `name_claims.kind` of a group's or channel's handle.
+pub(crate) const CLAIM_HANDLE: u8 = 2;
+
 /// How often retired names past their hold are deleted.
 const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Body codes of this module's refusals (`{"error": <code>}`).
-const CODE_USERNAME_TAKEN: &str = "username-taken";
+const CODE_NAME_TAKEN: &str = "name-taken";
 const CODE_USERNAME_ALREADY_SET: &str = "username-already-set";
 const CODE_NO_USERNAME: &str = "no-username";
 
@@ -209,11 +218,12 @@ pub(crate) struct RegisterResponse {
 /// `POST /discovery/register` — bind an account's FIRST username: an
 /// OPRF-hashed name to the session's `account_id`.
 ///
-/// `409 {"error":"username-taken"}` when the hash is present, current or
-/// retired, whoever holds it; `409 {"error":"username-already-set"}` when the
-/// account already holds a current name (a rename is
-/// `POST /discovery/username/replace`). Both are decided by unique keys, so
-/// two concurrent registers of one account bind one name.
+/// `409 {"error":"name-taken"}` when the name is held, by a person or a group
+/// or channel, current or retired (ADR-0087 section 1); `409
+/// {"error":"username-already-set"}` when the account already holds a
+/// current name (a rename is `POST /discovery/username/replace`). Both are
+/// decided by unique keys, so two concurrent registers of one account bind
+/// one name.
 pub(crate) async fn register(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
@@ -221,11 +231,25 @@ pub(crate) async fn register(
 ) -> Result<Json<RegisterResponse>, Response> {
     let (account_id, oprf_hash) = decode_binding(&payload, &authed)?;
 
-    let result = sqlx::query("INSERT INTO usernames (oprf_hash, account_id) VALUES (?, ?)")
-        .bind(&oprf_hash[..])
-        .bind(&account_id[..])
-        .execute(&state.db)
-        .await;
+    let mut tx = state.db.begin().await.map_err(internal("begin register"))?;
+    let result = async {
+        sqlx::query("INSERT INTO name_claims (lookup_key, kind) VALUES (?, ?)")
+            .bind(&oprf_hash[..])
+            .bind(CLAIM_PERSON)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO usernames (oprf_hash, account_id) VALUES (?, ?)")
+            .bind(&oprf_hash[..])
+            .bind(&account_id[..])
+            .execute(&mut *tx)
+            .await
+    }
+    .await;
+    let result = match result {
+        Ok(done) => tx.commit().await.map(|()| done),
+        // Rolled back on drop.
+        Err(e) => Err(e),
+    };
 
     match result {
         Ok(_) => {
@@ -244,7 +268,7 @@ pub(crate) async fn register(
             if db_err.message().contains(CURRENT_ACCOUNT_KEY) {
                 CODE_USERNAME_ALREADY_SET
             } else {
-                CODE_USERNAME_TAKEN
+                CODE_NAME_TAKEN
             },
         )),
         Err(e) => Err(internal("insert usernames")(e)),
@@ -265,7 +289,7 @@ pub(crate) async fn register(
 /// 1. the account holds a current name, else `409 no-username`;
 /// 2. the new hash is free, or is this account's own RETIRED row; a hash
 ///    that is present otherwise (another account's, current or retired, or
-///    this account's current one) is `409 username-taken`;
+///    this account's current one) is `409 name-taken`;
 /// 3. every other retired row of the account is deleted (its names are
 ///    free at once): an account holds at most one retired name;
 /// 4. the current row is retired (`retired_at` now, `is_public` cleared);
@@ -309,7 +333,14 @@ pub(crate) async fn replace(
         return Err(coded(StatusCode::CONFLICT, CODE_NO_USERNAME));
     };
 
-    // 2. The new hash: free, or this account's own retired row.
+    // 2. The new hash: free in the one namespace (ADR-0087), or this
+    //    account's own retired row.
+    let claimed: Option<(u8,)> =
+        sqlx::query_as("SELECT kind FROM name_claims WHERE lookup_key = ? FOR UPDATE")
+            .bind(&new_hash[..])
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal("read new name claim"))?;
     let existing: Option<(Vec<u8>, bool)> = sqlx::query_as(
         "SELECT account_id, retired_at IS NOT NULL FROM usernames          WHERE oprf_hash = ? FOR UPDATE",
     )
@@ -317,21 +348,27 @@ pub(crate) async fn replace(
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal("read new username"))?;
-    let revive = match existing {
-        None => false,
-        Some((owner, retired)) if retired && owner == account => true,
-        Some(_) => return Err(coded(StatusCode::CONFLICT, CODE_USERNAME_TAKEN)),
+    let revive = match (claimed, existing) {
+        (None, None) => false,
+        (Some((CLAIM_PERSON,)), Some((owner, retired))) if retired && owner == account => true,
+        _ => return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN)),
     };
 
     // 3. The account keeps one retired name: the one this rename leaves.
-    sqlx::query(
+    //    Claims first, while the rows still say which names they are.
+    for sql in [
+        "DELETE FROM name_claims WHERE lookup_key IN \
+           (SELECT oprf_hash FROM usernames \
+            WHERE account_id = ? AND retired_at IS NOT NULL AND oprf_hash <> ?)",
         "DELETE FROM usernames WHERE account_id = ? AND retired_at IS NOT NULL AND oprf_hash <> ?",
-    )
-    .bind(account)
-    .bind(&new_hash[..])
-    .execute(&mut *tx)
-    .await
-    .map_err(internal("free earlier retired usernames"))?;
+    ] {
+        sqlx::query(sql)
+            .bind(account)
+            .bind(&new_hash[..])
+            .execute(&mut *tx)
+            .await
+            .map_err(internal("free earlier retired usernames"))?;
+    }
 
     // 4. Retire the current row. Before the new one becomes current: the
     //    unique key admits one current row per account.
@@ -351,26 +388,36 @@ pub(crate) async fn replace(
         .execute(&mut *tx)
         .await
     } else {
-        sqlx::query("INSERT INTO usernames (oprf_hash, account_id) VALUES (?, ?)")
+        match sqlx::query("INSERT INTO name_claims (lookup_key, kind) VALUES (?, ?)")
             .bind(&new_hash[..])
-            .bind(account)
+            .bind(CLAIM_PERSON)
             .execute(&mut *tx)
             .await
+        {
+            Ok(_) => {
+                sqlx::query("INSERT INTO usernames (oprf_hash, account_id) VALUES (?, ?)")
+                    .bind(&new_hash[..])
+                    .bind(account)
+                    .execute(&mut *tx)
+                    .await
+            },
+            Err(e) => Err(e),
+        }
     };
     match written {
         Ok(_) => {},
         // Another account took the hash between the read and the insert.
         // Rolled back on drop: the old name stays current.
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            return Err(coded(StatusCode::CONFLICT, CODE_USERNAME_TAKEN));
+            return Err(coded(StatusCode::CONFLICT, CODE_NAME_TAKEN));
         },
         Err(e) => return Err(internal("write new username")(e)),
     }
 
     // 6. Out of Everyone: both were keyed over the old name.
     for sql in [
-        "DELETE FROM display_names WHERE account_id = ?",
-        "DELETE FROM public_records WHERE account_id = ?",
+        "DELETE FROM search_terms WHERE kind = 1 AND target = ?",
+        "DELETE FROM public_records WHERE kind = 1 AND target = ?",
     ] {
         sqlx::query(sql)
             .bind(account)
@@ -398,13 +445,26 @@ pub(crate) async fn replace(
 ///
 /// Any `sqlx::Error` from the delete.
 pub(crate) async fn prune_retired(pool: &MySqlPool, hold_secs: u64) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query(
+    let hold = i64::try_from(hold_secs).unwrap_or(i64::MAX);
+    let mut tx = pool.begin().await?;
+    // The claims first, while the rows still say which names they are.
+    sqlx::query(
+        "DELETE FROM name_claims WHERE lookup_key IN \
+           (SELECT oprf_hash FROM usernames \
+            WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND)",
+    )
+    .bind(hold)
+    .execute(&mut *tx)
+    .await?;
+    let rows = sqlx::query(
         "DELETE FROM usernames          WHERE retired_at IS NOT NULL AND retired_at <= NOW(3) - INTERVAL ? SECOND",
     )
-    .bind(i64::try_from(hold_secs).unwrap_or(i64::MAX))
-    .execute(pool)
+    .bind(hold)
+    .execute(&mut *tx)
     .await?
-    .rows_affected())
+    .rows_affected();
+    tx.commit().await?;
+    Ok(rows)
 }
 
 /// Hourly pruner: frees the names retired longer ago than the hold.
@@ -434,20 +494,27 @@ pub(crate) struct LookupRequest {
 
 #[derive(Serialize)]
 pub(crate) struct LookupResponse {
+    /// `"person"`, or `"handle"` for a public group or channel (ADR-0087
+    /// section 1: one namespace, one lookup).
+    pub(crate) kind: &'static str,
     /// Base64-encoded UUIDv7 raw bytes — the `account_id` registered
-    /// under this OPRF-hashed username.
-    pub(crate) account_id: String,
+    /// under this OPRF-hashed username. A person only: a group or channel
+    /// names no account; its ids are inside the sealed record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) account_id: Option<String>,
     /// Standard base64 of the account's public record (ADR-0060 section 5):
     /// the searcher opens it with the OPRF output it just used for the
     /// username (`openPublicRecord`).
     pub(crate) public_record_b64: String,
 }
 
-/// `POST /discovery/lookup` — resolve an OPRF-hashed username to its
-/// `account_id`. Returns **404 Not Found** for unknown hashes, for a retired
-/// name (ADR-0076), and for a
-/// username whose owner is not in Everyone (ADR-0060: the same status and
-/// body, so a lookup cannot tell hidden from unregistered).
+/// `POST /discovery/lookup` — resolve an OPRF-hashed `@name`: a person in
+/// Everyone (their `account_id` and public record) or a public group or
+/// channel (its public record only, ADR-0087). Returns **404 Not Found** for
+/// unknown hashes, for a retired or lapsed name (ADR-0076, ADR-0087), for a
+/// username whose owner is not in Everyone (ADR-0060) and for a private group
+/// or channel (ADR-0087 section 2): the same status and body, so a lookup
+/// cannot tell hidden or private from unregistered.
 ///
 /// Exact-match only: there is intentionally no prefix search /
 /// autocomplete from the server (which would either need plaintext
@@ -463,16 +530,26 @@ pub(crate) async fn lookup(
     // very response an unregistered one does. `PUT /discovery/visibility`
     // stores a public record in the transaction that sets `is_public`, so the
     // join drops nobody who entered Everyone through it.
-    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT u.account_id, p.record FROM usernames u \
-         JOIN public_records p ON p.account_id = u.account_id \
-         WHERE u.oprf_hash = ? AND u.is_public = TRUE AND u.retired_at IS NULL",
+    // One query for both kinds: a private name joins no record, so it takes
+    // the same path and gets the same answer as an absent one.
+    // The kind is a literal here, which MariaDB types as BIGINT.
+    let row: Option<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT 1, u.account_id, p.record FROM usernames u \
+         JOIN public_records p ON p.kind = 1 AND p.target = u.account_id \
+         WHERE u.oprf_hash = ? AND u.is_public = TRUE AND u.retired_at IS NULL \
+         UNION ALL \
+         SELECT 2, h.handle_id, p.record FROM handles h \
+         JOIN public_records p ON p.kind = 2 AND p.target = h.handle_id \
+         WHERE h.lookup_key = ? AND h.is_public = TRUE AND h.retired_at IS NULL \
+           AND h.lease_until > NOW(3) \
+         LIMIT 1",
     )
+    .bind(&oprf_hash[..])
     .bind(&oprf_hash[..])
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
-        tracing::error!(error = %e, "lookup usernames");
+        tracing::error!(error = %e, "lookup names");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal db error".to_string(),
@@ -480,11 +557,13 @@ pub(crate) async fn lookup(
     })?;
 
     match row {
-        Some((account_id, record)) => Ok(Json(LookupResponse {
-            account_id: B64.encode(account_id),
+        Some((kind, target, record)) => Ok(Json(LookupResponse {
+            kind: crate::visibility::kind_name(u8::try_from(kind).unwrap_or(0)),
+            account_id: (kind == i64::from(crate::visibility::TARGET_PERSON))
+                .then(|| B64.encode(target)),
             public_record_b64: B64.encode(record),
         })),
-        None => Err((StatusCode::NOT_FOUND, "username not found".to_string())),
+        None => Err((StatusCode::NOT_FOUND, "name not found".to_string())),
     }
 }
 
@@ -829,12 +908,12 @@ mod rename_tests {
         // registering, not by renaming to it.
         let (st, body) = c.register(stranger, old).await;
         assert_eq!(st, StatusCode::CONFLICT);
-        assert_eq!(code(&body), "username-taken");
+        assert_eq!(code(&body), "name-taken");
         let other = random::<16>();
         assert_eq!(c.register(other, random::<64>()).await.0, StatusCode::OK);
         let (st, body) = c.replace(other, old).await;
         assert_eq!(st, StatusCode::CONFLICT);
-        assert_eq!(code(&body), "username-taken");
+        assert_eq!(code(&body), "name-taken");
         // The failed rename changed nothing for that account.
         assert_eq!(c.rows(other).await.len(), 1);
 
@@ -885,7 +964,7 @@ mod rename_tests {
         assert_eq!(c.register(random::<16>(), first).await.0, StatusCode::OK);
         let (st, body) = c.register(random::<16>(), second).await;
         assert_eq!(st, StatusCode::CONFLICT);
-        assert_eq!(code(&body), "username-taken");
+        assert_eq!(code(&body), "name-taken");
 
         // The account takes its held name back: the row is revived, not
         // duplicated, and the name it left is retired in its place.
@@ -903,7 +982,7 @@ mod rename_tests {
         // Renaming to the name already held is not a rename.
         let (st, body) = c.replace(account, second).await;
         assert_eq!(st, StatusCode::CONFLICT);
-        assert_eq!(code(&body), "username-taken");
+        assert_eq!(code(&body), "name-taken");
     }
 
     #[tokio::test]
@@ -934,7 +1013,7 @@ mod rename_tests {
         // A name someone holds.
         let (st, body) = c.register(random::<16>(), first).await;
         assert_eq!(st, StatusCode::CONFLICT);
-        assert_eq!(code(&body), "username-taken");
+        assert_eq!(code(&body), "name-taken");
 
         // Another account's session cannot rename this one.
         let (st, _) = c

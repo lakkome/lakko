@@ -27,11 +27,11 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Чаты, группы, каналы и звонки — со сквозным шифрованием по умолчанию. Серверы Lakko никогда не видят ваши сообщения.",
+      "text": "Чаты, группы, каналы и звонки — со сквозным шифрованием по умолчанию.",
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Открытый исходный код. Номер телефона не нужен.",
+      "text": "Общение по-вашему. Без номера телефона.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -56,6 +56,14 @@
     },
     "auth.explainer.ways_back": {
       "text": "Если вы его забудете, вернуться в аккаунт помогут другое устройство, на котором вы ещё вошли, ключ доступа, фраза восстановления, три слова из неё или приложение-аутентификатор.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "Системная связка ключей недоступна. Разблокируйте её или установите, затем попробуйте снова.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko не может надёжно хранить ваши ключи на этом компьютере.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -183,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Ваш пароль никогда не покидает устройство. Затем вы получите фразу восстановления, которую нужно записать.",
+      "text": "Ваш пароль никогда не покидает устройство.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -578,6 +586,10 @@
       "text": "{name} завершает звонок для всех",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Вы больше не в этой группе.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Не удалось настроить шифрование звонка, поэтому звонок не начался.",
       "status": "machine"
@@ -674,24 +686,8 @@
       "text": "Здесь появятся ваши входящие и исходящие звонки.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Присоединиться по ссылке",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Это не похоже на ссылку на звонок. Вставьте ссылку целиком и попробуйте ещё раз.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Новый звонок",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Ссылкой делится тот, кто создал звонок.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Вставьте ссылку на звонок",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
@@ -952,6 +948,10 @@
     },
     "call.log.declined": {
       "text": "Отклонён",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Звонок не удался",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -1443,7 +1443,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Убирает канал из вашего списка, и это устройство перестаёт его читать. Позже можно подписаться снова.",
+      "text": "Канал исчезнет из вашего списка, а его посты будут удалены со всех ваших устройств. Позже можно подписаться снова.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1563,7 +1563,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "Название и описание доходят до всех подписчиков в зашифрованном виде. Сервер никогда их не читает.",
+      "text": "Название и описание доходят до всех подписчиков.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1651,11 +1651,11 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Подписчики видят название и описание. Они передаются в зашифрованном виде; на сервер попадает только шифротекст.",
+      "text": "Подписчики видят название и описание.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -1855,7 +1855,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Канал исчезнет из вашего списка, и это устройство перестанет его читать. Позже можно подписаться снова.",
+      "text": "Канал исчезнет из вашего списка, а его посты будут удалены со всех ваших устройств. Позже можно подписаться снова.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2166,6 +2166,10 @@
       "text": "Оттенки кожи: {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Подсказки эмодзи",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Эмодзи",
       "status": "machine"
@@ -2184,6 +2188,14 @@
     },
     "chat.ended.no_longer_member": {
       "text": "Вы больше не участник этой группы.",
+      "status": "machine"
+    },
+    "chat.ended.notice": {
+      "text": "Вы больше не состоите в {name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "Группа и её сообщения удалены с ваших устройств.",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -2310,16 +2322,8 @@
       "text": "GIF не найдены",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Понятно",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "Открыть GIF на весь экран",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "Поиск GIF идёт через сервер Lakko, который видит, что вы ищете. Отправленные GIF шифруются, как любые файлы.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -2402,8 +2406,16 @@
       "text": "О группе",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Ссылка скопирована.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Копировать ссылку",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Не удалось скопировать ссылку.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2431,7 +2443,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Вы будете получать сообщения, пока владелец или администратор не применит ваш запрос. Чтобы вернуться, понадобится новое приглашение.",
+      "text": "Группа исчезнет из вашего списка, а её сообщения будут удалены со всех ваших устройств. Вы будете получать сообщения, пока владелец или администратор не применит ваш запрос.",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -2507,11 +2519,7 @@
       "status": "machine"
     },
     "chat.members.add.action": {
-      "text": "Добавить участника",
-      "status": "machine"
-    },
-    "chat.members.add.done": {
-      "text": "Добавлено: {name}.",
+      "text": "Добавить участников",
       "status": "machine"
     },
     "chat.members.add.error.no_bundle": {
@@ -2519,27 +2527,23 @@
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "Не удалось добавить: {names}. Добавьте их через список участников.",
+      "text": "Не удалось добавить: {names}. Попробуйте ещё раз.",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "Аккаунт {name} не зарегистрирован.",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
-      "status": "machine"
-    },
-    "chat.members.add.requested": {
-      "text": "Запрошено добавление: {name}. Человек вступит, когда владелец или администратор применит изменение.",
+    "chat.members.add.search_placeholder": {
+      "text": "Поиск по контактам и людям",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "Добавить",
       "status": "machine"
     },
-    "chat.members.admin.demoted": {
-      "text": "Роль администратора снята.",
+    "chat.members.add.submit_count": {
+      "text": "Добавить {count}",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "Добавить участников",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2550,16 +2554,8 @@
       "text": "Админ",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Назначен администратор.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Снять роль администратора",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Изменение запрошено. Оно вступит в силу, когда владелец или администратор применит его.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2582,24 +2578,48 @@
       "text": "Одобрить",
       "status": "machine"
     },
-    "chat.members.join.approved_added": {
-      "text": "Вступление одобрено. Человек добавлен в группу.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Вступление одобрено. Человек вступит, когда владелец или администратор применит изменение.",
+    "chat.members.join.asked": {
+      "text": "Запрос {when}",
       "status": "machine"
     },
     "chat.members.join.heading": {
       "text": "Запросы на вступление ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Запросы на вступление (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "Пригласил(а) {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Пригласил(а) {name}",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Ссылка-приглашение неизвестна",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Есть ещё запросы. Они появятся, когда вы ответите на эти.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Отклонить",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Отклонить все",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Будут удалены все ожидающие запросы, включая те, что вы ещё не видели.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Отклонить все запросы?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2626,10 +2646,6 @@
       "text": "Изменения состава применяет владелец группы или администратор. Они применятся автоматически, когда кто-то из них это сделает.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Теперь # изменение ожидает применения.} few {Теперь # изменения ожидают применения.} many {Теперь # изменений ожидают применения.} other {Теперь # изменения ожидают применения.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Ожидает добавления.",
       "status": "machine"
@@ -2648,18 +2664,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Удалить: {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Участник удалён.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Удаление запрошено. Оно вступит в силу, когда владелец или администратор применит изменение.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Удаление запрошено.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -2926,6 +2930,26 @@
       "text": "Отреагировать — Отреагировали: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "Можно поставить не больше 3 реакций. Уберите одну, чтобы добавить другую.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# реакция} few {# реакции} many {# реакций} other {# реакции}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, ваша реакция",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Все {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Реакции",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Отреагировали: {names}",
       "status": "machine"
@@ -2938,8 +2962,16 @@
       "text": "Убрать свою реакцию — Отреагировали: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Показать, кто отреагировал",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Реакция должна быть одним эмодзи.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Новые реакции на ваши сообщения: {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3262,8 +3294,12 @@
       "text": "Запрос на вступление",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Состав изменён",
+    "chat.system.member_joined": {
+      "text": "{name} присоединяется",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} больше не в группе",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3292,14 +3328,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, администратор",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "Теперь владелец группы — {name}. Вы остаётесь администратором.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "Теперь владелец группы — {name}. Вы теперь обычный участник.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3340,10 +3368,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Ожидает передачи прав владельца: {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Передача прав владельца запрошена. Она вступит в силу, когда владелец или администратор применит изменение.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -3618,6 +3642,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Другие ваши устройства добавляют это устройство в чаты.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Ключи восстановлены. Чаты вернутся, когда ваши контакты откроют Lakko. Прежние сообщения не восстанавливаются.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Действия с разговором",
       "status": "machine"
@@ -3652,6 +3684,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Новые реакции",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -3732,6 +3768,10 @@
     },
     "common.copy": {
       "text": "Копировать",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "Не удалось скопировать.",
       "status": "machine"
     },
     "common.creating": {
@@ -3990,6 +4030,10 @@
       "text": "Чтобы позвонить, сначала отправьте сообщение.",
       "status": "machine"
     },
+    "contacts.detail.chat_starting": {
+      "text": "Чат создаётся.",
+      "status": "machine"
+    },
     "contacts.detail.gone_body": {
       "text": "Этого человека больше нет в ваших контактах.",
       "status": "machine"
@@ -4154,6 +4198,10 @@
       "text": "Принять",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "Не удалось принять. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "Отклонить",
       "status": "machine"
@@ -4204,6 +4252,50 @@
     },
     "contacts.scan_qr.not_a_link": {
       "text": "Это не ссылка Lakko. Попробуйте другой код.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Попросить снова",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "Разрешите доступ в настройках конфиденциальности системы и попробуйте снова.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko не может использовать камеру.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko не может использовать микрофон.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Открыть настройки",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Завершить звонок и выйти",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Завершить звонок и выйти?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Сообщения и звонки будут приходить. Чтобы остановить, выйдите через значок в трее.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko продолжает работать.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Открыть Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Выйти из Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4328,10 +4420,6 @@
     },
     "device_link.qr.waiting": {
       "text": "Ждём, пока другое устройство отсканирует этот код...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "Устройство добавлено.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -4460,10 +4548,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Откройте Lakko, чтобы посмотреть свои устройства.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Открыть «Устройства»",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -4702,6 +4786,10 @@
       "text": "Привязать это устройство?",
       "status": "machine"
     },
+    "devices.scan.confirm.title_named": {
+      "text": "Привязать «{name}»?",
+      "status": "machine"
+    },
     "devices.scan.error.camera_denied": {
       "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках и попробуйте ещё раз.",
       "status": "machine"
@@ -4866,10 +4954,6 @@
       "text": "Подмешивать случайные темы",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Меньше трафика. Сервер Lakko будет точно знать, какие темы вы выбрали.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Рекомендаций пока нет. Выберите темы или попросите участников ваших групп поделиться своими каналами.",
       "status": "machine"
@@ -4879,7 +4963,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko загружает рекомендации по ним вперемешку с несколькими случайными темами, поэтому сервер Lakko не может точно узнать, какие темы вы выбрали. Он никогда не видит, какие каналы вы открываете.",
+      "text": "Lakko загружает рекомендации по ним вперемешку с несколькими случайными темами.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4914,10 +4998,6 @@
       "text": "Найти",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "Поисковые запросы отправляются на сервер Lakko.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "Каналы не найдены.",
       "status": "machine"
@@ -4947,11 +5027,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "Участники этой группы смогут видеть, какие каналы вы читаете. Сервер Lakko — нет.",
+      "text": "Участники этой группы смогут видеть, какие каналы вы читаете.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Группы, участники которых видят, какие каналы вы читаете. Сервер Lakko этого не видит.",
+      "text": "Группы, участники которых видят, какие каналы вы читаете.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -5112,14 +5192,6 @@
     },
     "feed.attachments.count": {
       "text": "{count, plural, one {# вложение} few {# вложения} many {# вложений} other {# вложения}}",
-      "status": "machine"
-    },
-    "feed.banner.dismiss": {
-      "text": "Понятно",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Лента показывает сообщения, которые получило это устройство.",
       "status": "machine"
     },
     "feed.divider.new": {
@@ -5903,7 +5975,275 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
+      "text": "Если ничего не происходит, запрос можно отправить снова.",
+      "status": "machine"
+    },
+    "group_delete.action": {
+      "text": "Удалить группу",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Группа и её сообщения будут удалены со всех ваших устройств, а @{name} освободится через 30 дней. Это нельзя отменить.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "Удалить эту группу?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "От 3 до 32 символов: буквы a-z, цифры и _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Это @имя недоступно. Попробуйте другое.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Не удалось связаться с Lakko. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Это @имя занято.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Вы сегодня создали много групп. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Выбрать",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Копировать @имя",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "У этой группы нет @имени. Выберите его.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Группа",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Закрытая группа · {count, plural, one {# участник} few {# участника} many {# участников} other {# участника}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Открытая группа · {count, plural, one {# участник} few {# участника} many {# участников} other {# участника}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Вы достигли лимита на отправку файлов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Фото могут менять только владелец и администраторы.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "Не удалось загрузить фото. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "Фото больше недоступно. Выберите другое.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Применится, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Все в группе увидят вместо него инициалы.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "Удалить фото группы?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Все реакции",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Участники могут реагировать любым эмодзи.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "Выберите хотя бы одну.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "Можно выбрать до 100.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Без реакций",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Участники не могут реагировать на сообщения.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Убрать {emoji}",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Некоторые реакции",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Участники могут реагировать только выбранными вами эмодзи.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Изменения пропадут, если их не сохранить.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Все",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# реакция} few {# реакции} many {# реакций} other {# реакции}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Выкл.",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Добавить участников",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Копировать ссылку-приглашение",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Вы создали эту группу",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Здесь только вы.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Группа исчезнет из поиска. Вступить можно будет только по приглашению владельца или администратора. Все участники останутся.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Сделать закрытой",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "Сделать группу закрытой?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# человек ждёт вступления. Вы ещё можете ему ответить.} few {# человека ждут вступления. Вы ещё можете им ответить.} many {# человек ждут вступления. Вы ещё можете им ответить.} other {# человека ждут вступления. Вы ещё можете им ответить.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Любой сможет найти её и попросить вступить. Её название, фото, описание и примерный размер станут видны всем.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Сделать открытой",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "Сделать группу открытой?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "Старое @имя сразу перестанет работать. Оно останется за этой группой 30 дней.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Изменить",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "Изменить @имя?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@имя",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Это видят только участники.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "По этому имени группу может найти любой.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "У открытой группы должно быть название.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "Не удалось сохранить, кто может вступить. Откройте, чтобы попробовать снова.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Применится, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Ждёт сохранения",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Закрытая",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Вступить можно только по приглашению администратора. Группы нет в поиске.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Открытая",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Любой может найти эту группу и попросить вступить.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Тип группы",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Кто может вступить",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -6191,7 +6531,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Приглашение от {fingerprint}",
+      "text": "Приглашение от {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6550,20 +6890,24 @@
       "text": "Настройки",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Настройки. В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Группы",
+      "status": "machine"
+    },
+    "new_group.error.secure_setup": {
+      "text": "Не удалось создать группу. Ничего не создано. Попробуйте ещё раз.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
       "text": "Войдите снова, чтобы создать группу.",
       "status": "machine"
     },
-    "new_group.index_hint": {
-      "text": "Выберите группу, чтобы начать общение",
-      "status": "machine"
-    },
     "new_group.name_hint": {
-      "text": "Название видят все участники. Оно передаётся в зашифрованном виде; сервер никогда его не читает.",
+      "text": "Название видят все участники.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6575,7 +6919,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Сначала добавьте контакты: группа начинается с людей, которых вы уже знаете.",
+      "text": "Группу можно начать одному. Людей можно добавить сейчас или позже.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6648,6 +6992,14 @@
     },
     "notification.message.new": {
       "text": "Новое сообщение",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} отреагировал(а) {emoji} на ваше сообщение",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Открыть в приложении",
       "status": "machine"
     },
     "profile.avatar.change": {
@@ -6947,7 +7299,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 слов, которые храните только вы. Надёжнее и не связано с почтой.",
+      "text": "12 слов, которые храните только вы. Самый надёжный способ вернуться.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
@@ -7039,7 +7391,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Введите имя пользователя, затем откройте Lakko на устройстве, где вы ещё не вышли из аккаунта, и введите код, который оно покажет. Ничего, что могут прочитать серверы Lakko, не передаётся. Камера не нужна; при желании можно использовать QR-код.",
+      "text": "Введите имя пользователя, затем откройте Lakko на устройстве, где вы ещё не вышли из аккаунта, и введите код, который оно покажет. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7534,8 +7886,24 @@
       "text": "слово {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Спросить снова",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Пока нет ответа.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Отправленные запросы",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Ждём администратора.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
-      "text": "Устройство, на котором вы ещё не вышли из аккаунта, покажет шестизначный код; введите его здесь. Передача защищена сквозным шифрованием; серверы Lakko не могут её прочитать. Камера не нужна; при желании можно использовать QR-код.",
+      "text": "Устройство, на котором вы ещё не вышли из аккаунта, покажет шестизначный код; введите его здесь. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7710,6 +8078,50 @@
       "text": "Сохранённые",
       "status": "machine"
     },
+    "search.conversation.channel_line": {
+      "text": "Открытый канал · {band} подписчиков",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Открытая группа · {band} участников",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Открыть",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Вы сегодня попросились во много групп. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "В этой группе сейчас слишком много запросов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Попросить вступить",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "Запрос отправлен. Администратор увидит его, когда в следующий раз откроет Lakko.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Запрос отправлен",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Подписаться",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Группы и каналы",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "Ничего не найдено. Проверьте написание или попросите ссылку-приглашение.",
+      "status": "machine"
+    },
     "search.people.add_contact": {
       "text": "Добавить в контакты",
       "status": "machine"
@@ -7751,11 +8163,59 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Сообщения, звонки и запросы на добавление в контакты защищены сквозным шифрованием: прочитать их могут только участники разговора, но не серверы Lakko. Ваш пароль никогда не покидает устройство, а у каждого контакта есть код безопасности, который можно сверить при встрече.",
+      "text": "Сообщения, звонки и запросы на добавление в контакты защищены сквозным шифрованием: прочитать их могут только участники разговора. Ваш пароль никогда не покидает устройство, а у каждого контакта есть код безопасности, который можно сверить при встрече.",
       "status": "machine"
     },
     "settings.about.protection.title": {
       "text": "Как Lakko вас защищает",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Закрыть окно",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Чаты, Лента, Контакты, Звонки, Настройки",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Изменить последнее сообщение (в пустом поле)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Закрыть меню, диалог или панель; выйти из поиска",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Переключить папку чатов",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Новый чат",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Предыдущий или следующий разговор",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Выйти из Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Поиск по разговорам и людям",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Отправить или начать новую строку",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Настройки",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Сочетания клавиш",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7898,6 +8358,18 @@
       "text": "Тема на этом устройстве.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Быстрая реакция",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Изменить быструю реакцию",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Дважды коснитесь сообщения, чтобы отправить её.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Тема",
       "status": "machine"
@@ -7946,12 +8418,40 @@
       "text": "Ваши данные",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Сообщения и звонки будут приходить, пока окно закрыто.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Не закрываться, когда окно закрыто",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Как Lakko работает на этом компьютере.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Открывать Lakko при входе в систему на этом компьютере",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Не удалось прочитать настройки. Откройте Настройки снова.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Не удалось изменить настройку. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Сначала войдите в Lakko на новом устройстве. Затем выберите, на каком из двух показан код.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "Нет камеры ни на одном из устройств? Войдите на новом и выберите «{method}»: здесь появится запрос «{prompt}» с кодом для сверки.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Устройства. В ваш аккаунт добавлено устройство",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -7975,7 +8475,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Телефоны, планшеты и компьютеры, на которых выполнен вход в ваш аккаунт. Добавление устройства защищено сквозным шифрованием; серверы Lakko не могут его прочитать.",
+      "text": "Телефоны, планшеты и компьютеры, на которых выполнен вход в ваш аккаунт.",
       "status": "machine"
     },
     "settings.devices.list.lede": {
@@ -8012,10 +8512,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Сегодня на этом устройстве были сброшены ключи аккаунта. Остальные устройства вышли из аккаунта и удалены. Добавьте их снова в разделе «Настройки» > «Устройства» > «Добавить устройство».",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Устройство добавлено. Оно появится в списке, когда закончит подключение.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -8096,6 +8592,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Включите уведомления",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Когда кто-то реагирует на ваши сообщения",
       "status": "machine"
     },
     "settings.passkeys.add": {
@@ -8488,6 +8992,10 @@
     },
     "settings.section.security": {
       "text": "Безопасность",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Безопасность. В ваш аккаунт добавлено устройство",
       "status": "machine"
     },
     "settings.security.devices.sub": {
@@ -8890,6 +9398,22 @@
       "text": "Применение",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Все мои контакты",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Только выбранные",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Только контакты выбранных вами людей ({chosen} из {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Теперь только выбранные вами контакты. Изменить в разделе {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Контакты моих контактов",
       "status": "machine"
@@ -8936,6 +9460,18 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Выберите группы и каналы",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Выбрать контакты",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "У вас пока нет контактов.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Поиск контактов",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -9000,6 +9536,10 @@
     },
     "who_can_find_me.status.offline": {
       "text": "Изменения применятся, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Их контакты могут меня найти",
       "status": "machine"
     },
     "who_can_find_me.title": {

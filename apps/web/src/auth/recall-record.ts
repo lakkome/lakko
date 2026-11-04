@@ -34,6 +34,7 @@
  * username (UTF-8, the rest)`.
  */
 
+import type { DeviceCipher } from "./device-cipher";
 import { requireAccountStoresWritable } from "./account-store-gate";
 
 const DB_NAME = "lakko-recall-record";
@@ -121,12 +122,12 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 /** Seal `record` under `deviceKey` and write it. Overwrites a prior row. */
-export async function putRecallRecord(record: RecallRecord, deviceKey: CryptoKey): Promise<void> {
+export async function putRecallRecord(record: RecallRecord, deviceKey: DeviceCipher): Promise<void> {
   const plain = encodeRecallPlaintext(record);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   let ct: Uint8Array;
   try {
-    ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plain.slice()));
+    ct = new Uint8Array(await deviceKey.encrypt(iv, plain));
   } finally {
     plain.fill(0);
   }
@@ -158,7 +159,7 @@ export async function putRecallRecord(record: RecallRecord, deviceKey: CryptoKey
  *  the row does not open under `deviceKey` or is not a record. */
 export async function getRecallRecord(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<RecallRecord | null> {
   const db = await openDb();
   let row: RecallRow | undefined;
@@ -178,7 +179,7 @@ export async function getRecallRecord(
   }
   const iv = row.ciphertext.slice(0, 12);
   const ct = row.ciphertext.slice(12);
-  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct));
+  const plain = new Uint8Array(await deviceKey.decrypt(iv, ct));
   try {
     const record = decodeRecallPlaintext(accountIdB64, plain);
     if (record === null) throw new Error("recall record is not readable");

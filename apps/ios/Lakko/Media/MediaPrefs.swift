@@ -12,7 +12,6 @@ import Foundation
 ///   * the composer's record mode, mic or camera (UX spec §1, "remembered per
 ///     device");
 ///   * "Autoplay video notes", default OFF (§3 — autoplay downloads media);
-///   * the GIF privacy note's "Got it" (§5, "remembered per device");
 ///   * the local-only "played" marker on voice messages and video notes (§8 —
 ///     never sent, it is not a read receipt).
 ///
@@ -28,7 +27,6 @@ public struct MediaPrefs {
 
     public static let recordModeKey = "lakko.composer.recordMode"
     public static let autoplayKey = "lakko.media.autoplayVideoNotes"
-    public static let gifNoteKey = "lakko.gif.privacyNoteDismissed"
     /// The device-wide played set used before it was per account. Never read;
     /// removed by ``clearPlayed(accountIdB64:)``.
     public static let playedKey = "lakko.media.played"
@@ -65,11 +63,6 @@ public struct MediaPrefs {
     public var autoplayVideoNotes: Bool {
         get { defaults.bool(forKey: Self.autoplayKey) }
         nonmutating set { defaults.set(newValue, forKey: Self.autoplayKey) }
-    }
-
-    public var gifNoteDismissed: Bool {
-        get { defaults.bool(forKey: Self.gifNoteKey) }
-        nonmutating set { defaults.set(newValue, forKey: Self.gifNoteKey) }
     }
 
     public func playedKeys() -> [String] {

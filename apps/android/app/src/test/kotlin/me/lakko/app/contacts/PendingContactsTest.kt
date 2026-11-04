@@ -282,4 +282,16 @@ class PendingContactsTest {
         assertEquals(InviteLandingState.Own, InviteLandingViewModel.stateFor(InviteOpenResult.Own))
         assertEquals(InviteLandingState.OpenFailed, InviteLandingViewModel.stateFor(InviteOpenResult.Failed("x")))
     }
+
+    @Test
+    fun `a pending contact matches by stated name or username, and all of them with nothing typed`() {
+        val ines = contact("0a", 1, name = "Ines Vik", username = "t4i5066")
+        val anna = contact("0b", 2)
+        val both = listOf(ines, anna)
+        assertEquals(listOf(ines), PendingContacts.matching(both, "ines"))
+        assertEquals(listOf(ines), PendingContacts.matching(both, " INES vik "))
+        assertEquals(listOf(ines), PendingContacts.matching(both, "@t4i"))
+        assertEquals(emptyList<PendingContact>(), PendingContacts.matching(both, "zoe"))
+        assertEquals(both, PendingContacts.matching(both, "  "))
+    }
 }

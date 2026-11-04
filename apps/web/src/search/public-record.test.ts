@@ -55,7 +55,7 @@ const NOBODY: KnownPerson = {
   contactFallbackName: null,
   verifiedUsername: null,
   isContact: false,
-  keptGrantWireB64: null,
+  keptGrantWires: [],
 };
 
 /** A public record as the person publishes it: over their name term and
@@ -103,6 +103,30 @@ function deps(over: Partial<PeopleSearchDeps> = {}): PeopleSearchDeps {
     ...over,
   };
 }
+
+describe("what a public record states about the username", () => {
+  it("reaches the search from the real core, certificate included", () => {
+    const certificate = new Uint8Array(wasm.usernameCertificateLen()).fill(9);
+    const payload = wasm.IntroductionPayload.forPublicRecord(
+      ANNA_KEY,
+      ANNA_ACC,
+      "Anna Weber",
+      "anna",
+      certificate,
+      bindingOf(ANNA_KEY),
+    );
+    let record: Uint8Array;
+    try {
+      record = wasm.composePublicRecord(payload, [TERM_OUT], 1n);
+    } finally {
+      payload.free();
+    }
+    expect(openPublicRecordWith(wasm as unknown as Wasm, record, TERM_OUT)).toMatchObject({
+      username: "anna",
+      usernameCertificate: certificate,
+    });
+  });
+});
 
 describe("a name hit in Everyone", () => {
   it("is named from its public record, opened with the term's OPRF output", async () => {

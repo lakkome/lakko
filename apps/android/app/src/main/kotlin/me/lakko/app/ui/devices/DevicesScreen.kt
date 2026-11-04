@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,6 +84,7 @@ import me.lakko.app.devices.removalGate
 import me.lakko.app.devices.removalGateLine
 import me.lakko.app.devices.removalSheetOutcome
 import me.lakko.app.auth.UniffiLoginHandleSource
+import me.lakko.app.devices.DeviceCardCenter
 import me.lakko.app.devices.PAIRING_FAILED_COPY
 import me.lakko.app.devices.PAIRING_NO_USERNAME_COPY
 import me.lakko.app.devices.PairingCodec
@@ -129,6 +131,25 @@ public fun DevicesScreen(
     val account = (authState as? AuthState.Session)?.account
     val secrets = identitySecrets
 
+    // UX 17.5 - opening this screen while a new device is pending is what
+    // counts as seen: every pending device is acknowledged for the account,
+    // and its row stays highlighted until the screen is left.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_START -> me.lakko.app.devices.NewDeviceNotices.enterDevices()
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> me.lakko.app.devices.NewDeviceNotices.leaveDevices()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            me.lakko.app.devices.NewDeviceNotices.leaveDevices()
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -173,10 +194,11 @@ public fun DevicesScreen(
                     }
                 }
             }
-            // UX 17.5 - a device was added to the account (the same banner
-            // as on the Chats list; no `Open Devices` here, this is it), or
-            // the line that replaces it after a `New` device was removed.
-            NewDeviceNoticeBanner(onOpenDevices = null)
+            // UX 17.5 - a device was added to the account: the explanation
+            // above the list while a row carries `New` (opening this screen is
+            // the acknowledgement), or the line shown after a `New` device
+            // was removed.
+            NewDeviceExplanationBlock()
             RemovedNewDeviceLine(onChangePassword = onChangePassword)
             Text(
                 t("settings.devices.lede"),
@@ -202,9 +224,26 @@ public fun DevicesScreen(
                 chatRepository = chatRepository,
             )
 
+            // UX second-device.md section 2.1 - the last scan added a device
+            // but handed over no keys: the existing warning stays here until
+            // Add a device is pressed again.
+            val keysNotSentFor by me.lakko.app.devices.ScanLinkedNotice.shared.keysNotSentFor
+                .collectAsStateWithLifecycle()
+            if (keysNotSentFor == account.accountIdB64) {
+                Text(
+                    t("device_link.keys_not_sent"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             Button(
-                onClick = onAddDevice,
+                onClick = {
+                    me.lakko.app.devices.ScanLinkedNotice.shared.clear()
+                    onAddDevice()
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
@@ -325,6 +364,9 @@ public fun AddDeviceScreen(
                     ),
                 )
                 AddDeviceMode.Scan -> ScanSection(
+                    // UX second-device.md section 2.1 - a device added goes
+                    // straight back to the Devices list, no result line.
+                    onLinked = onBack,
                     authRepository = authRepository,
                     ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
@@ -385,9 +427,13 @@ private fun PairSection(
     var state: PairUi by remember { mutableStateOf(PairUi.Idle) }
     var session: PairingOrchestrator.JoinSession? by remember { mutableStateOf(null) }
     var pollJob: Job? by remember { mutableStateOf(null) }
+    // UX second-device.md section 2.1 - the city for this code, asked when
+    // the panel opens.
+    val place = remember { DeviceCardCenter.startPairingPlace() }
 
     DisposableEffect(Unit) {
         onDispose {
+            place.cancel()
             pollJob?.cancel()
             pollJob = null
             session?.dispose()
@@ -409,51 +455,58 @@ private fun PairSection(
             PairUi.Idle -> Button(
                 onClick = {
                     state = PairUi.Preparing
-                    try {
-                        val js = PairingOrchestrator.prepareJoinFlow(
-                            context = context,
-                            loginHandle = loginHandle,
-                            known = known,
-                        )
-                        session = js
-                        state = PairUi.Waiting(js.qrPayload)
-                        pollJob = scope.launch {
-                            try {
-                                when (val outcome = js.awaitWelcome()) {
-                                    is WelcomeCourier.WelcomeOutcome.Received -> {
-                                        state = PairUi.Joining
-                                        try {
-                                            // Phase 2a3d8-ui — pass the
-                                            // Welcome cursor so `accept`
-                                            // polls past it for the
-                                            // scanner-side history bundle.
-                                            js.accept(
-                                                welcomeBytes = outcome.welcomeBytes,
-                                                welcomeCursor = outcome.welcomeCursor,
-                                            )
-                                            state = PairUi.Done
-                                        } catch (cause: Throwable) {
-                                            me.lakko.app.rethrowIfCancelled(cause)
-                                            Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
-                                            state = PairUi.Error(LINK_FAILED)
+                    scope.launch {
+                        // UX second-device.md section 2.1 - the card takes the place that
+                        // has arrived within the bound; the code is never rebuilt for it.
+                        val envelope = DeviceCardCenter.pairingCardEnvelope(place.settled())
+                        try {
+                            val js = PairingOrchestrator.prepareJoinFlow(
+                                context = context,
+                                loginHandle = loginHandle,
+                                known = known,
+                                deviceCardEnvelope = envelope,
+                            )
+                            session = js
+                            state = PairUi.Waiting(js.qrPayload)
+                            pollJob = scope.launch {
+                                try {
+                                    when (val outcome = js.awaitWelcome()) {
+                                        is WelcomeCourier.WelcomeOutcome.Received -> {
+                                            state = PairUi.Joining
+                                            try {
+                                                // Phase 2a3d8-ui — pass the
+                                                // Welcome cursor so `accept`
+                                                // polls past it for the
+                                                // scanner-side history bundle.
+                                                js.accept(
+                                                    welcomeBytes = outcome.welcomeBytes,
+                                                    welcomeCursor = outcome.welcomeCursor,
+                                                )
+                                                state = PairUi.Done
+                                            } catch (cause: Throwable) {
+                                                me.lakko.app.rethrowIfCancelled(cause)
+                                                Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
+                                                state = PairUi.Error(LINK_FAILED)
+                                            }
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Timeout -> {
+                                            state = PairUi.Error(UiText("settings.devices.show.error.timeout"))
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Cancelled -> {
+                                            state = PairUi.Idle
                                         }
                                     }
-                                    WelcomeCourier.WelcomeOutcome.Timeout -> {
-                                        state = PairUi.Error(UiText("settings.devices.show.error.timeout"))
-                                    }
-                                    WelcomeCourier.WelcomeOutcome.Cancelled -> {
-                                        state = PairUi.Idle
-                                    }
+                                } catch (cause: Throwable) {
+                                    me.lakko.app.rethrowIfCancelled(cause)
+                                    Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
+                                    state = PairUi.Error(LINK_FAILED)
                                 }
-                            } catch (cause: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(cause)
-                                Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
-                                state = PairUi.Error(LINK_FAILED)
                             }
+                        } catch (cause: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(cause)
+                            Log.w(TAG, "WARN prepare failed: ${cause.javaClass.simpleName}")
+                            state = PairUi.Error(LINK_FAILED)
                         }
-                    } catch (cause: Throwable) {
-                        Log.w(TAG, "WARN prepare failed: ${cause.javaClass.simpleName}")
-                        state = PairUi.Error(LINK_FAILED)
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -547,15 +600,12 @@ private sealed interface ScanUi {
     class ConfirmTransfer(val decoded: DecodedPairingQr) : ScanUi
 
     data object Processing : ScanUi
-    /** [keysSent] is `false` when this device had no recovery phrase to hand
-     *  over (or the hand-over failed): the new device is linked but has to
-     *  bring its keys another way, and the screen says so. */
-    data class Done(val keysSent: Boolean) : ScanUi
     data class Error(val message: UiText) : ScanUi
 }
 
 @Composable
 private fun ScanSection(
+    onLinked: () -> Unit,
     authRepository: AuthRepository,
     ownUsername: String,
     accountIdBytes: ByteArray,
@@ -702,11 +752,19 @@ private fun ScanSection(
             is ScanUi.ConfirmTransfer -> Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // UX second-device.md section 2.1 - named from the card the
+                // payload carried, with the lines its Devices row will show;
+                // what the new device says about itself, so the warning stays.
+                val payloadCard = s.decoded.deviceCard?.let(me.lakko.app.devices.DeviceCardCenter::fromFfi)
+                val rowWords = deviceRowWords()
                 Text(
-                    t("devices.scan.confirm.title"),
+                    me.lakko.app.devices.DeviceCards.confirmTitle(payloadCard).text(),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                for (line in me.lakko.app.devices.DeviceCards.pairingLines(payloadCard, rowWords)) {
+                    Text(line, style = MaterialTheme.typography.bodyMedium)
+                }
                 Text(
                     t("devices.scan.confirm.body"),
                     style = MaterialTheme.typography.bodyMedium,
@@ -749,7 +807,13 @@ private fun ScanSection(
                             // waits for the device to land and publish
                             // its KeyPackage.
                             chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                            state = ScanUi.Done(keysSent = scanned.keysSent)
+                            // UX second-device.md section 2.1 - no result
+                            // line: straight back to the Devices list. A
+                            // hand-over without keys leaves its warning
+                            // under that list.
+                            me.lakko.app.devices.ScanLinkedNotice.shared.linked(accountIdB64, scanned.keysSent)
+                            proof.clear()
+                            onLinked()
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             when (me.lakko.app.ui.auth.gatedFailureOf(cause)) {
@@ -795,21 +859,6 @@ private fun ScanSection(
                 Text(t("device_link.request.adding"))
             }
 
-            is ScanUi.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    t("device_link.request.added"),
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                if (!s.keysSent) {
-                    Text(
-                        t("device_link.keys_not_sent"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
 
             is ScanUi.Error -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -863,6 +912,21 @@ internal fun deviceRowLabel(isSelf: Boolean, index: Int): UiText =
         UiText("settings.devices.device_n", texts = mapOf("number" to (index + 1).toString()))
     }
 
+/** Runs [reload] on every change of the account's device list while this is
+ *  composed and the screen is started. Not on opening: the screen reads the
+ *  list then itself. A change during a reload restarts it. */
+@Composable
+internal fun ReloadOnRosterChange(reload: suspend () -> Unit) {
+    val revision by me.lakko.app.devices.DeviceRosterChanges.revision.collectAsStateWithLifecycle()
+    val atOpen = remember { revision }
+    val latest by androidx.compose.runtime.rememberUpdatedState(reload)
+    LaunchedEffect(revision) {
+        if (revision != atOpen) latest()
+    }
+}
+
+// BringIntoViewRequester is experimental in the pinned Compose foundation.
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun DevicesList(
     authRepository: AuthRepository,
@@ -888,10 +952,12 @@ private fun DevicesList(
     // Non-null while the new phrase screen is up; the value says whether
     // the words are withheld (the publish is still owed).
     var rotatedPhrase: Boolean? by remember { mutableStateOf(null) }
-    // UX 17.5 - which rows carry `New`.
-    val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
+    // UX 17.5 - which rows carry `New` and the highlight.
+    val notice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
     // ADR-0080 - what each device said about itself.
     val cards by me.lakko.app.devices.DeviceCardCenter.cards.collectAsStateWithLifecycle()
+    // The own row follows the city switch.
+    val showCityOn by me.lakko.app.devices.DeviceCardCenter.showCity.collectAsStateWithLifecycle()
     val locale = remember { java.util.Locale.getDefault() }
     // UX section 3 - Remove all other devices: its sheet, the run, and each
     // row's own progress while it runs.
@@ -916,6 +982,32 @@ private fun DevicesList(
         } catch (cause: Throwable) {
             Log.w(TAG, "WARN device list failed: ${cause.javaClass.simpleName}")
             state = DevicesListUi.Error(UiText("settings.devices.error.load"))
+        }
+    }
+
+    // UX section 3 - the list follows the account: a device that joined or left
+    // while this screen is open, on any route. In place, with no spinner, and
+    // a read that fails keeps the rows on screen.
+    ReloadOnRosterChange {
+        val read = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val list = DeviceRemoval.listDevices(
+                    context = context,
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                )
+                val active = runner()
+                Triple(list, active?.pendingDeviceIds().orEmpty(), active?.waitingOnPersonDeviceIds().orEmpty())
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w(TAG, "WARN device list not re-read: ${cause.javaClass.simpleName}")
+                null
+            }
+        }
+        if (read != null) {
+            pending = read.second
+            waitingOnPerson = read.third
+            state = DevicesListUi.Ready(read.first.devices)
         }
     }
 
@@ -953,27 +1045,26 @@ private fun DevicesList(
         }
 
         is DevicesListUi.Ready -> {
-            val strings = me.lakko.app.l10n.Localization.strings.value
-            val words = me.lakko.app.devices.DeviceCards.Words(
-                device = t("devices.row.device"),
-                online = t("devices.row.online"),
-                app = { version ->
-                    if (version.isEmpty()) strings["devices.row.app_name"]
-                    else strings.format("devices.row.app", mapOf("version" to version))
-                },
-                place = { city, country ->
-                    strings.format("devices.row.place", mapOf("city" to city, "country" to country))
-                },
-                countryName = { code ->
-                    java.util.Locale("", code).getDisplayCountry(locale).ifEmpty { code }
-                },
-            )
+            val words = deviceRowWords()
+            // UX section 3 - this device's row is built from what it would
+            // put in its own card, never looked up among the received cards.
+            val ownFields = remember(s, showCityOn) {
+                me.lakko.app.devices.DeviceCardCenter.currentFields(System.currentTimeMillis())
+            }
             val (current, others) = me.lakko.app.devices.DeviceCards.order(
                 s.devices.map { device ->
                     val keyHex = hexKey(device.signaturePublicKey)
-                    me.lakko.app.devices.DeviceCards.RowInput(keyHex, device.leafIndex, device.isSelf, cards[keyHex])
+                    me.lakko.app.devices.DeviceCards.RowInput(
+                        keyHex,
+                        device.leafIndex,
+                        device.isSelf,
+                        me.lakko.app.devices.DeviceCards.cardFor(device.isSelf, keyHex, cards, ownFields),
+                    )
                 },
             )
+            // UX 17.5 - the first highlighted row in display order.
+            val firstHighlighted = (listOfNotNull(current) + others)
+                .firstOrNull { !it.isSelf && it.keyHex in notice.highlighted }?.keyHex
 
             @Composable
             fun DeviceRow(input: me.lakko.app.devices.DeviceCards.RowInput) {
@@ -983,13 +1074,16 @@ private fun DevicesList(
                     words,
                     System.currentTimeMillis(),
                     java.time.ZoneId.systemDefault(),
-                    android.text.format.DateFormat.is24HourFormat(context),
+                    me.lakko.app.l10n.DeviceFormats.is24Hour(context),
                     locale,
                 )
-                val isNew = !device.isSelf && me.lakko.app.devices.isNewDevice(
-                    notice,
-                    me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
-                )
+                val isNew = !device.isSelf &&
+                    me.lakko.app.devices.newDeviceKey(device.signaturePublicKey) in notice.highlighted
+                // UX 17.5 - the first highlighted row is scrolled into view.
+                val bringIntoView = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+                if (isNew && input.keyHex == firstHighlighted) {
+                    LaunchedEffect(input.keyHex) { bringIntoView.bringIntoView() }
+                }
                 val deviceIdB64Url = me.lakko.app.auth.base64UrlEncodeNoPad(device.signaturePublicKey)
                 val isPending = !device.isSelf && deviceIdB64Url in pending
                 val needsFinish = isPending && deviceIdB64Url in waitingOnPerson
@@ -1080,7 +1174,16 @@ private fun DevicesList(
                             }
                         }
                     },
-                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                    colors = ListItemDefaults.colors(
+                        // UX 17.5 - an accent-tinted background on a new row,
+                        // with the `New` text label (never colour alone).
+                        containerColor = if (isNew) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.background
+                        },
+                    ),
+                    modifier = Modifier.bringIntoViewRequester(bringIntoView),
                 )
             }
 
@@ -1213,10 +1316,7 @@ private fun DevicesList(
             device = device,
             label = label,
             runner = ::runner,
-            wasNew = me.lakko.app.devices.isNewDevice(
-                notice,
-                me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
-            ),
+            wasNew = me.lakko.app.devices.newDeviceKey(device.signaturePublicKey) in notice.highlighted,
             onClosed = { removedOrPending, done ->
                 confirming = null
                 if (done) removedDone = true
@@ -1521,6 +1621,28 @@ private enum class RowRun { Removing, Failed }
 
 /** Lower-case hex of a leaf key: the device-card store's key. */
 private fun hexKey(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+/** The words a device row (and the pairing confirm's lines) is built with,
+ *  in the current language. */
+@Composable
+private fun deviceRowWords(): me.lakko.app.devices.DeviceCards.Words {
+    val strings = me.lakko.app.l10n.LocalStrings.current
+    val locale = remember { java.util.Locale.getDefault() }
+    return me.lakko.app.devices.DeviceCards.Words(
+        device = t("devices.row.device"),
+        online = t("devices.row.online"),
+        app = { version ->
+            if (version.isEmpty()) strings["devices.row.app_name"]
+            else strings.format("devices.row.app", mapOf("version" to version))
+        },
+        place = { city, country ->
+            strings.format("devices.row.place", mapOf("city" to city, "country" to country))
+        },
+        countryName = { code ->
+            java.util.Locale("", code).getDisplayCountry(locale).ifEmpty { code }
+        },
+    )
+}
 
 @Composable
 private fun SectionHeader(text: String) {

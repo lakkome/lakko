@@ -232,4 +232,35 @@ final class ChatListRedesignTests: XCTestCase {
             ChatTimeline.isHiddenSystemRow(
                 ChatMessage(messageId: 1, direction: .system, text: "Anna joined", createdAt: "")))
     }
+
+    /// Maintainer, 2026-10-29: a one-to-one never shows a "Members changed"
+    /// row, including the commit rows already in its stored log. On iOS the
+    /// stored commit row (`[mls commit]`, what ``ChatRepository`` writes for
+    /// a commit) is never drawn in ANY conversation: the timeline and the
+    /// list preview both drop it through ``ChatTimeline/isHiddenSystemRow(_:)``.
+    /// So a one-to-one's stored commit rows are not in the displayed timeline
+    /// and never become its preview, and a group behaves as it always did on
+    /// iOS (hidden too); the log itself is untouched.
+    func testStoredCommitRowsAreNeverDrawnOrPreviewed() {
+        let stored = [
+            ChatMessage(messageId: 1, direction: .incoming, text: "hi", createdAt: ""),
+            ChatMessage(messageId: 2, direction: .system, text: "[mls commit]", createdAt: ""),
+            ChatMessage(messageId: 3, direction: .outgoing, text: "hello", createdAt: ""),
+            ChatMessage(messageId: 4, direction: .system, text: "[mls commit]", createdAt: ""),
+            ChatMessage(messageId: 5, direction: .system, text: "[mls commit]", createdAt: ""),
+        ]
+        let membersChanged = "Members changed"
+        for isGroup in [false, true] {
+            // What ChatScreen draws and what ChatListViewModel previews.
+            let drawn = stored.filter { !ChatTimeline.isHiddenSystemRow($0) }
+            XCTAssertEqual(drawn.map(\.messageId), [1, 3], "no commit row is drawn (group: \(isGroup))")
+            let last = stored.last(where: { !ChatTimeline.isHiddenSystemRow($0) })
+            XCTAssertEqual(last?.messageId, 3, "the preview is the last drawn row")
+            let preview = ChatListFormatting.preview(
+                text: last?.text ?? "", attachmentLabels: [], direction: last?.direction ?? .system,
+                deleted: false, isGroup: isGroup, senderName: nil)
+            XCTAssertFalse(preview.contains(membersChanged))
+            XCTAssertFalse(preview.contains("[mls"))
+        }
+    }
 }

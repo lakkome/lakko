@@ -47,9 +47,10 @@ public data class ConversationListRow(
     /** The formatted last-activity time, or `null` when there is none to show. */
     val time: String?,
     /**
-     * When the last thing a person can SEE happened, in unix millis, or `null`
-     * for a conversation nothing has happened in yet. A row that draws nothing
-     * does not move a conversation to the top.
+     * What the list sorts by, in unix millis: the last message or post a person
+     * can SEE, else the moment this device created or joined the conversation
+     * ([conversationActivityMs]; a channel: the moment it was added). A row
+     * that draws nothing does not move a conversation.
      */
     val lastActivityMs: Long?,
     /**
@@ -77,6 +78,9 @@ public data class ConversationListRow(
     /** ADR-0084 — for a one-to-one, the other person's signature key
      *  (standard base64), so the row shows their profile photo. */
     val peerKeyB64: String? = null,
+    /** ADR-0087 — the group's or channel's `@name` (no `@`), "" when none:
+     *  the local search matches it too. */
+    val handle: String = "",
 )
 
 /** The shared kind a chat-or-group row opens under. */
@@ -131,10 +135,14 @@ public fun conversationRowMatchesQuery(
     query: String,
     title: String,
     preview: String,
+    handle: String = "",
 ): Boolean {
     val q = query.trim()
     if (q.isEmpty()) return true
-    return title.contains(q, ignoreCase = true) || preview.contains(q, ignoreCase = true)
+    if (title.contains(q, ignoreCase = true) || preview.contains(q, ignoreCase = true)) return true
+    // ADR-0087 — a group or channel the person is in is found by its @name.
+    val h = q.removePrefix("@")
+    return h.isNotEmpty() && handle.isNotEmpty() && handle.contains(h, ignoreCase = true)
 }
 
 /**
@@ -149,3 +157,30 @@ public fun conversationRowMatchesQuery(
  */
 public fun showsEmptyConversationState(listIsEmpty: Boolean, query: String): Boolean =
     listIsEmpty && query.isBlank()
+
+/**
+ * Whether a search of the conversation list found no row at all. A pending
+ * contact's chat is a row like any other (ADR-0079), so a search that matches
+ * only one still has a list, with the people half under it.
+ */
+public fun searchFoundNoRow(conversations: Int, pendingContacts: Int): Boolean =
+    conversations == 0 && pendingContacts == 0
+
+/**
+ * ADR-0087 section 5 — the ids (lower-case hex) of the groups and channels
+ * this device is in, so a search result for one of them says Open: a group's
+ * conversation id and its current group id, a channel's id. A conversation
+ * whose membership ended is not one the person is in.
+ */
+public fun searchMemberIds(rows: List<ConversationListRow>): Set<String> {
+    val out = HashSet<String>()
+    for (r in rows) {
+        if (r.membershipEnded) continue
+        when (r.kind) {
+            ConversationRowKind.GROUP -> { out += r.id.lowercase(); out += r.headId.lowercase() }
+            ConversationRowKind.CHANNEL -> out += r.id.lowercase()
+            else -> Unit
+        }
+    }
+    return out
+}

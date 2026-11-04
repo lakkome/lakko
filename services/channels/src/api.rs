@@ -7,18 +7,25 @@
 //!
 //! | Method | Path | Gate | Purpose |
 //! |---|---|---|---|
-//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex}`. Re-creating a channel never changes its owner key. |
+//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex, private?}` (`private` defaults to `false`, applied only when the channel is created). Re-creating a channel never changes its owner key or its flag. |
+//! | `PUT`  | `/v1/channels/:id/access` | owner proof | Set the flag (ADR-0087 section 8): `{"private": bool}`. Going private withdraws the listing and deletes every public seed. |
+//! | `PUT`  | `/v1/channels/:id/public-seed/:epoch` | publisher proof | File a public channel's seed envelope for the epoch (ADR-0087 section 6): the 64 bytes of `lakko_channels::seal_public_seed`, `application/octet-stream`. Immutable once stored. |
+//! | `GET`  | `/v1/channels/:id/public-seed/:epoch` | none | The envelope, raw bytes, `Cache-Control: public, max-age=31536000, immutable`. |
+//! | `GET`  | `/v1/channels/:id/invite-keys` | publisher proof | A private channel's invite keys with expiry and use count (ADR-0087 section 7). |
+//! | `PUT`  | `/v1/channels/:id/invite-keys/:pk` | publisher proof | Register or update an invite key: `{expiry_ms, max_uses}`. |
+//! | `DELETE` | `/v1/channels/:id/invite-keys/:pk` | publisher proof | Revoke it. |
+//! | `GET`  | `/v1/channels/:id/subscribers/count` | publisher proof | The maintained subscriber count (ADR-0087 section 15). |
 //! | `PUT`  | `/v1/channels/:id/owner` | owner proof (by the CURRENT owner key) | Hand the channel to a new owner key (ADR-0074 section 3.5). Body: the new key, 32 raw bytes, `application/octet-stream`. |
 //! | `POST` | `/v1/channels/:id/posts` | publisher proof | Publish an opaque ChannelPost. |
 //! | `GET`  | `/v1/channels/:id/posts?after=&limit=` | none | Cursor-paginated fetch. |
-//! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token | Register a subscriber key. |
-//! | `GET`  | `/v1/channels/:id/subscribers` | owner proof | The subscriber keys (the publisher reseals to them). |
+//! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token; on a private channel also an `x-lakko-channel-invite-proof` | Register a subscriber key, with its sealed admission ticket on a private channel. |
+//! | `GET`  | `/v1/channels/:id/subscribers?after=<seq>&limit=<n>` | publisher proof | A page of subscriber rows in insertion order, with their tickets (the publisher admits and reseals to them). |
 //! | `PUT`  | `/v1/channels/:id/listing` | owner proof | Store or replace the listing. Body: the canonical `lakko/channel-listing/v1` bytes, `application/octet-stream`. |
 //! | `DELETE` | `/v1/channels/:id/listing` | owner proof | Withdraw the listing. |
 //! | `GET`  | `/v1/directory/bucket/:topic/:language` | none | Top 100 listings of a bucket, identical for every caller, cacheable for an hour. |
 //! | `GET`  | `/v1/directory/listing/:id` | none | One listing. |
 //! | `GET`  | `/v1/directory/search?q=` | one `directory-search` token | Top 24 matches; the query is never logged. |
-//! | `DELETE` | `/v1/channels/:id/subscribers/:pk` | subscriber signature | Unsubscribe (ADR-0060), signed by the subscriber key with a fresh timestamp. |
+//! | `DELETE` | `/v1/channels/:id/subscribers/:pk` | subscriber signature, or publisher proof | Unsubscribe (ADR-0060), signed by the subscriber key with a fresh timestamp; or a publisher removes the key from a private channel (ADR-0087 section 7), after which its envelope reads answer `410 subscriber-removed`. |
 //! | `PUT`  | `/v1/channels/:id/members/:pk` | subscriber signature | Upload a member card (ADR-0060), signed by the subscriber key. |
 //! | `DELETE` | `/v1/channels/:id/members/:pk` | subscriber signature | Remove it, signed likewise. |
 //! | `GET`  | `/v1/channels/:id/members?after=<pk_b64>&limit=<n>` | none | A page of member cards. |
@@ -27,6 +34,9 @@
 //! | `POST` | `/v1/channels/:id/rotate` | publisher proof | Atomic batch delivery + epoch bump. |
 //! | `POST` | `/v1/channels/:id/rotate/stage` | publisher proof | Stage a chunk of the next epoch (ADR-0030). |
 //! | `POST` | `/v1/channels/:id/rotate/commit` | publisher proof | Promote the staged epoch (ADR-0030). |
+//!
+//! Comments and reactions under a post (ADR-0087 section 13a) are in
+//! [`crate::feedback_api`], which has its own route table.
 //!
 //! "Publisher proof" is [`require_publisher`]: an owner proof, or a proof by
 //! a co-publisher key the owner appointed, over the method, the routed path,
@@ -67,15 +77,37 @@ use crate::directory::{
     band, normalize_search_query, rank, DirectoryEntry, BUCKET_PAGE_LEN, SEARCH_PAGE_LEN,
 };
 use crate::owner_auth::{require_owner, require_publisher};
+use crate::storage::SealedTicket;
 use crate::storage::{
-    ChannelId, ChannelStore, DirectoryQuery, StorageError, StoredListing, StoredPost, SubscriberId,
-    OWNER_PUBKEY_LEN,
+    ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, PublicSeedOutcome, StorageError,
+    StoredListing, StoredPost, SubscriberEntry, SubscriberId, INVITE_KEY_LEN, OWNER_PUBKEY_LEN,
+    PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 
 /// `Cache-Control` of a directory bucket: public and identical for every
 /// caller, so a cache in front removes even the per-request view (ADR-0059
 /// section 5).
 pub const BUCKET_CACHE_CONTROL: &str = "public, max-age=3600";
+/// `Cache-Control` of a public seed envelope: stored once and never
+/// replaced, so a cache in front may keep it (ADR-0087 section 6).
+pub const PUBLIC_SEED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
+/// Most invite keys a channel may hold at once (ADR-0087 section 7). Chosen,
+/// not measured: a one-use link per invited contact, with expired keys
+/// pruned.
+pub const MAX_INVITE_KEYS: usize = 4096;
+
+/// How long after its expiry an invite key is kept, so a publisher admitting
+/// a row that came in just before the expiry can still read the key. Chosen,
+/// not measured.
+pub const INVITE_KEY_GRACE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Default page of `GET .../subscribers`.
+pub const SUBSCRIBER_PAGE_DEFAULT: usize = 1000;
+
+/// Largest page of `GET .../subscribers` (the rotation stage-chunk bound).
+pub const SUBSCRIBER_PAGE_MAX: usize = 5000;
+
 /// `Cache-Control` of a single listing (chosen: shorter than a bucket so an
 /// owner's edit shows sooner on an opened card).
 pub const LISTING_CACHE_CONTROL: &str = "public, max-age=300";
@@ -134,6 +166,65 @@ pub struct CreateChannelRequest {
     /// section 1), derived by the creating account from its seed and the
     /// channel id. Fixed at creation.
     pub owner_pubkey_hex: String,
+    /// ADR-0087: the channel is private. Applied only when the channel is
+    /// created; `false` when absent.
+    #[serde(default)]
+    pub private: bool,
+}
+
+/// Body for `PUT /v1/channels/:id/access`.
+#[derive(Deserialize)]
+pub struct AccessRequest {
+    /// The flag to set.
+    pub private: bool,
+}
+
+/// Body for `PUT /v1/channels/:id/invite-keys/:pk`.
+#[derive(Deserialize)]
+pub struct InviteKeyRequest {
+    /// Unix milliseconds after which the key admits nobody; `0` = never.
+    pub expiry_ms: u64,
+    /// `0` = one use, `4294967295` = unlimited, else the ceiling (the
+    /// discovery ledger's rule, so a link's row and key carry one number).
+    pub max_uses: u32,
+}
+
+/// One invite key in `GET /v1/channels/:id/invite-keys`.
+#[derive(Serialize)]
+pub struct InviteKeyView {
+    /// 64-char lowercase hex of the invite public key.
+    pub invite_pk_hex: String,
+    /// As registered.
+    pub expiry_ms: u64,
+    /// As registered.
+    pub max_uses: u32,
+    /// New subscribers it let in.
+    pub used_count: u32,
+}
+
+impl InviteKeyView {
+    fn from_row(r: &InviteKeyRow) -> Self {
+        Self {
+            invite_pk_hex: hex::encode(r.invite_pk),
+            expiry_ms: r.expiry_ms,
+            max_uses: r.max_uses,
+            used_count: r.used_count,
+        }
+    }
+}
+
+/// Response of `GET /v1/channels/:id/invite-keys`.
+#[derive(Serialize)]
+pub struct InviteKeysResponse {
+    /// Every registered key, ascending.
+    pub invite_keys: Vec<InviteKeyView>,
+}
+
+/// Response of `GET /v1/channels/:id/subscribers/count`.
+#[derive(Serialize)]
+pub struct SubscriberCountResponse {
+    /// The maintained count of subscriber rows.
+    pub count: u64,
 }
 
 /// One directory item: the owner's listing bytes and the published band of
@@ -247,6 +338,11 @@ pub struct SubscribeRequest {
     /// public key (ADR-0060; the seed envelope is sealed to
     /// its X25519 image).
     pub subscriber_pubkey_hex: String,
+    /// ADR-0087 section 7: the sealed admission ticket, base64url without
+    /// padding of `lakko_channels::ADMISSION_TICKET_LEN` bytes. Required on a
+    /// private channel; stored opaquely, never opened here.
+    #[serde(default)]
+    pub sealed_ticket_b64: Option<String>,
 }
 
 /// Response for `POST /v1/channels/:id/subscribers`.
@@ -256,11 +352,49 @@ pub struct SubscribeResponse {
     pub subscriber_id: String,
 }
 
+/// Query string for `GET /v1/channels/:id/subscribers`.
+#[derive(Deserialize)]
+pub struct SubscribersQuery {
+    /// Return rows strictly after this row number; `0` from the start.
+    #[serde(default)]
+    pub after: u64,
+    /// Page size, at most [`SUBSCRIBER_PAGE_MAX`] (default
+    /// [`SUBSCRIBER_PAGE_DEFAULT`]).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One row of `GET /v1/channels/:id/subscribers`.
+#[derive(Serialize)]
+pub struct SubscriberRowView {
+    /// The row number; pass the last one as `after` for the next page.
+    pub seq: u64,
+    /// Subscriber pubkey hex.
+    pub subscriber_id: String,
+    /// The sealed admission ticket, base64url without padding, or `null`.
+    pub sealed_ticket_b64: Option<String>,
+}
+
+impl SubscriberRowView {
+    fn from_entry(e: &SubscriberEntry) -> Self {
+        Self {
+            seq: e.seq,
+            subscriber_id: e.subscriber.to_hex(),
+            sealed_ticket_b64: e.sealed_ticket.map(|t| URL_SAFE_NO_PAD.encode(t)),
+        }
+    }
+}
+
 /// Response for `GET /v1/channels/:id/subscribers`.
 #[derive(Serialize)]
 pub struct ListSubscribersResponse {
-    /// Subscriber pubkey hex strings, unordered.
+    /// The page's subscriber pubkey hex strings, in row order.
     pub subscribers: Vec<String>,
+    /// The same rows with their row numbers and tickets.
+    pub entries: Vec<SubscriberRowView>,
+    /// The last row number in the page, or the requested `after` when the
+    /// page is empty.
+    pub next_after: u64,
 }
 
 /// Response for `GET /v1/channels/:id/subscribers/:pubkey/envelope`.
@@ -433,7 +567,11 @@ async fn create_channel(
         )
             .into_response();
     };
-    match state.store.create(channel, owner).await {
+    match state
+        .store
+        .create_with_access(channel, owner, req.private)
+        .await
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(CreateChannelResponse {
@@ -569,6 +707,14 @@ async fn fetch_posts(
 /// `channel-subscribe` anonymous token (ADR-0059 section 4), after the body
 /// validated and the channel was found, so a malformed or misdirected
 /// request costs none.
+///
+/// On a private channel (ADR-0087 section 7) the request also carries a
+/// sealed admission ticket in the body and an
+/// `x-lakko-channel-invite-proof` by a registered invite key over the
+/// channel and the subscriber key; every proof refusal is the one
+/// `401 invite-proof-required`, before the token is spent. A new row takes
+/// one use of the key; a re-subscribe of a row already there takes none, so
+/// a retry after a lost answer works with a one-use link.
 async fn subscribe(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
@@ -599,55 +745,236 @@ async fn subscribe(
         )
             .into_response();
     };
-    if !state.store.exists(channel).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "unknown-channel",
-                "register the channel via POST /v1/channels first",
-            )),
-        )
-            .into_response();
+    let ticket = match parse_ticket(req.sealed_ticket_b64.as_deref()) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let private = match state.store.is_private(channel).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(err(
+                    "unknown-channel",
+                    "register the channel via POST /v1/channels first",
+                )),
+            )
+                .into_response()
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "channel flag lookup failed");
+            return internal_error();
+        },
+    };
+    let mut claimed: Option<[u8; INVITE_KEY_LEN]> = None;
+    if private {
+        if ticket.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "sealed-ticket-required",
+                    "subscribing to a private channel needs a sealed admission ticket",
+                )),
+            )
+                .into_response();
+        }
+        match check_invite_proof(&state, &headers, channel, sub).await {
+            Ok(key) => claimed = key,
+            Err(resp) => return resp,
+        }
     }
     if let Err(refused) = state
         .anon_tokens
         .spend_header(&headers, TokenContext::ChannelSubscribe)
         .await
     {
+        release_claim(&state, channel, claimed).await;
         return refused.into_response();
     }
-    let now = unix_ms();
-    match state.store.subscribe(channel, sub, now).await {
-        Ok(()) => (
-            StatusCode::CREATED,
-            Json(SubscribeResponse {
-                subscriber_id: sub.to_hex(),
-            }),
-        )
-            .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "unknown-channel",
-                "register the channel via POST /v1/channels first",
-            )),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(err("internal", "unexpected error")),
-        )
-            .into_response(),
+    finish_subscribe(&state, channel, sub, ticket, claimed).await
+}
+
+/// Write the subscriber row after every gate passed, giving back a claimed
+/// invite use when the row turns out not to be new or the write fails.
+async fn finish_subscribe(
+    state: &AppState,
+    channel: ChannelId,
+    sub: SubscriberId,
+    ticket: Option<SealedTicket>,
+    claimed: Option<[u8; INVITE_KEY_LEN]>,
+) -> Response {
+    match state
+        .store
+        .subscribe_with_ticket(channel, sub, unix_ms(), ticket)
+        .await
+    {
+        Ok(is_new) => {
+            if !is_new {
+                // A concurrent request inserted the row first; this one let
+                // nobody new in.
+                release_claim(state, channel, claimed).await;
+            }
+            (
+                StatusCode::CREATED,
+                Json(SubscribeResponse {
+                    subscriber_id: sub.to_hex(),
+                }),
+            )
+                .into_response()
+        },
+        Err(StorageError::UnknownChannel) => {
+            release_claim(state, channel, claimed).await;
+            (
+                StatusCode::NOT_FOUND,
+                Json(err(
+                    "unknown-channel",
+                    "register the channel via POST /v1/channels first",
+                )),
+            )
+                .into_response()
+        },
+        Err(e) => {
+            release_claim(state, channel, claimed).await;
+            tracing::error!(error = %e, "subscribe failed");
+            internal_error()
+        },
     }
 }
 
-/// `GET /v1/channels/:channel_id/subscribers` — list. Owner-signed, or
-/// signed by a co-publisher key the owner appointed: a publisher needs the
-/// keys to reseal, nobody else does, and the exact count stops being public
-/// (ADR-0059 section 4).
+/// Decode an optional sealed admission ticket: base64url without padding
+/// of exactly [`SEALED_TICKET_LEN`] bytes, else `400 bad-sealed-ticket`.
+fn parse_ticket(b64: Option<&str>) -> Result<Option<SealedTicket>, Box<Response>> {
+    let Some(b64) = b64 else {
+        return Ok(None);
+    };
+    URL_SAFE_NO_PAD
+        .decode(b64)
+        .ok()
+        .and_then(|b| <[u8; SEALED_TICKET_LEN]>::try_from(b.as_slice()).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(err(
+                        "bad-sealed-ticket",
+                        format!(
+                            "sealed_ticket_b64 must be {SEALED_TICKET_LEN} bytes in base64url \
+                         without padding"
+                        ),
+                    )),
+                )
+                    .into_response(),
+            )
+        })
+}
+
+/// The single refusal of every failed invite proof (ADR-0087 section 7).
+fn invite_proof_required() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(err(
+            "invite-proof-required",
+            "subscribing to this channel needs a valid invitation",
+        )),
+    )
+        .into_response()
+}
+
+/// The invite gate of a private channel's subscribe. In order: the header
+/// parses; the window and the signature verify over this channel and
+/// subscriber key; the key is registered for the channel and, for a new row,
+/// live (unexpired, uses left) - for a row already there, unexpired; the
+/// nonce is fresh (recorded only after the signature verified); a new row
+/// claims one use of the key atomically. Returns the key whose use was
+/// claimed, for the caller to give back if the request is then refused.
+async fn check_invite_proof(
+    state: &AppState,
+    headers: &HeaderMap,
+    channel: ChannelId,
+    sub: SubscriberId,
+) -> Result<Option<[u8; INVITE_KEY_LEN]>, Response> {
+    let Some(proof) = headers
+        .get(lakko_channels::INVITE_PROOF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| lakko_channels::InviteProof::parse(v).ok())
+    else {
+        return Err(invite_proof_required());
+    };
+    let now = unix_ms();
+    if lakko_channels::verify_invite_proof(&proof, channel.as_bytes(), sub.as_bytes(), now).is_err()
+    {
+        return Err(invite_proof_required());
+    }
+    let key = match state.store.invite_key(channel, proof.invite_key).await {
+        Ok(Some(key)) => key,
+        Ok(None) => return Err(invite_proof_required()),
+        Err(e) => {
+            tracing::error!(error = %e, "invite key lookup failed");
+            return Err(internal_error());
+        },
+    };
+    let already = state.store.is_subscribed(channel, sub).await;
+    let usable = if already {
+        !key.is_expired(now)
+    } else {
+        key.is_live(now)
+    };
+    if !usable {
+        return Err(invite_proof_required());
+    }
+    match state
+        .store
+        .consume_owner_nonce(proof.proof.nonce, now)
+        .await
+    {
+        Ok(true) => {},
+        Ok(false) => return Err(invite_proof_required()),
+        Err(e) => {
+            tracing::error!(error = %e, "invite nonce store failed; refusing");
+            return Err(internal_error());
+        },
+    }
+    if already {
+        return Ok(None);
+    }
+    match state
+        .store
+        .claim_invite_use(channel, proof.invite_key, now)
+        .await
+    {
+        Ok(true) => Ok(Some(proof.invite_key)),
+        Ok(false) => Err(invite_proof_required()),
+        Err(e) => {
+            tracing::error!(error = %e, "invite use claim failed");
+            Err(internal_error())
+        },
+    }
+}
+
+/// Give back a claimed invite use. A failure only leaves the key one use
+/// short, so it is logged, not surfaced.
+async fn release_claim(
+    state: &AppState,
+    channel: ChannelId,
+    claimed: Option<[u8; INVITE_KEY_LEN]>,
+) {
+    if let Some(key) = claimed {
+        if let Err(e) = state.store.release_invite_use(channel, key).await {
+            tracing::warn!(error = %e, "invite use release failed");
+        }
+    }
+}
+
+/// `GET /v1/channels/:channel_id/subscribers?after=<seq>&limit=<n>` — a page
+/// of subscriber rows in insertion order (ADR-0087 section 7), with each
+/// row's sealed ticket. Owner-signed, or signed by a co-publisher key the
+/// owner appointed: a publisher needs the keys to admit and reseal, nobody
+/// else does, and the exact count stops being public (ADR-0059 section 4).
 async fn list_subscribers(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
+    Query(q): Query<SubscribersQuery>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -662,11 +989,21 @@ async fn list_subscribers(
     if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &[]).await {
         return refused;
     }
-    match state.store.list_subscribers(channel).await {
-        Ok(list) => (
+    let limit = q
+        .limit
+        .unwrap_or(SUBSCRIBER_PAGE_DEFAULT)
+        .clamp(1, SUBSCRIBER_PAGE_MAX);
+    match state
+        .store
+        .list_subscriber_page(channel, q.after, limit)
+        .await
+    {
+        Ok(page) => (
             StatusCode::OK,
             Json(ListSubscribersResponse {
-                subscribers: list.into_iter().map(SubscriberId::to_hex).collect(),
+                subscribers: page.iter().map(|e| e.subscriber.to_hex()).collect(),
+                next_after: page.last().map_or(q.after, |e| e.seq),
+                entries: page.iter().map(SubscriberRowView::from_entry).collect(),
             }),
         )
             .into_response(),
@@ -680,6 +1017,64 @@ async fn list_subscribers(
             Json(err("internal", "unexpected error")),
         )
             .into_response(),
+    }
+}
+
+/// `GET /v1/channels/:channel_id/subscribers/count` — the maintained
+/// subscriber count (ADR-0087 section 15), publisher-signed.
+async fn subscriber_count(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    match state.store.subscriber_count(channel).await {
+        Ok(count) => (StatusCode::OK, Json(SubscriberCountResponse { count })).into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "subscriber count failed");
+            internal_error()
+        },
+    }
+}
+
+/// The answer to an envelope read for a key with no row: `410
+/// subscriber-removed` when a publisher removed it from a private channel
+/// (ADR-0087 section 7: the removed device ends the channel), else `404
+/// unknown-subscriber`.
+async fn no_subscriber_row(state: &AppState, channel: ChannelId, sub: SubscriberId) -> Response {
+    match state.store.is_removed(channel, sub).await {
+        Ok(true) => (
+            StatusCode::GONE,
+            Json(err(
+                "subscriber-removed",
+                "a publisher removed this subscriber from the channel",
+            )),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-subscriber",
+                "subscriber has not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "removal lookup failed");
+            internal_error()
+        },
     }
 }
 
@@ -834,14 +1229,7 @@ async fn fetch_envelope(
             Json(err("unknown-channel", "no such channel")),
         )
             .into_response(),
-        Err(StorageError::UnknownSubscriber) => (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "unknown-subscriber",
-                "subscriber has not registered against this channel",
-            )),
-        )
-            .into_response(),
+        Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(err("internal", "unexpected error")),
@@ -898,14 +1286,7 @@ async fn fetch_envelopes(
             Json(err("unknown-channel", "no such channel")),
         )
             .into_response(),
-        Err(StorageError::UnknownSubscriber) => (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "unknown-subscriber",
-                "subscriber has not registered against this channel",
-            )),
-        )
-            .into_response(),
+        Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(err("internal", "unexpected error")),
@@ -1438,12 +1819,19 @@ fn parse_unsubscribe_header(headers: &HeaderMap) -> Option<(u64, Vec<u8>)> {
 async fn unsubscribe(
     State(state): State<Arc<AppState>>,
     Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     let (channel, sub) = match bad_ids(&channel_id, &pubkey_hex) {
         Ok(ids) => ids,
         Err(resp) => return *resp,
     };
+    if headers.contains_key(lakko_channels::owner::OWNER_PROOF_HEADER_NAME)
+        || headers.contains_key(lakko_channels::copublisher::COPUBLISHER_PROOF_HEADER_NAME)
+    {
+        return remove_subscriber(&state, channel, sub, &method, &uri, &headers).await;
+    }
     let Some((issued_at_ms, sig)) = parse_unsubscribe_header(&headers) else {
         return bad_unsubscribe_signature("bad-unsubscribe-signature");
     };
@@ -1463,6 +1851,44 @@ async fn unsubscribe(
     match state.store.unsubscribe(channel, sub).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => member_store_error(e),
+    }
+}
+
+/// A publisher removes `sub` from a private channel (ADR-0087 section 7):
+/// the publisher proof over the empty body, then the removal, recorded so
+/// the removed key's envelope reads answer `410 subscriber-removed`.
+/// Idempotent `204`; a public channel is `409 channel-public` (anyone can
+/// come back to a public channel).
+async fn remove_subscriber(
+    state: &AppState,
+    channel: ChannelId,
+    sub: SubscriberId,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Response {
+    if let Err(refused) = require_publisher(state, channel, method, uri, headers, &[]).await {
+        return refused;
+    }
+    match state.store.remove_subscriber(channel, sub, unix_ms()).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::ChannelPublic) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "channel-public",
+                "a public channel's subscribers cannot be removed",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "remove subscriber failed");
+            internal_error()
+        },
     }
 }
 
@@ -1692,6 +2118,7 @@ async fn put_listing(
             )),
         )
             .into_response(),
+        Err(StorageError::ChannelPrivate) => channel_private(),
         Err(StorageError::UnknownChannel) => (
             StatusCode::NOT_FOUND,
             Json(err("unknown-channel", "no such channel")),
@@ -1929,6 +2356,335 @@ async fn revoke_copublisher(
     }
 }
 
+fn channel_private() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(err(
+            "channel-private",
+            "this is a private channel: it is never listed and holds no public seed",
+        )),
+    )
+        .into_response()
+}
+
+fn unknown_channel() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(err("unknown-channel", "no such channel")),
+    )
+        .into_response()
+}
+
+/// `PUT /v1/channels/:channel_id/access` — set the channel's flag
+/// (ADR-0087 section 8), owner-signed over the exact body `{"private":
+/// bool}`. Only the owner changes it. Going private withdraws the listing and
+/// deletes every public seed in the same step; going public changes only the
+/// flag (the client then publishes the listing and the public seed).
+/// Idempotent `204`.
+async fn put_access(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let req: AccessRequest = match parse_json_body(&headers, body).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match state.store.set_private(channel, req.private).await {
+        Ok(changed) => {
+            if changed {
+                tracing::info!(private = req.private, "channel flag changed");
+            }
+            StatusCode::NO_CONTENT.into_response()
+        },
+        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(e) => {
+            tracing::error!(error = %e, "set channel flag failed");
+            internal_error()
+        },
+    }
+}
+
+fn parse_epoch(epoch: &str) -> Option<u32> {
+    // Digits only: `u32::from_str` would also accept a leading `+`.
+    if epoch.is_empty() || epoch.len() > 10 || !epoch.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    epoch.parse().ok()
+}
+
+fn bad_epoch() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(err("bad-epoch", "epoch must be a decimal u32")),
+    )
+        .into_response()
+}
+
+/// `PUT /v1/channels/:channel_id/public-seed/:epoch` — file a public
+/// channel's seed envelope for `epoch` (ADR-0087 section 6). Publisher-signed
+/// over the exact body, the 64 bytes of `lakko_channels::seal_public_seed`,
+/// whose clear epoch must name the path's. The service never opens it: a
+/// subscriber holds the read key, so only this route keeps one from
+/// replacing it. The epoch may be at most the next one (filed before the
+/// rotation commits). Immutable: the identical envelope again is a `204`,
+/// another is `409 public-seed-exists`.
+async fn put_public_seed(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, epoch)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    let Some(epoch) = parse_epoch(&epoch) else {
+        return bad_epoch();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let Ok(envelope) = <[u8; PUBLIC_SEED_LEN]>::try_from(body.as_ref()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-public-seed",
+                format!("a public seed envelope is {PUBLIC_SEED_LEN} bytes"),
+            )),
+        )
+            .into_response();
+    };
+    if lakko_channels::public_seed_epoch(&envelope).map(lakko_channels::EpochId::as_u32)
+        != Some(epoch)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "public-seed-epoch-mismatch",
+                "the envelope names another epoch than the path",
+            )),
+        )
+            .into_response();
+    }
+    match state
+        .store
+        .put_public_seed(channel, epoch, envelope, unix_ms())
+        .await
+    {
+        Ok(PublicSeedOutcome::Stored | PublicSeedOutcome::AlreadyStored) => {
+            StatusCode::NO_CONTENT.into_response()
+        },
+        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(StorageError::ChannelPrivate) => channel_private(),
+        Err(StorageError::PublicSeedEpochInFuture { current, got }) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "public-seed-epoch-in-future",
+                format!("epoch {got} is beyond the next epoch (current epoch is {current})"),
+            )),
+        )
+            .into_response(),
+        Err(StorageError::PublicSeedConflict) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "public-seed-exists",
+                "another public seed is stored for this epoch",
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "put public seed failed");
+            internal_error()
+        },
+    }
+}
+
+/// `GET /v1/channels/:channel_id/public-seed/:epoch` — the stored public
+/// seed envelope, raw bytes. Open and immutable: a cache in front serves it
+/// ([`PUBLIC_SEED_CACHE_CONTROL`]). An absent seed (unknown channel, private
+/// channel, epoch not filed yet) is `404 public-seed-not-found` with
+/// `no-store`, so no cache pins the absence.
+async fn get_public_seed(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, epoch)): Path<(String, String)>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    let Some(epoch) = parse_epoch(&epoch) else {
+        return bad_epoch();
+    };
+    match state.store.public_seed(channel, epoch).await {
+        Ok(Some(envelope)) => {
+            let mut resp = (StatusCode::OK, envelope.to_vec()).into_response();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            with_cache_control(resp, PUBLIC_SEED_CACHE_CONTROL)
+        },
+        Ok(None) => with_cache_control(
+            (
+                StatusCode::NOT_FOUND,
+                Json(err(
+                    "public-seed-not-found",
+                    "no public seed is stored for this channel and epoch",
+                )),
+            )
+                .into_response(),
+            "no-store",
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "public seed read failed");
+            internal_error()
+        },
+    }
+}
+
+/// Parse a 64-hex invite key: a curve point of full order.
+fn parse_invite_key(hex_str: &str) -> Option<[u8; INVITE_KEY_LEN]> {
+    let key = parse_pubkey_hex(hex_str)?;
+    let vk = lakko_crypto::signing::VerifyingKey::from_bytes(&key).ok()?;
+    (!vk.is_weak()).then_some(key)
+}
+
+fn bad_invite_key() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(err(
+            "bad-invite-key",
+            "the invite key must be 64 hex chars of an Ed25519 public key",
+        )),
+    )
+        .into_response()
+}
+
+/// `GET /v1/channels/:channel_id/invite-keys` — a private channel's
+/// registered invite keys with expiry and use count (ADR-0087 section 7),
+/// publisher-signed. A publisher reads them to check an admission ticket's
+/// key, including keys a co-publisher registered.
+async fn list_invite_keys(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    match state.store.list_invite_keys(channel).await {
+        Ok(keys) => (
+            StatusCode::OK,
+            Json(InviteKeysResponse {
+                invite_keys: keys.iter().map(InviteKeyView::from_row).collect(),
+            }),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(e) => {
+            tracing::error!(error = %e, "list invite keys failed");
+            internal_error()
+        },
+    }
+}
+
+/// `PUT /v1/channels/:channel_id/invite-keys/:pubkey_hex` — register or
+/// update a link's invite key (ADR-0087 section 7), publisher-signed over
+/// the exact body `{expiry_ms, max_uses}`. Updating keeps the use count. At
+/// most [`MAX_INVITE_KEYS`] per channel (`409 too-many-invite-keys`).
+async fn put_invite_key(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let Some(key) = parse_invite_key(&pubkey_hex) else {
+        return bad_invite_key();
+    };
+    let req: InviteKeyRequest = match parse_json_body(&headers, body).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match state
+        .store
+        .put_invite_key(
+            channel,
+            key,
+            req.expiry_ms,
+            req.max_uses,
+            MAX_INVITE_KEYS,
+            unix_ms(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::TooManyInviteKeys) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "too-many-invite-keys",
+                "revoke an invite key before registering another",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(e) => {
+            tracing::error!(error = %e, "put invite key failed");
+            internal_error()
+        },
+    }
+}
+
+/// `DELETE /v1/channels/:channel_id/invite-keys/:pubkey_hex` — revoke a
+/// link's invite key, publisher-signed. A new subscribe under it is refused
+/// at once. Idempotent `204`.
+async fn delete_invite_key(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    let Some(key) = parse_invite_key(&pubkey_hex) else {
+        return bad_invite_key();
+    };
+    match state.store.delete_invite_key(channel, key).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "delete invite key failed");
+            internal_error()
+        },
+    }
+}
+
 /// `GET /v1/directory/bucket/:topic/:language` — the top listings of one
 /// bucket. No session, no token, no cookie; the response depends only on the
 /// bucket and the clock.
@@ -2076,6 +2832,23 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/channels", post(create_channel))
         .route("/v1/channels/{channel_id}/owner", put(replace_owner))
+        .route("/v1/channels/{channel_id}/access", put(put_access))
+        .route(
+            "/v1/channels/{channel_id}/public-seed/{epoch}",
+            put(put_public_seed).get(get_public_seed),
+        )
+        .route(
+            "/v1/channels/{channel_id}/invite-keys",
+            get(list_invite_keys),
+        )
+        .route(
+            "/v1/channels/{channel_id}/invite-keys/{pubkey_hex}",
+            put(put_invite_key).delete(delete_invite_key),
+        )
+        .route(
+            "/v1/channels/{channel_id}/subscribers/count",
+            get(subscriber_count),
+        )
         .route(
             "/v1/channels/{channel_id}/posts",
             post(publish_post).get(fetch_posts),
@@ -2125,6 +2898,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/health", get(health))
         .route("/version", get(version))
+        // ADR-0087 section 13a — comments and reactions.
+        .merge(crate::feedback_api::routes())
         .with_state(state)
 }
 

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
@@ -51,6 +52,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -78,9 +81,8 @@ import me.lakko.app.ui.components.LakkoDialogTone
  *
  * Header with the avatar, the name and the username; Account, Security
  * (Password, Passkeys, Devices, Recovery), Appearance and Media inline, Network, About
- * (version, licence) and the Danger zone at the bottom: Log out and Forget
- * this device behind the confirmations the flows already had. There is no
- * Delete account row: the client has no account-deletion call yet.
+ * (version, licence) and the Danger zone at the bottom: Log out, Forget this
+ * device and Delete account behind the confirmations the flows already had.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,6 +103,8 @@ public fun SettingsScreen(
     /** ADR-0059 section 6 — Security -> Channels I share. */
     onOpenChannelsIShare: () -> Unit = {},
     onForgetDevice: () -> Unit,
+    /** The delete dialog; its proof and its server calls live with Passkeys. */
+    onDeleteAccount: () -> Unit = {},
     modifier: Modifier = Modifier,
     /** docs/ux/chat-folders.md section 4 — between Notifications and Appearance. */
     onOpenChatFolders: () -> Unit = {},
@@ -109,6 +113,9 @@ public fun SettingsScreen(
     /** ADR-0075 / UX 19.1 — Settings > Account: how the account is
      *  protected (status line, banner, recovery email, recovery phrase). */
     accountProtection: @Composable () -> Unit = {},
+    /** reactions-and-emoji D3 / D4 — Appearance > Quick reaction: save the
+     *  account's quick reaction (synced to its other devices). */
+    onSetQuickReaction: (String) -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -171,8 +178,8 @@ public fun SettingsScreen(
             // asking why their phone did not ring. Nothing is shown when
             // notifications are on — a row confirming that things work is a row
             // nobody needs.
+            SectionLabel(t("settings.section.notifications"))
             if (!notificationsEnabled) {
-                SectionLabel(t("settings.section.notifications"))
                 SettingsRow(
                     title = t(NOTIFICATIONS_OFF_TITLE_KEY),
                     icon = Icons.Filled.NotificationsOff,
@@ -180,6 +187,8 @@ public fun SettingsScreen(
                     supporting = t(NOTIFICATIONS_OFF_NOTICE_KEY),
                 )
             }
+            // reactions-and-emoji section 12 — the one Reactions switch.
+            ReactionNotificationsRow()
 
             SectionLabel(t("settings.section.account"))
             SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
@@ -202,11 +211,15 @@ public fun SettingsScreen(
                 )
             }
             SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
+            // docs/ux/identity-recovery.md 17.5 - the attention badge while a
+            // new device of the account is pending.
+            val deviceNotice by me.lakko.app.devices.NewDeviceNotices.view.collectAsStateWithLifecycle()
             SettingsRow(
                 t("settings.devices.title"),
                 Icons.Filled.Devices,
                 onOpenDevices,
                 supporting = t("settings.security.devices.sub"),
+                attention = if (deviceNotice.attention) t("settings.devices.attention_a11y") else null,
             )
             SettingsRow(
                 t("settings.recovery.title"),
@@ -256,6 +269,8 @@ public fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // reactions-and-emoji D4 — the quick reaction lives in Appearance.
+            QuickReactionSettingRow(onSet = onSetQuickReaction)
             // docs/ux/localization.md section 1: a top-level row after Appearance.
             LanguageSettingsRow(onClick = onOpenLanguage)
 
@@ -313,6 +328,12 @@ public fun SettingsScreen(
                 title = t("settings.account.forget_device.label"),
                 icon = Icons.Filled.DeleteForever,
                 onClick = { confirmingForget = true },
+                danger = true,
+            )
+            SettingsRow(
+                title = t("settings.account.delete.confirm"),
+                icon = Icons.Filled.PersonRemove,
+                onClick = onDeleteAccount,
                 danger = true,
             )
             Text(
@@ -375,8 +396,8 @@ private fun TranslationsUpdatedRow() {
     val millis = signedAt ?: return
     val language = me.lakko.app.l10n.LocalStrings.current.language
     val date = remember(millis, language) {
-        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
-            .format(java.util.Date(millis))
+        // Words from the language, order from the device (localization.md 5).
+        me.lakko.app.l10n.DeviceFormats.mediumDate(millis, language)
     }
     ListItem(
         headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
@@ -424,9 +445,18 @@ private fun SettingsRow(
     onClick: () -> Unit,
     danger: Boolean = false,
     supporting: String? = null,
+    /** The accessible name of the attention badge (UX 17.5); `null`: no badge. */
+    attention: String? = null,
 ) {
     val tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     ListItem(
+        trailingContent = attention?.let {
+            {
+                me.lakko.app.ui.devices.AttentionBadge(
+                    modifier = Modifier.semantics { contentDescription = it },
+                )
+            }
+        },
         headlineContent = {
             Text(title, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
         },

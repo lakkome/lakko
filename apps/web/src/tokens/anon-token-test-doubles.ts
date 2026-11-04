@@ -39,6 +39,8 @@ export interface FakeIssuerOptions {
   }>;
   /** The key the key route serves (default {@link FAKE_ISSUER_KEY}). */
   readonly keyRouteKey?: string;
+  /** {@link AnonTokenPool}'s test-build rule; off is the release rule. */
+  readonly refillOnDemand?: boolean;
   /** The `public_key` the issuance response carries. */
   readonly responseKey?: string;
   /** The key the "issuer" actually evaluated under: `finalize` succeeds only
@@ -209,6 +211,7 @@ export function fakeTokenPool(options: FakeIssuerOptions = {}): {
     store: options.store ?? null,
     random: () => 0.5,
     timers,
+    ...(options.refillOnDemand === undefined ? {} : { refillOnDemand: options.refillOnDemand }),
   });
   const session = options.session === undefined ? "v1.QUNDT1VOVA.0.tag" : options.session;
   if (session !== null) pool.setSessionToken(session);

@@ -71,7 +71,7 @@ enum CallInviteLink {
 
     /// The origin of `value` (`scheme://host[:port]`), lower-cased, or `nil`
     /// when it is not one.
-    private static func origin(of value: String) -> String? {
+    static func origin(of value: String) -> String? {
         var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
         while text.hasSuffix("/") { text.removeLast() }
         guard let schemeEnd = text.range(of: "://") else { return nil }

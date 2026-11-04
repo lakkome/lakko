@@ -13,7 +13,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init from "../../wasm/lakko_ffi_wasm";
-import { callLinkTarget } from "../calls/call-link-slug";
 import { acceptCallInviteFromSlug } from "../calls/acceptor";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -32,23 +31,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("a pasted call link keeps its fragment", () => {
-  it("returns the slug and the #secret", () => {
-    expect(callLinkTarget("https://lakko.me/c/AbCdEfGh#0123456789abcdef")).toEqual({
-      slug: "AbCdEfGh",
-      hash: "#0123456789abcdef",
-    });
-  });
-
-  it("a paste without a fragment still routes, with an empty hash (the page shows damaged)", () => {
-    expect(callLinkTarget("  /c/AbCdEfGh ")).toEqual({ slug: "AbCdEfGh", hash: "" });
-  });
-
-  it("is null for something that is not a call link", () => {
-    expect(callLinkTarget("https://lakko.me/g/AbCdEfGh#x")).toBeNull();
-    expect(callLinkTarget("")).toBeNull();
-  });
-});
 
 describe("the call acceptor refuses a link without its secret", () => {
   it.each([[null], [""], ["#short"]])("hash %p is damaged, before any request", async (hash) => {

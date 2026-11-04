@@ -223,6 +223,9 @@ public class GroupCallHost(
      * or `null` when this device cannot name them. Called on the host scope.
      */
     private val notifyEndedForEveryone: (starterName: String?) -> Unit = {},
+    /** ADR-0087 UX 9.1 - show that the call ended because this account is out
+     *  of its group. Called on the host scope. */
+    private val notifyNoLongerInGroup: () -> Unit = {},
 ) {
     @Volatile
     private var port: GroupCallPort? = null
@@ -524,6 +527,22 @@ public class GroupCallHost(
             }
             notifyEndedForEveryone(name)
             leaveWith(GroupLeaveReason.HUNG_UP)
+        }
+    }
+
+    /**
+     * ADR-0087 UX 9.1 — this account is out of [groupIdHex]: a call in it ends,
+     * and the line says why. Safe from any thread: it only launches onto the
+     * host scope.
+     */
+    public fun onMembershipEnded(groupIdHex: String) {
+        scope.launch {
+            val a = active ?: return@launch
+            if (!a.groupIdHex.equals(groupIdHex, ignoreCase = true)) return@launch
+            // Nothing can be published to a group this device is out of.
+            a.endedForEveryone = true
+            notifyNoLongerInGroup()
+            release()
         }
     }
 

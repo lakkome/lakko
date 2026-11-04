@@ -41,9 +41,13 @@
 //! gate before the handler runs:
 //!
 //! - `POST /discovery/oprf` — context `discovery-lookup` (the OPRF
-//!   evaluation is the enumeration step; `lookup` and `channel/lookup`
+//!   evaluation is the enumeration step; `lookup` and `name/lookup`
 //!   follow it and keep only the per-IP limiter);
-//! - `POST /discovery/channel/register` — context `discovery-register`;
+//! - `POST /discovery/handle/claim` and `/discovery/handle/replace` —
+//!   context `discovery-register` (ADR-0087: taking a name);
+//! - `POST /discovery/oprf/batch` — context `discovery-register`, one
+//!   token for the whole term set of a name being published (amendment of
+//!   2026-11-04); spent inside the handler once the body validates;
 //! - the three `POST .../{blob_id}/consume` routes — context
 //!   `invite-consume`.
 //!
@@ -115,13 +119,22 @@
 //! - `GET    /ready`               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
+//! - `POST   /discovery/oprf/batch` — evaluate 1..=66 blinded elements of a name being
+//!   published, for one `discovery-register` token (ADR-0087 section 4, ADR-0060)
 //! - `POST   /discovery/register`  — bind an account's FIRST OPRF-hashed username
-//!   (`409 username-taken` / `409 username-already-set`, ADR-0076)
+//!   (`409 name-taken` / `409 username-already-set`, ADR-0076, ADR-0087)
 //! - `POST   /discovery/username/replace` — rename: retire the current name and bind another
-//!   (ADR-0076; `409 no-username` / `username-taken`)
-//! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0060)
+//!   (ADR-0076; `409 no-username` / `name-taken`)
+//! - `POST   /discovery/lookup`    — resolve an OPRF-hashed `@name`: a person in Everyone
+//!   (ADR-0060) or a public group or channel (ADR-0087)
 //! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0060)
-//! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0060)
+//! - `POST   /discovery/name/lookup` — people in Everyone and public groups and channels with
+//!   one name term, oldest first (ADR-0060, ADR-0087)
+//! - `POST   /discovery/handle/claim`   — a group or channel takes an `@name` (ADR-0087, token)
+//! - `PUT    /discovery/handle`         — publish / unpublish, renew the lease (ADR-0087)
+//! - `POST   /discovery/handle/replace` — move to a new `@name` (ADR-0087, token)
+//! - `POST   /discovery/handle/rekey`   — move a name to a new handle key (ADR-0087)
+//! - `DELETE /discovery/handle`         — retire an `@name` (ADR-0087)
 //! - `GET    /discovery/username-certificate` — this account's username certificate (ADR-0060)
 //! - `GET    /.well-known/lakko-username-cert-key` — the certificate verifying key (ADR-0060)
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
@@ -140,16 +153,14 @@
 //! - `POST   /discovery/group-invite`             — upload GroupInviteCapability blob (ADR-0028, G-3)
 //! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
 //! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3, token)
-//! - `POST   /discovery/channel/register`     — bind an OPRF-hashed channel name (G4-5, token)
-//! - `POST   /discovery/channel/lookup`       — resolve an OPRF-hashed channel name (G4-5)
 
 #![forbid(unsafe_code)]
 
 mod account;
 pub(crate) mod auth;
 mod call_invite;
-mod channel_names;
 mod group_invite;
+mod handles;
 mod identity_bundle;
 mod invite;
 mod key_reset;
@@ -431,6 +442,9 @@ async fn main() -> Result<()> {
     // ADR-0076: and the usernames retired longer ago than the hold.
     let _pruners =
         spawn_bucket_and_tombstone_pruners(&rate_limits, &pool, name_policy.retired_hold_secs);
+    // ADR-0087 — lapsed handle leases, held handles past the hold, old
+    // statement nonces.
+    let _handle_pruner = handles::spawn_pruner(pool.clone(), name_policy.retired_hold_secs);
 
     // KT-log S2.5 — the transparency-log reconciliation sweep. Spawned
     // ONLY when the transparency integration is armed; best-effort +
@@ -558,8 +572,9 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
 /// - **rate-limited** — the anonymous enumeration vectors, behind the per-IP
 ///   bucket; of these the OPRF evaluation and the three invite consumes
 ///   also spend an anonymous token (ADR-0054 S3);
-/// - **open** — by-id reads and health, plus the channel-name registration,
-///   which spends a `discovery-register` token.
+/// - **open** — by-id reads and health, plus the ADR-0087 handle writes,
+///   gated by the handle key's signed statement (a claim and a replace also
+///   spend a `discovery-register` token).
 ///
 /// The consumes stay unauthenticated by design: a fresh-install joiner taps
 /// a link before it has a session - but it must hold a token, so it signs
@@ -577,6 +592,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
     let oprf = Router::new()
         .route("/discovery/oprf", post(oprf::evaluate))
         .route_layer(gate(TokenContext::DiscoveryLookup));
+    // Amendment of 2026-11-04 (ADR-0087 section 4, ADR-0060): publishing a
+    // name evaluates its whole term set in one request for one
+    // `discovery-register` token. The handler validates the body before it
+    // spends the token, so no token layer here; it still sits under the
+    // per-IP bucket below, charged once per request.
+    let oprf = oprf.route("/discovery/oprf/batch", post(oprf::evaluate_batch));
 
     // ADR-0054 S3 — the three ledgers' consumes spend an `invite-consume`
     // token. The dedup tag in the body stays server-blind.
@@ -600,13 +621,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
     // G-discovery-ratelimit — per-IP token bucket on the enumeration-vector
     // endpoints, the outer layer: an address over its bucket is refused
     // before a token is spent or any OPRF compute runs. `lookup` and
-    // `channel/lookup` carry no token of their own (their enumeration step
-    // is the OPRF evaluation above).
+    // `name/lookup` carry no token of their own (their enumeration step is
+    // the OPRF evaluation above).
     let rate_limited = Router::new()
         .route("/discovery/lookup", post(registry::lookup))
         // ADR-0060 — find people in Everyone by one name term.
         .route("/discovery/name/lookup", post(visibility::name_lookup))
-        .route("/discovery/channel/lookup", post(channel_names::lookup))
         // ADR-0080 — the city of the request's own address, for a device
         // card. Anonymous, stores nothing, logs nothing; per-IP bucket only.
         .route("/discovery/locate", get(locate::locate))
@@ -632,12 +652,19 @@ pub(crate) fn build_app(state: AppState) -> Router {
             rate_limit::middleware,
         ));
 
-    // G4-5 — channel @name registration: anonymous, spends a
-    // `discovery-register` token (ADR-0054 S3). UNIQUE(oprf_hash) gates
-    // squatting; the token rations it per account.
-    let channel_register = Router::new()
-        .route("/discovery/channel/register", post(channel_names::register))
+    // ADR-0087 section 3 — group and channel @names. No session: the
+    // handle key's signed statement is the gate. Taking a name spends a
+    // `discovery-register` token; the other writes spend none.
+    let handle_claims = Router::new()
+        .route("/discovery/handle/claim", post(handles::claim))
+        .route("/discovery/handle/replace", post(handles::replace))
         .route_layer(gate(TokenContext::DiscoveryRegister));
+    let handle_writes = Router::new()
+        .route(
+            "/discovery/handle",
+            axum::routing::put(handles::update).delete(handles::retire_name),
+        )
+        .route("/discovery/handle/rekey", post(handles::rekey));
 
     // Open routes — no auth required, no rate limit.
     //   * /health, /ready, /version — no compute.
@@ -658,7 +685,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/.well-known/lakko-username-cert-key",
             get(visibility::cert_key),
         )
-        .merge(channel_register);
+        .merge(handle_claims)
+        .merge(handle_writes);
 
     open.merge(rate_limited)
         .merge(protected)

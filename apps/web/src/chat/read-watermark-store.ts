@@ -202,6 +202,17 @@ export class ReadWatermarkStore {
     return true;
   }
 
+  /** Drop a group's watermarks (ADR-0087 section 9: the group is gone from
+   *  this device) and schedule the save. */
+  forget(accountId: string, groupIdB64: string): void {
+    if (this.account !== accountId || !this.rows.has(groupIdB64)) return;
+    const next = new Map(this.rows);
+    next.delete(groupIdB64);
+    this.rows = next;
+    this.notify();
+    this.scheduleSave(accountId);
+  }
+
   /** Resolves once every save scheduled so far has settled (tests). */
   flush(): Promise<void> {
     return this.chain;

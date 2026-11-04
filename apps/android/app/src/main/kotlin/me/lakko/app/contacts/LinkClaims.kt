@@ -411,6 +411,9 @@ private data class ClaimBody(
     val notes: Map<String, StoredNote> = emptyMap(),
     /** The journal's epochs (ADR-0079 readability rule). */
     val journal: StoredJournal? = null,
+    /** The one-to-ones founded for a plain accept and not answered yet, by
+     *  the requester's account key (hex). */
+    val owedAccepts: Map<String, LinkClaims.Founded> = emptyMap(),
 )
 
 private val claimJson = Json { ignoreUnknownKeys = true }
@@ -533,6 +536,27 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
      *  founding this device would not find again. */
     public fun setFounded(keyHex: String, founded: LinkClaims.Founded): Boolean = synchronized(LOCK) {
         updateOwn(keyHex) { it.copy(founded = founded) }
+    }
+
+    /** The founding of a plain accept of the person [keyHex] names, if it is
+     *  still owed. */
+    public fun owedAccept(keyHex: String): LinkClaims.Founded? = synchronized(LOCK) { read().owedAccepts[keyHex] }
+
+    /** The people a plain accept is still owed to. */
+    public fun owedAcceptKeys(): List<String> = synchronized(LOCK) { read().owedAccepts.keys.toList() }
+
+    /** Record a plain accept's founding (before any Welcome is posted), or its
+     *  delivery. `false` when the write failed. */
+    public fun setOwedAccept(keyHex: String, founded: LinkClaims.Founded): Boolean = synchronized(LOCK) {
+        val body = read()
+        write(body.copy(owedAccepts = body.owedAccepts + (keyHex to founded)))
+    }
+
+    /** The accept was answered. */
+    public fun forgetOwedAccept(keyHex: String): Unit = synchronized(LOCK) {
+        val body = read()
+        if (keyHex !in body.owedAccepts) return
+        write(body.copy(owedAccepts = body.owedAccepts - keyHex))
     }
 
     /** Keep a link-founded note another device posted (the earliest per

@@ -122,7 +122,7 @@ final class ThreeWordsTests: XCTestCase {
         budgets.save(ThreeWords.Budget(misses: 3, pausedUntilMs: nil), accountIdB64: accountIdB64)
         markers.markPublishOwed(
             KeyResetPublishRecord(
-                attestation: Data(repeating: 0xA7, count: 177), keyGeneration: 2, signedAtMs: 1,
+                attestation: Data(repeating: 0xA7, count: 145), keyGeneration: 2, signedAtMs: 1,
                 newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
             accountIdB64: accountIdB64)
         markers.markPhraseOwed(accountIdB64: accountIdB64)

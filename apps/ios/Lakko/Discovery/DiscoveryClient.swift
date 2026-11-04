@@ -33,10 +33,10 @@ import LakkoCore
 /// No request here carries a proof of work any more. The anonymous routes
 /// spend one anonymous token each (``AnonTokenPool``, header
 /// `x-lakko-anon-token`): `/discovery/oprf` (`discovery-lookup` - every
-/// username or channel lookup, and the OPRF step of a registration),
-/// `/discovery/channel/register` (`discovery-register`) and the three
-/// consumes (`invite-consume`). Those routes, and the two token-free lookups
-/// `/discovery/lookup` + `/discovery/channel/lookup`, NEVER carry the
+/// username or `@name` lookup, and the OPRF step of a registration),
+/// `/discovery/handle/claim` (`discovery-register`) and the three
+/// consumes (`invite-consume`). Those routes, and the token-free lookup
+/// `/discovery/lookup`, NEVER carry the
 /// session token (not even this client's ``sessionToken``), a cookie or any
 /// account identifier, and travel on their own connection pool
 /// (``AnonymousHTTP``): a lookup must not be linkable to the account that
@@ -138,6 +138,50 @@ public final class DiscoveryClient {
             endpoint: "/discovery/oprf", body: request, context: .discoveryLookup)
     }
 
+    /// What one entry of an own-name batch blinds: the `@name` (the username
+    /// domain) or a name search term.
+    public enum OwnOprfInput: Equatable {
+        case name(String)
+        case term(String)
+    }
+
+    /// The most entries one batch takes: the record's 65 terms (the `@name`
+    /// and 64 name terms) plus the old `@name` of a replace.
+    public static let ownOprfBatchMax = 66
+
+    /// `POST /discovery/oprf/batch` (maintainer, 2026-11-04) — every OPRF
+    /// evaluation the account needs to publish its own or a conversation's
+    /// own name, in ONE request spending ONE `discovery-register` token:
+    /// blinded here, evaluated in order, each finalized with its own blinder.
+    /// Before it, each term was its own `/discovery/oprf` round with its own
+    /// lookup token, and a long name ran out of the token pool and into the
+    /// per-address limit. A search for someone else stays on
+    /// `/discovery/oprf`. Throws on an empty or oversized batch and on an
+    /// answer that does not match the request.
+    public func oprfOwnBatch(_ inputs: [OwnOprfInput]) async throws -> [OprfResult] {
+        guard !inputs.isEmpty, inputs.count <= Self.ownOprfBatchMax else {
+            throw DiscoveryClientError.argument("an OPRF batch takes 1 to \(Self.ownOprfBatchMax) entries")
+        }
+        let blinders: [OprfBlinder] = try inputs.map { input in
+            switch input {
+            case .name(let name): return try OprfBlinder.blind(username: name)
+            case .term(let term): return try OprfBlinder.blindNameTerm(term: term)
+            }
+        }
+        let endpoint = "/discovery/oprf/batch"
+        let response: OprfBatchResponse = try await postAnonymous(
+            endpoint: endpoint,
+            body: OprfBatchRequest(blinded: blinders.map { $0.blindedB64() }),
+            context: .discoveryRegister)
+        guard response.evaluated.count == blinders.count else {
+            throw DiscoveryClientError.http(
+                status: 200, endpoint: endpoint, body: "evaluation count does not match the request")
+        }
+        return try zip(blinders, response.evaluated).map { blinder, evaluated in
+            try blinder.finalize(evaluatedB64: evaluated)
+        }
+    }
+
     /// `POST /discovery/register`.
     public func register(_ request: RegisterRequest) async throws -> RegisterResponse {
         try await post(endpoint: "/discovery/register", body: request)
@@ -148,28 +192,6 @@ public final class DiscoveryClient {
     /// other non-2xx. Anonymous, no token (the per-IP limiter only).
     public func lookupRaw(_ request: LookupRequest) async throws -> LookupResponse? {
         try await postAnonymousNullableOn404(endpoint: "/discovery/lookup", body: request)
-    }
-
-    /// `POST /discovery/channel/register` (G4-5, ADR-0010) — bind an
-    /// OPRF-hashed `@channelname` to a `channel_id`. Since ADR-0054 S3 an
-    /// anonymous route spending one `discovery-register` token (ownership
-    /// lives at the PublisherGroup layer); never carries the session.
-    public func channelRegister(
-        _ request: ChannelRegisterRequest
-    ) async throws -> ChannelRegisterResponse {
-        try await postAnonymous(
-            endpoint: "/discovery/channel/register", body: request, context: .discoveryRegister)
-    }
-
-    /// `POST /discovery/channel/lookup` (G4-5, ADR-0010). Returns the
-    /// typed response on 200, `nil` on 404 (the typed not-found path),
-    /// throws on any other non-2xx. Mirror of ``lookupRaw(_:)`` for the
-    /// channel namespace — anonymous, no token (the per-IP limiter only).
-    public func channelLookupRaw(
-        _ request: ChannelLookupRequest
-    ) async throws -> ChannelLookupResponse? {
-        try await postAnonymousNullableOn404(
-            endpoint: "/discovery/channel/lookup", body: request)
     }
 
     /// `POST /discovery/identity` — upsert the identity bundle.
@@ -337,9 +359,11 @@ public final class DiscoveryClient {
                 account: nil
             )
         }
+        // ADR-0087 — a public group or channel answers the same lookup and
+        // names no account: no person holds this name.
         return LookupResult(
             normalisedUsername: normalisedUsername,
-            account: base64Decode(resp.accountId)
+            account: resp.kind == "handle" ? nil : resp.accountId.flatMap { base64Decode($0) }
         )
     }
 
@@ -436,7 +460,8 @@ public final class DiscoveryClient {
             body: NameLookupWireRequest(oprfHashB64: base64Encode(termLookupKey)),
             context: nil)
         return resp.results.compactMap { row in
-            guard let accountId = base64Decode(row.accountIdB64) else { return nil }
+            guard row.kind != "handle", let idB64 = row.accountIdB64,
+                  let accountId = base64Decode(idB64) else { return nil }
             return PublicAccountHit(
                 accountId: accountId, publicRecord: base64Decode(row.publicRecordB64))
         }
@@ -447,9 +472,139 @@ public final class DiscoveryClient {
     /// when the name is not registered or its owner is not in Everyone.
     public func lookupPublic(lookupKey: Data) async throws -> PublicAccountHit? {
         guard let resp = try await lookupRaw(LookupRequest(oprfHash: base64Encode(lookupKey))),
-              let accountId = base64Decode(resp.accountId) else { return nil }
+              resp.kind != "handle",
+              let accountId = resp.accountId.flatMap({ base64Decode($0) }) else { return nil }
         return PublicAccountHit(
             accountId: accountId, publicRecord: resp.publicRecord.flatMap { base64Decode($0) })
+    }
+
+    // MARK: - ADR-0087 group and channel @names
+
+    /// One OPRF round over a canonical `@name` (one `discovery-lookup` token).
+    public func oprfName(_ name: String) async throws -> OprfResult {
+        let blinder = try OprfBlinder.blind(username: name)
+        let resp = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: resp.evaluated)
+    }
+
+    /// One OPRF round over a name search term (one `discovery-lookup` token).
+    public func oprfNameTerm(_ term: String) async throws -> OprfResult {
+        let blinder = try OprfBlinder.blindNameTerm(term: term)
+        let resp = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: resp.evaluated)
+    }
+
+    /// `POST /discovery/lookup` keeping only a public group or channel: its
+    /// sealed record, or `nil`.
+    public func lookupHandleRecord(lookupKey: Data) async throws -> Data? {
+        guard let resp = try await lookupRaw(LookupRequest(oprfHash: base64Encode(lookupKey))),
+              resp.kind == "handle" else { return nil }
+        return resp.publicRecord.flatMap { base64Decode($0) }
+    }
+
+    /// `POST /discovery/name/lookup` keeping only the public groups and
+    /// channels: their sealed records (at most 20).
+    public func nameLookupHandles(termLookupKey: Data) async throws -> [Data] {
+        let resp: NameLookupWireResponse = try await postAnonymous(
+            endpoint: "/discovery/name/lookup",
+            body: NameLookupWireRequest(oprfHashB64: base64Encode(termLookupKey)),
+            context: nil)
+        return resp.results.filter { $0.kind == "handle" }.compactMap { base64Decode($0.publicRecordB64) }
+    }
+
+    /// ADR-0087 section 3 — the route of one signed handle statement.
+    public enum HandleRoute { case claim, update, replace, rekey, retire }
+
+    /// A handle write refused by discovery, with the server's code
+    /// (`name-taken`, `statement-refused`, ...).
+    public struct HandleWriteError: Error, Equatable {
+        public let status: Int
+        public let code: String?
+    }
+
+    private struct HandleWriteBody: Encodable {
+        let statementB64: String
+        let publicRecordB64: String?
+        let termsB64: [String]
+        enum CodingKeys: String, CodingKey {
+            case statementB64 = "statement_b64"
+            case publicRecordB64 = "public_record_b64"
+            case termsB64 = "terms_b64"
+        }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(statementB64, forKey: .statementB64)
+            if let publicRecordB64 { try c.encode(publicRecordB64, forKey: .publicRecordB64) }
+            if !termsB64.isEmpty { try c.encode(termsB64, forKey: .termsB64) }
+        }
+    }
+
+    private struct HandleWriteAnswer: Decodable {
+        let handleCertificateB64: String
+        let leaseUntilMs: UInt64
+        enum CodingKeys: String, CodingKey {
+            case handleCertificateB64 = "handle_certificate_b64"
+            case leaseUntilMs = "lease_until_ms"
+        }
+    }
+
+    private struct ErrorCodeWire: Decodable { let error: String? }
+
+    /// One signed handle statement to its route (ADR-0087 section 3):
+    /// `claim` and `replace` spend one `discovery-register` token, the others
+    /// none. No session. Returns the certificate and the lease end of a write,
+    /// `nil` for a retire.
+    public func handleWrite(
+        route: HandleRoute, statementB64: String, record: Data? = nil, terms: [Data] = []
+    ) async throws -> (certificate: Data, leaseUntilMs: UInt64)? {
+        let endpoint: String
+        let method: String
+        let context: AnonTokenContext?
+        switch route {
+        case .claim: endpoint = "/discovery/handle/claim"; method = "POST"; context = .discoveryRegister
+        case .replace: endpoint = "/discovery/handle/replace"; method = "POST"; context = .discoveryRegister
+        case .rekey: endpoint = "/discovery/handle/rekey"; method = "POST"; context = nil
+        case .update: endpoint = "/discovery/handle"; method = "PUT"; context = nil
+        case .retire: endpoint = "/discovery/handle"; method = "DELETE"; context = nil
+        }
+        let url = try buildURL(endpoint: endpoint)
+        let encoded = try encoder.encode(HandleWriteBody(
+            statementB64: statementB64, publicRecordB64: record.map(base64Encode),
+            termsB64: terms.map(base64Encode)))
+        let perform: (String?) async throws -> (Data, HTTPURLResponse) = { tokenHeader in
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let tokenHeader { request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName) }
+            request.httpBody = encoded
+            let raw: (Data, URLResponse)
+            do {
+                raw = try await AntiCensorshipTransport.perform(
+                    request, session: self.anonymousSession, config: self.antiCensorship)
+            } catch {
+                throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+            }
+            guard let http = raw.1 as? HTTPURLResponse else {
+                throw DiscoveryClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
+            }
+            return (raw.0, http)
+        }
+        let (data, http): (Data, HTTPURLResponse)
+        if let context {
+            (data, http) = try await AnonTokenRoute.send(context: context, tokens: tokens) { try await perform($0) }
+        } else {
+            (data, http) = try await perform(nil)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let code = (try? JSONDecoder().decode(ErrorCodeWire.self, from: data))?.error
+            throw HandleWriteError(status: http.statusCode, code: code)
+        }
+        if route == .retire { return nil }
+        let answer = try JSONDecoder().decode(HandleWriteAnswer.self, from: data)
+        guard let cert = base64Decode(answer.handleCertificateB64) else {
+            throw DiscoveryClientError.http(status: http.statusCode, endpoint: endpoint, body: "bad certificate")
+        }
+        return (cert, answer.leaseUntilMs)
     }
 
     /// `GET /.well-known/lakko-username-cert-key` — the username-certificate
@@ -464,88 +619,6 @@ public final class DiscoveryClient {
 
     // MARK: - Channel discovery (G4-5, ADR-0010)
     //
-    // The `@channelname` namespace reuses the SAME OPRF mechanism as
-    // `@username` (the `/discovery/oprf` evaluate endpoint is
-    // namespace-agnostic — one static key over the blinded handle). Only
-    // the second endpoint differs: `/discovery/channel/{register,lookup}`
-    // instead of `/discovery/{register,lookup}`, and the id is a 16-byte
-    // channel_id pseudonym rather than a 16-byte account UUIDv7.
-    // Mirror of `apps/web/src/discovery/client.ts`
-    // `registerChannelName` / `lookupChannel`.
-
-    /// Bind `@channelname` to a 16-byte `channel_id`.
-    ///
-    /// Flow: OPRF blind → `POST /discovery/oprf` (one `discovery-lookup`
-    /// token) → finalize → `POST /discovery/channel/register` (one
-    /// `discovery-register` token). Identical to
-    /// ``registerUsername(accountId:username:)`` modulo the id type +
-    /// the second endpoint. Handle normalisation (NFKC + lowercase +
-    /// trim + leading-`@` strip) happens inside `OprfBlinder.blind`.
-    ///
-    /// The write is session-token-gated (a DoS rate-limit role, not an
-    /// ownership proof). Throws
-    /// ``DiscoveryClientError/http(status:endpoint:body:)`` with
-    /// `status == 409` when the handle is already registered
-    /// (first-come-first-served). Returns the server `ok` flag.
-    public func registerChannelName(
-        channelId: Data,
-        handle: String
-    ) async throws -> Bool {
-        guard channelId.count == Self.channelIdLength else {
-            throw DiscoveryClientError.argument(
-                "channelId must be \(Self.channelIdLength) bytes"
-            )
-        }
-        let blinder = try OprfBlinder.blindChannel(handle: handle)
-
-        let oprfResp = try await oprfEvaluate(
-            OprfRequest(blinded: blinder.blindedB64())
-        )
-
-        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
-
-        let resp = try await channelRegister(
-            ChannelRegisterRequest(
-                oprfHash: base64Encode(lookupKey),
-                channelId: base64Encode(channelId)
-            )
-        )
-        return resp.ok
-    }
-
-    /// Resolve `@channelname` to its 32-char hex `channel_id`, or `nil`
-    /// when the handle is not registered.
-    ///
-    /// Same flow as ``registerChannelName(channelId:handle:)`` modulo the
-    /// second endpoint: OPRF (one `discovery-lookup` token) → `POST /discovery/channel/lookup`.
-    /// Exact-match only (the server does no prefix search). The 404
-    /// not-found path is folded into a `nil` return so a not-found is
-    /// visible in the type rather than an exception.
-    public func lookupChannel(handle: String) async throws -> String? {
-        let blinder = try OprfBlinder.blindChannel(handle: handle)
-
-        let oprfResp = try await oprfEvaluate(
-            OprfRequest(blinded: blinder.blindedB64())
-        )
-
-        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
-
-        guard let resp = try await channelLookupRaw(
-            ChannelLookupRequest(oprfHash: base64Encode(lookupKey))
-        ) else {
-            return nil
-        }
-        guard let channelBytes = base64Decode(resp.channelId),
-              channelBytes.count == Self.channelIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/channel/lookup",
-                body: "server returned malformed channel_id"
-            )
-        }
-        return Self.hexEncode(channelBytes)
-    }
-
     /// Upload (or replace) THIS device's MLS KeyPackage. Drives
     /// `POST /discovery/keypackage`.
     ///
@@ -688,10 +761,14 @@ public final class DiscoveryClient {
     /// non-genesis re-publish (absence is `COALESCE`-preserved server-side).
     ///
     /// ADR-0073 section 4.1: `keyResetAttest`, when non-`nil`, is the RAW
-    /// 177-byte key-reset attestation of the reset that installs THIS key;
+    /// 145-byte key-reset attestation of the reset that installs THIS key;
     /// standard-base64 encoded into `IdentityUploadRequest.keyResetAttest`.
     /// The refusals discovery answers are typed by
     /// ``IdentityUploadRefusal/of(_:)``.
+    ///
+    /// ADR-0074 section 3.7: `conversationLink`, when non-`nil`, is the RAW
+    /// 201-byte link a rotation mints. A key change that carries none clears
+    /// the stored one.
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
@@ -699,7 +776,8 @@ public final class DiscoveryClient {
         supersessionProofB64: String? = nil,
         leafAuth: Data? = nil,
         genesisAttest: Data? = nil,
-        keyResetAttest: Data? = nil
+        keyResetAttest: Data? = nil,
+        conversationLink: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -725,7 +803,8 @@ public final class DiscoveryClient {
                 supersessionProof: supersessionProofB64,
                 leafAuth: leafAuth.map { base64Encode($0) },
                 genesisAttest: genesisAttest.map { base64Encode($0) },
-                keyResetAttest: keyResetAttest.map { base64Encode($0) }
+                keyResetAttest: keyResetAttest.map { base64Encode($0) },
+                conversationLink: conversationLink.map { base64Encode($0) }
             )
         )
         guard resp.ok else {
@@ -796,10 +875,17 @@ public final class DiscoveryClient {
     /// with the link's fragment secret (`InviteCapability.openLink`), which
     /// also re-verifies the signature, so a substituted blob opens nothing.
     public func fetchInvite(blobId: Data) async throws -> Data? {
-        guard let raw = try await inviteFetch(blobId: blobId) else {
+        try await fetchInviteRow(blobId: blobId)?.sealed
+    }
+
+    /// ``fetchInvite(blobId:)`` with the ledger's `used_up` flag, which only
+    /// a page with no session reads.
+    public func fetchInviteRow(blobId: Data) async throws -> (sealed: Data, usedUp: Bool)? {
+        guard let raw = try await inviteFetch(blobId: blobId),
+              let sealed = base64Decode(raw.sealed) else {
             return nil
         }
-        return base64Decode(raw.sealed)
+        return (sealed, raw.usedUp ?? false)
     }
 
     /// Atomically bump the consume counter for the invite at
@@ -1767,22 +1853,10 @@ public final class DiscoveryClient {
         return s
     }
 
-    /// Lowercase hex, no separators — the 32-char wire form the
-    /// `services/channels` REST routes accept. Local to this client so
-    /// ``lookupChannel(handle:)`` can return a channel-id hex without
-    /// coupling the discovery module to `ChannelsComposer.bytesToHex`.
-    fileprivate static func hexEncode(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
-
     // MARK: - Constants
 
     /// Raw 16-byte UUIDv7.
     fileprivate static let accountIdLength: Int = 16
-
-    /// Raw 16-byte channel_id pseudonym (ADR-0010) — same length as an
-    /// account_id but a distinct namespace.
-    fileprivate static let channelIdLength: Int = 16
 
     /// Ed25519 + X25519 both use 32-byte public keys.
     fileprivate static let pubkeyLength: Int = 32
@@ -2068,9 +2142,12 @@ private struct NameLookupWireRequest: Encodable {
 
 private struct NameLookupWireResponse: Decodable {
     struct Row: Decodable {
-        let accountIdB64: String
+        /// `"person"` or `"handle"` (ADR-0087); absent on an older server.
+        let kind: String?
+        let accountIdB64: String?
         let publicRecordB64: String
         enum CodingKeys: String, CodingKey {
+            case kind
             case accountIdB64 = "account_id_b64"
             case publicRecordB64 = "public_record_b64"
         }

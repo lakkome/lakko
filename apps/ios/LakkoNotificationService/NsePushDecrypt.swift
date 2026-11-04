@@ -181,6 +181,8 @@ public struct NseProcessedRow: Equatable {
     /// ADR-0073 R.7 case 1 — the re-send marker of a chat row, when its
     /// sealed envelope carried one: where the message was ORIGINALLY sent.
     public let resendOrigin: NseResendOrigin?
+    /// Reactions-and-emoji spec section 12 — a reaction row's op.
+    public let reaction: NseReaction?
 
     public init(
         kind: NseProcessedKind,
@@ -189,8 +191,10 @@ public struct NseProcessedRow: Equatable {
         singleAttachmentKind: String? = nil,
         callIdHex: String? = nil,
         senderKeyB64: String? = nil,
-        resendOrigin: NseResendOrigin? = nil
+        resendOrigin: NseResendOrigin? = nil,
+        reaction: NseReaction? = nil
     ) {
+        self.reaction = kind == .reaction ? reaction : nil
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
@@ -206,8 +210,68 @@ public struct NseProcessedRow: Equatable {
         NseProcessedRow(
             kind: kind, text: text, attachmentCount: attachmentCount,
             singleAttachmentKind: singleAttachmentKind, callIdHex: callIdHex,
-            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin)
+            senderKeyB64: senderKeyB64, resendOrigin: resendOrigin, reaction: reaction)
     }
+}
+
+/// Reactions-and-emoji spec section 12 — what a reaction row carried.
+public struct NseReaction: Equatable {
+    public let targetMessageId: Int64
+    public let emoji: String
+    public let add: Bool
+    /// The target message's author account key (standard base64) as the
+    /// reactor stated it; compared with this account's own key.
+    public let targetAuthorB64: String?
+
+    public init(targetMessageId: Int64, emoji: String, add: Bool, targetAuthorB64: String?) {
+        self.targetMessageId = targetMessageId
+        self.emoji = emoji
+        self.add = add
+        self.targetAuthorB64 = targetAuthorB64
+    }
+
+    /// The notification's identity: one reaction of one person on one
+    /// message, so its removal can withdraw it.
+    public func key(groupIdHex: String, senderKeyB64: String) -> String {
+        "\(groupIdHex)|\(targetMessageId)|\(emoji)|\(senderKeyB64)"
+    }
+}
+
+/// "{name} reacted {emoji} to your message" in the interface language: the
+/// app stores the rendered template with two markers (``nseReactionNameMark``
+/// / ``nseReactionEmojiMark``); English when it has not.
+let nseReactionNameMark = "\u{E000}"
+let nseReactionEmojiMark = "\u{E001}"
+
+/// A message notification: titled with the conversation's name ("Lakko"
+/// when this process knows none); in a group the body reads
+/// "Sender: text", in a one-to-one the text alone, and with no known sender
+/// name the text alone. Media previews ("Photo", "Voice message") go through
+/// the same shape.
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+public func nseMessageNotification(
+    conversationName: String?, senderName: String?, isGroup: Bool, text: String
+) -> (title: String, body: String) {
+    let sender = senderName?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+    let conversation = conversationName?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+    // A one-to-one is titled with the person (the chat's name, else the
+    // sender's), as web and Android do.
+    let title = (isGroup ? conversation : (conversation ?? sender)) ?? "Lakko"
+    guard isGroup, let sender else { return (title, text) }
+    return (title, "\(sender): \(text)")
+}
+
+/// "{name} reacted {emoji} to your message", with the person's real name
+/// from the app's mirror; never a placeholder and never the conversation's
+/// name (the caller posts the generic line when the mirror holds none).
+public func nseReactionBody(name: String, emoji: String) -> String {
+    let template = nseWord("notification.reaction.body", english: "\(nseReactionNameMark) reacted \(nseReactionEmojiMark) to your message")
+    return template
+        .replacingOccurrences(of: nseReactionNameMark, with: name)
+        .replacingOccurrences(of: nseReactionEmojiMark, with: emoji)
 }
 
 /// ADR-0073 R.7 case 1 — where a re-sent message was originally sent: the
@@ -295,13 +359,18 @@ public enum NsePushOutcome: Equatable {
     case callSilent(NseCallAlert)
     /// A call this device may be showing an alert for is over.
     case callEnded(callIdHex: String)
-    /// ADR-0073 R.8 / R.7 — every row this wake brought is one the APP shows
-    /// nothing for: a row from a key an accepted reset retired, or a re-send
-    /// of a message this device already holds. The extension must still
+    /// The read ran and found nothing to post: every row this wake brought
+    /// is this device's own message coming back, a message from another
+    /// device of the same person, or a row the APP shows nothing for
+    /// (service traffic, a row from a key an accepted reset retired, a
+    /// re-send of a message this device already holds). The extension must still
     /// deliver something (it cannot post nothing), so it delivers the
     /// quietest thing it can: passive and silent, in the conversation's
     /// stack (``tag``).
     case quiet(tag: String)
+    /// Reactions-and-emoji spec section 12 — reactions were taken back before
+    /// anything else was said: withdraw their notifications, deliver quietly.
+    case withdrawReactions(keys: [String], tag: String)
     /// Nothing to say — the extension shows its generic fallback.
     case none
 }
@@ -319,11 +388,17 @@ public struct NsePushPreview: Equatable {
     /// notification is grouped under rather than the wake's own routing id.
     public let movedConversation: Bool
 
-    public init(title: String, body: String, tag: String, movedConversation: Bool = false) {
+    /// Reactions-and-emoji spec section 12 — set on a reaction notification.
+    public let reactionKey: String?
+
+    public init(
+        title: String, body: String, tag: String, movedConversation: Bool = false, reactionKey: String? = nil
+    ) {
         self.title = title
         self.body = body
         self.tag = tag
         self.movedConversation = movedConversation
+        self.reactionKey = reactionKey
     }
 }
 
@@ -331,12 +406,25 @@ public struct NsePushPreview: Equatable {
 /// snapshot. The production implementation (`NseRealThrowawayGroup`) wraps a
 /// throwaway `Identity` + `Group`; ``close()`` frees them and MUST NEVER
 /// persist / snapshot them back (read-only-throwaway discipline).
+public extension NseThrowawayGroup {
+    var isGroupConversation: Bool { false }
+}
+
 public protocol NseThrowawayGroup: AnyObject {
     /// Process ONE wire row through the throwaway group. Returns the decoded
-    /// row, or `nil` when the frame does not decrypt / authenticate, is our
-    /// own echo, or is a control frame (fail-closed skip — never a plaintext
-    /// guess). MUST NOT persist any MLS state.
-    func process(_ payload: Data) -> NseProcessedRow?
+    /// row, or `nil` when the frame was processed but carries nothing a
+    /// notification could show (a commit, a proposal, a service envelope).
+    /// THROWS when the frame does not decrypt / authenticate — a wrong epoch,
+    /// a role-refused commit, or this device's own message coming back (a
+    /// sender cannot open its own message). The two are kept apart because
+    /// the caller decides between "post nothing" and the generic banner on
+    /// exactly that difference. Either way the row is skipped, never guessed
+    /// at. MUST NOT persist any MLS state.
+    func process(_ payload: Data) throws -> NseProcessedRow?
+
+    /// Whether the conversation is a group (ADR-0062, read from the group's
+    /// own GroupContext): a group message's body names its sender.
+    var isGroupConversation: Bool { get }
 
     /// ADR-0053 client contract point 9 — the `x-lakko-ds-proof` header for
     /// one read of this group's journal, signed with the access key the
@@ -453,6 +541,40 @@ public protocol NsePushDecryptDeps {
         accountIdB64: String, receivedGroupIdHex: String,
         origin: NseResendOrigin, senderKeyB64: String?
     ) -> Bool
+
+    /// The DS message ids of `groupIdHex` the app's message log holds, sent
+    /// or received. A row that does not decrypt but is held here is this
+    /// device's own message coming back (or one the app already has), not a
+    /// message this device cannot read. READ-ONLY: the log the app wrote
+    /// (C-59). Defaulted empty: when the log cannot be read every row that
+    /// does not decrypt counts as unreadable, and the generic banner stands.
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64>
+
+    /// This account's own person key (standard base64, the form of
+    /// ``NseProcessedRow/senderKeyB64``): a message from it was sent by
+    /// another device of the same person and is not a notification.
+    /// READ-ONLY, from the App Group mirror the APP writes. Defaulted `nil`:
+    /// no row is taken for the person's own.
+    func ownPersonKeyB64(accountIdB64: String) -> String?
+
+    /// The name the app shows for the person holding `keyB64` (an account
+    /// key or a leaf key, standard base64), from the App Group mirror the APP
+    /// writes (``PersonNameMirror``). READ-ONLY (C-59).
+    ///
+    /// A REQUIREMENT, not only an extension method: a method that exists
+    /// only in a protocol extension is dispatched statically through
+    /// `any NsePushDecryptDeps`, so the real reader was never called and every
+    /// notification went out without the sender's name (seen on an iPhone,
+    /// 2026-11-04). It has NO default either: a default let the real reader
+    /// sit on the wrong type (the throwaway group class) and still compile,
+    /// so the default answered every lookup (seen again the same day). Every
+    /// conformer, test doubles included, implements it.
+    func personName(accountIdB64: String, keyB64: String) -> String?
+
+    /// Reactions-and-emoji spec section 12 — the Settings > Notifications >
+    /// Reactions switch (App Group mirror). A requirement for the same reason
+    /// as ``personName(accountIdB64:keyB64:)``.
+    func reactionNotificationsOn() -> Bool
 }
 
 public extension NsePushDecryptDeps {
@@ -464,6 +586,8 @@ public extension NsePushDecryptDeps {
     func callerName(accountIdB64: String, groupIdHex: String) -> String? { nil }
     func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
     func conversationHex(accountIdB64: String, groupIdHex: String) -> String { groupIdHex }
+    func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> { [] }
+    func ownPersonKeyB64(accountIdB64: String) -> String? { nil }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -515,15 +639,20 @@ public func decryptPushOutcome(
     //    no-direct-connection, the correct anti-censorship posture. The flag
     //    is mirrored from the app's preference into the shared App Group
     //    suite (the NSE cannot read the app's private UserDefaults.standard).
-    if deps.isAntiCensorshipArmed() { return .none }
+    nseTrace("wake received g=\(wake?.groupHex != nil) p=\(wake?.pointer.map(String.init) ?? "nil") s=\(wake?.subscriptionIdHex != nil)")
+    if deps.isAntiCensorshipArmed() { nseTrace("generic: anti-censorship armed"); return .none }
 
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A Wakeup /
     //    MailboxMessage wake is not handled in this slice.
     guard let rawGroupHex = wake?.groupHex, let pointer = wake?.pointer else {
+        nseTrace("generic: not a group-message wake")
         return .none
     }
     let groupHex = rawGroupHex.lowercased()
-    guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return .none }
+    guard groupHex.count == groupHexLen, isLowerHex(groupHex) else {
+        nseTrace("generic: malformed g")
+        return .none
+    }
 
     // 2. The wake is handled only for the bound account (ADR-0042, amended
     //    2026-09-30, with ADR-0078): no binding or no well-formed `s` → the
@@ -532,6 +661,7 @@ public func decryptPushOutcome(
     guard let boundAccountIdB64 = deps.boundAccount(
         wakeSubscriptionIdHex: wake?.subscriptionIdHex),
           !boundAccountIdB64.isEmpty else {
+        nseTrace("generic: no account binding for the wake")
         return .none
     }
 
@@ -547,13 +677,16 @@ public func decryptPushOutcome(
     guard let routed = routedGroup(deps.lookupRoute(
         accountIdB64: boundAccountIdB64, pushGidHex: groupHex,
         subscriptionIdHex: wake?.subscriptionIdHex)) else {
+        nseTrace("generic: route not found")
         return .none
     }
+    nseTrace("route found")
     let account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: routed.bytes)
     let realGroupHex = routed.hex
 
     // 4. The AccountIdentity seed → the throwaway Identity.
     guard var seed = deps.loadIdentitySeed(accountIdB64: account.accountIdB64) else {
+        nseTrace("generic: no identity seed")
         return .none
     }
 
@@ -562,6 +695,7 @@ public func decryptPushOutcome(
     guard let snapshot = deps.loadSnapshot(accountIdB64: account.accountIdB64) else {
         // Zero our seed view before bailing (the identity was never built).
         seed.resetBytes(in: 0..<seed.count)
+        nseTrace("generic: no MLS snapshot")
         return .none
     }
 
@@ -575,12 +709,14 @@ public func decryptPushOutcome(
             groupIdBytes: account.groupIdBytes
         )
     } catch {
+        nseTrace("open group failed: \(type(of: error)) \(error)")
         opened = nil
     }
     // The throwaway Identity has copied the seed; zero our view of it
     // regardless of success (mirrors the seed-store caller contract).
     seed.resetBytes(in: 0..<seed.count)
-    guard let group = opened else { return .none }
+    guard let group = opened else { nseTrace("generic: group not opened"); return .none }
+    nseTrace("group opened isGroup=\(group.isGroupConversation)")
 
     defer {
         // Discard the throwaway MLS state. We NEVER snapshot it back — doing
@@ -609,13 +745,16 @@ public func decryptPushOutcome(
         rows = try await deps.dsFetch(
             groupIdBytes: account.groupIdBytes, afterId: after, group: group)
     } catch {
+        nseTrace("generic: DS fetch failed: \(type(of: error))")
         return .none
     }
+    nseTrace("rows fetched=\(rows.count) after=\(after)")
 
     // 8. Process each row through the TEMP group and keep the NEWEST frame
     //    that yields a user-visible preview. A frame that will not decrypt /
-    //    authenticate (wrong epoch, our own echo, a control frame, a
-    //    role-refused commit) is skipped — never guessed. NOTE: `process`
+    //    authenticate (wrong epoch, our own echo, a role-refused commit) or
+    //    carries nothing to show (a control frame) is skipped — never
+    //    guessed. NOTE: `process`
     //    mutates the THROWAWAY provider ONLY; it is never persisted.
     //    A call-signaling row is classified separately and OUTRANKS a message
     //    (see this function's docs): the newest call event decides, and an
@@ -625,11 +764,34 @@ public func decryptPushOutcome(
     let conversationTag = deps.conversationHex(
         accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     var latest: NsePushPreview?
+    var reactionRemovals: [String] = []
     var latestCall: (row: NseProcessedRow, createdAt: String)?
-    // Did the batch hold a row the app shows nothing for?
-    var silenced = false
+    // Rows that did not decrypt and that the app's log does not hold: a
+    // message this device cannot read yet, which only the generic banner can
+    // stand for.
+    var unreadableRows = 0
+    // Rows whose sender the person-name mirror does not name (a defect):
+    // only the generic banner can stand for them.
+    var namelessRows = 0
+    // Both read once, and only when a row asks.
+    lazy var heldIds = deps.heldMessageIds(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
+    lazy var ownPersonKey = deps.ownPersonKeyB64(accountIdB64: account.accountIdB64)
     for row in rows {
-        guard let processed = group.process(row.payload) else { continue }
+        let decoded: NseProcessedRow?
+        do {
+            decoded = try group.process(row.payload)
+        } catch {
+            // A sender cannot open its own message, so the wake the DS sends
+            // this device for its own message brings back a row that does not
+            // decrypt. The app's log holds that row (or one it already
+            // received): a held id is quiet, anything else is unreadable.
+            if nseIsOwnMessageEcho(error) { nseTrace("row \(row.id): own echo"); continue }
+            if !heldIds.contains(row.id) { unreadableRows += 1 }
+            nseTrace("row \(row.id): process failed \(type(of: error)) held=\(heldIds.contains(row.id))")
+            continue
+        }
+        guard let processed = decoded else { nseTrace("row \(row.id): no preview (control or service)"); continue }
+        nseTrace("row \(row.id): kind=\(processed.kind) sender=\(processed.senderKeyB64 ?? "nil")")
         // ADR-0073 R.8 — nothing from a superseded sender acts: its call does
         // not ring and its message is not previewed (the app drops the same
         // row before storage). Asked before the kind, so a kind added later
@@ -637,16 +799,75 @@ public func decryptPushOutcome(
         if nseDropsSilently(
             processed, accountIdB64: account.accountIdB64, receivedGroupIdHex: realGroupHex, deps: deps
         ) {
-            silenced = true
+            nseTrace("row \(row.id): dropped silently (superseded or held re-send)")
             continue
         }
         switch processed.kind {
         case .callOffer, .callEnd:
             latestCall = (row: processed, createdAt: row.createdAt)
         default:
-            guard let body = previewBody(of: processed) else { continue }
+            // A message from another device of this same person is not a
+            // notification. Calls keep their own rules above.
+            if let sender = processed.senderKeyB64, let own = ownPersonKey, sender == own {
+                nseTrace("row \(row.id): own other device")
+                continue
+            }
+            // Section 12 — a reaction to one of this person's own messages.
+            if processed.kind == .reaction {
+                guard let reaction = processed.reaction, let sender = processed.senderKeyB64,
+                      let own = ownPersonKey, reaction.targetAuthorB64 == own else {
+                    nseTrace("row \(row.id): reaction not to an own message (own=\(ownPersonKey != nil) target=\(processed.reaction?.targetAuthorB64 ?? "nil"))")
+                    continue
+                }
+                let key = reaction.key(groupIdHex: realGroupHex, senderKeyB64: sender)
+                if !reaction.add {
+                    reactionRemovals.append(key)
+                    if latest?.reactionKey == key { latest = nil }
+                    continue
+                }
+                guard deps.reactionNotificationsOn(),
+                      !deps.isMuted(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) else {
+                    nseTrace("row \(row.id): reaction switched off or muted")
+                    continue
+                }
+                let title = deps.callerName(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) ?? "Lakko"
+                guard let name = deps.personName(accountIdB64: account.accountIdB64, keyB64: sender) else {
+                    // Every sender is a contact or a member whose name the app
+                    // mirrors: a miss is a defect. The generic line, never a
+                    // made-up name.
+                    nseLogMissingSenderName()
+                    namelessRows += 1
+                    latest = nil
+                    continue
+                }
+                nseTrace("row \(row.id): reaction preview, named sender")
+                latest = NsePushPreview(
+                    title: title, body: nseReactionBody(name: name, emoji: reaction.emoji), tag: conversationTag,
+                    movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame,
+                    reactionKey: key)
+                continue
+            }
+            guard let text = previewBody(of: processed) else { nseTrace("row \(row.id): nothing to preview"); continue }
+            let senderName = processed.senderKeyB64.flatMap {
+                deps.personName(accountIdB64: account.accountIdB64, keyB64: $0)
+            }
+            // A group body always names its sender with the real name from the
+            // app's mirror. A miss is a defect: the generic line, never a
+            // group body without the sender and never a made-up name.
+            if group.isGroupConversation && senderName == nil {
+                nseLogMissingSenderName()
+                namelessRows += 1
+                latest = nil
+                continue
+            }
+            nseTrace("row \(row.id): message preview, sender named=\(senderName != nil)")
+            let shown = nseMessageNotification(
+                conversationName: deps.callerName(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex),
+                senderName: senderName,
+                isGroup: group.isGroupConversation,
+                text: text)
             latest = NsePushPreview(
-                title: "Lakko", body: body, tag: conversationTag,
+                title: shown.title, body: shown.body, tag: conversationTag,
                 movedConversation: conversationTag.caseInsensitiveCompare(realGroupHex) != .orderedSame)
         }
     }
@@ -691,12 +912,44 @@ public func decryptPushOutcome(
             break
         }
     }
-    if let latest { return .preview(latest) }
-    // Only rows the app shows nothing for: the quietest delivery there is.
-    // (A batch with nothing readable at all stays `.none`: the generic line,
-    // because an unread message may be behind it.)
-    if silenced { return .quiet(tag: conversationTag) }
-    return .none
+    if let latest { nseTrace("result: preview (title from conversation=\(latest.title != "Lakko"))"); return .preview(latest) }
+    if !reactionRemovals.isEmpty { nseTrace("result: withdraw reactions"); return .withdrawReactions(keys: reactionRemovals, tag: conversationTag) }
+    // The read ran to the end and found no message from someone else. A row
+    // this device could not read may be one, so it keeps the generic line.
+    // Otherwise the wake brought only this device's own message, a message
+    // from another device of the same person, or rows the app shows nothing
+    // for (service traffic, a superseded sender, a held re-send): nothing is
+    // to be posted, and `.quiet` is the nearest the extension can come to
+    // that.
+    if unreadableRows > 0 || namelessRows > 0 {
+        nseTrace("result: generic (unreadable=\(unreadableRows) nameless=\(namelessRows))")
+        return .none
+    }
+    nseTrace("result: quiet")
+    return .quiet(tag: conversationTag)
+}
+
+#if DEBUG
+/// DEBUG builds only: where ``nseTrace(_:)`` sends a line. The extension sets
+/// it to the App Group file writer (``NseTraceFile``); tests leave it unset.
+/// A Release build compiles none of this: ``nseTrace(_:)`` is empty there and
+/// its argument is never evaluated.
+nonisolated(unsafe) var nseTraceSink: ((String) -> Void)?
+
+func nseTrace(_ line: @autoclosure () -> String) {
+    guard let sink = nseTraceSink else { return }
+    sink(line())
+}
+#else
+@inline(__always)
+func nseTrace(_ line: @autoclosure () -> String) {}
+#endif
+
+/// One plain error line, with no identifier, when the person-name mirror
+/// holds no name for a sender. The app mirrors every member of every
+/// conversation and every contact, so this should never be seen.
+func nseLogMissingSenderName() {
+    NSLog("[nse] ERR no name in the person-name mirror for a sender; generic banner shown")
 }
 
 /// ADR-0073 R.8 / R.7 case 1 — the rows the background reader shows nothing
@@ -1315,9 +1568,15 @@ public func nseIsServiceEnvelope(
     // acted on. A yes / no from the slim FFI (`isLinkFoundedEnvelope`).
     // Defaulted for the reason above.
     isLinkFounded: (Data) -> Bool = { _ in false },
-    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0
+    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0,
+    // ADR-0087 — the group photo, the allowed reactions, the @name, and the
+    // knock and admission seeds. Each rides an ordinary group journal row;
+    // recognised and suppressed like every service envelope, never stored
+    // (C-59). A yes / no from the slim FFI. Defaulted for the reason above.
+    isGroupSetting: (Data) -> Bool = { _ in false }
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if bytes.first == 0x6C, isGroupSetting(bytes) { return true }
     if nseLooksLikeLinkFounded(bytes, envelopeLens: linkFoundedEnvelopeLens), isLinkFounded(bytes) {
         return true
     }
@@ -1519,4 +1778,15 @@ private func isLowerHex(_ s: String) -> Bool {
         if !isDigit && !isLower { return false }
     }
     return true
+}
+
+/// Whether a row's decrypt failure is this device's own message coming back: a
+/// sender cannot open what it sent. The core names the refusal: openmls's
+/// `ValidationError::CannotDecryptOwnMessage` reaches the client inside the
+/// error text (`process_message: ValidationError(CannotDecryptOwnMessage)`).
+/// It covers every row this device published (its typing, receipts and
+/// commits, which the message log never holds). A text that does not match
+/// (another openmls wording) only falls back to the held-id check.
+func nseIsOwnMessageEcho(_ error: Error) -> Bool {
+    String(describing: error).contains("CannotDecryptOwnMessage")
 }

@@ -60,7 +60,8 @@ import {
 } from "./webauthn-client";
 import { useWebauthnClient } from "./use-webauthn-client";
 import { Icon } from "../ui/icons";
-import { currentLanguage, t, type L10nArgs } from "../l10n";
+import { t, type L10nArgs } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 const SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
@@ -414,7 +415,7 @@ export default function PasskeysSection(): JSX.Element {
 function formatTimestamp(ms: number | null): string {
   const d = ms === null ? null : new Date(ms);
   if (d === null || Number.isNaN(d.getTime())) return t("common.unknown");
-  return d.toLocaleString(currentLanguage());
+  return d.toLocaleString(displayLocale());
 }
 
 /** The catalog key for an error (ADR-0061 section 6: never the server's

@@ -92,6 +92,9 @@ export interface PersonResult {
   /** For `grant`: the 134-byte grant wire (standard base64) the reach check
    *  and the request are signed with. Secret. */
   readonly grantWireB64: string | null;
+  /** `true` when {@link grantWireB64} passed a DS reach check: a merge
+   *  prefers it over a grant nobody has asked about. */
+  readonly grantChecked?: boolean;
   /** For `open`: the person's 97-byte mailbox binding from their public
    *  record (standard base64; ADR-0078), where an unsigned request goes.
    *  Verified against their key before any write. Absent when not known. */
@@ -128,14 +131,20 @@ export interface LocalCandidate {
   readonly verifiedUsername: string | null;
   readonly isContact: boolean;
   readonly accountIdHex: string | null;
-  /** The widest grant kept for them (`received-grants.ts` `bestGrantFor`),
-   *  or `null`. */
-  readonly keptGrantWireB64: string | null;
+  /** Every grant kept for them that may be offered, in the order they are
+   *  tried (`received-grants.ts` `grantsInOrderForPerson`): the contact
+   *  grant, each group's, each channel's, the one a search found them
+   *  through. Never a bare `member` grant. Empty: nothing reaches them. */
+  readonly keptGrantWires: readonly string[];
+  /** `true` when the first of {@link keptGrantWires} passed a reach check
+   *  (`reach-verdicts.ts`). */
+  readonly grantChecked?: boolean;
 }
 
 /** A local candidate as a result, with its reach worked out. */
 export function localResult(c: LocalCandidate, name: string): PersonResult {
-  const reach: PersonReach = c.isContact ? "contact" : c.keptGrantWireB64 !== null ? "grant" : "none";
+  const grant = c.keptGrantWires[0] ?? null;
+  const reach: PersonReach = c.isContact ? "contact" : grant !== null ? "grant" : "none";
   return {
     keyB64: c.keyB64,
     keyHex: c.keyHex,
@@ -144,7 +153,8 @@ export function localResult(c: LocalCandidate, name: string): PersonResult {
     ...(c.nameIsFallback === true ? { nameIsFallback: true } : {}),
     username: shownUsername(c.verifiedUsername, reach),
     reach,
-    grantWireB64: reach === "grant" ? c.keptGrantWireB64 : null,
+    grantWireB64: reach === "grant" ? grant : null,
+    ...(reach === "grant" && c.grantChecked === true ? { grantChecked: true } : {}),
   };
 }
 
@@ -178,7 +188,8 @@ export function localPeople(
 
 /**
  * Merge result lists into one, keyed on the account key: the strongest reach
- * wins, the first list's name is kept (the local one, which respects a
+ * wins (with equal reach, the result whose grant passed a reach check), the
+ * first list's name is kept (the local one, which respects a
  * rename) unless it is only a contact's stand-in and a later list has a real
  * name (the one the person published), and a username is kept from whichever list verified one - then
  * gated again by the merged reach. The own account never appears.
@@ -198,7 +209,11 @@ export function mergePeople(
         order.push(p.keyHex);
         continue;
       }
-      const stronger = REACH_RANK[p.reach] > REACH_RANK[held.reach] ? p : held;
+      const stronger =
+        REACH_RANK[p.reach] > REACH_RANK[held.reach] ||
+        (p.reach === held.reach && p.grantChecked === true && held.grantChecked !== true)
+          ? p
+          : held;
       const reach = stronger.reach;
       byKey.set(p.keyHex, {
         keyB64: held.keyB64,
@@ -211,6 +226,7 @@ export function mergePeople(
         reach,
         grantWireB64:
           reach === "grant" ? (stronger.grantWireB64 ?? held.grantWireB64 ?? p.grantWireB64) : null,
+        ...(reach === "grant" && stronger.grantChecked === true ? { grantChecked: true } : {}),
         ...(reach === "open" && (held.openBindingB64 ?? p.openBindingB64) !== undefined
           ? { openBindingB64: (held.openBindingB64 ?? p.openBindingB64)! }
           : {}),
@@ -218,6 +234,66 @@ export function mergePeople(
     }
   }
   return order.map((k) => byKey.get(k)!);
+}
+
+/** Who the contact list holds. */
+export interface ContactSet {
+  readonly keysB64: ReadonlySet<string>;
+  readonly accountIdsHex: ReadonlySet<string>;
+}
+
+/**
+ * The rows as the contact list stands now. An answer was built when it was
+ * asked, so a person who became a contact since would still offer **Add
+ * contact**, and the moment their request leaves the Sent list that row would
+ * offer a second request. By account id too: their key may have rotated.
+ */
+export function asContacts(people: readonly PersonResult[], contacts: ContactSet): PersonResult[] {
+  return people.map((p) => {
+    if (p.reach === "contact") return p;
+    const isContact =
+      contacts.keysB64.has(p.keyB64) || (p.accountIdHex !== null && contacts.accountIdsHex.has(p.accountIdHex));
+    if (!isContact) return p;
+    const { openBindingB64: _binding, grantChecked: _checked, ...rest } = p;
+    return { ...rest, reach: "contact", grantWireB64: null };
+  });
+}
+
+/**
+ * Whether an answer names as a contact someone who is no longer one. Such a
+ * row is wrong twice: the person has no way to be added from it, and in
+ * Contacts it is hidden as "listed above", where they no longer stand.
+ */
+export function namesFormerContact(people: readonly PersonResult[], contacts: ContactSet): boolean {
+  return people.some(
+    (p) =>
+      p.reach === "contact" &&
+      !contacts.keysB64.has(p.keyB64) &&
+      !(p.accountIdHex !== null && contacts.accountIdsHex.has(p.accountIdHex)),
+  );
+}
+
+/**
+ * The rows under People: one person, one row (UX 6.1).
+ *
+ * `listedB64` are the people a list row above shows: a contact, or someone
+ * added through their link. They leave People whatever their reach.
+ *
+ * `chatPeersB64` are the people whose one-to-one matched (Chats). Only a
+ * contact among them leaves: a removed person with a chat keeps their row,
+ * and with it the way to add them.
+ *
+ * A contact who stands in neither (their name has not arrived, so nothing
+ * matches them yet) keeps a row here, so the field is never blank.
+ */
+export function peopleRows(
+  people: readonly PersonResult[],
+  listedB64: ReadonlySet<string>,
+  chatPeersB64: ReadonlySet<string>,
+): PersonResult[] {
+  return people.filter(
+    (p) => !listedB64.has(p.keyB64) && !(p.reach === "contact" && chatPeersB64.has(p.keyB64)),
+  );
 }
 
 /** Lower-case hex of a byte string. */

@@ -45,7 +45,7 @@ use lakko_contacts::group_invite::{
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation, open_link as rust_group_invite_open_link,
     seal_link as rust_group_invite_seal_link, GroupInviteCapability as RustGroupInviteCapability,
-    GroupInvitePreview as RustGroupInvitePreview,
+    GroupInvitePreview as RustGroupInvitePreview, GroupKnockKey as RustGroupKnockKey,
     LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
     LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
 };
@@ -334,7 +334,7 @@ fn prepare_profile(
 #[wasm_bindgen]
 #[derive(Clone, PartialEq, Eq)]
 pub struct AvatarRef {
-    inner: lakko_contacts::profile::AvatarRef,
+    pub(crate) inner: lakko_contacts::profile::AvatarRef,
 }
 
 impl core::fmt::Debug for AvatarRef {
@@ -416,7 +416,7 @@ impl AvatarRef {
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileAvatar {
-    inner: lakko_contacts::profile::Avatar,
+    pub(crate) inner: lakko_contacts::profile::Avatar,
 }
 
 #[wasm_bindgen]
@@ -2529,6 +2529,26 @@ pub enum WasmIncomingEnvelopeKind {
     /// The decoded note rides the `linkFounded` getter; `payload` is empty.
     /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
     LinkFounded = 21,
+    /// A group's `@name` and its flag (ADR-0087 section 11). `payload` is the
+    /// whole envelope; the typed decode and the signature check are the FFI
+    /// step of ADR-0087. Never render it.
+    ConversationHandle = 22,
+    /// A knock-key seed sealed to one admin (ADR-0087 section 5). `payload`
+    /// is the whole envelope; the typed decode and open are the FFI step of
+    /// ADR-0087. Never render it.
+    KnockSeed = 23,
+    /// A private channel's admission seed sealed to one co-publisher
+    /// (ADR-0087 section 7). `payload` is the whole envelope; the typed
+    /// decode and open are the FFI step. Never render it.
+    AdmissionSeed = 24,
+    /// A group's photo (ADR-0087 section 18.1) in `groupPhoto`; `payload`
+    /// is empty. Admit it only from an owner or admin resolved at receipt and
+    /// keep it only when `groupPhotoIsNewer`. Never render it.
+    GroupPhoto = 25,
+    /// A group's allowed reactions (ADR-0087 section 13a) in
+    /// `groupReactions`; `payload` is empty. Admit it only from an owner or
+    /// admin and keep it only when `groupReactionsIsNewer`. Never render it.
+    GroupReactions = 26,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2555,6 +2575,8 @@ pub struct WasmIncomingEnvelope {
     device_card: Option<crate::device_card::WasmDeviceCard>,
     link_claim: Option<crate::link_claim::WasmLinkClaim>,
     link_founded: Option<crate::link_founded::WasmLinkFounded>,
+    group_photo: Option<crate::conversation_meta::WasmGroupPhoto>,
+    group_reactions: Option<crate::conversation_meta::WasmGroupReactions>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2580,6 +2602,8 @@ impl WasmIncomingEnvelope {
             device_card: None,
             link_claim: None,
             link_founded: None,
+            group_photo: None,
+            group_reactions: None,
         }
     }
 }
@@ -2723,6 +2747,19 @@ impl WasmIncomingEnvelope {
     pub fn link_founded(&self) -> Option<crate::link_founded::WasmLinkFounded> {
         self.link_founded.clone()
     }
+
+    /// Set only for `GroupPhoto` (ADR-0087 section 18.1): the decoded photo.
+    #[wasm_bindgen(getter, js_name = groupPhoto)]
+    pub fn group_photo(&self) -> Option<crate::conversation_meta::WasmGroupPhoto> {
+        self.group_photo.clone()
+    }
+
+    /// Set only for `GroupReactions` (ADR-0087 section 13a): the decoded
+    /// value.
+    #[wasm_bindgen(getter, js_name = groupReactions)]
+    pub fn group_reactions(&self) -> Option<crate::conversation_meta::WasmGroupReactions> {
+        self.group_reactions.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2763,6 +2800,7 @@ pub(crate) fn dispatch_incoming_envelope_for_tests(
 
 /// The `JsError`-free core of [`dispatch_incoming_envelope`], so the refusal
 /// is exercisable on the host.
+#[allow(clippy::too_many_lines)] // one arm per envelope kind
 fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, String> {
     use WasmIncomingEnvelopeKind as K;
     let parsed = rust_dispatch_incoming_envelope(plaintext).map_err(|err| err.to_string())?;
@@ -2851,6 +2889,26 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::LinkClaim(claim) => WasmIncomingEnvelope {
             link_claim: Some(claim.into()),
             ..WasmIncomingEnvelope::of(K::LinkClaim)
+        },
+        IncomingEnvelope::ConversationHandle(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ConversationHandle)
+        },
+        IncomingEnvelope::KnockSeed(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::KnockSeed)
+        },
+        IncomingEnvelope::AdmissionSeed(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::AdmissionSeed)
+        },
+        IncomingEnvelope::GroupPhoto(photo) => WasmIncomingEnvelope {
+            group_photo: Some(photo.into()),
+            ..WasmIncomingEnvelope::of(K::GroupPhoto)
+        },
+        IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
+            group_reactions: Some(value.into()),
+            ..WasmIncomingEnvelope::of(K::GroupReactions)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -3571,12 +3629,18 @@ pub fn committer_beacon_envelope_len() -> u32 {
 /// `issuerSigningSeed` is the 32-byte Ed25519 seed; `groupId` is the target
 /// group's opaque MLS GroupId bytes; `expiryMs` is UNIX millis (`0` = never).
 /// Returns an `InviteLinkMint`.
+///
+/// `knockPublicKey` / `knockVersion` are the group's knock key the joiner
+/// seals its request to (ADR-0087 section 5, capability v3).
 #[wasm_bindgen(js_name = composeGroupInviteCapability)]
 pub fn compose_group_invite_capability(
     issuer_signing_seed: &[u8],
     group_id: &[u8],
     expiry_ms: u64,
+    knock_public_key: &[u8],
+    knock_version: u16,
 ) -> Result<WasmInviteLinkMint, JsError> {
+    let knock = group_knock_key(knock_public_key, knock_version)?;
     if issuer_signing_seed.len() != 32 {
         return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
     }
@@ -3588,7 +3652,7 @@ pub fn compose_group_invite_capability(
             "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
         )));
     }
-    let wire = rust_group_invite_compose(&signing, group_id, expiry_ms)
+    let wire = rust_group_invite_compose(&signing, group_id, expiry_ms, &knock)
         .map_err(|e| JsError::new(&format!("{e}")))?;
     seal_mint(
         &signing,
@@ -3666,6 +3730,155 @@ pub struct WasmGroupInvitePreview {
     inviter_name: Option<String>,
     member_count: u16,
     channel_id: Option<Vec<u8>>,
+    avatar: Option<ProfileAvatar>,
+    subscriber: Option<WasmSubscriberInvite>,
+}
+
+fn preview_to_wasm(p: RustGroupInvitePreview) -> WasmGroupInvitePreview {
+    WasmGroupInvitePreview {
+        group_name: p.group_name,
+        inviter_name: p.inviter_name,
+        member_count: p.member_count,
+        channel_id: p.channel_id.map(|c| c.to_vec()),
+        avatar: p.avatar.map(|inner| ProfileAvatar { inner }),
+        subscriber: p.subscriber.map(|s| WasmSubscriberInvite {
+            access: WasmChannelAccess { inner: s.access },
+            description: s.description,
+        }),
+    }
+}
+
+/// How a channel subscriber invitation lets its holder read the channel
+/// (ADR-0087 sections 6, 7 and 14).
+#[wasm_bindgen(js_name = ChannelAccess)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct WasmChannelAccess {
+    inner: lakko_contacts::group_invite::ChannelAccess,
+}
+
+impl core::fmt::Debug for WasmChannelAccess {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+fn access_key(what: &str, bytes: &[u8]) -> Result<[u8; 32], JsError> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| JsError::new(&format!("{what} must be 32 bytes")))
+}
+
+#[wasm_bindgen(js_class = ChannelAccess)]
+impl WasmChannelAccess {
+    /// A private channel: the link's 32-byte invite seed (SECRET), the
+    /// channel's 32-byte admission public key and its version.
+    ///
+    /// # Errors
+    ///
+    /// Throws on a wrong-length key.
+    #[wasm_bindgen(js_name = privateChannel)]
+    pub fn private_channel(
+        invite_seed: &[u8],
+        admission_public_key: &[u8],
+        admission_version: u16,
+    ) -> Result<WasmChannelAccess, JsError> {
+        Ok(Self {
+            inner: lakko_contacts::group_invite::ChannelAccess::Private {
+                invite_seed: access_key("inviteSeed", invite_seed)?,
+                admission_public_key: access_key("admissionPublicKey", admission_public_key)?,
+                admission_version,
+            },
+        })
+    }
+
+    /// A public channel: its 32-byte read key.
+    ///
+    /// # Errors
+    ///
+    /// Throws on a wrong-length key.
+    #[wasm_bindgen(js_name = publicChannel)]
+    pub fn public_channel(read_key: &[u8]) -> Result<WasmChannelAccess, JsError> {
+        Ok(Self {
+            inner: lakko_contacts::group_invite::ChannelAccess::Public {
+                read_key: access_key("readKey", read_key)?,
+            },
+        })
+    }
+
+    /// `true` for a private channel.
+    #[wasm_bindgen(getter, js_name = isPrivate)]
+    pub fn is_private(&self) -> bool {
+        matches!(
+            self.inner,
+            lakko_contacts::group_invite::ChannelAccess::Private { .. }
+        )
+    }
+
+    /// The invite seed of a private channel (SECRET), else `undefined`.
+    #[wasm_bindgen(getter, js_name = inviteSeed)]
+    pub fn invite_seed(&self) -> Option<Vec<u8>> {
+        match &self.inner {
+            lakko_contacts::group_invite::ChannelAccess::Private { invite_seed, .. } => {
+                Some(invite_seed.to_vec())
+            },
+            lakko_contacts::group_invite::ChannelAccess::Public { .. } => None,
+        }
+    }
+
+    /// The admission public key of a private channel, else `undefined`.
+    #[wasm_bindgen(getter, js_name = admissionPublicKey)]
+    pub fn admission_public_key(&self) -> Option<Vec<u8>> {
+        match &self.inner {
+            lakko_contacts::group_invite::ChannelAccess::Private {
+                admission_public_key,
+                ..
+            } => Some(admission_public_key.to_vec()),
+            lakko_contacts::group_invite::ChannelAccess::Public { .. } => None,
+        }
+    }
+
+    /// The admission-key version of a private channel, else `undefined`.
+    #[wasm_bindgen(getter, js_name = admissionVersion)]
+    pub fn admission_version(&self) -> Option<u16> {
+        match &self.inner {
+            lakko_contacts::group_invite::ChannelAccess::Private {
+                admission_version, ..
+            } => Some(*admission_version),
+            lakko_contacts::group_invite::ChannelAccess::Public { .. } => None,
+        }
+    }
+
+    /// The read key of a public channel, else `undefined`.
+    #[wasm_bindgen(getter, js_name = readKey)]
+    pub fn read_key(&self) -> Option<Vec<u8>> {
+        match &self.inner {
+            lakko_contacts::group_invite::ChannelAccess::Public { read_key } => {
+                Some(read_key.to_vec())
+            },
+            lakko_contacts::group_invite::ChannelAccess::Private { .. } => None,
+        }
+    }
+}
+
+/// What a subscriber invitation carries beyond the channel id and name.
+#[wasm_bindgen(js_name = SubscriberInvite)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmSubscriberInvite {
+    access: WasmChannelAccess,
+    description: String,
+}
+
+#[wasm_bindgen(js_class = SubscriberInvite)]
+impl WasmSubscriberInvite {
+    /// Private or public, with the keys each needs.
+    #[wasm_bindgen(getter)]
+    pub fn access(&self) -> WasmChannelAccess {
+        self.access.clone()
+    }
+
+    /// The channel description; may be empty.
+    #[wasm_bindgen(getter)]
+    pub fn description(&self) -> String {
+        self.description.clone()
+    }
 }
 
 #[wasm_bindgen(js_class = GroupInvitePreview)]
@@ -3695,6 +3908,30 @@ impl WasmGroupInvitePreview {
     pub fn channel_id(&self) -> Option<Vec<u8>> {
         self.channel_id.clone()
     }
+
+    /// ADR-0087 section 18.4: the photo when the link was made, or
+    /// `undefined`. Its keys are readable by whoever holds the link.
+    #[wasm_bindgen(getter)]
+    pub fn avatar(&self) -> Option<ProfileAvatar> {
+        self.avatar.clone()
+    }
+
+    /// ADR-0087 sections 7 and 14: set on a channel subscriber invitation.
+    #[wasm_bindgen(getter)]
+    pub fn subscriber(&self) -> Option<WasmSubscriberInvite> {
+        self.subscriber.clone()
+    }
+}
+
+/// The 32-byte knock public key and its version (ADR-0087 section 5).
+fn group_knock_key(public_key: &[u8], version: u16) -> Result<RustGroupKnockKey, JsError> {
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| JsError::new("knockPublicKey must be 32 bytes"))?;
+    Ok(RustGroupKnockKey {
+        public_key,
+        version,
+    })
 }
 
 /// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2) and
@@ -3707,6 +3944,7 @@ impl WasmGroupInvitePreview {
 ///
 /// Throws on a bad seed / group id or a name the rule refuses.
 #[wasm_bindgen(js_name = composeGroupInviteCapabilityWithPreview)]
+#[allow(clippy::too_many_arguments)] // one argument per preview field
 pub fn compose_group_invite_capability_with_preview(
     issuer_signing_seed: &[u8],
     group_id: &[u8],
@@ -3714,7 +3952,11 @@ pub fn compose_group_invite_capability_with_preview(
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
+    knock_public_key: &[u8],
+    knock_version: u16,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<WasmInviteLinkMint, JsError> {
+    let knock = group_knock_key(knock_public_key, knock_version)?;
     if issuer_signing_seed.len() != 32 {
         return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
     }
@@ -3734,11 +3976,19 @@ pub fn compose_group_invite_capability_with_preview(
             .map_err(name_error)?,
         member_count,
         channel_id: None,
+        subscriber: None,
+        avatar: avatar.map(|a| a.inner),
     };
     let link_key = rust_generate_link_key();
-    let wire =
-        rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
-            .map_err(|e| JsError::new(&format!("{e}")))?;
+    let wire = rust_group_invite_compose_with_preview(
+        &signing,
+        group_id,
+        expiry_ms,
+        Some(&knock),
+        &preview,
+        &link_key,
+    )
+    .map_err(|e| JsError::new(&format!("{e}")))?;
     seal_mint(
         &signing,
         |secret| rust_group_invite_seal_link(secret, &wire),
@@ -3757,13 +4007,18 @@ pub fn compose_group_invite_capability_with_preview(
 ///
 /// Throws on a bad seed, group id or channel id, or a name the rule refuses.
 #[wasm_bindgen(js_name = composeCoPublisherInviteCapability)]
+#[allow(clippy::too_many_arguments)] // one argument per preview field
 pub fn compose_co_publisher_invite_capability(
     issuer_signing_seed: &[u8],
     group_id: &[u8],
     expiry_ms: u64,
     channel_id: &[u8],
     channel_name: Option<String>,
+    knock_public_key: &[u8],
+    knock_version: u16,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<WasmInviteLinkMint, JsError> {
+    let knock = group_knock_key(knock_public_key, knock_version)?;
     let seed: [u8; 32] = issuer_signing_seed
         .try_into()
         .map_err(|_| JsError::new("issuerSigningSeed must be 32 bytes"))?;
@@ -3782,11 +4037,19 @@ pub fn compose_co_publisher_invite_capability(
         inviter_name: None,
         member_count: 0,
         channel_id: Some(channel),
+        subscriber: None,
+        avatar: avatar.map(|a| a.inner),
     };
     let link_key = rust_generate_link_key();
-    let wire =
-        rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
-            .map_err(|e| JsError::new(&format!("{e}")))?;
+    let wire = rust_group_invite_compose_with_preview(
+        &signing,
+        group_id,
+        expiry_ms,
+        Some(&knock),
+        &preview,
+        &link_key,
+    )
+    .map_err(|e| JsError::new(&format!("{e}")))?;
     seal_mint(
         &signing,
         |secret| rust_group_invite_seal_link(secret, &wire),
@@ -3901,13 +4164,161 @@ impl GroupInviteCapability {
             .inner
             .open_preview(&key)
             .map_err(|e| JsError::new(&format!("{e}")))?;
-        Ok(opened.map(|p| WasmGroupInvitePreview {
-            group_name: p.group_name,
-            inviter_name: p.inviter_name,
-            member_count: p.member_count,
-            channel_id: p.channel_id.map(|c| c.to_vec()),
-        }))
+        Ok(opened.map(preview_to_wasm))
     }
+
+    /// The 32-byte knock public key the joiner seals its request to
+    /// (ADR-0087 section 5); `undefined` on a channel subscriber invitation.
+    #[wasm_bindgen(getter, js_name = knockPublicKey)]
+    pub fn knock_public_key(&self) -> Option<Vec<u8>> {
+        self.inner.knock.map(|k| k.public_key.to_vec())
+    }
+
+    /// The knock-key version; `undefined` on a subscriber invitation.
+    #[wasm_bindgen(getter, js_name = knockVersion)]
+    pub fn knock_version(&self) -> Option<u16> {
+        self.inner.knock.map(|k| k.version)
+    }
+}
+
+/// ADR-0087 sections 7 and 14 — mint a channel SUBSCRIBER invitation over
+/// the 16-byte `channelId` (no knock key): its sealed preview carries the
+/// channel's name (required), description, photo and access keys. Returns
+/// an `InviteLinkMint`.
+///
+/// # Errors
+///
+/// Throws on a bad seed, channel id or key, a name / description the
+/// channel rules refuse, or a photo out of bounds.
+#[wasm_bindgen(js_name = composeChannelSubscriberInviteCapability)]
+pub fn compose_channel_subscriber_invite_capability(
+    issuer_signing_seed: &[u8],
+    channel_id: &[u8],
+    expiry_ms: u64,
+    channel_name: String,
+    description: String,
+    access: &WasmChannelAccess,
+    avatar: Option<ProfileAvatar>,
+) -> Result<WasmInviteLinkMint, JsError> {
+    let seed: [u8; 32] = issuer_signing_seed
+        .try_into()
+        .map_err(|_| JsError::new("issuerSigningSeed must be 32 bytes"))?;
+    let signing = SigningKey::from_seed(&seed);
+    let channel: [u8; 16] = channel_id
+        .try_into()
+        .map_err(|_| JsError::new("channelId must be 16 bytes"))?;
+    let preview = RustGroupInvitePreview {
+        group_name: Some(channel_name),
+        inviter_name: None,
+        member_count: 0,
+        channel_id: Some(channel),
+        subscriber: Some(lakko_contacts::group_invite::SubscriberInvite {
+            access: access.inner.clone(),
+            description,
+        }),
+        avatar: avatar.map(|a| a.inner),
+    };
+    let link_key = rust_generate_link_key();
+    let wire = rust_group_invite_compose_with_preview(
+        &signing, &channel, expiry_ms, None, &preview, &link_key,
+    )
+    .map_err(|e| JsError::new(&format!("{e}")))?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
+}
+
+/// A channel invitation card opened (ADR-0087 section 14).
+#[wasm_bindgen(js_name = OpenedChannelInviteCard)]
+pub struct WasmOpenedChannelInviteCard {
+    ledger_id: Vec<u8>,
+    link_secret: Vec<u8>,
+    sealed: Vec<u8>,
+    capability_wire: Vec<u8>,
+    preview: WasmGroupInvitePreview,
+}
+
+#[wasm_bindgen(js_class = OpenedChannelInviteCard)]
+impl WasmOpenedChannelInviteCard {
+    /// The 6-byte ledger id (consume it on Subscribe).
+    #[wasm_bindgen(getter, js_name = ledgerId)]
+    pub fn ledger_id(&self) -> Vec<u8> {
+        self.ledger_id.clone()
+    }
+
+    /// The 12-byte link secret. SECRET.
+    #[wasm_bindgen(getter, js_name = linkSecret)]
+    pub fn link_secret(&self) -> Vec<u8> {
+        self.link_secret.clone()
+    }
+
+    /// The sealed `/g/` blob.
+    #[wasm_bindgen(getter)]
+    pub fn sealed(&self) -> Vec<u8> {
+        self.sealed.clone()
+    }
+
+    /// The verified plaintext capability wire.
+    #[wasm_bindgen(getter, js_name = capabilityWire)]
+    pub fn capability_wire(&self) -> Vec<u8> {
+        self.capability_wire.clone()
+    }
+
+    /// The preview: always a subscriber invitation.
+    #[wasm_bindgen(getter)]
+    pub fn preview(&self) -> WasmGroupInvitePreview {
+        self.preview.clone()
+    }
+}
+
+/// Encode a channel invitation card for `composeChannelInviteEnvelope`.
+///
+/// # Errors
+///
+/// Throws for a wrong-length id or secret, or a sealed blob no `/g/` link
+/// can have.
+#[wasm_bindgen(js_name = composeChannelInviteCard)]
+pub fn compose_channel_invite_card(
+    ledger_id: &[u8],
+    link_secret: &[u8],
+    sealed: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let card = lakko_contacts::group_invite::ChannelInviteCard {
+        ledger_id: ledger_id
+            .try_into()
+            .map_err(|_| JsValue::from_str("ledgerId must be 6 bytes"))?,
+        link_secret: rust_link_secret_from_slice(link_secret).map_err(invite_link_error)?,
+        sealed: sealed.to_vec(),
+    };
+    card.encode()
+        .map_err(|e| JsValue::from_str(&format!("{e}")))
+}
+
+/// Decode a channel invitation card, open its link and check it carries a
+/// subscriber invitation. Does NOT check expiry.
+///
+/// # Errors
+///
+/// Throws when the card is malformed, the link does not open, or it is not
+/// a subscriber invitation.
+#[wasm_bindgen(js_name = openChannelInviteCard)]
+pub fn open_channel_invite_card(card: &[u8]) -> Result<WasmOpenedChannelInviteCard, JsValue> {
+    let card = lakko_contacts::group_invite::ChannelInviteCard::decode(card)
+        .map_err(|e| JsValue::from_str(&format!("{e}")))?;
+    let (_, capability_wire) =
+        rust_group_invite_open_link(&card.link_secret, &card.sealed).map_err(invite_link_error)?;
+    let (_, preview) = card
+        .open()
+        .map_err(|e| JsValue::from_str(&format!("{e}")))?;
+    Ok(WasmOpenedChannelInviteCard {
+        ledger_id: card.ledger_id.to_vec(),
+        link_secret: card.link_secret.to_vec(),
+        sealed: card.sealed.clone(),
+        capability_wire,
+        preview: preview_to_wasm(preview),
+    })
 }
 
 // ============================================================================
@@ -4126,7 +4537,8 @@ mod tests {
     /// attribution and comes out whole (success path only, see above).
     #[test]
     fn group_join_attribution_carries_the_reply_grant() {
-        let mint = compose_group_invite_capability(&[0x33; 32], &[7u8; 32], 0).unwrap();
+        let mint =
+            compose_group_invite_capability(&[0x33; 32], &[7u8; 32], 0, &[0x4B; 32], 1).unwrap();
         let cap = GroupInviteCapability::open_link(&mint.sealed(), &mint.link_secret())
             .unwrap_or_else(|_| panic!("the minted link opens"));
         let env =

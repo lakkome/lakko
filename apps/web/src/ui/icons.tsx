@@ -38,6 +38,8 @@ const PATHS = {
   // exclamation mark that flags a contact whose account keys were reset.
   shieldAlert: `<path d="M12 3 5 6v5.5c0 4.3 3 7.6 7 8.5 4-.9 7-4.2 7-8.5V6z"/><path d="M12 8v4.5"/><path d="M12 15.5v.5"/>`,
   user: `<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/>`,
+  // A person with a plus: Add members at the top of a group's members list.
+  userPlus: `<circle cx="10" cy="8.5" r="3.6"/><path d="M3 20a7 7 0 0 1 14 0"/><path d="M19 8v6M16 11h6"/>`,
   bell: `<path d="M6.5 17V11a5.5 5.5 0 0 1 11 0v6l1.5 2h-14z"/><path d="M10 21h4"/>`,
   bellOff: `<path d="M6.5 17V11a5.5 5.5 0 0 1 11 0v6l1.5 2h-14z"/><path d="M10 21h4M4 4l16 16"/>`,
   palette: `<path d="M12 3a9 9 0 0 0 0 18c1.4 0 2-.9 2-1.9 0-.9-.6-1.3-.6-2 0-1 .8-1.6 1.8-1.6h1.6A4.2 4.2 0 0 0 21 11.3C21 6.7 17 3 12 3z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15.5" cy="7" r="1.2"/>`,

@@ -91,7 +91,7 @@ vi.mock("../profile/ProfileContext", () => ({
 }));
 vi.mock("./GroupNameContext", () => ({
   // No shared name, so a group is titled by the label this file gives it.
-  useGroupNames: () => ({ nameOf: () => null, version: () => 0 }),
+  useGroupNames: () => ({ nameOf: () => null, handleOf: () => undefined, version: () => 0 }),
 }));
 vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-circle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Circle directories (ADR-0086): the one-way key tree over a person's contacts, the chain of older epoch keys, the static retrieval filter, sealed rows and their bounded codecs"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# BLAKE3 derive-key and keyed hash, ChaCha20-Poly1305, Ed25519 and the
+# zeroizing secret container. The same primitives the rest of the core uses;
+# no new cryptography enters here.
+lakko-crypto.workspace = true
+
+# Standard base64 for the JSON bodies of the directory routes, so no client
+# spells a field name. The same crate `lakko-ds-proof` uses.
+base64 = "0.22"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `lakko-crypto` pulls `rand_core`'s `getrandom`, which needs its WebCrypto
+# backend on wasm32 (the same pin `lakko-vault` and `lakko-anon-token` carry).
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1"

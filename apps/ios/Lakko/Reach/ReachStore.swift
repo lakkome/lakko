@@ -42,6 +42,9 @@ public struct ReachRecord: Codable, Equatable {
     public var ownOfferFofVersion: UInt32?
     /// What the cached own record was composed for (`fof version|name|username`).
     public var ownOfferCacheKey: [String] = []
+    /// ADR-0060 section 4 - the OPRF OUTPUT of each term already evaluated
+    /// (`"n:<term>"` / `"u:<username>"` -> base64). Never sent anywhere.
+    public var introductionTermOutputsB64: [String: String]?
     /// Per one-to-one conversation (group hex), the key of the own
     /// introduction record last offered there, so an unchanged offer is not
     /// re-sent.
@@ -51,6 +54,11 @@ public struct ReachRecord: Codable, Equatable {
     /// web does: either can change without the other. Optional so a record
     /// stored before the split still decodes.
     public var bundleSentDigest: [String: String]?
+    /// ADR-0060 section 4, "A device that holds nothing asks" — per one-to-one
+    /// conversation (group hex), when an ask from the other person last
+    /// reset the two sent records above. Optional so a record stored before
+    /// it still decodes.
+    public var introductionsResetAtMs: [String: UInt64]?
     /// ADR-0060 section 1, "Versions after a restore" — the counter slots
     /// (``ReachRules/VersionSlot/storageKey``) this device has checked against
     /// the keys its mailbox holds on the DS. A slot with no version in the
@@ -68,8 +76,43 @@ public struct ReachRecord: Codable, Equatable {
     /// last registration, so the next one sees which it left and rotates
     /// that class's one key. `nil` until the first registration.
     public var memberOf: ReachRules.Membership?
+    /// ADR-0060 section 6, "An add of a person found by search" — the people
+    /// this device proposed to add to a group after finding them in
+    /// Everyone, with the mailbox binding their public record carried. A
+    /// device never receives its own group messages, so its own sweep reads
+    /// this in place of the committer-delegation envelope it posted. Removed
+    /// once the Welcome to that person in that group was written. Optional
+    /// so a record stored before it still decodes.
+    public var openAdds: [OpenAdd]?
+    /// ADR-0060 section 6 — the committer-delegation envelopes received in
+    /// this account's groups, newest per (group, sender, added person), oldest
+    /// first. Public to the group, no secret; kept here so a committer that
+    /// restarts can still write a Welcome it owes. An envelope whose
+    /// delegations expired is dropped. Optional so a record stored before it
+    /// still decodes.
+    public var keptEnvelopes: [KeptEnvelope]?
 
     public init() {}
+
+    /// One ``openAdds`` entry.
+    public struct OpenAdd: Codable, Equatable {
+        public var groupIdHex: String
+        public var accountKeyB64: String
+        public var bindingB64: String
+        public var storedAtMs: UInt64
+    }
+
+    /// One ``keptEnvelopes`` entry.
+    public struct KeptEnvelope: Codable, Equatable {
+        /// Lower-case hex of the group it arrived in; empty when the caller
+        /// named none.
+        public var groupIdHex: String
+        /// The sender's account key (base64), resolved at receipt (C-68).
+        public var senderKeyB64: String
+        /// The composed envelope (base64).
+        public var envelopeB64: String
+        public var storedAtMs: UInt64
+    }
 
     public struct StoredBundle: Codable, Equatable {
         public var updatedAtMs: UInt64

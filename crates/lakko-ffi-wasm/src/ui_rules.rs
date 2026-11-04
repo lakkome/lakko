@@ -65,14 +65,18 @@ use lakko_ui_rules::speaking::{
     SPEAKING_LEVEL, SPEAKING_LEVEL_MAX, SPEAKING_LEVEL_MIN,
 };
 use lakko_ui_rules::visibility::{
-    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    choose_mode as rust_choose_mode, exclude_contact_under_all as rust_exclude_contact_under_all,
+    exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contact_chosen as rust_set_contact_chosen, set_contacts_form as rust_set_contacts_form,
     set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
     set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::scoped_discovery::{GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting};
-use lakko_contacts::visibility::ScopeId as RustScopeId;
+use crate::scoped_discovery::{
+    flat_contact_ids, ContactsForm, GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting,
+};
+use lakko_contacts::visibility::{contact_account_id, ScopeId as RustScopeId};
 
 /// Which screen a conversation row opens.
 ///
@@ -351,6 +355,55 @@ pub fn guest_name(random: u32) -> String {
     lakko_ui_rules::guest_name::guest_name(u64::from(random))
 }
 
+/// The letters drawn in an avatar without a photo: the first letter of each
+/// of the first two words, or the first two letters of a one-word name, in
+/// upper case; at most two grapheme clusters; empty when nothing in the name
+/// is a letter, digit or emoji (the client then draws its placeholder).
+#[wasm_bindgen(js_name = avatarInitials)]
+#[must_use]
+pub fn avatar_initials(name: &str) -> String {
+    lakko_ui_rules::initials::avatar_initials(name)
+}
+
+/// One run of a message's text: `docs/ux/message-links.md`.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct MessageTextPiece {
+    text: String,
+    is_link: bool,
+}
+
+#[wasm_bindgen]
+impl MessageTextPiece {
+    /// The text as sent.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Whether this run is a link to open. The address is the text.
+    #[wasm_bindgen(getter, js_name = isLink)]
+    #[must_use]
+    pub fn is_link(&self) -> bool {
+        self.is_link
+    }
+}
+
+/// A message's text as pieces, in order. Joining every piece's text gives the
+/// input back. Draw a link piece as a link; decide nothing else about it here.
+#[wasm_bindgen(js_name = splitMessageLinks)]
+#[must_use]
+pub fn split_message_links(text: &str) -> Vec<MessageTextPiece> {
+    lakko_ui_rules::message_links::split_message_links(text)
+        .into_iter()
+        .map(|p| MessageTextPiece {
+            text: p.text,
+            is_link: p.is_link,
+        })
+        .collect()
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[wasm_bindgen(js_name = InfoTarget)]
@@ -384,6 +437,7 @@ impl From<RustInfoTarget> for InfoTarget {
 pub struct PersonInfoCapabilities {
     membership_ended: bool,
     is_contact: bool,
+    contacts_of_contacts_on: bool,
 }
 
 #[wasm_bindgen]
@@ -392,12 +446,20 @@ impl PersonInfoCapabilities {
     /// over (ADR-0045 UX 6.2). `isContact`: the person is on this device's
     /// contact list - `false` only for a person the viewer removed, whose
     /// one-to-one remains, and whose card then offers `add-contact`.
+    /// `contactsOfContactsOn`: Contacts of my contacts is on in "Who can find
+    /// me", under either form; left out it reads `false`, and the card has
+    /// no `their-contacts-can-find-me` row.
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(membership_ended: bool, is_contact: bool) -> Self {
+    pub fn new(
+        membership_ended: bool,
+        is_contact: bool,
+        contacts_of_contacts_on: Option<bool>,
+    ) -> Self {
         Self {
             membership_ended,
             is_contact,
+            contacts_of_contacts_on: contacts_of_contacts_on.unwrap_or(false),
         }
     }
 
@@ -406,6 +468,13 @@ impl PersonInfoCapabilities {
     #[must_use]
     pub fn is_contact(&self) -> bool {
         self.is_contact
+    }
+
+    /// Contacts of my contacts is on in "Who can find me".
+    #[wasm_bindgen(getter, js_name = contactsOfContactsOn)]
+    #[must_use]
+    pub fn contacts_of_contacts_on(&self) -> bool {
+        self.contacts_of_contacts_on
     }
 
     /// This device's membership in the conversation is over.
@@ -569,10 +638,81 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     rust_person_info_sections(RustPersonInfoCapabilities {
         membership_ended: caps.membership_ended,
         is_contact: caps.is_contact,
+        contacts_of_contacts_on: caps.contacts_of_contacts_on,
     })
     .into_iter()
     .map(|s| s.name().to_string())
     .collect()
+}
+
+/// What a group's or channel's info holds under ADR-0087 (UX
+/// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15), as
+/// kebab-case section names. `kind` is `"group"` or `"channel"`, `role`
+/// `"owner"`, `"admin"` or `"member"`. Replaces `groupInfoSections` and
+/// `channelInfoSections` once the clients move to it.
+///
+/// # Errors
+///
+/// Throws `info.badKind` / `info.badRole` for another value.
+#[wasm_bindgen(js_name = conversationInfoSections)]
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn conversation_info_sections(
+    kind: &str,
+    role: &str,
+    alone: bool,
+    can_transfer: bool,
+    can_leave: bool,
+    has_handle: bool,
+) -> Result<Vec<String>, String> {
+    use lakko_ui_rules::info::{
+        conversation_info_sections as rust_sections, ConversationInfoCapabilities,
+        ConversationInfoKind, ConversationRole,
+    };
+    let kind = match kind {
+        "group" => ConversationInfoKind::Group,
+        "channel" => ConversationInfoKind::Channel,
+        _ => return Err("info.badKind: kind must be \"group\" or \"channel\"".to_string()),
+    };
+    let role = match role {
+        "owner" => ConversationRole::Owner,
+        "admin" => ConversationRole::Admin,
+        "member" => ConversationRole::Member,
+        _ => return Err("info.badRole: role must be owner, admin or member".to_string()),
+    };
+    Ok(rust_sections(ConversationInfoCapabilities {
+        kind,
+        role,
+        alone,
+        can_transfer,
+        can_leave,
+        has_handle,
+    })
+    .into_iter()
+    .map(|s| s.name().to_string())
+    .collect())
+}
+
+/// The `@name` to prefill for a new group (`kind` `"group"`) or channel
+/// (`"channel"`) named `name`; `random` is the caller's randomness (a
+/// `bigint`).
+///
+/// # Errors
+///
+/// Throws `handle.badKind` for another kind.
+#[wasm_bindgen(js_name = suggestHandle)]
+pub fn suggest_handle(
+    name: &str,
+    kind: &str,
+    private: bool,
+    random: u64,
+) -> Result<String, String> {
+    use lakko_ui_rules::handle::{suggest_handle as rust_suggest, HandleKind};
+    let kind = match kind {
+        "group" => HandleKind::Group,
+        "channel" => HandleKind::Channel,
+        _ => return Err("handle.badKind: kind must be \"group\" or \"channel\"".to_string()),
+    };
+    Ok(rust_suggest(name, kind, private, random))
 }
 
 /// What a group's info holds — section 2.2.
@@ -799,6 +939,71 @@ pub fn set_groups_visible(setting: &VisibilitySetting, on: bool) -> VisibilitySe
 #[must_use]
 pub fn set_groups_form(setting: &VisibilitySetting, form: GroupsForm) -> VisibilitySetting {
     VisibilitySetting::from_rust(rust_set_groups_form(setting.rust(), form.into()))
+}
+
+/// All my contacts, or only the chosen ones. No effect unless part 2.1 is
+/// on.
+#[wasm_bindgen(js_name = setContactsForm)]
+#[must_use]
+pub fn set_contacts_form(setting: &VisibilitySetting, form: ContactsForm) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_contacts_form(setting.rust(), form.into()))
+}
+
+fn exclude_contact_under_all_inner(
+    setting: &VisibilitySetting,
+    all_contact_ids: &[u8],
+    excluded: &[u8],
+) -> Result<VisibilitySetting, Refusal> {
+    let all = flat_contact_ids(all_contact_ids)?;
+    let excluded = contact_account_id(excluded)?;
+    Ok(VisibilitySetting::from_rust(
+        rust_exclude_contact_under_all(setting.rust(), &all, &excluded)?,
+    ))
+}
+
+/// Exclude one contact while "all" is on: the form becomes "only the ones I
+/// choose" with every other contact in `allContactIds` (concatenated 16-byte
+/// account ids) chosen.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `contactIdLength` /
+/// `tooManyChosenContacts`.
+#[wasm_bindgen(js_name = excludeContactUnderAll)]
+pub fn exclude_contact_under_all(
+    setting: &VisibilitySetting,
+    all_contact_ids: &[u8],
+    excluded: &[u8],
+) -> Result<VisibilitySetting, JsValue> {
+    exclude_contact_under_all_inner(setting, all_contact_ids, excluded).map_err(Refusal::into_js)
+}
+
+fn set_contact_chosen_inner(
+    setting: &VisibilitySetting,
+    account_id: &[u8],
+    on: bool,
+) -> Result<VisibilitySetting, Refusal> {
+    let id = contact_account_id(account_id)?;
+    Ok(VisibilitySetting::from_rust(rust_set_contact_chosen(
+        setting.rust(),
+        &id,
+        on,
+    )?))
+}
+
+/// Choose or unchoose one contact in the chosen list.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `contactIdLength` /
+/// `tooManyChosenContacts`.
+#[wasm_bindgen(js_name = setContactChosen)]
+pub fn set_contact_chosen(
+    setting: &VisibilitySetting,
+    account_id: &[u8],
+    on: bool,
+) -> Result<VisibilitySetting, JsValue> {
+    set_contact_chosen_inner(setting, account_id, on).map_err(Refusal::into_js)
 }
 
 fn exclude_scope_under_all_inner(
@@ -1850,6 +2055,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_avatar_initials_cross_the_boundary_intact() {
+        assert_eq!(avatar_initials("QA Phase A"), "QP");
+        assert_eq!(avatar_initials("VG3"), "VG");
+        assert_eq!(avatar_initials(""), "");
+    }
+
+    #[test]
     fn the_av_alignment_crosses_the_boundary_intact() {
         assert_eq!(
             (
@@ -2028,6 +2240,43 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn contact_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{allows_contact, default_visibility_setting};
+        let s = default_visibility_setting();
+        let chosen = set_contacts_form(&s, ContactsForm::Chosen);
+        assert_eq!(chosen.contacts_form(), ContactsForm::Chosen);
+        // The memory of the form crosses too.
+        let nobody = choose_visibility_mode(&chosen, VisibilityMode::Nobody);
+        let back = choose_visibility_mode(&nobody, VisibilityMode::Some);
+        assert_eq!(back.contacts_form(), ContactsForm::Chosen);
+
+        let all = [[1u8; 16], [2u8; 16]].concat();
+        let excluded = exclude_contact_under_all(&s, &all, &[2; 16]).unwrap();
+        assert_eq!(excluded.contacts_form(), ContactsForm::Chosen);
+        assert_eq!(excluded.chosen_contacts(), vec![1u8; 16]);
+        assert!(!allows_contact(&excluded, &[2; 16]));
+        let more = set_contact_chosen(&excluded, &[3; 16], true).unwrap();
+        assert_eq!(more.chosen_contacts(), [[1u8; 16], [3u8; 16]].concat());
+        assert_eq!(
+            set_contact_chosen(&more, &[1; 16], false)
+                .unwrap()
+                .chosen_contacts(),
+            vec![3u8; 16]
+        );
+        for refused in [
+            set_contact_chosen_inner(&s, &[1; 15], true),
+            exclude_contact_under_all_inner(&s, &[1; 17], &[1; 16]),
+            exclude_contact_under_all_inner(&s, &all, &[]),
+        ] {
+            let e = refused.unwrap_err();
+            assert_eq!(
+                (e.property, e.code.as_str()),
+                ("visibilityError", "contactIdLength")
+            );
+        }
+    }
+
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow::new(
             id.to_string(),
@@ -2052,10 +2301,16 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(PersonInfoCapabilities::new(true, true));
+        let ended = person_info_sections(PersonInfoCapabilities::new(true, true, None));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
-        let removed = person_info_sections(PersonInfoCapabilities::new(false, false));
+        let removed = person_info_sections(PersonInfoCapabilities::new(false, false, Some(true)));
+        assert!(!removed.iter().any(|s| s == "their-contacts-can-find-me"));
+        assert!(
+            person_info_sections(PersonInfoCapabilities::new(false, true, Some(true)))
+                .iter()
+                .any(|s| s == "their-contacts-can-find-me")
+        );
         assert!(removed.contains(&"add-contact".to_string()));
         assert!(!removed.contains(&"remove-contact".to_string()));
         assert!(
@@ -2140,5 +2395,20 @@ mod tests {
             t.sample("", None, odd);
             t.decide_floor(Vec::new(), odd);
         }
+    }
+
+    #[test]
+    fn conversation_info_and_handle_suggestion() {
+        let sections =
+            conversation_info_sections("group", "owner", true, false, false, true).unwrap();
+        assert_eq!(sections.first().map(String::as_str), Some("handle"));
+        assert!(sections.iter().any(|s| s == "reactions"));
+        let channel_admin =
+            conversation_info_sections("channel", "admin", false, false, false, true).unwrap();
+        assert!(!channel_admin.iter().any(|s| s == "reactions"));
+        assert!(conversation_info_sections("dm", "owner", true, false, false, true).is_err());
+        assert!(suggest_handle("Book Club", "group", false, 0)
+            .unwrap()
+            .starts_with("book_club"));
     }
 }

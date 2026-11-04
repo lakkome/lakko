@@ -39,7 +39,7 @@
  * ended one-to-one had no way to be closed at all.
  */
 import { AutoTranslateSwitch } from "../translation/ConversationControls";
-import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
 import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
@@ -47,6 +47,9 @@ import { personInfoSections } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
+import { visibilitySetting } from "../reach/visibility-store";
+import { TheirContactsCanFindMeRow } from "../settings/TheirContactsCanFindMeRow";
+import { showsTheirContactsSwitch, viewOf } from "../settings/who-can-find-me";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon, type IconName } from "../ui/icons";
@@ -54,6 +57,7 @@ import { t } from "../l10n";
 import { namedActionKey } from "../ui/confirm-dialog";
 import { createLiveText } from "../l10n/live-text";
 import { computeSafetyNumber } from "./safety";
+import { messageAction, type MessageAction } from "./message-action";
 import { safetyNumberRows } from "./safety-number-format";
 
 export interface ContactDetailViewProps {
@@ -65,11 +69,22 @@ export interface ContactDetailViewProps {
   readonly chatHref: string | null;
   /** Whether Message can create the chat when there is none yet. */
   readonly canStartChat: boolean;
+  /** When the person became a contact, for the seconds a chat takes to
+   *  arrive after an accept. Absent where the screen has no such row. */
+  readonly acceptedAtMs?: number;
   readonly busy: () => boolean;
   readonly error: () => string | null;
   readonly myPubkey: () => Uint8Array | null;
   /** The narrow-screen way back to the list. */
   readonly onBack: () => void;
+  /**
+   * `docs/ux/conversation-info.md` section 3.1 — set when this screen was
+   * opened from another screen it now covers (a conversation, a group's info,
+   * a search result): the back icon is shown at every width and returns
+   * there, in place of the narrow-only way back to the list. Absent when
+   * nothing is covered (the Contacts list beside it).
+   */
+  readonly onBackToOrigin?: (() => void) | undefined;
   /** Message: open the conversation with this person. Always offered; a
    *  caller that IS the conversation passes the way back to it. */
   readonly onMessage: () => void;
@@ -94,6 +109,9 @@ export interface ContactDetailViewProps {
    * `Add to contacts` in place of Rename and Remove (amended 2026-10-24).
    */
   readonly isContact: boolean;
+  /** The person's account id, the name "Who can find me" has for them, or
+   *  `null`: such a contact cannot be chosen, and has no switch there. */
+  readonly accountIdHex: string | null;
   /** Put the person back on the contact list. Local; sends nothing. */
   readonly onAddContact: () => void;
   /**
@@ -110,12 +128,17 @@ export interface ContactDetailViewProps {
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
+  const contactsOfContactsOn = (): boolean => {
+    const s = visibilitySetting();
+    return s !== null && props.accountIdHex !== null && showsTheirContactsSwitch(viewOf(s));
+  };
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
     personInfoSections(uiRules(), {
       membershipEnded: props.membershipEnded,
       isContact: props.isContact,
+      contactsOfContactsOn: contactsOfContactsOn(),
     }),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
@@ -212,6 +235,18 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     if (ok) props.onRemove();
   }
 
+  // Ticks only so the card moves on by itself when the seconds are over.
+  const [clock, setClock] = createSignal(Date.now());
+  const clockTimer = setInterval(() => setClock(Date.now()), 5_000);
+  onCleanup(() => clearInterval(clockTimer));
+  const messageState = (): MessageAction =>
+    messageAction({
+      hasChat: props.chatHref !== null,
+      canStartChat: props.canStartChat,
+      acceptedAtMs: props.acceptedAtMs ?? null,
+      nowMs: clock(),
+    });
+
   const actions = (): ReadonlyArray<{
     label: string;
     icon: IconName;
@@ -230,11 +265,9 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             {
               label: t("contacts.detail.message"),
               icon: "chat" as IconName,
-              disabled: props.busy() || (noChat && !props.canStartChat),
+              disabled: props.busy() || messageState() !== "go",
               title:
-                noChat && !props.canStartChat
-                  ? t("contacts.detail.message_unavailable")
-                  : undefined,
+                messageState() === "unavailable" ? t("contacts.detail.message_unavailable") : undefined,
               run: () => props.onMessage(),
             },
           ];
@@ -267,15 +300,33 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   return (
     <article>
       <div class="lk-page lk-stack lk-contact-detail">
-        <button
-          type="button"
-          class="ghost small lk-narrow-only"
-          style={{ "align-self": "flex-start" }}
-          onClick={() => props.onBack()}
+        <Show
+          when={props.onBackToOrigin}
+          fallback={
+            <button
+              type="button"
+              class="ghost small lk-narrow-only"
+              style={{ "align-self": "flex-start" }}
+              onClick={() => props.onBack()}
+            >
+              <Icon name="back" size={16} />
+              {t("nav.contacts")}
+            </button>
+          }
         >
-          <Icon name="back" size={16} />
-          {t("nav.contacts")}
-        </button>
+          {(back) => (
+            <button
+              type="button"
+              class="lk-icon-button"
+              style={{ "align-self": "flex-start" }}
+              aria-label={t("common.back")}
+              title={t("common.back")}
+              onClick={() => back()()}
+            >
+              <Icon name="back" size={20} />
+            </button>
+          )}
+        </Show>
 
         <header class="lk-contact-head">
           <Avatar label={name()} id={props.personKeyB64} size="xl" personKey={props.personKeyB64} playVideo />
@@ -311,6 +362,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               )}
             </For>
           </div>
+        </Show>
+        <Show when={sections().includes("message") && messageState() === "starting"}>
+          <p class="lk-meta" role="status">
+            {t("contacts.detail.chat_starting")}
+          </p>
         </Show>
         <Show when={props.error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
 
@@ -358,6 +414,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             </Show>
           </Show>
         </section>
+        </Show>
+
+        <Show when={sections().includes("their-contacts-can-find-me") ? props.accountIdHex : null}>
+          {(hex) => <TheirContactsCanFindMeRow accountIdHex={hex()} />}
         </Show>
 
         <Show when={sections().includes("rename-contact")}>

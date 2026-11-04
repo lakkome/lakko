@@ -163,7 +163,7 @@ final class KeyRotationPlanTests: XCTestCase {
         XCTAssertNil(store.load(accountIdB64: "b"), "per account")
 
         stored.phase = .committed
-        stored.attestation = Data(repeating: 9, count: 177)
+        stored.attestation = Data(repeating: 9, count: 145)
         stored.keyGeneration = 4
         store.put(stored, accountIdB64: "a")
         XCTAssertTrue(store.publishOwed(accountIdB64: "a"))
@@ -181,7 +181,7 @@ final class KeyRotationPlanTests: XCTestCase {
         var stored = record(.committed)
         stored.newSignaturePubkey = Data(repeating: 2, count: 32)
         stored.supersessionProof = Data(repeating: 3, count: 145)
-        stored.attestation = Data(repeating: 4, count: 177)
+        stored.attestation = Data(repeating: 4, count: 145)
         let json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(stored)) as? [String: Any])
         XCTAssertEqual(

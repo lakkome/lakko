@@ -43,6 +43,8 @@ const pendingBatch: StampedEdit[] = [
   { t: "pins", hlc: 7n, folderIdHex: FOLDER_HEX, pinned: [{ kind: 2, id: GROUP }] },
   { t: "removed", hlc: 8n, folderIdHex: FOLDER_HEX },
   { t: "order", hlc: 9n, folderIdsHex: [FOLDER_HEX] },
+  // ADR-0087 section 9: names the conversation, the register is read at send.
+  { t: "conversation-end", hlc: 10n, ref: { kind: 2, id: GROUP } },
 ];
 
 describe("encode / decode", () => {

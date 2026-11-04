@@ -55,6 +55,11 @@ struct SettingsScreen: View {
     private var appearanceRaw = AppearanceSetting.system.rawValue
 
     @State private var confirmingLogout = false
+    /// Reactions-and-emoji spec section 6 — the quick-reaction picker.
+    @State private var choosingQuickReaction = false
+    @ObservedObject private var quickReaction = QuickReactionSetting.shared
+    /// Section 12 — the Reactions notification switch, mirrored for the view.
+    @State private var reactionNotifications = ReactionNotificationPreference.isOn
     @State private var confirmingForget = false
     @State private var confirmingDelete = false
 
@@ -166,9 +171,9 @@ struct SettingsScreen: View {
                     row(l10n.t("settings.password.title"), systemImage: "lock") { onOpen(.password) }
                 }
                 row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
-                row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
-                    onOpen(.devices)
-                }
+                // UX 17.5 — carries the exclamation-mark badge while a device
+                // added to the account is pending here.
+                DevicesSettingsRow { onOpen(.devices) }
                 row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
                 // ADR-0059 section 6 — every group the "Share my channels"
                 // switch is on in (docs/ux/feed.md 6.3).
@@ -177,19 +182,72 @@ struct SettingsScreen: View {
                 }
             }
 
+            // Reactions-and-emoji spec section 12 — one switch, on by
+            // default, per device (the notification extension reads it too).
+            Section {
+                Toggle(isOn: Binding(
+                    get: { reactionNotifications },
+                    set: { reactionNotifications = $0; ReactionNotificationPreference.isOn = $0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.t("settings.notifications.reactions"))
+                        Text(l10n.t("settings.notifications.reactions_sub"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+                .tint(Color.lakkoAccent)
+            } header: {
+                Text(l10n.t("settings.section.notifications"))
+            }
+
             // `docs/ux/chat-folders.md` section 4 — between Notifications
             // (not a section on this client) and Appearance.
             Section {
                 row(l10n.t("settings.section.folders"), systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
             }
 
-            Section(l10n.t("settings.section.appearance")) {
+            Section {
                 LakkoPicker(
                     l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled",
                     selection: appearance,
                     options: AppearanceSetting.allCases.map {
                         LakkoPickerOption(value: $0, label: l10n.t($0.labelKey))
                     })
+                // Section 6 (D4) — the quick reaction: the current emoji,
+                // tapping opens the picker; a pick saves and closes.
+                Button { choosingQuickReaction = true } label: {
+                    HStack {
+                        Label(l10n.t("settings.appearance.quick_reaction"), systemImage: "hand.thumbsup")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(quickReaction.current).font(.title3)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+                .buttonStyle(.plain)
+            } header: {
+                Text(l10n.t("settings.section.appearance"))
+            } footer: {
+                Text(l10n.t("settings.appearance.quick_reaction_sub"))
+            }
+            .sheet(isPresented: $choosingQuickReaction) {
+                NavigationStack {
+                    EmojiTab(onPick: { emoji in
+                        quickReaction.choose(emoji)
+                        choosingQuickReaction = false
+                    })
+                    .navigationTitle(l10n.t("settings.appearance.quick_reaction"))
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button(l10n.t("common.done")) { choosingQuickReaction = false }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
             }
 
             // UX spec `docs/ux/localization.md` section 1: a top-level row
@@ -289,6 +347,10 @@ struct SettingsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        // Settings opened: the phrase-saved flag and the protection rows
+        // follow the server. On the list, not on a row of it: a row with no
+        // content still takes a row's height.
+        .task { await accountProtection?.refresh() }
         // A UIKit-backed List keeps the mirroring it was built with when the
         // environment's layout direction flips under it (its glyphs come out
         // mirrored), so the list is rebuilt when the direction changes.
@@ -328,5 +390,33 @@ struct SettingsScreen: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The `Devices` row of Settings (UX 17.5): the same row as its neighbours,
+/// with the exclamation-mark badge while a device added to the account is
+/// pending here. Its own view observes the warning, so Settings is not
+/// re-evaluated by it.
+private struct DevicesSettingsRow: View {
+    let action: () -> Void
+    @ObservedObject private var notice = NewDeviceNoticeCenter.shared
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        let attention = notice.badgeVisible
+        Button(action: action) {
+            HStack {
+                Label(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone")
+                    .foregroundStyle(Color.lakkoText)
+                Spacer()
+                if attention { NewDeviceAttentionBadge() }
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            attention ? l10n.t("settings.devices.attention_a11y") : l10n.t("settings.devices.title"))
     }
 }

@@ -53,8 +53,9 @@ use lakko_contacts::introduction::{
 };
 use lakko_contacts::reach::MAX_REACH_SCOPE_ID_LEN;
 use lakko_contacts::visibility::{
-    try_unwrap_reach_state, try_unwrap_visibility, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES,
-    MAX_SCOPE_ID_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
+    try_unwrap_reach_state, try_unwrap_visibility, CONTACT_ACCOUNT_ID_LEN, MAX_CHOSEN_CONTACTS,
+    MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_SCOPE_ID_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1,
+    VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 use crate::FfiError;
@@ -74,9 +75,12 @@ const BUNDLE_HEADER: usize = INTRODUCTIONS_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 2;
 const BUNDLE_MIN: usize = BUNDLE_HEADER + 2 + INTRODUCTION_RECORD_MIN_LEN;
 const BUNDLE_MAX: usize = BUNDLE_HEADER + MAX_BUNDLE_RECORDS * (2 + INTRODUCTION_RECORD_MAX_LEN);
 /// Setting: `domain || version(1) || updated_at(8) || mode flags groups
-/// last_groups (4) || count(2)` then per scope `kind(1) || len(1) || id`.
-const VISIBILITY_MIN: usize = VISIBILITY_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 4 + 2;
-const VISIBILITY_MAX: usize = VISIBILITY_MIN + MAX_CHOSEN_SCOPES * (2 + MAX_SCOPE_ID_LEN);
+/// last_groups contacts_form (5) || count(2)` then per scope
+/// `kind(1) || len(1) || id`, then `contacts_count(2)` and the account ids.
+const VISIBILITY_MIN: usize = VISIBILITY_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 5 + 2 + 2;
+const VISIBILITY_MAX: usize = VISIBILITY_MIN
+    + MAX_CHOSEN_SCOPES * (2 + MAX_SCOPE_ID_LEN)
+    + MAX_CHOSEN_CONTACTS * CONTACT_ACCOUNT_ID_LEN;
 /// Reach state: `domain || version(1) || updated_at(8) || count(2)` then per
 /// entry `class(1) || len(1) || scope || version(4)`.
 const REACH_STATE_MIN: usize = REACH_STATE_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 2;
@@ -231,6 +235,13 @@ mod tests {
                     }
                 })
                 .collect();
+            s.chosen_contacts = (0..4096u16)
+                .map(|i| {
+                    let mut id = [0u8; 16];
+                    id[..2].copy_from_slice(&i.to_be_bytes());
+                    id
+                })
+                .collect();
         }
         compose_visibility(&s).unwrap()
     }
@@ -354,9 +365,9 @@ mod tests {
 
         let (v_min, v_max) = (visibility(false), visibility(true));
         assert_eq!((v_min.len(), v_max.len()), (VISIBILITY_MIN, VISIBILITY_MAX));
-        let (d_min, d_max) = (delegation(1), delegation(16));
+        let (d_min, d_max) = (delegation(0), delegation(16));
         assert_eq!((d_min.len(), d_max.len()), (DELEGATION_MIN, DELEGATION_MAX));
-        assert_eq!((DELEGATION_MIN, DELEGATION_MAX), (346, 3121));
+        assert_eq!((DELEGATION_MIN, DELEGATION_MAX), (161, 3121));
         let (r_min, r_max) = (reach_state(false), reach_state(true));
         assert_eq!(
             (r_min.len(), r_max.len()),
@@ -366,7 +377,7 @@ mod tests {
         // The literals.
         assert_eq!(scoped_discovery_envelope_min_len(), 32);
         assert_eq!(REACH_STATE_MIN, 32);
-        assert_eq!(VISIBILITY_MIN, 35);
+        assert_eq!(VISIBILITY_MIN, 38);
         assert_eq!(scoped_discovery_envelope_max_len() as usize, BUNDLE_MAX);
         for wire in [
             &offer_min,

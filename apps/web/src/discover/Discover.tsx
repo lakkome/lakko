@@ -15,6 +15,7 @@
  * used where a feed mixes suggestions in.
  */
 
+import { initialsOf } from "../ui/Avatar";
 import { createMemo, createSignal, For, onMount, Show, type Accessor, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
@@ -67,8 +68,6 @@ export const COPY = {
   pickTitle: (): string => t("discover.pick.title"),
   pickBody: (): string => t("discover.pick.body"),
   mixLabel: (): string => t("discover.mix.label"),
-  mixOffLine: (): string => t("discover.mix.off_line"),
-  searchHelper: (): string => t("discover.search.helper"),
   unavailable: (): string => t("discover.unavailable"),
   noResults: (): string => t("discover.search.no_results"),
   gone: (): string => t("discover.gone"),
@@ -412,7 +411,9 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     }
     setVerified(new Set([...verified(), card.channelIdHex]));
     if (!here()) return;
-    navigate(paths.channelSubscribe(card.channelIdHex), { state: { handle: card.handle } });
+    navigate(paths.channelSubscribe(card.channelIdHex), {
+      state: { handle: card.handle, subscribe: true },
+    });
   }
 
   return {
@@ -482,7 +483,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
       <div class="lk-discover-card-body">
         <div class="lk-discover-card-head">
           <span class="lk-discover-avatar" aria-hidden="true">
-            {c().name.trim().charAt(0).toUpperCase() || "#"}
+            {initialsOf(c().name, "#")}
           </span>
           <div class="lk-discover-card-title">
             <strong>{c().name}</strong>
@@ -663,7 +664,9 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
           {t("discover.search.action")}
         </button>
       </form>
-      <p class="lk-feed-hint">{m.unavailable() ? COPY.unavailable() : COPY.searchHelper()}</p>
+      <Show when={m.unavailable()}>
+        <p class="lk-feed-hint">{COPY.unavailable()}</p>
+      </Show>
 
       <Show when={m.notice()}>
         {(msg) => (
@@ -714,7 +717,6 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
               />
               <span>{COPY.mixLabel()}</span>
             </label>
-            <p class="lk-feed-hint">{COPY.mixOffLine()}</p>
           </details>
         </Show>
         <Show when={m.refreshing() && m.cards().length === 0}>

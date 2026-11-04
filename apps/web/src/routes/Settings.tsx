@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Privacy · Security · Chat folders · Appearance ·
+ * `/settings/:section?` — Profile · Privacy · Security · Notifications (desktop
+ * only, docs/ux/desktop.md 3.1) · Chat folders · Appearance ·
  * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
  * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
@@ -12,6 +13,8 @@
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
+import { chooseQuickReaction, quickReactionOf } from "../chat/quick-reaction-register";
+import { EmojiPicker } from "../media/EmojiPicker";
 import { createSignal, onMount, Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 
@@ -29,7 +32,7 @@ import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
-import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
+import { WhoCanFindMeContactsList, WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import { setShowCityToOwnDevices, showCityToOwnDevices } from "../devices/device-card-runtime";
 import { RecoveryPage } from "../settings/RecoveryPage";
 import { ProtectionCard } from "../auth/protect/ProtectionCard";
@@ -39,26 +42,39 @@ import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { TranslationSettingsSection } from "../translation/TranslationSettings";
 import { paths } from "./paths";
+import { isDesktop } from "../platform";
+import {
+  AntiCensorshipCard,
+  BrowserNotificationsSection,
+  DesktopNotificationsSection,
+  KeyboardShortcutsCard,
+} from "../settings/DesktopSettings";
+import { sectionsForBuild, showsShortcutList } from "../settings/desktop-only";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
+import { DevicesAttention, devicesNeedAttention } from "../devices/DeviceAddedNotice";
 
 type Section =
   | "profile"
   | "privacy"
   | "security"
+  | "notifications"
   | "folders"
   | "appearance"
   | "language"
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups" | "translation";
+type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "translation";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
-const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
+const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
   { id: "profile", labelKey: "settings.section.profile", icon: "user" },
   { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
-  // docs/ux/chat-folders.md section 4 - between Notifications (which the web
-  // does not have) and Appearance.
+  // docs/ux/desktop.md section 3.1; the browser build's has the reactions
+  // switch alone (docs/ux/reactions-and-emoji.md section 12).
+  { id: "notifications", labelKey: "settings.section.notifications", icon: "bell" },
+  // docs/ux/chat-folders.md section 4 - between Notifications and Appearance.
   { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
   { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
   { id: "language", labelKey: "settings.language.title", icon: "globe" },
@@ -67,6 +83,9 @@ const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }>
   { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
 
+/** The sections this build has. */
+const SECTIONS = sectionsForBuild(ALL_SECTIONS, isDesktop());
+
 /** The interface language in its own name: the Language row's trailing text. */
 function currentLanguageOwnName(): string {
   return supportedLanguages().find((l) => l.code === currentLanguage())?.ownName ?? "";
@@ -74,7 +93,7 @@ function currentLanguageOwnName(): string {
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
-  if (s === "privacy-groups") return "privacy-groups";
+  if (s === "privacy-groups" || s === "privacy-contacts") return s;
   // ADR-0082 / UX section 6 - a sub-screen of Language.
   if (s === "translation") return "translation";
   // The former Data section: its export card now sits under Account.
@@ -104,7 +123,7 @@ export default function Settings(): JSX.Element {
     const p = shown();
     if (p === "recovery") return "security";
     if (p === "translation") return "language";
-    return p === "privacy-groups" ? "privacy" : p;
+    return p === "privacy-groups" || p === "privacy-contacts" ? "privacy" : p;
   };
 
   const username = (): string => {
@@ -139,9 +158,19 @@ export default function Settings(): JSX.Element {
             classList={{ active: highlighted() === s.id && page() !== null }}
             activeClass=""
             inactiveClass=""
+            // The Devices row lives in Security: on a wide screen Settings
+            // opens on Profile, so the section entry carries the badge too.
+            aria-label={
+              s.id === "security" && devicesNeedAttention()
+                ? t("settings.security.attention_a11y")
+                : undefined
+            }
           >
             <Icon name={s.icon} size={20} />
             <span>{t(s.labelKey)}</span>
+            <Show when={s.id === "security"}>
+              <DevicesAttention />
+            </Show>
             <Show when={s.id === "language"}>
               <span class="lk-settings-nav-trail">
                 <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
@@ -166,11 +195,19 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "privacy-groups"}>
             <WhoCanFindMeList />
           </Show>
+          <Show when={shown() === "privacy-contacts"}>
+            <WhoCanFindMeContactsList />
+          </Show>
           <Show when={shown() === "security"}>
             <SecuritySection />
           </Show>
           <Show when={shown() === "recovery"}>
             <RecoveryPage />
+          </Show>
+          <Show when={shown() === "notifications"}>
+            <Show when={isDesktop()} fallback={<BrowserNotificationsSection />}>
+              <DesktopNotificationsSection />
+            </Show>
           </Show>
           <Show when={shown() === "folders"}>
             <ChatFoldersSection />
@@ -268,6 +305,9 @@ function SecuritySection(): JSX.Element {
       <PasswordCard />
       <PasskeysSection />
       <ChannelsIShareCard />
+      <Show when={isDesktop()}>
+        <AntiCensorshipCard />
+      </Show>
       <section class="lk-card">
         <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
@@ -275,10 +315,17 @@ function SecuritySection(): JSX.Element {
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.devices.title")}</span>
+            <span class="lk-card-row-title">
+              {t("settings.devices.title")}
+              <DevicesAttention />
+            </span>
             <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
-          <A href={paths.devices} class="lk-card-row-action">
+          <A
+            href={paths.devices}
+            class="lk-card-row-action"
+            aria-label={badgeVisible(addedNotice()) ? t("settings.devices.attention_a11y") : undefined}
+          >
             {t("common.manage")}
           </A>
         </div>
@@ -338,7 +385,55 @@ function AppearanceSection(): JSX.Element {
           ))}
         </div>
       </section>
+      <QuickReactionCard />
     </>
+  );
+}
+
+/** `docs/ux/reactions-and-emoji.md` section 6 (D4) — Settings > Appearance >
+ *  Quick reaction: the current emoji; a tap opens the picker in reaction
+ *  mode, a pick saves (to the account, D3) and closes. */
+function QuickReactionCard(): JSX.Element {
+  const auth = useAuth();
+  const [open, setOpen] = createSignal(false);
+  const account = (): string | null => {
+    const st = auth.state();
+    return st.kind === "session" ? st.account.accountId : null;
+  };
+  return (
+    <section class="lk-card" style={{ position: "relative" }}>
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon" aria-hidden="true">
+          {quickReactionOf(account())}
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-title">{t("settings.appearance.quick_reaction")}</span>
+          <span class="lk-card-row-sub">{t("settings.appearance.quick_reaction_sub")}</span>
+        </div>
+        <button
+          type="button"
+          class="lk-card-row-action"
+          data-picker-toggle
+          aria-label={t("settings.appearance.quick_reaction_change")}
+          disabled={account() === null}
+          onClick={() => setOpen(!open())}
+        >
+          {quickReactionOf(account())}
+        </button>
+      </div>
+      <Show when={open()}>
+        <EmojiPicker
+          mode="reaction"
+          onEmoji={(emoji) => {
+            const a = account();
+            if (a !== null) chooseQuickReaction(a, emoji);
+          }}
+          onClose={() => setOpen(false)}
+          sessionToken={() => null}
+          align="right"
+        />
+      </Show>
+    </section>
   );
 }
 
@@ -412,6 +507,9 @@ function AboutSection(): JSX.Element {
           </div>
         </div>
       </section>
+      <Show when={showsShortcutList(isDesktop())}>
+        <KeyboardShortcutsCard />
+      </Show>
     </>
   );
 }

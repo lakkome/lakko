@@ -19,6 +19,7 @@
  * squatted login handle at auth must not land this device in another
  * account under the typed name).
  */
+import type { DeviceCipher } from "../device-cipher";
 import type { JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { base64Encode } from "../account-id";
@@ -31,6 +32,7 @@ import {
 import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../../devices/RestoreViaDevicePanel";
+import type { PairingPlace } from "../../devices/device-card-runtime";
 import { UsernameField } from "./UsernameField";
 import { t } from "../../l10n";
 import { KeyedError } from "../../l10n/keyed-error";
@@ -50,7 +52,7 @@ export function DeviceRecover(props: {
   } | null = null;
   let liveSession: AnonymousJoinSession | null = null;
 
-  async function prepare(): Promise<DeviceRestoreFlowHandle> {
+  async function prepare(place: PairingPlace): Promise<DeviceRestoreFlowHandle> {
     const trimmed = props.username().trim();
     if (trimmed.length === 0) {
       throw new KeyedError("recovery.username_required");
@@ -65,10 +67,12 @@ export function DeviceRecover(props: {
     // `persistTo` lands the state.
     const session = await prepareAnonymousJoinFlow({
       loginHandle: target.handle.bytes,
+      place,
     });
     liveSession = session;
     return {
       qrPayload: session.qrPayload,
+      pairingPayloadAtSeal: () => session.pairingPayloadAtSeal(),
       awaitWelcome: (signal) => session.awaitWelcome(signal),
       accept: async (welcome, welcomeCursor) => {
         const outcome = await session.accept(welcome, { welcomeCursor });
@@ -106,7 +110,7 @@ export function DeviceRecover(props: {
       forgotPassword: true,
       ...(session !== null
         ? {
-            persistJoinState: (deviceKey: CryptoKey): Promise<void> => session.persistTo(deviceKey),
+            persistJoinState: (deviceKey: DeviceCipher): Promise<void> => session.persistTo(deviceKey),
           }
         : {}),
     });

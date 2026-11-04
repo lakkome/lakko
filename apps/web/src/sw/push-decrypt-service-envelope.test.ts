@@ -74,7 +74,7 @@ function wasmStub(parseBodyEnvelope: (b: Uint8Array) => unknown = realWasm.parse
           applicationData: payload,
           senderLeaf: 2,
         }),
-        members: () => [],
+        members: () => [{ leafIndex: 2, signaturePublicKey: new Uint8Array(32).fill(7) }],
         free: () => undefined,
       }),
     },
@@ -86,6 +86,8 @@ function wasmStub(parseBodyEnvelope: (b: Uint8Array) => unknown = realWasm.parse
 function deps(messages: unknown[]) {
   return {
     readWakeBinding: async () => ({ accountId: "acct" }),
+    // A sender always has a name on this device (the mirror the app writes).
+    lookupSenderName: async () => "Test Sender",
     lookupRoute: async () => ({ accountId: "acct", groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
     getDeviceKey: async () => ({}),
     getIdentitySeed: async () => new Uint8Array(64),

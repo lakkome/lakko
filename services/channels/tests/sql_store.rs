@@ -8,8 +8,9 @@
 //! test works on fresh random channel ids.
 
 use lakko_svc_channels::{
-    ChannelId, ChannelStore, DirectoryQuery, ModerationAction, SqlChannelStore, StorageError,
-    StoredListing, SubscriberId, MIGRATIONS,
+    ChannelId, ChannelStore, DirectoryQuery, ModerationAction, PublicSeedOutcome, SqlChannelStore,
+    StorageError, StoredListing, SubscriberId, INVITE_USES_UNLIMITED, MIGRATIONS, PUBLIC_SEED_LEN,
+    SEALED_TICKET_LEN,
 };
 use sqlx::mysql::MySqlPoolOptions;
 
@@ -301,4 +302,304 @@ async fn copublisher_keys_are_appointed_bounded_and_revoked() {
     assert!(s.revoke_copublisher(c, key).await.unwrap());
     assert!(!s.revoke_copublisher(c, key).await.unwrap());
     assert!(!s.is_copublisher(c, key).await.unwrap());
+}
+
+// ----------------------------------------------------------------------------
+// ADR-0087 sections 6, 7 and 15: the store contract of public and private
+// channels, run against the in-memory store always and against MariaDB when
+// `LAKKO_CHANNELS_TEST_DATABASE_URL` is set.
+// ----------------------------------------------------------------------------
+
+/// Far-past clock values so the prunes below take only this test's rows from
+/// a database other tests share.
+const OLD_MS: u64 = 1_000_000;
+const PRUNE_CUTOFF_MS: u64 = 2_000_000;
+
+fn sub() -> SubscriberId {
+    SubscriberId::from_bytes(&random::<32>()).unwrap()
+}
+
+async fn flag_and_public_seeds(s: &dyn ChannelStore) {
+    let c = channel();
+    assert_eq!(s.is_private(c).await.unwrap(), None);
+    s.create_with_access(c, OWNER, true).await.unwrap();
+    assert_eq!(s.is_private(c).await.unwrap(), Some(true));
+    // Re-creating never changes the flag.
+    s.create_with_access(c, OWNER, false).await.unwrap();
+    s.create(c, OWNER).await.unwrap();
+    assert_eq!(s.is_private(c).await.unwrap(), Some(true));
+
+    // A private channel holds no public seed and no listing.
+    assert!(matches!(
+        s.put_public_seed(c, 0, [1; PUBLIC_SEED_LEN], OLD_MS).await,
+        Err(StorageError::ChannelPrivate)
+    ));
+    assert!(matches!(
+        s.put_listing(c, listing("en", "Private", 1), now_ms())
+            .await,
+        Err(StorageError::ChannelPrivate)
+    ));
+
+    assert!(s.set_private(c, false).await.unwrap());
+    assert!(!s.set_private(c, false).await.unwrap());
+    assert_eq!(s.is_private(c).await.unwrap(), Some(false));
+    s.put_listing(c, listing("en", "Public", 1), now_ms())
+        .await
+        .unwrap();
+
+    // Immutable per epoch; at most the next epoch.
+    assert_eq!(
+        s.put_public_seed(c, 0, [1; PUBLIC_SEED_LEN], OLD_MS)
+            .await
+            .unwrap(),
+        PublicSeedOutcome::Stored
+    );
+    assert_eq!(
+        s.put_public_seed(c, 0, [1; PUBLIC_SEED_LEN], OLD_MS)
+            .await
+            .unwrap(),
+        PublicSeedOutcome::AlreadyStored
+    );
+    assert!(matches!(
+        s.put_public_seed(c, 0, [2; PUBLIC_SEED_LEN], OLD_MS).await,
+        Err(StorageError::PublicSeedConflict)
+    ));
+    assert!(matches!(
+        s.put_public_seed(c, 2, [2; PUBLIC_SEED_LEN], OLD_MS).await,
+        Err(StorageError::PublicSeedEpochInFuture { current: 0, got: 2 })
+    ));
+    s.put_public_seed(c, 1, [3; PUBLIC_SEED_LEN], OLD_MS)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.public_seed(c, 0).await.unwrap(),
+        Some([1; PUBLIC_SEED_LEN])
+    );
+    assert_eq!(
+        s.public_seed(c, 1).await.unwrap(),
+        Some([3; PUBLIC_SEED_LEN])
+    );
+    assert_eq!(s.public_seed(c, 7).await.unwrap(), None);
+
+    // Epoch 0 was superseded when epoch 1's seed came; epoch 1 was not.
+    assert!(
+        s.prune_public_seeds_superseded_before(PRUNE_CUTOFF_MS)
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(s.public_seed(c, 0).await.unwrap(), None);
+    assert_eq!(
+        s.public_seed(c, 1).await.unwrap(),
+        Some([3; PUBLIC_SEED_LEN])
+    );
+
+    // Going private withdraws the listing and deletes every public seed.
+    assert!(s.set_private(c, true).await.unwrap());
+    assert_eq!(s.public_seed(c, 1).await.unwrap(), None);
+    assert!(s.listing(c, now_ms()).await.unwrap().is_none());
+    assert!(matches!(
+        s.set_private(channel(), true).await,
+        Err(StorageError::UnknownChannel)
+    ));
+}
+
+async fn invite_keys(s: &dyn ChannelStore) {
+    let c = channel();
+    s.create_with_access(c, OWNER, true).await.unwrap();
+    let one_use = random::<32>();
+    let unlimited = random::<32>();
+    let expiring = random::<32>();
+    let now = now_ms();
+    s.put_invite_key(c, one_use, 0, 0, 3, now).await.unwrap();
+    s.put_invite_key(c, unlimited, 0, INVITE_USES_UNLIMITED, 3, now)
+        .await
+        .unwrap();
+    s.put_invite_key(c, expiring, 5_000, 10, 3, now)
+        .await
+        .unwrap();
+    assert!(matches!(
+        s.put_invite_key(c, random::<32>(), 0, 1, 3, now).await,
+        Err(StorageError::TooManyInviteKeys)
+    ));
+    assert!(matches!(
+        s.put_invite_key(channel(), one_use, 0, 1, 3, now).await,
+        Err(StorageError::UnknownChannel)
+    ));
+    assert_eq!(s.list_invite_keys(c).await.unwrap().len(), 3);
+
+    // `0` is one use.
+    assert!(s.claim_invite_use(c, one_use, now).await.unwrap());
+    assert!(!s.claim_invite_use(c, one_use, now).await.unwrap());
+    s.release_invite_use(c, one_use).await.unwrap();
+    assert!(s.claim_invite_use(c, one_use, now).await.unwrap());
+    // Updating the terms keeps the count.
+    s.put_invite_key(c, one_use, 0, 2, 3, now).await.unwrap();
+    let row = s.invite_key(c, one_use).await.unwrap().unwrap();
+    assert_eq!((row.max_uses, row.used_count), (2, 1));
+    assert!(s.claim_invite_use(c, one_use, now).await.unwrap());
+    assert!(!s.claim_invite_use(c, one_use, now).await.unwrap());
+
+    for _ in 0..5 {
+        assert!(s.claim_invite_use(c, unlimited, now).await.unwrap());
+    }
+    // Expired (5 000 ms after the epoch).
+    assert!(!s.claim_invite_use(c, expiring, now).await.unwrap());
+    assert!(!s.claim_invite_use(c, random::<32>(), now).await.unwrap());
+
+    assert!(
+        s.prune_invite_keys_expired_before(PRUNE_CUTOFF_MS)
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(s.invite_key(c, expiring).await.unwrap(), None);
+    assert!(s.delete_invite_key(c, unlimited).await.unwrap());
+    assert!(!s.delete_invite_key(c, unlimited).await.unwrap());
+    let left: Vec<[u8; 32]> = s
+        .list_invite_keys(c)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.invite_pk)
+        .collect();
+    assert_eq!(left, vec![one_use]);
+}
+
+async fn subscriber_rows_count_and_removal(s: &dyn ChannelStore) {
+    let c = channel();
+    s.create_with_access(c, OWNER, true).await.unwrap();
+    let (alice, bob, dave) = (sub(), sub(), sub());
+    let ticket_a = [0xA1; SEALED_TICKET_LEN];
+    let ticket_b = [0xB2; SEALED_TICKET_LEN];
+    assert!(s
+        .subscribe_with_ticket(c, alice, now_ms(), Some(ticket_a))
+        .await
+        .unwrap());
+    assert!(s
+        .subscribe_with_ticket(c, bob, now_ms(), Some(ticket_b))
+        .await
+        .unwrap());
+    assert!(s
+        .subscribe_with_ticket(c, dave, now_ms(), None)
+        .await
+        .unwrap());
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 3);
+    // A re-subscribe is not a new row and keeps the count; a ticket given
+    // replaces the stored one, none keeps it.
+    assert!(!s
+        .subscribe_with_ticket(c, alice, now_ms(), Some(ticket_b))
+        .await
+        .unwrap());
+    assert!(!s
+        .subscribe_with_ticket(c, bob, now_ms(), None)
+        .await
+        .unwrap());
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 3);
+
+    let page = s.list_subscriber_page(c, 0, 2).await.unwrap();
+    assert_eq!(
+        page.iter().map(|e| e.subscriber).collect::<Vec<_>>(),
+        vec![alice, bob]
+    );
+    assert_eq!(page[0].sealed_ticket, Some(ticket_b));
+    assert_eq!(page[1].sealed_ticket, Some(ticket_b));
+    assert!(page[0].seq < page[1].seq);
+    let rest = s.list_subscriber_page(c, page[1].seq, 10).await.unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].subscriber, dave);
+    assert_eq!(rest[0].sealed_ticket, None);
+    assert!(s
+        .list_subscriber_page(c, rest[0].seq, 10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The subscriber leaves: no removal record.
+    s.unsubscribe(c, dave).await.unwrap();
+    s.unsubscribe(c, dave).await.unwrap();
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 2);
+    assert!(!s.is_removed(c, dave).await.unwrap());
+
+    // A publisher removes `bob`: the row goes, the key is recorded removed.
+    assert!(s.remove_subscriber(c, bob, now_ms()).await.unwrap());
+    assert!(!s.remove_subscriber(c, bob, now_ms()).await.unwrap());
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 1);
+    assert!(s.is_removed(c, bob).await.unwrap());
+    assert!(!s.is_subscribed(c, bob).await);
+    assert!(matches!(
+        s.fetch_envelope(c, bob).await,
+        Err(StorageError::UnknownSubscriber)
+    ));
+    // Subscribing again (with a new invitation) clears it.
+    assert!(s
+        .subscribe_with_ticket(c, bob, now_ms(), Some(ticket_b))
+        .await
+        .unwrap());
+    assert!(!s.is_removed(c, bob).await.unwrap());
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 2);
+
+    // The stale-subscriber prune moves the counter and drops old removal
+    // records.
+    s.touch_subscriber_activity(c, alice, OLD_MS).await.unwrap();
+    s.remove_subscriber(c, dave, OLD_MS).await.unwrap();
+    assert!(s.is_removed(c, dave).await.unwrap());
+    assert!(
+        s.prune_subscribers_older_than(PRUNE_CUTOFF_MS)
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert!(!s.is_subscribed(c, alice).await);
+    assert!(!s.is_removed(c, dave).await.unwrap());
+    assert_eq!(s.subscriber_count(c).await.unwrap(), 1);
+
+    // A public channel's subscribers cannot be removed.
+    let public = channel();
+    s.create(public, OWNER).await.unwrap();
+    s.subscribe(public, alice, now_ms()).await.unwrap();
+    assert!(matches!(
+        s.remove_subscriber(public, alice, now_ms()).await,
+        Err(StorageError::ChannelPublic)
+    ));
+    assert_eq!(s.subscriber_count(public).await.unwrap(), 1);
+    assert!(matches!(
+        s.subscriber_count(channel()).await,
+        Err(StorageError::UnknownChannel)
+    ));
+}
+
+#[tokio::test]
+async fn the_in_memory_store_meets_the_adr_0087_contract() {
+    let s = lakko_svc_channels::InMemoryChannelStore::new();
+    flag_and_public_seeds(&s).await;
+    invite_keys(&s).await;
+    subscriber_rows_count_and_removal(&s).await;
+}
+
+#[tokio::test]
+async fn the_sql_store_meets_the_adr_0087_contract() {
+    let Some(s) = store("the_sql_store_meets_the_adr_0087_contract").await else {
+        return;
+    };
+    flag_and_public_seeds(&s).await;
+    invite_keys(&s).await;
+    subscriber_rows_count_and_removal(&s).await;
+}
+
+/// The ticket column is exactly the codec's ticket length, so a ticket the
+/// codec seals always fits and a change of the codec fails here.
+#[test]
+fn the_sealed_ticket_column_fits_the_ticket() {
+    let migration = include_str!("../migrations/0010_private_channels.sql");
+    let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalised.contains(&format!(
+            "ADD COLUMN sealed_ticket BINARY({SEALED_TICKET_LEN}) NULL"
+        )),
+        "SEALED_TICKET_LEN ({SEALED_TICKET_LEN}) must match 0010_private_channels.sql"
+    );
+    assert_eq!(PUBLIC_SEED_LEN, 64);
+    let normalised_seed = format!("envelope BINARY({PUBLIC_SEED_LEN}) NOT NULL");
+    assert!(normalised.contains(&normalised_seed));
 }

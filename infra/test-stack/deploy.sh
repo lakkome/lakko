@@ -24,7 +24,7 @@ HERE="$REPO/infra/test-stack"
 DOMAIN="${LAKKO_TEST_DOMAIN:-test.lakko.me}"
 SSH_TARGET="${LAKKO_TEST_SSH:-root@$DOMAIN}"
 OUT="$REPO/target/test-stack"
-SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy)
 
 # accept-new records the host key on first contact and still refuses a changed one.
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
@@ -66,7 +66,13 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # absent key builds a client that simply does not offer Web Push.
   vapid_public="$(remote 'cat /etc/lakko-test/vapid_public.b64url 2>/dev/null || true' | tr -d '[:space:]')"
   [[ -n $vapid_public ]] || log "no VAPID public key on the server; Web Push stays off"
+  # The test stack turns off the device-link answer limit (5 a day on the
+  # signed-in device), so sign-in tests do not run out of answers, and refills
+  # an empty token bucket on demand, so a walk never stops on the pool. Limits
+  # have their own tests.
   (cd "$REPO/apps/web" && VITE_LAKKO_SFU_URL="wss://$DOMAIN/sfu" \
+    VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
+    VITE_LAKKO_ANON_TOKEN_REFILL=on-demand \
     VITE_LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL="$vapid_public" npm run build)
 fi
 

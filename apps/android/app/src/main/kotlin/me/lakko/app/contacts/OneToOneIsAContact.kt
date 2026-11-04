@@ -28,6 +28,11 @@ import java.security.MessageDigest
  *  - A row exists with a recorded chat: nothing to do, `null`.
  *
  * Never overwrites a recorded chat, a display name or an account id.
+ *
+ * [samePerson] joins the keys of one person across proven rotations (ADR-0074
+ * section 3.7): a contact met after a rotation has their row under the key they
+ * asked with and the conversation under the key their leaves are bound to, and
+ * that is one person, one row.
  */
 public fun adoptingOneToOnePeer(
     accepted: List<AcceptedContact>,
@@ -36,8 +41,9 @@ public fun adoptingOneToOnePeer(
     groupIdHex: String,
     nowMs: ULong,
     createdAt: String,
+    samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
 ): List<AcceptedContact>? {
-    val index = accepted.indexOfFirst { it.request.fromPubkey.contentEquals(signatureKey) }
+    val index = accepted.indexOfFirst { samePerson(it.request.fromPubkey, signatureKey) }
     if (index >= 0) {
         val old = accepted[index]
         if (old.groupIdHex != null) return null
@@ -55,6 +61,34 @@ public fun adoptingOneToOnePeer(
         createdAt = createdAt,
     )
     return accepted + AcceptedContact(request = synthetic, groupIdHex = groupIdHex)
+}
+
+/**
+ * The accepted list with [requests] accepted: one row per person. A person who
+ * already has a row (the one-to-one rule ran ahead of the accept, or a request
+ * was re-sent) keeps it; the mailbox request takes the place of a synthetic
+ * one, and a chat or a name the row holds stays.
+ */
+public fun acceptingRequests(
+    accepted: List<AcceptedContact>,
+    requests: List<IncomingContactRequest>,
+    groupIdHex: String?,
+    samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
+): List<AcceptedContact> {
+    val rows = accepted.toMutableList()
+    for (request in requests) {
+        val index = rows.indexOfFirst { samePerson(it.request.fromPubkey, request.fromPubkey) }
+        if (index < 0) {
+            rows += AcceptedContact(request = request, groupIdHex = groupIdHex)
+            continue
+        }
+        val held = rows[index]
+        rows[index] = held.copy(
+            request = if (held.request.messageId < 0) request else held.request,
+            groupIdHex = held.groupIdHex ?: groupIdHex,
+        )
+    }
+    return rows
 }
 
 /**

@@ -70,8 +70,8 @@ class DeviceCardsTest {
         assertFalse(DeviceCards.shouldSend(card(updatedAtMs = now - DeviceCards.REFRESH_MS + 1), fields, now))
         assertTrue(DeviceCards.shouldSend(card(updatedAtMs = now - DeviceCards.REFRESH_MS), fields, now))
         assertTrue(DeviceCards.shouldSend(card(updatedAtMs = now + 5_000), fields, now))
-        assertEquals(15_000L, DeviceCards.growthDelayMs(0.5))
-        assertTrue(DeviceCards.growthDelayMs(1.0) < 30_000L)
+        assertEquals(150L, DeviceCards.growthDelayMs(0.5))
+        assertTrue(DeviceCards.growthDelayMs(1.0) < 300L)
         assertEquals(0L, DeviceCards.growthDelayMs(Double.NaN))
     }
 
@@ -167,6 +167,96 @@ class DeviceCardsTest {
         DeviceCardCenter.bindStorage(prefs, "other") { }
         assertTrue(DeviceCardCenter.cards.value.isEmpty())
         assertNull(DeviceCardCenter.ownCard())
+    }
+
+    /** Bind the center with a stand-in composer (the JVM suite has no native
+     *  library) and [send] as the DeviceGroup send path; returns the prefs. */
+    private fun bindForSending(send: suspend (ByteArray) -> Unit): MemoryPrefs {
+        val prefs = MemoryPrefs()
+        DeviceCardCenter.foreground = true
+        DeviceCardCenter.antiCensorshipArmed = { false }
+        DeviceCardCenter.locate = { null }
+        DeviceCardCenter.platformFacts = { Triple("Pixel 7a", "Android 15", "1.4") }
+        DeviceCardCenter.composeEnvelope = { byteArrayOf(1, 2, 3) }
+        DeviceCardCenter.bindStorage(prefs, "acct", send)
+        return prefs
+    }
+
+    private suspend fun until(condition: () -> Boolean) {
+        withTimeout(5_000) { while (!condition()) delay(10) }
+    }
+
+    @Test
+    fun a_failed_first_publish_stays_owed_and_goes_on_the_next_poll_pass() = runBlocking {
+        val original = DeviceCardCenter.composeEnvelope
+        try {
+            var fail = true
+            var sent = 0
+            val prefs = bindForSending {
+                if (fail) error("network") else sent += 1
+            }
+            DeviceCardCenter.noteAction(now)
+            until { DeviceCardCenter.isOwed() }
+            assertEquals(0, sent)
+            // The owed flag is persisted: a restart keeps it owed.
+            DeviceCardCenter.unbind()
+            DeviceCardCenter.bindStorage(prefs, "acct") { if (fail) error("network") else sent += 1 }
+            assertTrue(DeviceCardCenter.isOwed())
+            // The next poll pass sends it.
+            fail = false
+            DeviceCardCenter.sendOwedIfAny()
+            until { !DeviceCardCenter.isOwed() }
+            assertEquals(1, sent)
+            // Nothing is owed any more: a further pass sends nothing.
+            DeviceCardCenter.sendOwedIfAny()
+            delay(100)
+            assertEquals(1, sent)
+        } finally {
+            DeviceCardCenter.composeEnvelope = original
+        }
+    }
+
+    @Test
+    fun a_growth_resend_that_comes_due_in_the_background_goes_at_the_next_foreground() = runBlocking {
+        val original = DeviceCardCenter.composeEnvelope
+        try {
+            var sent = 0
+            bindForSending { sent += 1 }
+            DeviceCardCenter.noteAction(now)
+            until { sent == 1 }
+            DeviceCardCenter.foreground = false
+            DeviceCardCenter.scheduleResend(random = 0.0)
+            until { DeviceCardCenter.isOwed() }
+            // Not from the background: neither the timer nor a poll pass sends.
+            DeviceCardCenter.sendOwedIfAny()
+            delay(100)
+            assertEquals(1, sent)
+            // The next foreground does.
+            DeviceCardCenter.foreground = true
+            until { sent == 2 }
+            until { !DeviceCardCenter.isOwed() }
+        } finally {
+            DeviceCardCenter.composeEnvelope = original
+        }
+    }
+
+    @Test
+    fun a_local_add_hands_the_own_card_over_at_once() = runBlocking {
+        val original = DeviceCardCenter.composeEnvelope
+        try {
+            var sent = 0
+            bindForSending { sent += 1 }
+            // No own card yet: nothing to hand over.
+            DeviceCardCenter.sendHandOver()
+            delay(100)
+            assertEquals(0, sent)
+            DeviceCardCenter.noteAction(now)
+            until { sent == 1 }
+            DeviceCardCenter.sendHandOver()
+            until { sent == 2 }
+        } finally {
+            DeviceCardCenter.composeEnvelope = original
+        }
     }
 
     /** A minimal in-memory [SharedPreferences]. */

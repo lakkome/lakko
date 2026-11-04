@@ -8,9 +8,13 @@
  *
  * The person may have changed who can find them between the search and the
  * tap, so a result found through a grant is checked AGAIN right before the
- * request goes out: a check that says no is **Request refused**, and nothing
- * is sent (an unsigned-looking write to a closed mailbox would be answered as
- * stored and silently dropped, which is worse than saying so).
+ * request goes out. When the row's grant is refused, every other grant this
+ * device holds for the person is tried, read fresh (a new one may have
+ * arrived) and in the usual order, and the request goes with the first that
+ * passes. None passing is **Request refused**, and nothing is sent (an
+ * unsigned-looking write to a closed mailbox would be answered as stored and
+ * silently dropped, which is worse than saying so). A check that could not be
+ * made is a failure, not a refusal.
  *
  * The request goes out at once, with no introduction text (UX section 6.1:
  * no dialog, no form, no second field); it carries the sender's profile and
@@ -30,13 +34,18 @@ import { canAddContact, toHex, type PersonResult } from "./people";
 
 export type SendOutcome =
   | { readonly kind: "sent" }
-  | { readonly kind: "refused" }
+  /** `byReachCheck`: the DS reach check said no, so the kept grant no longer
+   *  reaches them (`reach-verdicts.ts`). */
+  | { readonly kind: "refused"; readonly byReachCheck?: boolean }
   /** `message` renders the failure in the current language. */
   | { readonly kind: "failed"; readonly message: () => string };
 
 export interface SendDeps {
   /** The DS reach check of the person's account mailbox with a grant. */
   reachCheck(identityPk: Uint8Array, grantWireB64: string): Promise<boolean>;
+  /** Every grant this device holds for the person now, in the order they are
+   *  tried. Absent: only the row's. */
+  heldGrantWires?(identityPk: Uint8Array): readonly string[];
   /** The identity bundle of an account: its account key and X25519 key. */
   identityFetch(
     accountId: Uint8Array,
@@ -71,14 +80,31 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+/** The first grant that still reaches the person: the row's, else any other
+ *  held for them. `null` when every one was refused. Throws what the check
+ *  throws: a check that could not be made is no refusal. */
+async function reachingGrant(
+  key: Uint8Array,
+  rowGrant: string | null,
+  deps: SendDeps,
+): Promise<string | null> {
+  const held = deps.heldGrantWires?.(key) ?? [];
+  const wires = rowGrant === null ? held : [rowGrant, ...held.filter((w) => w !== rowGrant)];
+  for (const wire of wires) {
+    if (await deps.reachCheck(key, wire)) return wire;
+  }
+  return null;
+}
+
 /** Send the request. Never throws. */
 export async function sendFoundRequest(person: PersonResult, deps: SendDeps): Promise<SendOutcome> {
   if (!canAddContact(person) || person.accountIdHex === null) return { kind: "refused" };
-  const grant = person.reach === "grant" ? person.grantWireB64 : null;
   try {
     const key = base64Decode(person.keyB64);
+    let grant: string | null = null;
     if (person.reach === "grant") {
-      if (grant === null || !(await deps.reachCheck(key, grant))) return { kind: "refused" };
+      grant = await reachingGrant(key, person.grantWireB64, deps);
+      if (grant === null) return { kind: "refused", byReachCheck: true };
     }
     if (person.reach === "open" && person.username !== null) {
       await deps.sendByUsername(person.username, NO_INTRO, grant);

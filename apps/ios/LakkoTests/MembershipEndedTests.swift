@@ -785,15 +785,15 @@ final class MembershipEndedTests: XCTestCase {
             "an emitted beacon would be a POST, and there must not be one")
     }
 
-    /// §6.2.4 — the chat-list row's snapshot carries the state, so the list can
-    /// render its muted line and drop the unread badge without holding a live
-    /// `Group`.
+    /// §6.2.4 — the snapshot of an ended group carries the state, so the list
+    /// can render its muted line for a retired leaf (`MembershipEndTests`).
+    /// ADR-0087 section 9 — a person who is out has no row at all.
     func testTheThreadSnapshotCarriesTheEndedState() throws {
         let f = try makeEvictedRepo()
         defer { try? FileManager.default.removeItem(at: f.outboxDir) }
 
-        let thread = try XCTUnwrap(
-            f.repo.state.threads.first { $0.groupIdHex == f.groupIdHex })
+        XCTAssertTrue(f.repo.state.threads.allSatisfy { $0.groupIdHex != f.groupIdHex })
+        let thread = try XCTUnwrap(f.repo.groups[f.groupIdHex]).toThread()
         XCTAssertTrue(thread.membershipEnded)
         XCTAssertEqual(
             chatListLine(membershipState(isActive: !thread.membershipEnded,

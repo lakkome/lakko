@@ -78,7 +78,7 @@ public class KeyRotationOwed(
     public val commitSent: Boolean = false,
     /** The account IS at the new key. */
     public val committed: Boolean = false,
-    /** Standard base64 of the 177-byte attestation; `null` when the commit's
+    /** Standard base64 of the 145-byte attestation; `null` when the commit's
      *  answer was lost and the commit was learned from the session upgrade
      *  (the publish then uses the proof alone). */
     public val attestationB64: String? = null,

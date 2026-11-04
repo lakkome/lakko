@@ -9,21 +9,28 @@
  * (`DeviceGroupSyncContext.deviceRoster`) gaining a device this device has
  * not acknowledged. The roster, not the directory's device list: it is the
  * end-to-end authenticated membership (a server cannot hide a device from
- * it), and it is the very list Settings > Devices draws, so the banner and
+ * it), and it is the very list Settings > Devices draws, so the badge and
  * the `New` label on a row cannot disagree.
  *
- * Kept per account in `localStorage` (so it survives restarts and each
- * browser dismisses its own): the devices already acknowledged, the devices
- * this device itself let in, and the devices the notice is about with the
- * time this device learned of each (the DeviceGroup carries no join date).
- * Device keys are public keys; nothing here is secret.
+ * Kept per account in `localStorage` (so it survives restarts): the devices
+ * this device treats as known, the devices this device itself let in, and
+ * the pending devices with the time this device learned of each (the
+ * DeviceGroup carries no join date). Device keys are public keys; nothing
+ * here is secret.
  *
- * - The first roster this device ever sees seeds the acknowledged set: a
- *   device never shows the notice about itself, and it treats every device
- *   already in the account when it joined as known.
- * - A device this device let in is acknowledged at once.
- * - `Dismiss`, or the device's removal, ends the notice. Opening Devices
- *   does not.
+ * Synced between the account's devices (amended 2026-10-29): the set of
+ * devices whose warning was seen, the `lakko-sync` device-acknowledgement
+ * register, held by `DeviceGroupSyncContext`. A device pending here whose
+ * key is in that set is not pending; folding the set in moves it to known.
+ *
+ * - The first roster this device ever sees seeds the known set: a device
+ *   never shows the notice about itself, and it treats every device already
+ *   in the account when it joined as known.
+ * - A device this device let in is known at once (and is NOT acknowledged
+ *   for the account: the other devices still warn).
+ * - Opening Settings > Devices while something is pending acknowledges
+ *   every pending device for the account (`beginDevicesVisit`); the
+ *   highlight stays for that visit only. Removing the device also ends it.
  *
  * Everything that decides is pure; the storage and the signal are thin.
  */
@@ -72,6 +79,7 @@ export function observeRoster(
   state: AddedNoticeState | null,
   roster: RosterObservation,
   nowMs: number,
+  acknowledged: ReadonlySet<string> = new Set(),
 ): ObserveResult {
   const keys = [...new Set(roster.keys)];
   if (keys.length === 0 || !keys.includes(roster.ownKey)) {
@@ -86,13 +94,16 @@ export function observeRoster(
   // A device that left is forgotten, so the same key coming back is news.
   const known = new Set(state.known.filter((k) => inRoster.has(k)));
   const pending = state.pending.filter(
-    (p) => inRoster.has(p.key) && !letIn.has(p.key) && p.key !== roster.ownKey,
+    (p) =>
+      inRoster.has(p.key) && !letIn.has(p.key) && p.key !== roster.ownKey && !acknowledged.has(p.key),
   );
   const pendingKeys = new Set(pending.map((p) => p.key));
   const added: string[] = [];
   for (const key of keys) {
     if (known.has(key) || pendingKeys.has(key)) continue;
-    if (key === roster.ownKey || letIn.has(key)) {
+    // Acknowledged on some device of the account (possibly before this one
+    // ever saw it): known, never news.
+    if (key === roster.ownKey || letIn.has(key) || acknowledged.has(key)) {
       known.add(key);
       continue;
     }
@@ -112,13 +123,21 @@ export function observeRoster(
   };
 }
 
-/** `Dismiss`: every device the notice is about is acknowledged. */
-export function dismissNotice(state: AddedNoticeState): AddedNoticeState {
+/**
+ * Fold the account's acknowledged set in: every pending device in it becomes
+ * known. Returns the same state object when nothing changed.
+ */
+export function applyAcknowledged(
+  state: AddedNoticeState,
+  acknowledged: ReadonlySet<string>,
+): AddedNoticeState {
+  const moved = state.pending.filter((p) => acknowledged.has(p.key)).map((p) => p.key);
+  if (moved.length === 0) return state;
   return {
     v: 1,
-    known: [...new Set([...state.known, ...state.pending.map((p) => p.key)])],
+    known: [...new Set([...state.known, ...moved])],
     letIn: state.letIn,
-    pending: [],
+    pending: state.pending.filter((p) => !acknowledged.has(p.key)),
   };
 }
 
@@ -135,18 +154,28 @@ export function letIn(state: AddedNoticeState | null, key: string): AddedNoticeS
 }
 
 export interface AddedNoticeView {
-  /** The banner is shown. */
+  /** Something is pending: the notification, the Settings badge and the
+   *  Devices-row badge are up. */
   readonly visible: boolean;
   /** `devices.added_notice.title`, or `.title_many` for two or more. */
   readonly titleKey: "devices.added_notice.title" | "devices.added_notice.title_many";
-  /** The most recent join time, unix ms (`null` when hidden). */
+  /** The most recent join time, unix ms (`null` when nothing is pending). */
   readonly latestAtMs: number | null;
-  /** The keys that carry the `New` label in Settings > Devices. */
+  /** The pending keys (each carries the `New` label in Settings > Devices). */
   readonly newKeys: readonly string[];
 }
 
-export function noticeView(state: AddedNoticeState | null): AddedNoticeView {
-  const pending = state?.pending ?? [];
+/** What is pending: the local pending set minus what the account has
+ *  acknowledged. */
+export function noticeView(
+  state: AddedNoticeState | null,
+  acknowledged: ReadonlySet<string> = new Set(),
+): AddedNoticeView {
+  const pending = (state?.pending ?? []).filter((p) => !acknowledged.has(p.key));
+  return viewOf(pending);
+}
+
+function viewOf(pending: readonly PendingDevice[]): AddedNoticeView {
   return {
     visible: pending.length > 0,
     titleKey: pending.length > 1 ? "devices.added_notice.title_many" : "devices.added_notice.title",
@@ -155,15 +184,60 @@ export function noticeView(state: AddedNoticeState | null): AddedNoticeView {
   };
 }
 
-/** Whether the local notification is raised: only when devices became
- *  pending, the app is running but not in front, and the person already
- *  allowed notifications (never asked for here). */
-export function shouldNotify(input: {
+/** The badge on the Settings destination and on the Devices row. */
+export function badgeVisible(view: AddedNoticeView): boolean {
+  return view.visible;
+}
+
+/**
+ * Opening Settings > Devices (17.5 "What counts as seen"). `null` when
+ * nothing is pending. Otherwise the keys to acknowledge for the account
+ * (every device pending here) and the visit snapshot: what the screen keeps
+ * highlighting and explaining until it is left, after the acknowledgement
+ * has emptied the pending set.
+ */
+export function beginDevicesVisit(
+  view: AddedNoticeView,
+): { readonly toAcknowledge: readonly string[]; readonly visit: AddedNoticeView } | null {
+  if (!view.visible) return null;
+  return { toAcknowledge: [...view.newKeys], visit: view };
+}
+
+/** A visit that saw more devices become pending while it was open. */
+export function extendVisit(visit: AddedNoticeView | null, more: AddedNoticeView): AddedNoticeView {
+  if (visit === null) return more;
+  const keys = [...new Set([...visit.newKeys, ...more.newKeys])];
+  const at = [visit.latestAtMs, more.latestAtMs].filter((x): x is number => x !== null);
+  return {
+    visible: keys.length > 0,
+    titleKey: keys.length > 1 ? "devices.added_notice.title_many" : "devices.added_notice.title",
+    latestAtMs: at.length === 0 ? null : Math.max(...at),
+    newKeys: keys,
+  };
+}
+
+/**
+ * The system notification, decided after each fold. `post`: devices became
+ * pending and the person already allowed notifications (never asked for
+ * here), whether the app is in front or not. `withdraw`: nothing is pending
+ * any more (whichever device acknowledged it). The title follows the whole
+ * pending count, so a second device replaces the first notification.
+ */
+export function notificationAction(input: {
   readonly added: number;
-  readonly hidden: boolean;
+  readonly pendingBefore: number;
+  readonly pendingAfter: number;
   readonly permission: "granted" | "denied" | "default" | "unsupported";
-}): boolean {
-  return input.added > 0 && input.hidden && input.permission === "granted";
+}): "post" | "withdraw" | "none" {
+  if (input.pendingAfter === 0) return input.pendingBefore > 0 ? "withdraw" : "none";
+  if (input.added > 0 && input.permission === "granted") return "post";
+  return "none";
+}
+
+/** The fixed notification identifier of an account: a second notice
+ *  replaces the first, and withdrawing finds it. */
+export function noticeTag(accountIdB64: string): string {
+  return `lakko-device-added:${accountIdB64}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +318,15 @@ const [current, setCurrent] = createSignal<{
   readonly state: AddedNoticeState | null;
 } | null>(null);
 
+/** The account's acknowledged set as the synced state holds it (hex keys). */
+const [acknowledgedSet, setAcknowledgedSet] = createSignal<{
+  readonly accountIdB64: string;
+  readonly keys: ReadonlySet<string>;
+} | null>(null);
+
+/** The open visit to Settings > Devices, or `null` when it is not open. */
+const [visit, setVisit] = createSignal<AddedNoticeView | null>(null);
+
 // The live state is what the next roster fold starts from and saves: a state
 // held from before Forget device (or put back by a fold in flight across it)
 // would be saved into the wiped account's store at its next sign-in on this
@@ -253,6 +336,9 @@ registerAccountMemory(
   (ids) => {
     const c = current();
     if (c !== null && ids.includes(c.accountIdB64)) setCurrent(null);
+    const a = acknowledgedSet();
+    if (a !== null && ids.includes(a.accountIdB64)) setAcknowledgedSet(null);
+    setVisit(null);
   },
   { signOut: true },
 );
@@ -261,10 +347,13 @@ registerAccountMemory(
 export function bindAddedNotice(accountIdB64: string | null): void {
   if (accountIdB64 === null) {
     setCurrent(null);
+    setAcknowledgedSet(null);
+    setVisit(null);
     return;
   }
   if (untrack(current)?.accountIdB64 === accountIdB64) return;
   setCurrent({ accountIdB64, state: loadNoticeState(accountIdB64) });
+  setVisit(null);
 }
 
 function update(accountIdB64: string, next: AddedNoticeState): void {
@@ -272,8 +361,40 @@ function update(accountIdB64: string, next: AddedNoticeState): void {
   if (untrack(current)?.accountIdB64 === accountIdB64) setCurrent({ accountIdB64, state: next });
 }
 
-/** Reactive: what the banner and the Devices list show. */
-export const addedNotice: Accessor<AddedNoticeView> = () => noticeView(current()?.state ?? null);
+function acknowledgedOf(accountIdB64: string | undefined): ReadonlySet<string> {
+  const a = acknowledgedSet();
+  return a !== null && a.accountIdB64 === accountIdB64 ? a.keys : new Set();
+}
+
+/** Reactive: what is pending (the badges and the notification). */
+export const addedNotice: Accessor<AddedNoticeView> = () => {
+  const c = current();
+  return noticeView(c?.state ?? null, acknowledgedOf(c?.accountIdB64));
+};
+
+/** Reactive: the open visit's snapshot, or `null` outside Settings > Devices. */
+export const devicesVisit: Accessor<AddedNoticeView | null> = visit;
+
+/** Reactive: the keys Settings > Devices highlights (the visit's snapshot,
+ *  or what is pending when no visit snapshot covers it). */
+export function highlightedDeviceKeys(): ReadonlySet<string> {
+  return new Set([...(visit()?.newKeys ?? []), ...addedNotice().newKeys]);
+}
+
+/** Settings > Devices opened (or a device became pending while it is open).
+ *  Returns the keys to acknowledge for the account; the caller writes and
+ *  sends them through the synced state. */
+export function enterDevicesVisit(): readonly string[] {
+  const begun = beginDevicesVisit(untrack(addedNotice));
+  if (begun === null) return [];
+  setVisit(extendVisit(untrack(visit), begun.visit));
+  return begun.toAcknowledge;
+}
+
+/** Settings > Devices left: the highlight and the explanation go. */
+export function leaveDevicesVisit(): void {
+  setVisit(null);
+}
 
 /** Fold a roster of `accountIdB64`; returns how many devices became pending. */
 export function recordRoster(accountIdB64: string, roster: RosterObservation, nowMs: number): number {
@@ -281,15 +402,21 @@ export function recordRoster(accountIdB64: string, roster: RosterObservation, no
   // of the state it then writes re-ran that effect without end.
   const held = untrack(current);
   const before = held?.accountIdB64 === accountIdB64 ? held.state : loadNoticeState(accountIdB64);
-  const result = observeRoster(before, roster, nowMs);
+  const acked = untrack(() => acknowledgedOf(accountIdB64));
+  const result = observeRoster(before, roster, nowMs, acked);
   if (result.state !== null) update(accountIdB64, result.state);
   return result.added.length;
 }
 
-/** `Dismiss` on the banner. */
-export function dismissAddedNotice(accountIdB64: string): void {
-  const state = loadNoticeState(accountIdB64);
-  if (state !== null) update(accountIdB64, dismissNotice(state));
+/** The synced acknowledged set of `accountIdB64` changed (hex keys). */
+export function recordAcknowledged(accountIdB64: string, keys: readonly string[]): void {
+  const set = new Set(keys);
+  setAcknowledgedSet({ accountIdB64, keys: set });
+  const held = untrack(current);
+  const before = held?.accountIdB64 === accountIdB64 ? held.state : loadNoticeState(accountIdB64);
+  if (before === null) return;
+  const next = applyAcknowledged(before, set);
+  if (next !== before) update(accountIdB64, next);
 }
 
 /** This device let the device with signature key `deviceKey` in. */

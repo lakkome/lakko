@@ -83,6 +83,7 @@ struct PhotoBubble: View {
     }
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.mediaColumnWidth) private var columnWidth
     @State private var thumb: UIImage?
     @State private var full: UIImage?
     @State private var fullData: Data?
@@ -93,12 +94,14 @@ struct PhotoBubble: View {
     @State private var viewerOpen = false
 
     private var size: CGSize {
-        InlineMedia.bubbleSize(
-            width: ref.width,
-            height: ref.height,
-            thumbWidth: ref.thumb?.width,
-            thumbHeight: ref.thumb?.height
-        )
+        InlineMedia.fit(
+            InlineMedia.bubbleSize(
+                width: ref.width,
+                height: ref.height,
+                thumbWidth: ref.thumb?.width,
+                thumbHeight: ref.thumb?.height
+            ),
+            within: columnWidth)
     }
 
     private var key: String { MediaSessionCache.key(for: ref) }
@@ -207,6 +210,7 @@ struct VideoBubble: View {
     }
 
     @EnvironmentObject private var media: ChatMediaController
+    @Environment(\.mediaColumnWidth) private var columnWidth
     @State private var poster: UIImage?
     @State private var downloading = false
     @State private var failed = false
@@ -219,12 +223,14 @@ struct VideoBubble: View {
     }
 
     private var size: CGSize {
-        InlineMedia.bubbleSize(
-            width: ref.width,
-            height: ref.height,
-            thumbWidth: ref.thumb?.width,
-            thumbHeight: ref.thumb?.height
-        )
+        InlineMedia.fit(
+            InlineMedia.bubbleSize(
+                width: ref.width,
+                height: ref.height,
+                thumbWidth: ref.thumb?.width,
+                thumbHeight: ref.thumb?.height
+            ),
+            within: columnWidth)
     }
 
     private var key: String { MediaSessionCache.key(for: ref) }

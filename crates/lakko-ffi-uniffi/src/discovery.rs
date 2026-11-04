@@ -50,7 +50,7 @@ use crate::FfiError;
 ///
 /// Two values on purpose, so each call site names the one it uses:
 /// `lookup_key` is the `oprf_hash` of every discovery request (register,
-/// lookup, name register and lookup, channel handles) and what a username
+/// lookup, name register and lookup, handle claims) and what a username
 /// certificate binds; `output` never leaves the device, because a public
 /// record and an introduction record are sealed under keys derived from it.
 ///
@@ -275,30 +275,8 @@ impl OprfBlinder {
         })
     }
 
-    /// Domain-separated `@channel` variant of [`Self::blind`]. Blinds
-    /// the channel-namespace OPRF input (`CHANNEL_OPRF_DOMAIN ‖
-    /// normalise(handle)`), so a channel handle never produces the same
-    /// OPRF hash as the identical string used as a `@username`
-    /// (lakko-security channels review, Finding 2). Both the channel
-    /// register and lookup paths MUST use this constructor so their
-    /// hashes agree.
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError::Discovery`] for an empty-after-normalisation handle or
-    /// an OPRF blind failure. The ADR-0048 §4 username rule is NOT applied
-    /// to channel handles — a separate namespace with its own policy.
-    #[uniffi::constructor]
-    pub fn blind_channel(handle: String) -> Result<Self, FfiError> {
-        let (blinder, blinded_b64) = InnerBlinder::blind_channel(&handle)?;
-        Ok(Self {
-            inner: Mutex::new(Some(blinder)),
-            blinded_b64,
-        })
-    }
-
     /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
-    /// from usernames and channel handles. A publisher blinds each of
+    /// from `@name`s. A publisher blinds each of
     /// [`name_search_terms`]; the finalised hash is one search term of an
     /// introduction record or a public name row. `normalized_username`
     /// returns the term.
@@ -513,8 +491,8 @@ mod tests {
             Err(other) => panic!("expected UsernameInvalidCharacters, got {other:?}"),
             Ok(_) => panic!("expected a refusal"),
         }
-        // Channel handles keep their own policy.
-        assert!(OprfBlinder::blind_channel("my-channel".to_string()).is_ok());
+        // ADR-0087 section 1: a group's or channel's @name obeys the same
+        // rule; there is no separate channel blinder.
     }
 
     #[test]

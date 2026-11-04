@@ -34,6 +34,7 @@ members = [
     "crates/lakko-ui-rules",
     "crates/lakko-feed",
     "crates/lakko-vault",
+    "crates/lakko-circle",
     "crates/lakko-l10n",
     "crates/lakko-log-hygiene",
     "crates/lakko-discovery-client",
@@ -56,6 +57,7 @@ members = [
     "services/witness",
     "services/transport-rendezvous",
     "tools/release-manifest",
+    "tools/bootstrap-config",
     "tools/l10n",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
@@ -139,6 +141,18 @@ icu_locale_core = "2"
 # `sync`: ICU4X data held in `Arc`, not `Rc`, so a catalog can cross the
 # UniFFI boundary (which requires `Send + Sync`).
 icu_provider = { version = "2", features = ["sync"] }
+# The one-emoji rule of lakko-ui-rules (reactions and emoji-only messages,
+# UX `reactions-and-emoji.md` D10): Unicode extended grapheme clusters, so
+# "one emoji" means the same on web, iOS and Android instead of three
+# platform segmenters (`Intl.Segmenter`, Swift `Character`, an Android
+# check). No dependencies of its own; MIT OR Apache-2.0.
+unicode-segmentation = "1.13"
+# The Extended_Pictographic property the same rule needs, which
+# unicode-segmentation uses internally but does not expose. Already in the
+# lock (url -> idna -> idna_adapter pulls 2.2.0), the ICU4X family
+# lakko-l10n already uses; Unicode-3.0. Default features keep the compiled
+# data.
+icu_properties = "2"
 
 # Internal crates — path + version (cargo-deny rejects wildcard-only deps).
 # The version is kept in lockstep with workspace.package.version so they
@@ -174,6 +188,7 @@ lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-vault = { path = "crates/lakko-vault", version = "0.0.0" }
+lakko-circle = { path = "crates/lakko-circle", version = "0.0.0" }
 lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 

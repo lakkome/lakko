@@ -17,6 +17,7 @@ import {
   boundToPublishedKey,
   searchPeople,
   type KnownPerson,
+  MAX_EXTRA_USERNAME_CHECKS,
   type PeopleSearchDeps,
 } from "./people-search";
 
@@ -42,7 +43,7 @@ const NOBODY: KnownPerson = {
   contactFallbackName: null,
   verifiedUsername: null,
   isContact: false,
-  keptGrantWireB64: null,
+  keptGrantWires: [],
 };
 
 function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownPerson> = {}): PeopleSearchDeps {
@@ -216,6 +217,100 @@ describe("searchPeople: names in Everyone", () => {
   });
 });
 
+describe("searchPeople: a name hit's @username (UX 6.1)", () => {
+  const CERT = new Uint8Array([7]);
+  const RECORD = new Uint8Array([1]);
+  const opened = (username: string | null = "annaw", certificate: Uint8Array | null = CERT) => ({
+    identityPk: ANNA_KEY,
+    accountId: ANNA_ACC,
+    displayName: "Anna Weber",
+    username,
+    usernameCertificate: certificate,
+  });
+  const named = (over: Partial<PeopleSearchDeps> = {}) =>
+    deps({
+      accountsOfNameTermLookupKey: async () => [hit(ANNA_ACC, RECORD)],
+      openPublicRecord: () => opened(),
+      ...over,
+    });
+
+  it("shows the username the record states once its certificate proves it", async () => {
+    const verifyUsername = vi.fn(async () => true);
+    const out = await searchPeople("anna weber", named({ verifyUsername }));
+    expect(out.people[0]).toMatchObject({ name: "Anna Weber", username: "annaw", reach: "open" });
+    // The certificate binds the lookup key, never the output, to the hit's account.
+    expect(verifyUsername).toHaveBeenCalledWith(CERT, round("u", "annaw").lookupKey, ANNA_ACC);
+  });
+
+  it("shows none when the certificate does not prove it: a record is the person's own claim", async () => {
+    const out = await searchPeople("anna weber", named({ verifyUsername: async () => false }));
+    expect(out.people[0]).toMatchObject({ name: "Anna Weber", username: null });
+  });
+
+  it("shows none with no certificate, and spends no token on it", async () => {
+    const usernameOprf = vi.fn(async (u: string) => round("u", u));
+    const out = await searchPeople(
+      "anna weber",
+      named({ openPublicRecord: () => opened("annaw", null), usernameOprf, verifyUsername: async () => true }),
+    );
+    expect(out.people[0]!.username).toBeNull();
+    expect(usernameOprf).not.toHaveBeenCalled();
+  });
+
+  it("a token that cannot be had costs the username, never the row", async () => {
+    const out = await searchPeople(
+      "anna weber",
+      named({
+        usernameOprf: async () => {
+          throw new Error("no token");
+        },
+        verifyUsername: async () => true,
+      }),
+    );
+    expect(out.people[0]).toMatchObject({ name: "Anna Weber", username: null, reach: "open" });
+  });
+
+  it("uses the kept lookup key where there is one", async () => {
+    const usernameOprf = vi.fn(async (u: string) => round("u", u));
+    const usernameLookupKey = vi.fn(async (u: string) => round("kept", u).lookupKey);
+    const verifyUsername = vi.fn(async () => true);
+    await searchPeople("anna weber", named({ usernameOprf, usernameLookupKey, verifyUsername }));
+    expect(usernameOprf).not.toHaveBeenCalled();
+    expect(verifyUsername).toHaveBeenCalledWith(CERT, round("kept", "annaw").lookupKey, ANNA_ACC);
+  });
+
+  it("verifies at most the extra allowance per search, shared with introductions", async () => {
+    const accounts = [0xd1, 0xd2, 0xd3, 0xd4].map((b) => ({
+      acc: new Uint8Array(16).fill(b),
+      key: new Uint8Array(32).fill(b),
+    }));
+    const usernameOprf = vi.fn(async (u: string) => round("u", u));
+    const out = await searchPeople(
+      "anna",
+      deps({
+        accountsOfNameTermLookupKey: async () => accounts.map((a) => hit(a.acc, a.key)),
+        identityKeyOf: async (acc) => accounts.find((a) => a.acc[0] === acc[0])?.key ?? null,
+        openPublicRecord: (record) => {
+          const a = accounts.find((x) => x.key[0] === record[0])!;
+          return {
+            identityPk: a.key,
+            accountId: a.acc,
+            displayName: `Anna ${a.key[0]}`,
+            username: `user${a.key[0]}`,
+            usernameCertificate: CERT,
+          };
+        },
+        canonicalUsername: () => null,
+        usernameOprf,
+        verifyUsername: async () => true,
+      }),
+    );
+    expect(usernameOprf).toHaveBeenCalledTimes(MAX_EXTRA_USERNAME_CHECKS);
+    expect(out.people.filter((p) => p.username !== null)).toHaveLength(MAX_EXTRA_USERNAME_CHECKS);
+    expect(out.people).toHaveLength(accounts.length);
+  });
+});
+
 describe("searchPeople: contacts of contacts", () => {
   it("shows an introduced person after the reach check says their key still opens the mailbox", async () => {
     const reachCheck = vi.fn(async () => true);
@@ -228,6 +323,33 @@ describe("searchPeople: contacts of contacts", () => {
       username: null,
     });
     expect(reachCheck).toHaveBeenCalledWith(BO_KEY, `W:${toHex(FOF_WIRE)}`);
+    // What passed is marked, so it beats a kept grant nobody asked about.
+    expect(out.people[0]?.grantChecked).toBe(true);
+  });
+
+  it("logs one line of counts per finished search", async () => {
+    const logCounts = vi.fn();
+    await searchPeople(
+      "bo",
+      deps({
+        openIntroductions: async () => [
+          intro(),
+          intro({ displayName: "Someone Else" }),
+          intro({ identityPk: ANNA_KEY, accountId: ANNA_ACC, displayName: "Bo Other" }),
+        ],
+        introductionRecordsHeld: () => 7,
+        reachCheck: async (pk) => toHex(pk) === toHex(ANNA_KEY),
+        logCounts,
+      }),
+    );
+    expect(logCounts).toHaveBeenCalledTimes(1);
+    expect(logCounts).toHaveBeenCalledWith({
+      recordsHeld: 7,
+      recordsOpened: 3,
+      keptAfterMatch: 2,
+      refusedByReachCheck: 1,
+      people: 1,
+    });
   });
 
   it("drops the person silently when the reach check says no - as if not found", async () => {

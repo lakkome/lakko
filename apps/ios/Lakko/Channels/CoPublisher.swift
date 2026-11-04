@@ -137,12 +137,21 @@ public enum CoPublisher {
         accountIdB64: String?
     ) async throws -> String {
         let groupId = try publisherGroup.groupId()
+        // ADR-0087 section 5 — the co-publisher's request is a sealed row to
+        // the PublisherGroup's knock key, which the owner derives from the
+        // journal root (the owner is the only one who mints these links).
+        var root = try dsJournalRootSeed(accountIdentitySeed: identity.ed25519Seed(), journalId: groupId)
+        defer { RootHandover.wipe(&root) }
+        var knockSeed = try groupKnockSeed(journalRootSeed: root, version: ChatRepository.currentKnockVersion)
+        defer { RootHandover.wipe(&knockSeed) }
         let mint = try composeCoPublisherInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(),
             groupId: groupId,
             expiryMs: 0,
             channelId: try publisherGroup.channelId(),
-            channelName: channelName
+            channelName: channelName,
+            knockPublicKey: try groupKnockPublicKey(knockSeed: knockSeed),
+            knockVersion: ChatRepository.currentKnockVersion
         )
         // ADR-0078 section 10: the ledger row carries a key minted for this
         // link alone. No use limit: the owner's approval is the boundary.
@@ -329,6 +338,18 @@ public enum CoPublisher {
                     }
                     continue
                 }
+                // ADR-0087 section 5 — a sealed row to the PublisherGroup's
+                // knock key (web and Android co-publishers send these). The
+                // owner derives the seed of the row's version from the
+                // journal root; only a row carrying a link of this group is
+                // kept. Receive side only; this client still knocks with the
+                // proposal form.
+                if let version = knockRowVersion(row: row.payload) {
+                    await retainSealedKnock(
+                        identity: identity, publisherGroup: publisherGroup, groupId: groupId,
+                        version: version, row: row.payload)
+                    continue
+                }
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
             // ADR-0060 section 6 — a co-publisher's attribution carries its
@@ -348,6 +369,37 @@ public enum CoPublisher {
         return PollOutcome(
             pendingCount: try publisherGroup.pendingExternalJoins().count,
             knockCursor: knockCursor)
+    }
+
+    /// Open one sealed co-publisher request and retain its KeyPackage.
+    /// Anything that does not open, names no link of this group, or is not
+    /// admissible is dropped.
+    private static func retainSealedKnock(
+        identity: Identity, publisherGroup: PublisherGroup, groupId: Data, version: UInt16, row: Data
+    ) async {
+        guard var root = try? dsJournalRootSeed(
+            accountIdentitySeed: identity.ed25519Seed(), journalId: groupId) else { return }
+        defer { RootHandover.wipe(&root) }
+        guard var seed = try? groupKnockSeed(journalRootSeed: root, version: version) else { return }
+        defer { RootHandover.wipe(&seed) }
+        guard let request = try? openKnockRow(knockSeed: seed, row: row),
+              let capability = request.capability,
+              let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability),
+              cap.groupId() == groupId,
+              let kept = try? publisherGroup.retainJoinRequest(
+                  identity: identity, keyPackage: request.keyPackage) else { return }
+        switch kept.outcome {
+        case .retained, .alreadyPending:
+            let account = ((try? keyPackageAccountKey(keyPackage: request.keyPackage)) ?? nil)
+                ?? kept.joinerSignatureKey
+            await MainActor.run {
+                _ = ReachCenter.shared.keep(
+                    request.replyGrant, carrier: .request,
+                    fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+            }
+        case .queueFull, .alreadyMember, .notAdmissible:
+            return
+        }
     }
 
     /// The pending co-publisher external-join requests — each a 32-byte joiner
@@ -415,7 +467,7 @@ public enum CoPublisher {
     /// mailbox is the verified one the reply grant's binding names; the
     /// Welcome is one sealed row of kind `welcomeRendezvous`.
     static func deliverWelcome(ds: DsClient, welcome: Data, joinerKey: Data) async throws {
-        let resolve: () async throws -> MailboxWriteAttempt = {
+        let resolve: () async throws -> MailboxWritePlan = {
             let plan = await MainActor.run {
                 ReachCenter.shared.writePlan(toAccountKey: joinerKey)
             }
@@ -423,13 +475,14 @@ public enum CoPublisher {
                 NSLog("ADR-0078: no verified mailbox for the co-publisher; its Welcome was not written")
                 throw MailboxUnknown()
             }
-            return MailboxWriteAttempt(target: plan.target, auth: plan.auth)
+            return plan
         }
-        func publish(_ attempt: MailboxWriteAttempt) async throws {
-            _ = try await ds.publishMailbox(
-                pseudonym: attempt.target.address,
-                payload: try attempt.target.seal(kind: .welcomeRendezvous, body: welcome),
-                writeAuth: attempt.auth)
+        func publish(_ plan: MailboxWritePlan) async throws {
+            let row = try plan.target.seal(kind: .welcomeRendezvous, body: welcome)
+            _ = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address, payload: row, writeAuth: auth)
+            }
         }
         let first = try await resolve()
         do {
@@ -454,6 +507,8 @@ public enum CoPublisher {
         proposalRef: Data
     ) throws {
         try publisherGroup.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
+        let groupId = try publisherGroup.groupId()
+        Task { await CoPublisherKeyBook.shared.forget(groupId: groupId, joinerKey: proposalRef) }
     }
 
     // MARK: - Joiner side — a prospective co-publisher requests + joins
@@ -752,23 +807,68 @@ public enum CoPublisherError: Error, LocalizedError {
 /// Co-publisher keys read off PublisherGroup knock queues (ADR-0059
 /// section 1), filed under the joiner's account key each binding was
 /// verified under, so the approve looks one up by the joiner key it approves.
-/// In memory: a binding read before a restart is not kept (the knock cursor
-/// has moved past it), so a joiner approved after a restart is not appointed.
+///
+/// Durable per account (2026-11-04): the knock cursor moves past the row, so
+/// a binding kept in memory only was gone after a restart and a joiner
+/// approved after one was never appointed. Public keys only (the joiner's
+/// account key and the co-publisher key it asked for), so plain
+/// `UserDefaults` under ``AccountStoreGate``; removed once the appointment
+/// landed or the request was rejected, and with the account
+/// (``AccountLocalDataWipe``).
 actor CoPublisherKeyBook {
     static let shared = CoPublisherKeyBook()
-    private var keys: [Data: Data] = [:]
 
-    private static func slot(groupId: Data, joinerKey: Data) -> Data {
-        groupId + joinerKey
+    static func storeKey(_ accountIdB64: String) -> String { "lakko.copublisher-keys.v1.\(accountIdB64)" }
+
+    private static func slot(groupId: Data, joinerKey: Data) -> String {
+        (groupId + joinerKey).base64EncodedString()
     }
 
-    func record(groupId: Data, binding: FfiChannelCoPublisherBinding) {
-        keys[Self.slot(groupId: groupId, joinerKey: binding.accountPubkey)] =
-            binding.copublisherPubkey
+    private nonisolated func load(_ accountIdB64: String) -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: Self.storeKey(accountIdB64)) as? [String: String] ?? [:]
     }
 
-    func key(groupId: Data, joinerKey: Data) -> Data? {
-        keys[Self.slot(groupId: groupId, joinerKey: joinerKey)]
+    private nonisolated func save(_ all: [String: String], _ accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        if all.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.storeKey(accountIdB64))
+        } else {
+            UserDefaults.standard.set(all, forKey: Self.storeKey(accountIdB64))
+        }
+    }
+
+    func record(
+        groupId: Data, binding: FfiChannelCoPublisherBinding,
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) {
+        guard let accountIdB64 else { return }
+        var all = load(accountIdB64)
+        all[Self.slot(groupId: groupId, joinerKey: binding.accountPubkey)] =
+            binding.copublisherPubkey.base64EncodedString()
+        save(all, accountIdB64)
+    }
+
+    func key(
+        groupId: Data, joinerKey: Data, accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) -> Data? {
+        guard let accountIdB64 else { return nil }
+        return load(accountIdB64)[Self.slot(groupId: groupId, joinerKey: joinerKey)]
+            .flatMap { Data(base64Encoded: $0) }
+    }
+
+    /// The appointment landed, or the request was rejected.
+    func forget(
+        groupId: Data, joinerKey: Data, accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) {
+        guard let accountIdB64 else { return }
+        var all = load(accountIdB64)
+        guard all.removeValue(forKey: Self.slot(groupId: groupId, joinerKey: joinerKey)) != nil else { return }
+        save(all, accountIdB64)
+    }
+
+    nonisolated static func clear(accountIdB64: String) {
+        UserDefaults.standard.removeObject(forKey: storeKey(accountIdB64))
     }
 }
 

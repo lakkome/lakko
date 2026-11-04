@@ -64,12 +64,20 @@ final class SilentContinuityAlignmentTests: XCTestCase {
     private final class Group: NseThrowawayGroup {
         let decode: (Data) -> NseProcessedRow?
         init(_ decode: @escaping (Data) -> NseProcessedRow?) { self.decode = decode }
-        func process(_ payload: Data) -> NseProcessedRow? { decode(payload) }
+        /// A row the table maps to `nil` models a row that does not decrypt.
+        func process(_ payload: Data) throws -> NseProcessedRow? {
+            guard let row = decode(payload) else { throw DecryptFailed() }
+            return row
+        }
         func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? { "v1.fake" }
         func close() {}
     }
 
+    private struct DecryptFailed: Error {}
+
     private final class Deps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         var group: Group?
         var rows: [NseFetchedRow] = []
         var superseded: Set<String> = []
@@ -195,6 +203,8 @@ final class SilentContinuityAlignmentTests: XCTestCase {
 
     func testTheDefaultDependencyObjectDropsNothing() {
         final class Plain: NsePushDecryptDeps {
+            func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+            func reactionNotificationsOn() -> Bool { true }
             func boundAccount(wakeSubscriptionIdHex: String?) -> String? { nil }
             func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? { nil }
             func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { false }

@@ -12,11 +12,13 @@
  *     and never the pairing payload (that travels sealed, device-link.ts);
  *   - the grant redeem carries the grant alone, and the account id the fresh
  *     device ends up with is the one the redeem answered;
- *   - no request leaves the device while the fresh device prepares (no
- *     discovery lookup);
+ *   - one request only leaves the device while the fresh device prepares:
+ *     its city, for the card in the payload (docs/ux/second-device.md
+ *     section 2.1, 2026-10-29); no discovery lookup;
  *   - the anonymous join binds the Welcome to the redeemed account, and a
  *     Welcome for another account is refused.
  */
+import { WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -81,7 +83,7 @@ import {
   STATE_EXPORTER_LABEL,
   encodeStateBundle,
   loadKnownGroupIds,
-  type StateBundleV2,
+  type StateBundleV3,
 } from "./state-bundle";
 import { loadAccepted } from "../contacts/local-store";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
@@ -314,21 +316,28 @@ describe("the anonymous join (the no-password restore)", () => {
     return { welcome, seed };
   }
 
-  it("prepares with no request at all, then binds to the account the redeem answered", async () => {
-    const seen = stubFetch(() => ({
-      status: 200,
-      json: {
-        account_id_b64: b64url(ACCOUNT),
-        session_token: "v2.tok",
-        session_expires_at_ms: 9,
-        refresh_token: "r1.tok",
-        refresh_expires_at_ms: 99,
-        key_generation: 1,
-      },
-    }));
+  it("prepares with one locate request and nothing else, then binds to the account the redeem answered", async () => {
+    const seen = stubFetch((url) =>
+      url.endsWith("/discovery/locate")
+        ? { status: 200, json: { city: "Almere", country: "NL" } }
+        : {
+            status: 200,
+            json: {
+              account_id_b64: b64url(ACCOUNT),
+              session_token: "v2.tok",
+              session_expires_at_ms: 9,
+              refresh_token: "r1.tok",
+              refresh_expires_at_ms: 99,
+              key_generation: 1,
+            },
+          },
+    );
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
-    // No discovery lookup, nothing at all, before the session.
-    expect(seen).toHaveLength(0);
+    // Its city, for the card in the payload, and nothing else before the
+    // session: no discovery lookup, no request naming the account.
+    expect(seen.map((s) => s.url)).toEqual(["/api/discovery/discovery/locate"]);
+    expect(seen[0]?.body).toBeNull();
+    expect(parsePairingQrPayloadWith(wasm, session.qrPayload, alice()).deviceCard?.city).toBe("Almere");
     // The payload is the typed name's: another name's device refuses it.
     expect(() => parsePairingQrPayloadWith(wasm, session.qrPayload, bob())).toThrow(
       PAIRING_WRONG_ACCOUNT,
@@ -336,8 +345,11 @@ describe("the anonymous join (the no-password restore)", () => {
 
     const { welcome } = confirmOnOtherDevice(session.qrPayload);
     const outcome = await session.accept(welcome, { welcomeCursor: 1 });
-    expect(seen.map((s) => s.url)).toEqual(["/api/auth/device/authorize/redeem"]);
-    expect(Object.keys(seen[0]?.body ?? {})).toEqual(["grant_token_b64"]);
+    expect(seen.map((s) => s.url)).toEqual([
+      "/api/discovery/discovery/locate",
+      "/api/auth/device/authorize/redeem",
+    ]);
+    expect(Object.keys(seen[1]?.body ?? {})).toEqual(["grant_token_b64"]);
     expect(outcome.recovery?.accountIdBytes).toEqual(ACCOUNT);
     expect(outcome.recovery?.session?.sessionToken).toBe("v2.tok");
     session.dispose();
@@ -368,16 +380,42 @@ describe("the anonymous join (the no-password restore)", () => {
   });
 });
 
+describe("the place in the payload of the code route", () => {
+  it("the QR payload keeps no place it did not wait for; the code route seals the late answer", async () => {
+    const seen = stubFetch(() => ({ status: 500, json: {} }));
+    let answer: { city: string; country: string } | null = null;
+    const place = { current: () => answer, settled: () => Promise.resolve() };
+    const session = await prepareAnonymousJoinFlow({ loginHandle: alice(), place });
+    expect(seen).toHaveLength(0);
+    const shown = parsePairingQrPayloadWith(wasm, session.qrPayload, alice());
+    expect(shown.deviceCard?.city).toBe("");
+    // Nothing arrived yet: the code route seals the QR payload itself.
+    expect(await session.pairingPayloadAtSeal()).toBe(session.qrPayload);
+
+    answer = { city: "Almere", country: "NL" };
+    const sealed = parsePairingQrPayloadWith(wasm, await session.pairingPayloadAtSeal(), alice());
+    expect(sealed.deviceCard?.city).toBe("Almere");
+    expect(sealed.deviceCard?.country).toBe("NL");
+    // The same device and the same rendezvous: only the card differs.
+    expect(sealed.keyPackage).toEqual(shown.keyPackage);
+    expect(sealed.rendezvousPseudonym).toEqual(shown.rendezvousPseudonym);
+    session.dispose();
+  });
+});
+
 describe("the anonymous join applies the pairing state bundle", () => {
   const ACCOUNT = new Uint8Array(16).fill(0x42);
   const ACCOUNT_B64 = btoa(String.fromCharCode(...ACCOUNT));
   const GROUP = "Z3JvdXAtb25lLWlkLWJ5dGVzLTMyLWxvbmctIQ==";
-  const BUNDLE: StateBundleV2 = {
-    v: 2,
+  const BUNDLE: StateBundleV3 = {
+    v: 3,
     contacts: [{ signaturePubkeyB64: "cGVlci1rZXk=", displayName: "Peer", acceptedAtMs: 5 }],
     pins: [],
     knownGroupIdsB64: [GROUP],
     ownPredecessors: [],
+    groupNames: [],
+    profiles: [],
+    pendingContacts: [],
   };
 
   /** The confirming device, as in the suite above, publishing a state row. */
@@ -433,10 +471,10 @@ describe("the anonymous join applies the pairing state bundle", () => {
     expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
     expect(loadKnownGroupIds(ACCOUNT_B64)).toEqual([]);
 
-    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+    const deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
       "encrypt",
       "decrypt",
-    ]);
+    ]));
     const info = console.info;
     console.info = (): void => {};
     try {
@@ -466,10 +504,10 @@ describe("the anonymous join applies the pairing state bundle", () => {
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
     await session.accept(confirmWithState(session.qrPayload), { welcomeCursor: 1 });
     session.dispose();
-    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+    const deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
       "encrypt",
       "decrypt",
-    ]);
+    ]));
     await expect(session.persistTo(deviceKey)).rejects.toThrow(/disposed/);
     expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
   });
@@ -484,7 +522,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
   it("the no-session restore screen hands persistTo to completeFromDeviceRestore", () => {
     const src = read("../auth/recover/DeviceRecover.tsx");
     expect(src).toMatch(/prepareAnonymousJoinFlow\(/);
-    expect(src).toMatch(/persistJoinState: \(deviceKey: CryptoKey\): Promise<void> => session\.persistTo\(deviceKey\)/);
+    expect(src).toMatch(/persistJoinState: \(deviceKey: DeviceCipher\): Promise<void> => session\.persistTo\(deviceKey\)/);
   });
 
   it("the parked sign-in with no device key hands persistTo to completeFromPairing", () => {

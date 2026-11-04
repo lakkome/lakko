@@ -73,6 +73,7 @@
  *     see `chat/durable-cursor.ts` for the mechanism and why holding (rather
  *     than aborting) is the right shape on the receive side.
  */
+import { runBeforeSend } from "./before-send";
 import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -83,11 +84,14 @@ import { boundContactsAccount } from "../contacts/local-store";
 import { DS_WAKE_HEADER_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import {
+  isKnockRowLen as wasmIsKnockRowLen,
+  knockRowVersion as wasmKnockRowVersion,
   Role,
   type Group as WasmGroup,
   type Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
+import type { MembershipChange } from "./membership-rows";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
@@ -113,6 +117,11 @@ import { sniffPin } from "./pin-envelope";
 import { sniffSharedChannels, type SharedList } from "../discover/shared-channels";
 import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
+import { deliverKnockSeed, groupIsPublic, knockSeedsForRow, rememberKnockName } from "../ds/knock-seeds";
+import { rememberKnockOrigin, rowStampMs } from "./knock-origins";
+import { joinReplyBindingVerifies, rememberJoinReply } from "../reach/join-replies";
+import { reachSession } from "../reach/reach-service";
+import { sniffGroupSetting, type GroupSetting } from "./group-settings-envelope";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import type { IncomingPin } from "./pin-store";
 import {
@@ -225,6 +234,13 @@ export type IncomingChatEvent =
       text: string;
       /** Reaction emoji (only for `op === "reaction"`). */
       emoji: string | undefined;
+      /** Add or take off (only for `op === "reaction"`): explicit, never a
+       *  toggle (UX reactions-and-emoji section 17). */
+      reactionAction?: "add" | "remove";
+      /** The reacted-to message's author account key as the reactor saw it
+       *  (only for `op === "reaction"`, when sent). A claim: the notification
+       *  path reads it, no attribution does. */
+      reactionTargetAuthor?: Uint8Array;
       /** ADR-0024 — the typing state (only for `op === "typing"`):
        *  `true` = started typing, `false` = stopped. `undefined`
        *  for every other op. */
@@ -253,6 +269,11 @@ export type IncomingChatEvent =
        *  that happened to the group. */
       systemKind: "commit" | "external-join-proposal";
       createdAt: string;
+      /** `docs/ux/second-device.md` section 4 — on the LAST commit row of a
+       *  received batch that changed the people of a group, the person keys
+       *  that joined and left (`chat/membership-rows.ts`). Absent on every
+       *  other row; the receive paths add it after the batch is applied. */
+      membership?: MembershipChange;
     }
   | {
       /** ADR-0045 — a membership PROPOSAL: a member asked for an add, a
@@ -521,6 +542,21 @@ export type IncomingChatEvent =
       messageId: number;
       envelope: ScopedEnvelopeKind;
       payload: Uint8Array;
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0087 — a group setting that travels beside the group name: the
+       *  photo, the allowed reactions, the conversation handle, or (consumed
+       *  at receipt, never handed on) a knock seed the owner sent an admin.
+       *  Never a timeline bubble. `setting` is `undefined` when the domain
+       *  matched but the body failed its bounds: dropped. */
+      kind: "group-setting";
+      messageId: number;
+      setting: GroupSetting | undefined;
+      /** Diagnostic only. */
       senderLeaf: number | undefined;
       /** The sender's ACCOUNT key resolved at receipt (C-68). */
       senderKey: MemberIdentity | undefined;
@@ -874,6 +910,11 @@ export class ChatClient {
     } catch (err) {
       throw new ChatError("group.groupId unavailable", err);
     }
+
+    // ADR-0048 §2 — a profile this device owes the group goes out first, so
+    // nobody reads this message before this device's name. Before the lock:
+    // the profile is published under the same lock.
+    await runBeforeSend(base64Encode(groupId));
 
     return withGroupMlsLock(base64Encode(groupId), async () =>
       this.sealAndPublish(myIdentity, group, groupId, plaintext, "message"),
@@ -1242,7 +1283,22 @@ export class ChatClient {
     if (readKnockCursor(groupIdB64, owner) !== after) return [];
     const events: IncomingChatEvent[] = [];
     let last = after;
+    let queueFull = false;
     for (const row of raw.messages) {
+      // ADR-0087 section 5 — a sealed KeyPackage row: opened with the knock
+      // seed of its own version, retained with `retainJoinRequest`, and
+      // approved later from the retained package. The cursor stops while the
+      // queue is full, so the backlog stays on the DS instead of being lost.
+      const sealed = await this.applySealedKnockRow(myIdentity, group, row);
+      if (sealed !== "not-sealed") {
+        if (sealed === "queue-full") {
+          queueFull = true;
+          break;
+        }
+        last = row.id;
+        if (typeof sealed === "object") events.push(sealed);
+        continue;
+      }
       last = row.id;
       let processed;
       try {
@@ -1271,6 +1327,10 @@ export class ChatClient {
       );
       if (event.kind === "externalJoinRequest") events.push(event);
     }
+    if (queueFull) {
+      // eslint-disable-next-line no-console
+      console.info("ChatClient: join requests queue full; knock cursor held");
+    }
     if (last === after) return events;
     // The retained request lives in the provider (ADR-0027), so it must be
     // durable before the cursor moves past the knock that carried it.
@@ -1283,6 +1343,116 @@ export class ChatClient {
     }
     writeKnockCursor(groupIdB64, last, owner);
     return events;
+  }
+
+  /**
+   * One knock row in the ADR-0087 sealed form, or `"not-sealed"` for any other
+   * row (the earlier external-join proposal form is read by `processKnock`).
+   * Returns the request event, `"queue-full"` (stop the cursor before this
+   * row), or `"dropped"` (a row nobody here can read, another group's, a
+   * private group's row without a capability of this group, an inadmissible
+   * package). Never throws.
+   */
+  private async applySealedKnockRow(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    row: { readonly id: number; readonly createdAt: string; readonly payload: Uint8Array },
+  ): Promise<IncomingChatEvent | "queue-full" | "dropped" | "not-sealed"> {
+    // The shape test runs on the already-loaded module (the chat view loads it
+    // before any poll); a module that is not loaded reads every row as the
+    // earlier form, which `processKnock` then judges.
+    let version: number | undefined;
+    try {
+      if (!wasmIsKnockRowLen(row.payload.length)) return "not-sealed";
+      version = wasmKnockRowVersion(row.payload);
+    } catch {
+      return "not-sealed";
+    }
+    if (version === undefined) return "not-sealed";
+    const wasm = await loadWasm();
+    const groupId = group.groupId;
+    const groupIdB64 = base64Encode(groupId);
+    // Every seed this device holds for the group, the row's own version
+    // first: a request found by search names the initial version whatever
+    // key it was sealed to (the public record carries the key alone).
+    const seeds = await knockSeedsForRow(groupId, groupIdB64, version);
+    let request: ReturnType<typeof wasm.openKnockRow> | undefined;
+    for (const seed of seeds) {
+      try {
+        request = wasm.openKnockRow(seed, row.payload);
+        break;
+      } catch {
+        /* another version's key */
+      }
+    }
+    if (request === undefined) return "dropped";
+    try {
+      // The link the request came through, when it came through one (its
+      // issuer is the "Invited by" line, UX section 8). A private group takes
+      // a row only with a capability of this group.
+      let issuerKeyB64: string | null = null;
+      const cap = request.capability;
+      if (cap !== undefined && cap.length > 0) {
+        try {
+          const c = wasm.GroupInviteCapability.decodeAndVerify(cap);
+          const same = base64Encode(c.groupId) === groupIdB64;
+          if (same) issuerKeyB64 = base64Encode(c.issuerSignaturePubkey);
+          c.free();
+        } catch {
+          issuerKeyB64 = null;
+        }
+      }
+      if (!groupIsPublic(groupIdB64) && issuerKeyB64 === null) return "dropped";
+      let joined;
+      try {
+        joined = group.retainJoinRequest(myIdentity, request.keyPackage);
+      } catch {
+        return "dropped";
+      }
+      const outcome = joined.outcome;
+      const joinerKey = joined.joinerSignatureKey;
+      joined.free();
+      if (outcome === "queue-full") return "queue-full";
+      if (outcome !== "retained" && outcome !== "already-pending") return "dropped";
+      // The Welcome goes to the joiner's mailbox under the reply grant (C-69),
+      // checked against the account the package is bound to.
+      const session = reachSession();
+      const reply = request.replyGrant;
+      try {
+        let accountKey: Uint8Array | undefined;
+        try {
+          accountKey = group.pendingExternalJoinAccountKey(joinerKey);
+        } catch {
+          accountKey = undefined;
+        }
+        if (session !== null && joinReplyBindingVerifies(reply, accountKey)) {
+          // Durable before the knock cursor moves past this row: a sealed
+          // knock is read once (`reach/join-replies.ts`).
+          await rememberJoinReply(group.groupId, joinerKey, session.encodeGrant(reply));
+        }
+      } finally {
+        reply.free();
+      }
+      const profile = request.profile;
+      if (profile !== undefined) {
+        const name = profile.displayName ?? (profile.username === undefined ? "" : `@${profile.username}`);
+        rememberKnockName(base64Encode(joinerKey), name);
+        profile.free();
+      }
+      await rememberKnockOrigin(groupIdB64, base64Encode(joinerKey), {
+        askedAtMs: rowStampMs(row.createdAt),
+        issuerKeyB64,
+      });
+      return {
+        kind: "externalJoinRequest",
+        messageId: row.id,
+        joinerSignatureKey: joinerKey,
+        retained: true,
+        createdAt: row.createdAt,
+      };
+    } finally {
+      request.free();
+    }
   }
 
   /** The serialized half of {@link pollMessages}: everything that touches MLS
@@ -1389,6 +1559,11 @@ export class ChatClient {
         await consumeRegistrarSeed(group, event);
         continue;
       }
+      // ADR-0087 section 5 — a knock seed, the same way.
+      if (event.kind === "group-setting" && event.setting?.kind === "knockSeed") {
+        await consumeKnockSeed(group, event.setting.plaintext, event.senderKey);
+        continue;
+      }
       // Never shown, never persisted, never previewed.
       if (event.kind === "serviceEnvelope") continue;
       events.push(event);
@@ -1490,6 +1665,32 @@ export async function consumeRegistrarSeed(
     senderAccountKey,
     ownerAccountKey,
   });
+}
+
+/**
+ * ADR-0087 section 5 — hand one knock-seed envelope to its handler with the
+ * owner read off the LIVE role table now, at receipt (C-68). Never throws.
+ */
+export async function consumeKnockSeed(
+  group: WasmGroup,
+  plaintext: Uint8Array,
+  senderKey: MemberIdentity | undefined,
+): Promise<void> {
+  let ownerAccountKey: Uint8Array | undefined;
+  let groupId: Uint8Array;
+  try {
+    ownerAccountKey = group.roleTableOwner();
+    groupId = group.groupId;
+  } catch {
+    return;
+  }
+  let senderAccountKey: Uint8Array | undefined;
+  try {
+    senderAccountKey = senderKey === undefined ? undefined : base64Decode(senderKey);
+  } catch {
+    senderAccountKey = undefined;
+  }
+  await deliverKnockSeed({ groupId, groupIdB64: base64Encode(groupId), plaintext, senderAccountKey, ownerAccountKey });
 }
 
 /**
@@ -1708,6 +1909,22 @@ export async function toEvent(
         };
       }
     }
+    // ADR-0087 — the group photo, allowed reactions, conversation handle and
+    // knock seed, before the chat parser for the same reason as the arms
+    // above. A domain match that fails its bounds is dropped.
+    {
+      const sniff = sniffGroupSetting(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "group-setting",
+          messageId,
+          setting: sniff.kind === "setting" ? sniff.setting : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
     // ADR-0060 — the scoped-discovery service envelopes, before the chat
     // parser for the same reason as the arms above: rendered through the
     // lossy-UTF-8 fallback they would put domain bytes (and, for a
@@ -1786,6 +2003,10 @@ export async function toEvent(
       target: body.kind === "typing" ? 0 : body.target,
       text: body.kind === "edit" ? body.text : "",
       emoji: body.kind === "reaction" ? body.emoji : undefined,
+      ...(body.kind === "reaction" ? { reactionAction: body.action } : {}),
+      ...(body.kind === "reaction" && body.targetAuthor !== undefined
+        ? { reactionTargetAuthor: body.targetAuthor }
+        : {}),
       isTyping: body.kind === "typing" ? body.isTyping : undefined,
       senderLeaf,
       senderKey,

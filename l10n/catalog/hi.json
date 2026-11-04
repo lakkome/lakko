@@ -27,11 +27,11 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "चैट, ग्रुप, चैनल और कॉल, सब डिफ़ॉल्ट रूप से एंड-टू-एंड एन्क्रिप्टेड। Lakko के सर्वर आपके मैसेज कभी नहीं देखते।",
+      "text": "चैट, ग्रुप, चैनल और कॉल, सब डिफ़ॉल्ट रूप से एंड-टू-एंड एन्क्रिप्टेड।",
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "ओपन सोर्स। फ़ोन नंबर की ज़रूरत नहीं।",
+      "text": "बातचीत आपके तरीके से। फ़ोन नंबर की ज़रूरत नहीं।",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -56,6 +56,14 @@
     },
     "auth.explainer.ways_back": {
       "text": "अगर आप इसे भूल जाएँ, तो कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, कोई पासकी, आपकी रिकवरी फ़्रेज़, उसके तीन शब्द, या कोई ऑथेंटिकेटर ऐप आपको वापस अकाउंट में ले आता है।",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "आपके सिस्टम का कीरिंग उपलब्ध नहीं है। उसे अनलॉक करें या कोई इंस्टॉल करें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko इस कंप्यूटर पर आपकी कुंजियाँ सुरक्षित रूप से नहीं रख सकता।",
       "status": "machine"
     },
     "auth.language.button": {
@@ -183,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता। इसके बाद आपको लिखकर रखने के लिए एक रिकवरी फ़्रेज़ मिलेगी।",
+      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता।",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -578,6 +586,10 @@
       "text": "{name} ने सभी के लिए कॉल समाप्त कर दी",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "आप अब इस ग्रुप में नहीं हैं।",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "कॉल का एन्क्रिप्शन सेट अप नहीं हो सका, इसलिए कॉल शुरू नहीं हुई।",
       "status": "machine"
@@ -674,24 +686,8 @@
       "text": "आप जो कॉल करते हैं और जो कॉल आपको आती हैं, वे यहाँ दिखती हैं।",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "लिंक से शामिल हों",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "यह कॉल लिंक जैसा नहीं दिखता। पूरा लिंक पेस्ट करें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "नई कॉल",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "कॉल बनाने वाला व्यक्ति लिंक शेयर करता है।",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "कॉल लिंक पेस्ट करें",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
@@ -952,6 +948,10 @@
     },
     "call.log.declined": {
       "text": "अस्वीकार की गई",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "कॉल विफल रहा",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -1363,7 +1363,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "चैनल आपकी सूची से हट जाता है और यह डिवाइस उसे पढ़ना बंद कर देता है। आप बाद में फिर से सब्सक्राइब कर सकते हैं।",
+      "text": "चैनल को आपकी सूची से हटाता है और उसकी पोस्ट आपके सभी डिवाइस से हटा देता है। आप बाद में फिर से सदस्यता ले सकते हैं।",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "नाम और विवरण हर सब्सक्राइबर तक एन्क्रिप्टेड रूप में पहुँचते हैं। सर्वर उन्हें कभी नहीं पढ़ता।",
+      "text": "नाम और विवरण हर सब्सक्राइबर तक पहुँचते हैं।",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1571,11 +1571,11 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "सब्सक्राइबर नाम और विवरण देखते हैं। ये एन्क्रिप्टेड रूप में जाते हैं; सर्वर तक सिर्फ़ एन्क्रिप्टेड टेक्स्ट पहुँचता है।",
+      "text": "सब्सक्राइबर नाम और विवरण देखते हैं।",
       "status": "machine"
     },
     "channels.new.title": {
@@ -1775,7 +1775,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "यह आपकी सूची से हट जाता है और यह डिवाइस इसे पढ़ना बंद कर देता है। आप बाद में फिर से सब्सक्राइब कर सकते हैं।",
+      "text": "यह आपकी सूची से हट जाएगा और इसकी पोस्ट आपके सभी डिवाइस से हटा दी जाएँगी। आप बाद में फिर से सदस्यता ले सकते हैं।",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2070,6 +2070,10 @@
       "text": "{name} के लिए त्वचा के रंग",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "इमोजी सुझाव",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "इमोजी",
       "status": "machine"
@@ -2088,6 +2092,14 @@
     },
     "chat.ended.no_longer_member": {
       "text": "आप अब इस ग्रुप के सदस्य नहीं हैं।",
+      "status": "machine"
+    },
+    "chat.ended.notice": {
+      "text": "आप अब {name} में नहीं हैं।",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "ग्रुप और उसके मैसेज आपके डिवाइस से हटा दिए गए हैं।",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -2210,16 +2222,8 @@
       "text": "कोई GIF नहीं मिला",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "ठीक है",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "GIF फ़ुल स्क्रीन में खोलें",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF खोज Lakko के सर्वर से होकर जाती है, जो देखता है कि आप क्या खोज रहे हैं। भेजे गए GIF किसी भी फ़ाइल की तरह एन्क्रिप्ट होते हैं।",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -2302,8 +2306,16 @@
       "text": "ग्रुप की जानकारी",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "लिंक कॉपी हो गया।",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "लिंक कॉपी करें",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "लिंक कॉपी नहीं हो सका।",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2331,7 +2343,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "जब तक मालिक या कोई एडमिन आपका अनुरोध लागू नहीं करता, आपको मैसेज मिलते रहेंगे। फिर से शामिल होने के लिए आपको नए इनवाइट की ज़रूरत होगी।",
+      "text": "यह आपकी सूची से हट जाएगा और इसके मैसेज आपके सभी डिवाइस से हटा दिए जाएँगे। जब तक मालिक या कोई एडमिन आपका अनुरोध लागू नहीं करता, आपको मैसेज मिलते रहेंगे।",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -2410,36 +2422,28 @@
       "text": "सदस्य जोड़ें",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "{name} को जोड़ दिया गया।",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "इस व्यक्ति ने अभी तक Lakko सेट अप करना पूरा नहीं किया है। बाद में फिर से कोशिश करें।",
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "{names} को नहीं जोड़ा जा सका। उन्हें सदस्यों वाले पैनल से जोड़ें।",
+      "text": "{names} को जोड़ा नहीं जा सका। फिर से कोशिश करें।",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "{name} नाम से कोई अकाउंट रजिस्टर नहीं है।",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
-      "status": "machine"
-    },
-    "chat.members.add.requested": {
-      "text": "{name} को जोड़ने का अनुरोध भेजा गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+    "chat.members.add.search_placeholder": {
+      "text": "संपर्क या लोग खोजें",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "जोड़ें",
       "status": "machine"
     },
-    "chat.members.admin.demoted": {
-      "text": "एडमिन की भूमिका हटा दी गई।",
+    "chat.members.add.submit_count": {
+      "text": "{count} जोड़ें",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "सदस्य जोड़ें",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2454,8 @@
       "text": "एडमिन",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "एडमिन बना दिया गया।",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "एडमिन की भूमिका हटाएँ",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "बदलाव का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2482,24 +2478,48 @@
       "text": "स्वीकार करें",
       "status": "machine"
     },
-    "chat.members.join.approved_added": {
-      "text": "शामिल होना स्वीकार किया गया। उन्हें ग्रुप में जोड़ दिया गया है।",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "शामिल होना स्वीकार किया गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+    "chat.members.join.asked": {
+      "text": "{when} अनुरोध किया",
       "status": "machine"
     },
     "chat.members.join.heading": {
       "text": "शामिल होने के अनुरोध ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "जुड़ने के अनुरोध (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "{name} ने आमंत्रित किया · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "{name} ने आमंत्रित किया",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "इनवाइट लिंक का पता नहीं",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "और अनुरोध प्रतीक्षा में हैं। इनका जवाब देने पर वे दिखेंगे।",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "अस्वीकार करें",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "सभी अस्वीकार करें",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "इससे प्रतीक्षा में मौजूद सभी अनुरोध हट जाएँगे, उन्हें भी जो आपने अभी तक नहीं देखे।",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "सभी अनुरोध अस्वीकार करें?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2526,10 +2546,6 @@
       "text": "सदस्यता के बदलाव ग्रुप के मालिक या कोई एडमिन लागू करते हैं। जब उनमें से कोई ऐसा करेगा, तो ये अपने-आप लागू हो जाएँगे।",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {अब # बदलाव लागू होने का इंतज़ार कर रहा है।} other {अब # बदलाव लागू होने का इंतज़ार कर रहे हैं।}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "जोड़े जाने का इंतज़ार।",
       "status": "machine"
@@ -2548,18 +2564,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "{name} को हटाएँ",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "सदस्य को हटा दिया गया।",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "हटाने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "हटाने का अनुरोध भेजा गया।",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -2726,6 +2730,18 @@
       "text": "दूसरा व्यक्ति",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "फ़ोटो लोड नहीं हो सकी",
       "status": "machine"
@@ -2802,6 +2818,26 @@
       "text": "रिएक्ट करें - रिएक्ट करने वाले: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "आप अधिकतम 3 प्रतिक्रियाएँ जोड़ सकते हैं। दूसरी जोड़ने के लिए एक हटाएँ।",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# प्रतिक्रिया} other {# प्रतिक्रियाएँ}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, आपकी प्रतिक्रिया",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "सभी {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "प्रतिक्रियाएँ",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "रिएक्ट करने वाले: {names}",
       "status": "machine"
@@ -2814,8 +2850,16 @@
       "text": "अपना रिएक्शन हटाएँ - रिएक्ट करने वाले: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "देखें किसने प्रतिक्रिया दी",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "रिएक्शन सिर्फ़ एक इमोजी होना चाहिए।",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "आपके संदेशों पर नई प्रतिक्रियाएँ, {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3134,8 +3178,12 @@
       "text": "शामिल होने का अनुरोध",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "सदस्य बदले",
+    "chat.system.member_joined": {
+      "text": "{name} जुड़े",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} अब समूह में नहीं है",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3164,14 +3212,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, एडमिन",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} अब ग्रुप के मालिक हैं। आप अब भी एडमिन हैं।",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} अब ग्रुप के मालिक हैं। अब आप एक सामान्य सदस्य हैं।",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3212,10 +3252,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "{name} को मालिक बनाए जाने का इंतज़ार है।",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "मालिकाना हक सौंपने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -3490,6 +3526,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "आपके दूसरे डिवाइस इसे आपकी चैट में जोड़ रहे हैं।",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "आपकी कुंजियाँ बहाल हो गईं। जब आपके संपर्क Lakko खोलेंगे, आपकी चैट लौट आएँगी। पुराने संदेश बहाल नहीं होते।",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "बातचीत के विकल्प",
       "status": "machine"
@@ -3524,6 +3568,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "नई प्रतिक्रियाएँ",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -3604,6 +3652,10 @@
     },
     "common.copy": {
       "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "कॉपी नहीं हो सका।",
       "status": "machine"
     },
     "common.creating": {
@@ -3842,12 +3894,28 @@
       "text": "इनवाइट लिंक शेयर करें",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "संपर्कों में जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "संपर्क के विकल्प",
       "status": "machine"
     },
     "contacts.detail.call_needs_chat": {
       "text": "कॉल शुरू करने के लिए पहले एक मैसेज भेजें।",
+      "status": "machine"
+    },
+    "contacts.detail.chat_starting": {
+      "text": "आपकी चैट तैयार हो रही है।",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -4014,6 +4082,10 @@
       "text": "स्वीकार करें",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "अस्वीकार करें",
       "status": "machine"
@@ -4056,6 +4128,58 @@
     },
     "contacts.safety.title": {
       "text": "सुरक्षा नंबर की पुष्टि करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR कोड स्कैन करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "फिर से पूछें",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "अपने सिस्टम की निजता सेटिंग में इसकी अनुमति दें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko आपके कैमरे का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko आपके माइक्रोफ़ोन का उपयोग नहीं कर सकता।",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "सेटिंग खोलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "कॉल खत्म करें और बाहर निकलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "कॉल खत्म करके बाहर निकलें?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "आपको संदेश और कॉल मिलते रहेंगे। बंद करने के लिए ट्रे आइकन से बाहर निकलें।",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko अभी भी चल रहा है।",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Lakko खोलें",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Lakko बंद करें",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4180,10 +4304,6 @@
     },
     "device_link.qr.waiting": {
       "text": "आपके दूसरे डिवाइस के यह कोड स्कैन करने का इंतज़ार है...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "डिवाइस जोड़ दिया गया।",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -4312,10 +4432,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "अपने डिवाइस देखने के लिए Lakko खोलें।",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "डिवाइस खोलें",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -4486,12 +4602,12 @@
       "text": "आपके दूसरे डिवाइस अपनी चैट रखते हैं और नई कुंजियाँ अपने आप पा लेते हैं।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -4552,6 +4668,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "इस डिवाइस को लिंक करें?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "“{name}” को लिंक करें?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -4718,10 +4838,6 @@
       "text": "रैंडम विषय मिलाएँ",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "कम डेटा लगता है। Lakko का सर्वर ठीक-ठीक देख सकेगा कि आपने कौन-से विषय चुने।",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "अभी कोई सुझाव नहीं। विषय चुनें, या अपने ग्रुप के लोगों से अपने चैनल शेयर करने को कहें।",
       "status": "machine"
@@ -4731,7 +4847,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko इनके लिए सुझाव डाउनलोड करता है, कुछ रैंडम विषयों के साथ मिलाकर, ताकि Lakko का सर्वर ठीक-ठीक न जान सके कि आपने कौन-से विषय चुने। वह कभी नहीं देखता कि आप कौन-से चैनल खोलते हैं।",
+      "text": "Lakko इनके लिए सुझाव डाउनलोड करता है, कुछ रैंडम विषयों के साथ मिलाकर।",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4882,6 @@
       "text": "खोजें",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "खोज Lakko के सर्वर पर भेजी जाती हैं।",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "कोई चैनल नहीं मिला।",
       "status": "machine"
@@ -4799,11 +4911,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "इस ग्रुप के लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं। Lakko का सर्वर नहीं देख सकता।",
+      "text": "इस ग्रुप के लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं।",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "वे ग्रुप जिनके लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं। Lakko का सर्वर नहीं देख सकता।",
+      "text": "वे ग्रुप जिनके लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं।",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -4964,14 +5076,6 @@
     },
     "feed.attachments.count": {
       "text": "{count, plural, one {# अटैचमेंट} other {# अटैचमेंट}}",
-      "status": "machine"
-    },
-    "feed.banner.dismiss": {
-      "text": "ठीक है",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "आपकी फ़ीड वे मैसेज दिखाती है जो इस डिवाइस को मिले हैं।",
       "status": "machine"
     },
     "feed.divider.new": {
@@ -5755,7 +5859,275 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
+      "text": "अगर कुछ नहीं होता, तो आप अनुरोध दोबारा भेज सकते हैं।",
+      "status": "machine"
+    },
+    "group_delete.action": {
+      "text": "समूह हटाएँ",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "इससे समूह और उसके संदेश आपके सभी डिवाइस से हट जाएँगे और @{name} 30 दिनों में मुक्त हो जाएगा। इसे पूर्ववत नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "यह समूह हटाएँ?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "3 से 32 अक्षर: अक्षर a-z, अंक और _।",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "सहेजा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "यह @नाम उपलब्ध नहीं है। कोई और आज़माएँ।",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Lakko से संपर्क नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "यह @नाम लिया जा चुका है।",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "आज आपने बहुत सारे समूह बनाए हैं। कल फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "चुनें",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "@नाम कॉपी करें",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "इस समूह का कोई @नाम नहीं है। एक चुनें।",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "समूह",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "निजी समूह · {count, plural, one {# सदस्य} other {# सदस्य}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "सार्वजनिक समूह · {count, plural, one {# सदस्य} other {# सदस्य}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "आप फ़ाइलें भेजने की सीमा तक पहुँच गए हैं। बाद में फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "केवल मालिक और एडमिन ही फ़ोटो बदल सकते हैं।",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "फ़ोटो अपलोड नहीं हो सकी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "यह फ़ोटो अब उपलब्ध नहीं है। कोई दूसरी चुनें।",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "आपके वापस ऑनलाइन आने पर लागू होगा।",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "समूह में सभी को इसकी जगह आद्याक्षर दिखेंगे।",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "समूह की फ़ोटो हटाएँ?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "सभी प्रतिक्रियाएँ",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "सदस्य किसी भी इमोजी से प्रतिक्रिया दे सकते हैं।",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "कम से कम एक चुनें।",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "आप अधिकतम 100 चुन सकते हैं।",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "कोई प्रतिक्रिया नहीं",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "सदस्य संदेशों पर प्रतिक्रिया नहीं दे सकते।",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "{emoji} हटाएँ",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "सहेजा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "कुछ प्रतिक्रियाएँ",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "सदस्य केवल आपके चुने इमोजी से प्रतिक्रिया दे सकते हैं।",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "प्रतिक्रियाएँ",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "अगर आप बदलाव सहेजते नहीं हैं, तो वे खो जाएंगे।",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "सभी",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# प्रतिक्रिया} other {# प्रतिक्रियाएँ}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "बंद",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "सदस्य जोड़ें",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "आमंत्रण लिंक कॉपी करें",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "आपने यह समूह बनाया",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "यहाँ केवल आप हैं।",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "यह खोज से हट जाएगा। लोग केवल मालिक या एडमिन के आमंत्रण से ही जुड़ सकेंगे। समूह में सभी बने रहेंगे।",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "निजी बनाएँ",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "इस समूह को निजी बनाएँ?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# व्यक्ति जुड़ने की प्रतीक्षा में है। आप अब भी उन्हें जवाब दे सकते हैं।} other {# लोग जुड़ने की प्रतीक्षा में हैं। आप अब भी उन्हें जवाब दे सकते हैं।}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "कोई भी इसे ढूँढकर जुड़ने का अनुरोध कर सकेगा। इसका नाम, फ़ोटो, विवरण और अनुमानित आकार सभी को दिखेगा।",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "सार्वजनिक बनाएँ",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "इस समूह को सार्वजनिक बनाएँ?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "पुराना @नाम अभी काम करना बंद कर देगा। यह 30 दिनों तक इस समूह के लिए आरक्षित रहेगा।",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "बदलें",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "@नाम बदलें?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@नाम",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "इसे केवल सदस्य देखते हैं।",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "कोई भी इस नाम से इस समूह को ढूँढ सकता है।",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "सार्वजनिक समूह का एक नाम होना चाहिए।",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "कौन जुड़ सकता है, यह बदलाव सहेजा नहीं जा सका। फिर से कोशिश करने के लिए इसे खोलें।",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "आपके फिर से ऑनलाइन होने पर लागू होगा।",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "सहेजे जाने की प्रतीक्षा",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "निजी",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "केवल एडमिन द्वारा आमंत्रित लोग ही जुड़ सकते हैं। यह खोज में नहीं दिखता।",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "सार्वजनिक",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "कोई भी इस समूह को ढूँढकर जुड़ने का अनुरोध कर सकता है।",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "समूह का प्रकार",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "कौन जुड़ सकता है",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -5874,6 +6246,74 @@
       "text": "यह लिंक अब मान्य नहीं है। उस व्यक्ति से नया लिंक माँगें।",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} पहले से आपके संपर्कों में हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "खाता बनाएँ",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "मेरे पास पहले से खाता है",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "यह आपका अपना आमंत्रण लिंक है",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} को अपने संपर्कों में जोड़ें?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "इस व्यक्ति",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "इनवाइट",
       "status": "machine"
@@ -5975,7 +6415,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "{fingerprint} ने इनवाइट किया",
+      "text": "{name} ने इनवाइट किया",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6026,8 +6466,44 @@
       "text": "{date} को बनाया",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "अवधि",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "लोगों की संख्या",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "लिंक हटाएँ",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "यह लिंक हटाएँ?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "लिंक हटा दिया गया।",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "आपका कोई भी लिंक खोलने वाला व्यक्ति आपको संपर्क अनुरोध भेज सकता है, जब तक लिंक की समय-सीमा खत्म न हो जाए या उसके सभी इस्तेमाल पूरे न हो जाएँ।",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "लिंक बदलें",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "लिंक की शर्तें",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6036,6 +6512,22 @@
     },
     "invite.links.error.copy": {
       "text": "लिंक कॉपी नहीं हो सका।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 से {max} तक लोगों की संख्या डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6074,6 +6566,10 @@
       "text": "{count} मिनट में खत्म",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "अपनी पसंद",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {# दिन में} other {# दिनों में}}",
       "status": "machine"
@@ -6110,12 +6606,28 @@
       "text": "नया",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "लिंक रद्द कर दिया गया।",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "रद्द किया जा रहा है...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR कोड दिखाएँ",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "दिन",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "घंटे",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6132,6 +6644,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# इस्तेमाल बाकी} other {# इस्तेमाल बाकी}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "अपनी पसंद",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -6258,20 +6774,24 @@
       "text": "सेटिंग्स",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "सेटिंग्स. आपके खाते में एक डिवाइस जोड़ा गया",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "ग्रुप",
+      "status": "machine"
+    },
+    "new_group.error.secure_setup": {
+      "text": "यह समूह नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
       "status": "machine"
     },
     "new_group.error.sign_in": {
       "text": "ग्रुप बनाने के लिए फिर से साइन इन करें।",
       "status": "machine"
     },
-    "new_group.index_hint": {
-      "text": "मैसेज भेजने के लिए कोई ग्रुप चुनें",
-      "status": "machine"
-    },
     "new_group.name_hint": {
-      "text": "हर सदस्य नाम देखता है। इसे एन्क्रिप्ट करके भेजा जाता है; सर्वर इसे कभी नहीं पढ़ता।",
+      "text": "हर सदस्य नाम देखता है।",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6283,7 +6803,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "पहले संपर्क जोड़ें; ग्रुप उन लोगों से शुरू होता है जिन्हें आप पहले से जानते हैं।",
+      "text": "ग्रुप सिर्फ़ आपसे भी शुरू हो सकता है। लोगों को अभी या बाद में जोड़ें।",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6356,6 +6876,14 @@
     },
     "notification.message.new": {
       "text": "नया मैसेज",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} ने आपके संदेश पर {emoji} प्रतिक्रिया दी",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "ऐप में खोलें",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -6535,7 +7063,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। ज़्यादा मज़बूत, और ईमेल से कोई संबंध नहीं।",
+      "text": "12 शब्द जो सिर्फ़ आपके पास रहते हैं। वापस आने का सबसे मज़बूत तरीका।",
       "status": "machine"
     },
     "protect.phrase.save.body": {
@@ -6627,7 +7155,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "अपना यूज़रनेम डालें, फिर Lakko को ऐसे डिवाइस पर खोलें जो अभी भी लॉग इन है और उस पर दिख रहा कोड टाइप करें। ऐसा कुछ नहीं भेजा जाता जिसे Lakko के सर्वर पढ़ सकें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "text": "अपना यूज़रनेम डालें, फिर Lakko को ऐसे डिवाइस पर खोलें जो अभी भी लॉग इन है और उस पर दिख रहा कोड टाइप करें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7122,8 +7650,24 @@
       "text": "शब्द {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "फिर से पूछें",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "अभी तक कोई जवाब नहीं।",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "भेजे गए अनुरोध",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "एडमिन की प्रतीक्षा है।",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
-      "text": "जो डिवाइस अभी भी लॉग इन है, वह छह अंकों का कोड दिखाता है; उसे यहाँ टाइप करें। ट्रांसफ़र एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे नहीं पढ़ सकते। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "text": "जो डिवाइस अभी भी लॉग इन है, वह छह अंकों का कोड दिखाता है; उसे यहाँ टाइप करें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7266,6 +7810,50 @@
       "text": "अपनी कुंजियाँ रिस्टोर करें",
       "status": "machine"
     },
+    "search.conversation.channel_line": {
+      "text": "सार्वजनिक चैनल · {band} सदस्य",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "सार्वजनिक समूह · {band} सदस्य",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "खोलें",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "आज आपने बहुत सारे समूहों में जुड़ने का अनुरोध किया है। कल फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "इस समूह में अभी बहुत सारे अनुरोध हैं। बाद में फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "जुड़ने का अनुरोध करें",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "अनुरोध भेजा गया। एडमिन अगली बार Lakko खोलने पर इसे देखेंगे।",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "अनुरोध भेजा गया",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "सदस्यता लें",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "समूह और चैनल",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "कुछ नहीं मिला। वर्तनी जाँचें, या आमंत्रण लिंक माँगें।",
+      "status": "machine"
+    },
     "search.people.add_contact": {
       "text": "संपर्क जोड़ें",
       "status": "machine"
@@ -7307,11 +7895,59 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "मैसेज, कॉल और संपर्क अनुरोध एंड-टू-एंड एन्क्रिप्टेड हैं: उन्हें सिर्फ़ बातचीत में शामिल लोग पढ़ सकते हैं, Lakko के सर्वर कभी नहीं। आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता, और हर संपर्क का एक सुरक्षा नंबर होता है जिसे आप आमने-सामने मिलाकर देख सकते हैं।",
+      "text": "मैसेज, कॉल और संपर्क अनुरोध एंड-टू-एंड एन्क्रिप्टेड हैं: उन्हें सिर्फ़ बातचीत में शामिल लोग पढ़ सकते हैं। आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता, और हर संपर्क का एक सुरक्षा नंबर होता है जिसे आप आमने-सामने मिलाकर देख सकते हैं।",
       "status": "machine"
     },
     "settings.about.protection.title": {
       "text": "Lakko आपकी सुरक्षा कैसे करता है",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "विंडो बंद करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "चैट, फ़ीड, संपर्क, कॉल, सेटिंग्स",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "मेरा आखिरी संदेश संपादित करें (खाली संदेश फ़ील्ड में)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "मेनू, डायलॉग या शीट बंद करें; खोज से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "चैट फ़ोल्डर बदलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "नई चैट",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "पिछली या अगली बातचीत",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "बातचीत और लोग खोजें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "भेजें या नई पंक्ति शुरू करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "सेटिंग",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "कीबोर्ड शॉर्टकट",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7454,6 +8090,18 @@
       "text": "इस डिवाइस पर थीम।",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "त्वरित प्रतिक्रिया",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "त्वरित प्रतिक्रिया बदलें",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "इसे भेजने के लिए किसी संदेश पर दो बार टैप करें।",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "थीम",
       "status": "machine"
@@ -7502,12 +8150,40 @@
       "text": "आपका डेटा",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "विंडो बंद होने पर भी आपको संदेश और कॉल मिलेंगे।",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "विंडो बंद होने पर भी चलता रहे",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "इस कंप्यूटर पर Lakko कैसे चलता है।",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "इस कंप्यूटर में साइन इन करने पर Lakko खोलें",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "ये सेटिंग पढ़ी नहीं जा सकीं। सेटिंग फिर से खोलें।",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "यह सेटिंग बदली नहीं जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "पहले नए डिवाइस पर Lakko में साइन इन करें। फिर चुनें कि दोनों में से कौन-सा कोड दिखा रहा है।",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "किसी भी डिवाइस में कैमरा नहीं है? नए डिवाइस पर साइन इन करें और \"{method}\" चुनें: यहाँ मिलान के लिए एक कोड के साथ \"{prompt}\" संदेश दिखेगा।",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "डिवाइस. आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -7531,7 +8207,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "आपके खाते में साइन इन किए हुए फ़ोन, टैबलेट और कंप्यूटर। डिवाइस जोड़ना एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे पढ़ नहीं सकते।",
+      "text": "आपके खाते में साइन इन किए हुए फ़ोन, टैबलेट और कंप्यूटर।",
       "status": "machine"
     },
     "settings.devices.list.lede": {
@@ -7568,10 +8244,6 @@
     },
     "settings.devices.reset_note": {
       "text": "आज इस डिवाइस पर आपके अकाउंट की कुंजियाँ रीसेट की गईं। दूसरे डिवाइस लॉग आउट करके हटा दिए गए। उन्हें सेटिंग्स > डिवाइस > डिवाइस जोड़ें से फिर से जोड़ें।",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "डिवाइस जुड़ गया। शामिल होने की प्रक्रिया पूरी होते ही यह सूची में दिखेगा।",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -7652,6 +8324,14 @@
     },
     "settings.notifications.off.title": {
       "text": "नोटिफ़िकेशन चालू करें",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "प्रतिक्रियाएँ",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "जब कोई आपके संदेशों पर प्रतिक्रिया दे",
       "status": "machine"
     },
     "settings.passkeys.add": {
@@ -8044,6 +8724,10 @@
     },
     "settings.section.security": {
       "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "सुरक्षा. आपके खाते में एक डिवाइस जोड़ा गया",
       "status": "machine"
     },
     "settings.security.devices.sub": {
@@ -8446,6 +9130,22 @@
       "text": "लागू किया जा रहा है",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "मेरे सभी संपर्क",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "केवल जिन्हें मैं चुनूँ",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "केवल आपके चुने हुए लोगों के संपर्क ({chosen} / {total})।",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "अब केवल आपके चुने हुए संपर्क। {privacy} में बदलें।",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "मेरे संपर्कों के संपर्क",
       "status": "machine"
@@ -8492,6 +9192,18 @@
     },
     "who_can_find_me.list.choose": {
       "text": "ग्रुप और चैनल चुनें",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "संपर्क चुनें",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "आपके अभी कोई संपर्क नहीं हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "संपर्क खोजें",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8558,184 +9270,12 @@
       "text": "आपके फिर से ऑनलाइन होने पर लागू होगा।",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "इनके संपर्क मुझे ढूँढ सकते हैं",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} को अपने संपर्कों में जोड़ें?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "अभी नहीं",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} पहले से आपके संपर्कों में हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "चैट खोलें",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "यह आपका अपना आमंत्रण लिंक है",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "हो गया",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "इस व्यक्ति",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "संपर्कों में जोड़ें",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} को इस खाते की आपकी संपर्क सूची में वापस जोड़ता है।",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "जोड़ें",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "QR कोड दिखाएँ",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "QR कोड स्कैन करें",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "अपनी पसंद",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "अवधि",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "घंटे",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "दिन",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "लोगों की संख्या",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "1 से {max} तक लोगों की संख्या डालें।",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "खाता बनाएँ",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "मेरे पास पहले से खाता है",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "भेजने वाले से नया लिंक माँगें।",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "लिंक बदलें",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "लिंक की शर्तें",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "लिंक हटाएँ",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "यह लिंक हटाएँ?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "लिंक हटा दिया गया।",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
       "status": "machine"
     }
   }

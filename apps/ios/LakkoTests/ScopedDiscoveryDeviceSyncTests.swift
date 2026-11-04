@@ -55,6 +55,97 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         XCTAssertEqual(c.setting.updatedAtMs, 1_000)
     }
 
+    // MARK: - The backup (D37, D38)
+
+    func testABackupCarriesTheChosenSettingAndNotTheUntouchedDefault() throws {
+        let c = try center()
+        XCTAssertNil(c.backupSettingEnvelope(accountIdB64: "acct"), "the default at stamp 0")
+        let envelope = try settingEnvelope(.everyone, stamp: 1_000)
+        c.adoptDeviceEnvelope(envelope)
+        XCTAssertEqual(c.backupSettingEnvelope(accountIdB64: "acct"), envelope)
+    }
+
+    func testARestoredSettingForTheActiveAccountTakesTheDevicePath() throws {
+        let c = try center()
+        XCTAssertTrue(c.adoptRestoredSetting(
+            envelope: try settingEnvelope(.everyone, stamp: 1_000), accountIdB64: "acct"))
+        XCTAssertEqual(c.setting.mode, .everyone)
+        XCTAssertFalse(c.adoptRestoredSetting(
+            envelope: try settingEnvelope(.nobody, stamp: 900), accountIdB64: "acct"), "nothing older")
+        XCTAssertEqual(c.setting.mode, .everyone)
+    }
+
+    func testARestoredSettingBeforeTheSessionIsWhatActivationReads() throws {
+        let persistence = InMemoryReachPersistence()
+        let c = ReachCenter(persistence: persistence, ds: Offline.ds())
+        XCTAssertTrue(c.adoptRestoredSetting(
+            envelope: try settingEnvelope(.everyone, stamp: 1_000), accountIdB64: "acct"))
+        c.activate(
+            accountIdB64: "acct",
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32)))
+        XCTAssertEqual(c.setting.mode, .everyone)
+        XCTAssertEqual(c.setting.updatedAtMs, 1_000)
+    }
+
+    func testAnUndecodableRestoredSettingChangesNothing() throws {
+        let persistence = InMemoryReachPersistence()
+        let c = ReachCenter(persistence: persistence, ds: Offline.ds())
+        XCTAssertFalse(c.adoptRestoredSetting(envelope: Data([9, 9]), accountIdB64: "acct"))
+        XCTAssertNil(persistence.load(accountIdB64: "acct"))
+    }
+
+    func testARestoreDropsTheNoteThatEveryoneWasPublished() throws {
+        let c = try center()
+        c.setPublishedEveryone(true)
+        c.forgetPublishedEveryone(accountIdB64: "acct")
+        XCTAssertNil(c.publishedEveryone)
+
+        let persistence = InMemoryReachPersistence()
+        var held = ReachRecord()
+        held.publishedEveryone = true
+        persistence.save(held, accountIdB64: "other")
+        let idle = ReachCenter(persistence: persistence, ds: Offline.ds())
+        idle.forgetPublishedEveryone(accountIdB64: "other")
+        XCTAssertNil(persistence.load(accountIdB64: "other")?.publishedEveryone)
+    }
+
+    /// Everyone chosen with nothing to publish leaves the person unfindable:
+    /// the setting's screen says so, it is not only a log line.
+    func testEveryoneWithNothingToPublishIsNotASilentStop() async throws {
+        let c = try center()
+        c.adoptDeviceEnvelope(try settingEnvelope(.everyone, stamp: 1_000))
+        c.sessionTokenProvider = { "token" }
+        c.ownNameProvider = { (nil, nil, nil) }
+        await c.applyEveryone(discovery: DiscoveryClient())
+        XCTAssertEqual(c.status, .failed)
+        XCTAssertNil(c.publishedEveryone)
+    }
+
+    /// A rotation keeps the name and moves the key and the mailbox the public
+    /// record names, so what was published no longer stands.
+    func testAMovedKeyOrMailboxIsANewPublication() {
+        func key(_ account: UInt8, _ binding: UInt8) -> String {
+            ReachRules.everyonePublishKey(
+                displayName: "Nora", username: "nora", certificate: Data([1]),
+                accountKey: Data([account]), mailboxBinding: Data([binding]))
+        }
+        XCTAssertEqual(key(1, 1), key(1, 1))
+        XCTAssertNotEqual(key(1, 1), key(2, 1))
+        XCTAssertNotEqual(key(1, 1), key(1, 2))
+    }
+
+    func testChoosingASettingAsksForABackup() throws {
+        let c = ReachCenter(persistence: InMemoryReachPersistence(), ds: Offline.ds())
+        let account = base64Encode(Data((0..<16).map { _ in UInt8.random(in: 0...255) }))
+        c.activate(
+            accountIdB64: account,
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32)))
+        defer { AutoBackupStore.clear(accountIdB64: account) }
+        XCTAssertNil(AutoBackupStore.load(accountIdB64: account).dirtySinceMs)
+        c.updateSetting(chooseVisibilityMode(setting: c.setting, mode: .everyone))
+        XCTAssertNotNil(AutoBackupStore.load(accountIdB64: account).dirtySinceMs)
+    }
+
     // MARK: - ReachState
 
     func testANewerReachStateIsAdoptedAndChangesTheGrants() throws {

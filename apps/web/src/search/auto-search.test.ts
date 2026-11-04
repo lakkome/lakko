@@ -8,6 +8,7 @@ import {
   MAX_REMEMBERED_SEARCHES,
   NETWORK_SEARCH_DEBOUNCE_MS,
   NETWORK_SEARCH_MIN_CHARS,
+  SEARCH_ANSWER_KEPT_MS,
   SearchMemory,
   networkQueryOf,
   type NetworkQueryRules,
@@ -97,6 +98,73 @@ describe("networkQueryOf (UX 6.1: when it asks the network)", () => {
 
   it("treats case and repeated spaces as the same search", () => {
     expect(networkQueryOf("Anna  Weber", rules)?.key).toBe(networkQueryOf("anna weber", rules)?.key);
+  });
+});
+
+describe("AutoSearch: waiting for the pause", () => {
+  it("says a question is coming from the moment a new text is typed", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    expect(h.last().waiting).toBe(true);
+    expect(h.last().searching).toBe(false);
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    expect(h.last().waiting).toBeUndefined();
+    expect(h.last().searching).toBe(true);
+    await settle();
+    expect(h.last().waiting).toBeUndefined();
+  });
+
+  it("does not wait on a text that asks nothing, or on a remembered answer", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("an");
+    expect(h.last().waiting).toBeUndefined();
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.type("an");
+    h.type("anna");
+    expect(h.last().waiting).toBeUndefined();
+  });
+});
+
+describe("AutoSearch.recheck", () => {
+  const isAnna = (o: PeopleSearchOutcome): boolean => o.people.some((p) => p.name === "anna");
+
+  it("asks at once for the text standing when its answer is false", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+    h.auto.recheck(isAnna);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(2);
+    expect(h.last().outcome?.state.kind).toBe("found");
+  });
+
+  it("leaves a true answer and asks nothing", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.auto.recheck(() => false);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets a false answer for a text not on screen", async () => {
+    const h = harness(async (q) => found(q));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.type("bert");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    h.auto.recheck(isAnna);
+    await settle();
+    expect(h.memory.get("anna")).toBeUndefined();
+    expect(h.memory.get("bert")).toBeDefined();
+    expect(h.run).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -258,6 +326,53 @@ describe("AutoSearch", () => {
     h.auto.dispose();
     h.timers.advance(5_000);
     expect(h.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("a remembered answer ages (UX 6.1)", () => {
+  it("is reused until SEARCH_ANSWER_KEPT_MS and asked again after", () => {
+    let now = 0;
+    const m = new SearchMemory(10, () => now);
+    m.remember("a", found("a"));
+    now = SEARCH_ANSWER_KEPT_MS - 1;
+    expect(m.get("a")).toBeDefined();
+    now = SEARCH_ANSWER_KEPT_MS;
+    expect(m.get("a")).toBeUndefined();
+  });
+
+  it("a not-found ages the same way", () => {
+    let now = 0;
+    const m = new SearchMemory(10, () => now);
+    m.remember("a", notFound);
+    now = SEARCH_ANSWER_KEPT_MS;
+    expect(m.get("a")).toBeUndefined();
+  });
+
+  it("the age is read when a text is asked: an old answer is asked again, and nothing asks by itself", async () => {
+    let now = 0;
+    const h = harness(async (q) => found(q), new SearchMemory(10, () => now));
+    h.type("anna");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // Young: the same text again is answered from memory.
+    h.type("anna ");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // Time passes with the text standing: nothing asks by itself.
+    now = SEARCH_ANSWER_KEPT_MS * 2;
+    h.timers.advance(SEARCH_ANSWER_KEPT_MS * 2);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(1);
+
+    // The next time the text is asked, the answer is too old.
+    h.type("anna  ");
+    h.timers.advance(NETWORK_SEARCH_DEBOUNCE_MS);
+    await settle();
+    expect(h.run).toHaveBeenCalledTimes(2);
   });
 });
 

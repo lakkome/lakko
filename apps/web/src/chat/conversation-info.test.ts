@@ -39,14 +39,14 @@ import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import {
   GROUP_ONLY_SECTIONS,
   channelInfoSections,
+  conversationInfoSectionsFor,
   findPersonRecord,
-  groupInfoSections,
   infoHeading,
   infoOpenLabel,
   infoOpening,
   infoTargetForKind,
   personInfoSections,
-  type GroupInfoCapabilities,
+  type ConversationInfoInput,
   type InfoSection,
 } from "./conversation-info";
 import type { UiRules } from "./ui-rules";
@@ -64,18 +64,20 @@ function holdsGroupOnlySection(sections: readonly InfoSection[]): boolean {
   return sections.some((s) => GROUP_ONLY_SECTIONS.includes(s));
 }
 
-/** Every combination of the six group capability flags. */
-function everyGroupCapability(): GroupInfoCapabilities[] {
-  const out: GroupInfoCapabilities[] = [];
-  for (let bits = 0; bits < 64; bits += 1) {
-    out.push({
-      canManageMembers: (bits & 1) !== 0,
-      canRename: (bits & 2) !== 0,
-      canMintInvite: (bits & 4) !== 0,
-      isOwner: (bits & 8) !== 0,
-      canLeave: (bits & 16) !== 0,
-      membershipEnded: (bits & 32) !== 0,
-    });
+/** Every input of the ADR-0087 info rule, for a group. */
+function everyGroupInput(): ConversationInfoInput[] {
+  const out: ConversationInfoInput[] = [];
+  for (const role of ["owner", "admin", "member"] as const) {
+    for (let bits = 0; bits < 16; bits += 1) {
+      out.push({
+        kind: "group",
+        role,
+        alone: (bits & 1) !== 0,
+        canTransfer: (bits & 2) !== 0,
+        canLeave: (bits & 4) !== 0,
+        hasHandle: (bits & 8) !== 0,
+      });
+    }
   }
   return out;
 }
@@ -105,7 +107,7 @@ describe("infoOpenLabel", () => {
     expect(infoOpenLabel("channel")).toBe("Channel info");
   });
 
-  it("the layer's heading is the same words as the button", () => {
+  it("the screen's heading is the same words as the button", () => {
     for (const target of ["person", "group", "channel"] as const) {
       expect(infoHeading(target)).toBe(infoOpenLabel(target));
     }
@@ -133,18 +135,16 @@ describe("the vocabulary that crosses the boundary", () => {
         expect(personInfoSections(rules, caps)).toHaveLength(raw.length);
       }
     }
-    for (const caps of everyGroupCapability()) {
-      const raw = wasm.groupInfoSections(
-        new wasm.GroupInfoCapabilities(
-          caps.canManageMembers,
-          caps.canRename,
-          caps.canMintInvite,
-          caps.isOwner,
-          caps.canLeave,
-          caps.membershipEnded,
-        ),
+    for (const input of everyGroupInput()) {
+      const raw = wasm.conversationInfoSections(
+        input.kind,
+        input.role,
+        input.alone,
+        input.canTransfer,
+        input.canLeave,
+        input.hasHandle,
       );
-      expect(groupInfoSections(rules, caps)).toHaveLength(raw.length);
+      expect(conversationInfoSectionsFor(rules, input)).toHaveLength(raw.length);
     }
     for (let bits = 0; bits < 8; bits += 1) {
       const caps = {
@@ -175,8 +175,8 @@ describe("the vocabulary that crosses the boundary", () => {
         for (const s of personInfoSections(rules, { membershipEnded, isContact })) produced.add(s);
       }
     }
-    for (const caps of everyGroupCapability()) {
-      for (const s of groupInfoSections(rules, caps)) produced.add(s);
+    for (const input of everyGroupInput()) {
+      for (const s of conversationInfoSectionsFor(rules, input)) produced.add(s);
     }
     for (let bits = 0; bits < 8; bits += 1) {
       const caps = {
@@ -195,10 +195,15 @@ describe("the vocabulary that crosses the boundary", () => {
       "remove-contact",
       "add-contact",
       "delete-chat",
-      // routes/Chat.tsx
+      // routes/Chat.tsx and chat/GroupInfoExtras.tsx
       "rename-group",
       "add-member",
       "invite-link",
+      "transfer-ownership",
+      "delete-group",
+      "handle",
+      "group-type",
+      "reactions",
       // routes/Channels.tsx
       "subscriber-count",
       "manage-channel",
@@ -215,10 +220,28 @@ describe("the vocabulary that crosses the boundary", () => {
   // passing over a name that no longer exists.
   it("every group-only name is one a group's info really holds", () => {
     const inSomeGroup = new Set<InfoSection>();
-    for (const caps of everyGroupCapability()) {
-      for (const s of groupInfoSections(rules, caps)) inSomeGroup.add(s);
+    for (const input of everyGroupInput()) {
+      for (const s of conversationInfoSectionsFor(rules, input)) inSomeGroup.add(s);
     }
     for (const name of GROUP_ONLY_SECTIONS) expect([...inSomeGroup]).toContain(name);
+  });
+});
+
+describe("Their contacts can find me (who-can-find-me 5.1)", () => {
+  it("is on a contact's card only while Contacts of my contacts is on", () => {
+    const on = { membershipEnded: false, isContact: true, contactsOfContactsOn: true };
+    expect(personInfoSections(rules, on)).toContain("their-contacts-can-find-me");
+    expect(personInfoSections(rules, { ...on, contactsOfContactsOn: false })).not.toContain(
+      "their-contacts-can-find-me",
+    );
+    expect(personInfoSections(rules, { membershipEnded: false, isContact: true })).not.toContain(
+      "their-contacts-can-find-me",
+    );
+  });
+
+  it("is not on the card of a person the viewer removed", () => {
+    const removed = { membershipEnded: false, isContact: false, contactsOfContactsOn: true };
+    expect(personInfoSections(rules, removed)).not.toContain("their-contacts-can-find-me");
   });
 });
 
@@ -290,43 +313,49 @@ describe("personInfoSections", () => {
   });
 });
 
-describe("groupInfoSections", () => {
-  const full: GroupInfoCapabilities = {
-    canManageMembers: true,
-    canRename: true,
-    canMintInvite: true,
-    isOwner: true,
+describe("conversationInfoSectionsFor (ADR-0087 section 18)", () => {
+  const owner: ConversationInfoInput = {
+    kind: "group",
+    role: "owner",
+    alone: false,
+    canTransfer: true,
     canLeave: true,
-    membershipEnded: false,
+    hasHandle: true,
   };
 
   it("renders nothing until the shared rules have loaded", () => {
-    expect(groupInfoSections(null, full)).toEqual([]);
+    expect(conversationInfoSectionsFor(null, owner)).toEqual([]);
   });
 
-  it("carries the three blocks this client gates a control on", () => {
-    const sections = groupInfoSections(rules, full);
-    for (const gated of ["rename-group", "add-member", "invite-link"] as const) {
+  it("carries the blocks this client gates a control on", () => {
+    const sections = conversationInfoSectionsFor(rules, owner);
+    for (const gated of ["rename-group", "add-member", "invite-link", "group-type", "handle"] as const) {
       expect(sections).toContain(gated);
     }
   });
 
-  // The rule used to offer `leave-group` unconditionally, and this client
-  // hid it anyway through `exitBlockState`, which is a rule nobody was
-  // following. The condition is now a field, so the two agree.
+  it("an owner alone deletes the group instead of handing it over", () => {
+    const sections = conversationInfoSectionsFor(rules, { ...owner, alone: true });
+    expect(sections).toContain("delete-group");
+    expect(sections).not.toContain("transfer-ownership");
+  });
+
   it("a group with no proposal path is offered no way out", () => {
-    const sections = groupInfoSections(rules, { ...full, isOwner: false, canLeave: false });
+    const sections = conversationInfoSectionsFor(rules, { ...owner, role: "member", canLeave: false });
     expect(sections).not.toContain("leave-group");
     expect(sections).toContain("group-name");
     expect(sections).toContain("members");
   });
 
-  // The other half of the same state as the one-to-one above, and the reason
-  // the two now agree: one rule, asked twice.
-  it("an ended membership is readable and offers nothing but the door", () => {
-    for (const caps of everyGroupCapability()) {
-      if (!caps.membershipEnded) continue;
-      expect(groupInfoSections(rules, caps)).toEqual(["group-name", "members", "delete-chat"]);
+  it("the owner and admins choose the reactions, a member does not", () => {
+    expect(conversationInfoSectionsFor(rules, owner)).toContain("reactions");
+    expect(conversationInfoSectionsFor(rules, { ...owner, role: "admin" })).toContain("reactions");
+    expect(conversationInfoSectionsFor(rules, { ...owner, role: "member" })).not.toContain("reactions");
+  });
+
+  it("only the owner chooses who can join", () => {
+    for (const role of ["admin", "member"] as const) {
+      expect(conversationInfoSectionsFor(rules, { ...owner, role })).not.toContain("group-type");
     }
   });
 });
@@ -451,11 +480,11 @@ describe("infoOpening", () => {
     expect(infoOpening("person", null)).toBe("nothing");
   });
 
-  it("a group opens the layer whatever record is at hand", () => {
-    expect(infoOpening("group", null)).toBe("layer");
+  it("a group opens its screen whatever record is at hand", () => {
+    expect(infoOpening("group", null)).toBe("group-screen");
     // A record cannot belong to a group, but a caller handing one over by
     // mistake must not be sent to a contact page for a group.
-    expect(infoOpening("group", record)).toBe("layer");
+    expect(infoOpening("group", record)).toBe("group-screen");
   });
 
   it("opens nothing until the destination is known", () => {

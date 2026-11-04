@@ -29,6 +29,26 @@
 //! folder edit, and a late device gets the list in the snapshot parts. Read
 //! with [`SyncedState::saved`], [`SyncedState::is_saved`] and
 //! [`SyncedState::saved_blob_ids`].
+//!
+//! ## Conversation ends (ADR-0087 section 9)
+//!
+//! One more register, carried in [`FolderChangeSet::conversation_ends`]. To
+//! write one:
+//!
+//! 1. ask [`SyncedState::compose_conversation_ended`] or
+//!    [`SyncedState::compose_conversation_joined`], passing the MLS epoch
+//!    (`Group.epoch()`; `0` for a channel). `None` means there is nothing to
+//!    tell the other devices: go on with the rest of the end without it;
+//! 2. put the register in a [`FolderChangeSet`], fold it with
+//!    [`SyncedState::apply_folder_changes`] and send the same change set as
+//!    `DeviceGroupBody::FolderChanges`.
+//!
+//! A received one arrives through [`SyncedState::apply_payload`]; read
+//! [`SyncedState::ended_conversations`] after every apply and at launch.
+//! The register's `epoch` is what `Group::delete_after_ended_elsewhere` takes.
+//! A device holding an active group at an epoch ABOVE a register's has come
+//! back since that end: it does not act on the register, and answers with
+//! `compose_conversation_joined` at its own epoch.
 
 use std::sync::{Arc, Mutex};
 
@@ -193,6 +213,62 @@ pub struct FolderChangeSet {
     /// Defaults to empty, so a folder-only change set is built as before.
     #[uniffi(default = [])]
     pub saved: Vec<SavedMessageRegister>,
+    /// Conversation-end registers (ADR-0087 section 9). Defaults to empty.
+    #[uniffi(default = [])]
+    pub conversation_ends: Vec<ConversationEndRegister>,
+}
+
+/// What a conversation-end register says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConversationEndState {
+    /// No device of this account is left in the conversation.
+    Ended,
+    /// The account joined again after an end.
+    Joined,
+}
+
+/// How this account's membership of a conversation stands, stamped (ADR-0087
+/// section 9). Build it with [`SyncedState::compose_conversation_ended`] /
+/// [`SyncedState::compose_conversation_joined`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConversationEndRegister {
+    /// HLC stamp of this register.
+    pub hlc: u64,
+    /// The conversation.
+    pub conversation: FolderConversationRef,
+    /// Ended, or joined again.
+    pub state: ConversationEndState,
+    /// The MLS epoch of the end or the join; `0` for a channel. The fold
+    /// orders by this before the stamp.
+    pub epoch: u64,
+}
+
+impl ConversationEndRegister {
+    fn into_core(self) -> Stamped<core::ConversationEnd> {
+        Stamped {
+            hlc: self.hlc,
+            value: core::ConversationEnd {
+                conversation: self.conversation.into(),
+                state: match self.state {
+                    ConversationEndState::Ended => core::ConversationEndState::Ended,
+                    ConversationEndState::Joined => core::ConversationEndState::Joined,
+                },
+                epoch: self.epoch,
+            },
+        }
+    }
+
+    fn from_core(s: Stamped<core::ConversationEnd>) -> Self {
+        Self {
+            hlc: s.hlc,
+            conversation: s.value.conversation.into(),
+            state: match s.value.state {
+                core::ConversationEndState::Ended => ConversationEndState::Ended,
+                core::ConversationEndState::Joined => ConversationEndState::Joined,
+            },
+            epoch: s.value.epoch,
+        }
+    }
 }
 
 /// What a saved-message register holds.
@@ -391,6 +467,11 @@ impl FolderChangeSet {
         for m in self.saved {
             c.saved.push(m.into_core()?);
         }
+        c.conversation_ends = self
+            .conversation_ends
+            .into_iter()
+            .map(ConversationEndRegister::into_core)
+            .collect();
         c.validate()
             .map_err(|e| FfiError::SyncedState(e.to_string()))?;
         Ok(c)
@@ -438,6 +519,11 @@ impl FolderChangeSet {
                 .saved
                 .into_iter()
                 .map(SavedMessageRegister::from_core)
+                .collect(),
+            conversation_ends: c
+                .conversation_ends
+                .into_iter()
+                .map(ConversationEndRegister::from_core)
                 .collect(),
         }
     }
@@ -1262,6 +1348,304 @@ impl SyncedState {
             .map_err(own_username_refusal)
     }
 
+    /// Record that the person has seen the "a device was added to your
+    /// account" warning (identity-recovery 17.5) for each of `device_keys`
+    /// (32-byte device signature keys), stamped `hlc`, at wall-clock
+    /// `now_ms`. Write-once per key. Returns the envelopes to send to the
+    /// account's other devices in DeviceGroup service envelopes, carrying
+    /// exactly what this call wrote (empty when nothing was new).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` when a key is not 32 bytes;
+    /// [`FfiError::LockPoisoned`].
+    pub fn acknowledge_devices(
+        &self,
+        hlc: u64,
+        device_keys: Vec<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let keys = device_keys
+            .iter()
+            .map(|k| fixed::<{ core::DEVICE_ACK_KEY_LEN }>(k, "device key"))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.with(|s| s.acknowledge_devices(hlc, &keys, now_ms))
+    }
+
+    /// Whether the added-device warning for `device_key` was seen on some
+    /// device of the account. A key of another length is never acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn is_device_acknowledged(&self, device_key: Vec<u8>) -> Result<bool, FfiError> {
+        let Ok(key) = <[u8; core::DEVICE_ACK_KEY_LEN]>::try_from(device_key.as_slice()) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_device_acknowledged(&key))
+    }
+
+    /// Every acknowledged device key, ascending.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn acknowledged_devices(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| {
+            s.acknowledged_devices()
+                .iter()
+                .map(|k| k.to_vec())
+                .collect()
+        })
+    }
+
+    /// Every held acknowledgement as envelopes: the re-send a device owes
+    /// when a live send did not go out.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn device_ack_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.device_ack_envelopes())
+    }
+
+    /// Decode a device-acknowledgement envelope received in a DeviceGroup
+    /// service envelope (route on [`is_device_ack_envelope`]) and fold every
+    /// register in. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"` with code
+    /// `wrongDomain` / `unknownVersion` / `count` / `truncated` /
+    /// `notCanonical` / `trailing`.
+    pub fn apply_device_ack_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_device_ack_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    // -----------------------------------------------------------------
+    // Quick reaction (UX reactions-and-emoji section 6)
+    // -----------------------------------------------------------------
+
+    /// Set the account's quick reaction, stamped `hlc`. `true` when the
+    /// register now holds it: send [`Self::quick_reaction_envelope`] to the
+    /// account's other devices in a DeviceGroup service envelope. Offer only
+    /// what `isSingleEmoji` accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an empty or over-long value;
+    /// [`FfiError::LockPoisoned`].
+    pub fn set_quick_reaction(&self, hlc: u64, emoji: String) -> Result<bool, FfiError> {
+        self.with(|s| s.set_quick_reaction(hlc, &emoji))?
+            .map_err(synced_err)
+    }
+
+    /// The account's quick reaction, or `None` when never chosen (then use
+    /// `defaultQuickReaction()`).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn quick_reaction(&self) -> Result<Option<String>, FfiError> {
+        self.with(|s| s.quick_reaction())
+    }
+
+    /// The envelope carrying the held quick reaction with its original stamp
+    /// (the live send and the catch-up re-send); `None` when never written.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn quick_reaction_envelope(&self) -> Result<Option<Vec<u8>>, FfiError> {
+        self.with(|s| s.quick_reaction_envelope())
+    }
+
+    /// Fold in a quick-reaction envelope (route on
+    /// [`is_quick_reaction_envelope`]). Fail closed. Returns whether
+    /// anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_quick_reaction_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_quick_reaction_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel reactions and comments (ADR-0087 section 13a)
+    // -----------------------------------------------------------------
+
+    /// Record that this account reacted (`reacted`) or took the reaction
+    /// off, `emoji` under the post at `post_cursor` of `channel_id` (posted at
+    /// `post_at_ms`, which drives the 30-day retention). Returns the envelope
+    /// to send to the account's other devices, or `None` when nothing
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` for a fourth own reaction on
+    /// one post or a bad argument; [`FfiError::LockPoisoned`].
+    pub fn set_channel_reaction(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        emoji: String,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.set_channel_reaction(hlc, channel, post_cursor, &emoji, reacted, post_at_ms)
+        })?
+        .map_err(synced_err)
+    }
+
+    /// Whether this account holds `emoji` on the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        emoji: String,
+    ) -> Result<bool, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.has_channel_reaction(&channel, post_cursor, &emoji))
+    }
+
+    /// The emoji this account holds on the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+    ) -> Result<Vec<String>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// Every held own channel reaction as envelopes (the catch-up re-send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_reaction_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_reaction_envelopes())
+    }
+
+    /// Fold in an own-channel-reaction envelope (route on
+    /// [`is_channel_reaction_envelope`]). Fail closed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_channel_reaction_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_reaction_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Record a comment this account wrote: its 16-byte `comment_nonce`
+    /// (what derives its write key) under the post. Returns the envelope to
+    /// send, or `None` when it was already held or the client cap is reached.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad argument; [`FfiError::LockPoisoned`].
+    pub fn record_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_nonce: Vec<u8>,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        let nonce = fixed::<{ core::CHANNEL_COMMENT_NONCE_LEN }>(&comment_nonce, "comment nonce")?;
+        self.with(|s| s.record_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// Record that this account deleted one of its comments. Returns the
+    /// envelope to send, or `None` when it was already deleted.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad argument; [`FfiError::LockPoisoned`].
+    pub fn delete_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_nonce: Vec<u8>,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        let nonce = fixed::<{ core::CHANNEL_COMMENT_NONCE_LEN }>(&comment_nonce, "comment nonce")?;
+        self.with(|s| s.delete_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// The nonces of this account's live comments under the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn channel_comments_on(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.channel_comments_on(&channel, post_cursor)
+                .iter()
+                .map(|n| n.to_vec())
+                .collect()
+        })
+    }
+
+    /// Every held own comment record as envelopes (the catch-up re-send).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn channel_comment_envelopes(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.channel_comment_envelopes())
+    }
+
+    /// Fold in an own-channel-comment envelope (route on
+    /// [`is_channel_comment_envelope`]). Fail closed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"<code>: <reason>"`.
+    pub fn apply_channel_comment_envelope(&self, envelope: Vec<u8>) -> Result<bool, FfiError> {
+        self.with(|s| s.apply_channel_comment_envelope(&envelope))?
+            .map_err(|e| FfiError::SyncedState(format!("{}: {e}", e.code())))
+    }
+
+    /// Drop own channel reactions and comments whose post is past the 30-day
+    /// retention at `now_ms`. Returns how many registers were dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn prune_channel_activity(&self, now_ms: u64) -> Result<u64, FfiError> {
+        self.with(|s| u64::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u64::MAX))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4), stamped
     /// `hlc`: at mint, and for any change. `true` when written; then send
     /// [`Self::link_record_envelope_for`] in a DeviceGroup service envelope.
@@ -1457,6 +1841,99 @@ impl SyncedState {
         self.with(|s| s.saved_blob_ids().iter().map(|b| b.to_vec()).collect())
     }
 
+    /// The register to write now that this account's membership has ended,
+    /// or `None` when there is nothing to tell the other devices (the
+    /// register already says so, the account has rejoined at a later epoch, or
+    /// [`conversation_ends_max_client`] are held). `epoch` is the epoch the
+    /// group froze at, `0` for a channel. `None` never stops the end itself:
+    /// the device still wipes the conversation.
+    ///
+    /// Does not fold anything: put the register in a change set.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] when the conversation id is empty or longer
+    /// than 64 bytes; [`FfiError::LockPoisoned`].
+    pub fn compose_conversation_ended(
+        &self,
+        hlc: u64,
+        conversation: FolderConversationRef,
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| s.compose_conversation_ended(hlc, &conversation, epoch))?
+            .map(|r| r.map(ConversationEndRegister::from_core))
+            .map_err(synced_err)
+    }
+
+    /// The register to write now that this account has joined a conversation,
+    /// or `None` when no end is held to clear: a first join writes nothing.
+    /// `epoch` is the epoch the Welcome joined at (`Group.epoch()` right after
+    /// the join), `0` for a channel.
+    ///
+    /// Does not fold anything: put the register in a change set.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] when the conversation id is empty or longer
+    /// than 64 bytes; [`FfiError::LockPoisoned`].
+    pub fn compose_conversation_joined(
+        &self,
+        hlc: u64,
+        conversation: FolderConversationRef,
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| s.compose_conversation_joined(hlc, &conversation, epoch))?
+            .map(|r| r.map(ConversationEndRegister::from_core))
+            .map_err(synced_err)
+    }
+
+    /// The register held for a conversation, a "joined" included. `None` when
+    /// no end ever reached it.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn conversation_end(
+        &self,
+        conversation: FolderConversationRef,
+    ) -> Result<Option<ConversationEndRegister>, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| {
+            s.conversation_end(&conversation)
+                .map(ConversationEndRegister::from_core)
+        })
+    }
+
+    /// Whether this account's membership of a conversation has ended. `false`
+    /// for one never ended and for one joined again since.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn is_conversation_ended(
+        &self,
+        conversation: FolderConversationRef,
+    ) -> Result<bool, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| s.is_conversation_ended(&conversation))
+    }
+
+    /// Every conversation whose register says ended, by `(kind, id)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn ended_conversations(&self) -> Result<Vec<ConversationEndRegister>, FfiError> {
+        self.with(|s| {
+            s.ended_conversations()
+                .into_iter()
+                .map(ConversationEndRegister::from_core)
+                .collect()
+        })
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     ///
     /// # Errors
@@ -1525,6 +2002,35 @@ pub fn lineage_group_id_max_len() -> u32 {
 /// service envelope, asked before the `lakko-contacts` dispatcher. Says
 /// nothing about validity; [`SyncedState::apply_recovery_email_envelope`]
 /// decides that.
+/// Whether `bytes` is a quick-reaction envelope (route a DeviceGroup
+/// service envelope to [`SyncedState::apply_quick_reaction_envelope`]).
+#[uniffi::export]
+#[must_use]
+pub fn is_quick_reaction_envelope(bytes: Vec<u8>) -> bool {
+    core::is_quick_reaction_envelope(&bytes)
+}
+
+/// Whether `bytes` is an own-channel-reaction envelope.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_reaction_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_reaction_envelope(&bytes)
+}
+
+/// Whether `bytes` is an own-channel-comment envelope.
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_comment_envelope(bytes: Vec<u8>) -> bool {
+    core::is_channel_comment_envelope(&bytes)
+}
+
+/// The most own reactions one post takes (3).
+#[uniffi::export]
+#[must_use]
+pub fn channel_reactions_per_post_max() -> u32 {
+    u32::try_from(core::CHANNEL_REACTIONS_PER_POST_MAX).unwrap_or(u32::MAX)
+}
+
 #[uniffi::export]
 #[must_use]
 pub fn is_recovery_email_envelope(bytes: Vec<u8>) -> bool {
@@ -1537,6 +2043,17 @@ pub fn is_recovery_email_envelope(bytes: Vec<u8>) -> bool {
 #[must_use]
 pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
+}
+
+/// `true` when `bytes` open with the device-acknowledgement envelope domain
+/// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
+/// service envelope, asked before the `lakko-contacts` dispatcher. Says
+/// nothing about validity; [`SyncedState::apply_device_ack_envelope`]
+/// decides that.
+#[uniffi::export]
+#[must_use]
+pub fn is_device_ack_envelope(bytes: Vec<u8>) -> bool {
+    core::is_device_ack_envelope(&bytes)
 }
 
 /// `true` when `bytes` open with the own-username envelope domain
@@ -1670,6 +2187,15 @@ pub fn compose_saved_removal(
 #[must_use]
 pub fn saved_max_client() -> u32 {
     u32::try_from(core::SAVED_MAX_CLIENT).unwrap_or(u32::MAX)
+}
+
+/// How many conversation-end registers a client writes:
+/// [`SyncedState::compose_conversation_ended`] answers `None` for a new
+/// conversation past it. A client-side limit, chosen; NOT a decode bound.
+#[uniffi::export]
+#[must_use]
+pub fn conversation_ends_max_client() -> u32 {
+    u32::try_from(core::CONVERSATION_ENDS_MAX_CLIENT).unwrap_or(u32::MAX)
 }
 
 /// How many saved registers a client puts in one change set. A larger
@@ -2023,6 +2549,28 @@ mod tests {
     }
 
     #[test]
+    fn device_acknowledgements_are_written_once_and_carried() {
+        let a = SyncedState::new();
+        let k = vec![7u8; 32];
+        assert!(!a.is_device_acknowledged(k.clone()).unwrap());
+        assert!(a.acknowledge_devices(1, vec![vec![1u8; 31]], 5).is_err());
+        let sent = a.acknowledge_devices(3, vec![k.clone()], 5).unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(is_device_ack_envelope(sent[0].clone()));
+        assert!(a
+            .acknowledge_devices(4, vec![k.clone()], 6)
+            .unwrap()
+            .is_empty());
+        let b = SyncedState::new();
+        assert!(b.apply_device_ack_envelope(sent[0].clone()).unwrap());
+        assert!(b.is_device_acknowledged(k.clone()).unwrap());
+        assert!(!b.is_device_acknowledged(vec![7u8; 3]).unwrap());
+        assert_eq!(b.acknowledged_devices().unwrap(), vec![k]);
+        assert_eq!(b.device_ack_envelopes().unwrap(), sent);
+        assert!(b.apply_device_ack_envelope(vec![1, 2, 3]).is_err());
+    }
+
+    #[test]
     fn the_own_username_is_set_cleared_carried_and_persisted() {
         let a = SyncedState::new();
         assert_eq!(a.own_username().unwrap(), None);
@@ -2259,6 +2807,77 @@ mod tests {
         assert_eq!(s.saved().unwrap()[0].message_id, 7);
         assert_eq!(s.saved().unwrap()[0].attachment_kind, "");
         assert_eq!(s.max_hlc().unwrap(), 13);
+    }
+
+    fn with_end(register: ConversationEndRegister) -> FolderChangeSet {
+        FolderChangeSet {
+            conversation_ends: vec![register],
+            ..FolderChangeSet::default()
+        }
+    }
+
+    /// An end through the same path a client takes: compose, fold, a late
+    /// device in the snapshot, a restore, a join clearing it.
+    #[test]
+    fn a_conversation_end_reaches_a_late_device_and_a_join_clears_it() {
+        let a = SyncedState::new();
+        // A first join leaves no register.
+        assert_eq!(a.compose_conversation_joined(1, chat(), 3).unwrap(), None);
+
+        let end = a
+            .compose_conversation_ended(5, chat(), 7)
+            .unwrap()
+            .expect("the first end writes");
+        assert_eq!(end.state, ConversationEndState::Ended);
+        assert_eq!((end.hlc, end.epoch), (5, 7));
+        assert!(a.apply_folder_changes(with_end(end.clone())).unwrap());
+        assert!(a.is_conversation_ended(chat()).unwrap());
+        assert_eq!(a.ended_conversations().unwrap(), vec![end.clone()]);
+        assert_eq!(a.conversation_end(chat()).unwrap(), Some(end.clone()));
+        // The same end from another device tells nobody anything.
+        assert_eq!(a.compose_conversation_ended(9, chat(), 7).unwrap(), None);
+
+        let late = SyncedState::new();
+        for part in a.snapshot_parts().unwrap() {
+            late.apply_payload(ParsedDeviceGroupPayload {
+                hlc: 1,
+                sender_leaf: 0,
+                body: DeviceGroupBody::StateSnapshot { part },
+            })
+            .unwrap();
+        }
+        assert!(late.is_conversation_ended(chat()).unwrap());
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert!(restored.is_conversation_ended(chat()).unwrap());
+
+        let join = a
+            .compose_conversation_joined(6, chat(), 9)
+            .unwrap()
+            .expect("a join after an end writes");
+        assert_eq!(join.state, ConversationEndState::Joined);
+        assert!(a.apply_folder_changes(with_end(join)).unwrap());
+        assert!(!a.is_conversation_ended(chat()).unwrap());
+        assert_eq!(a.ended_conversations().unwrap(), vec![]);
+
+        // The old end, sent late with the newest stamp, does not stand.
+        let mut stale = end;
+        stale.hlc = 99;
+        assert!(!a.apply_folder_changes(with_end(stale)).unwrap());
+        assert!(!a.is_conversation_ended(chat()).unwrap());
+        assert_eq!(a.compose_conversation_ended(99, chat(), 7).unwrap(), None);
+
+        let no_id = FolderConversationRef {
+            kind: FolderConversationKind::Group,
+            id: vec![],
+        };
+        assert!(matches!(
+            a.compose_conversation_ended(1, no_id, 0),
+            Err(FfiError::SyncedState(_))
+        ));
+        assert_eq!(
+            conversation_ends_max_client() as usize,
+            core::CONVERSATION_ENDS_MAX_CLIENT
+        );
     }
 
     #[test]
@@ -2551,5 +3170,46 @@ mod tests {
         assert!(is_valid_folder_name("Work".into()));
         assert!(!is_valid_folder_name(" Work".into()));
         assert_eq!(mint_folder_id().len(), 16);
+    }
+
+    #[test]
+    fn quick_reaction_and_own_channel_activity_sync_through_envelopes() {
+        let a = SyncedState::new();
+        let b = SyncedState::new();
+        assert!(a.set_quick_reaction(1, "\u{1F44D}".into()).unwrap());
+        let env = a.quick_reaction_envelope().unwrap().unwrap();
+        assert!(is_quick_reaction_envelope(env.clone()));
+        assert!(b.apply_quick_reaction_envelope(env).unwrap());
+        assert_eq!(b.quick_reaction().unwrap(), Some("\u{1F44D}".to_string()));
+
+        let channel = vec![3_u8; 16];
+        let env = a
+            .set_channel_reaction(2, channel.clone(), 7, "\u{1F44D}".into(), true, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(is_channel_reaction_envelope(env.clone()));
+        assert!(b.apply_channel_reaction_envelope(env).unwrap());
+        assert!(b
+            .has_channel_reaction(channel.clone(), 7, "\u{1F44D}".into())
+            .unwrap());
+        assert_eq!(a.channel_reaction_envelopes().unwrap().len(), 1);
+
+        let env = a
+            .record_channel_comment(3, channel.clone(), 7, vec![9; 16], 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(is_channel_comment_envelope(env.clone()));
+        assert!(b.apply_channel_comment_envelope(env).unwrap());
+        assert_eq!(
+            b.channel_comments_on(channel.clone(), 7).unwrap(),
+            vec![vec![9; 16]]
+        );
+        assert!(a
+            .delete_channel_comment(4, channel.clone(), 7, vec![9; 16], 1_000)
+            .unwrap()
+            .is_some());
+        assert!(a.channel_comments_on(channel, 7).unwrap().is_empty());
+        assert_eq!(a.prune_channel_activity(u64::MAX).unwrap(), 2);
+        assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

@@ -42,12 +42,17 @@ struct ContactDetailScreen: View {
     /// (ADR-0045 UX 6.2.4). Called only after a delete actually landed.
     var onChatDeleted: () -> Void = {}
 
+    @Environment(\.dismiss) private var dismiss
     @State private var renaming = false
     @State private var draftName = ""
     @State private var confirmingRemove = false
+    /// Remove ran here: the card closes, whatever stays behind the name.
+    @State private var removedHere = false
     @State private var confirmingDeleteChat = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0060 — whether `Their contacts can find me` stands follows the setting.
+    @ObservedObject private var reach = ReachCenter.shared
 
     var body: some View {
         // One presentation: pushed on the tab's stack, from the Contacts list
@@ -61,21 +66,34 @@ struct ContactDetailScreen: View {
     private var content: some View {
         // The accepted contact, else a person the viewer removed whose
         // one-to-one remains (section 2.1, amended 2026-10-24).
-        if let contact = viewModel.person(messageId: messageId) {
+        if let contact = Self.cardPerson(viewModel.person(messageId: messageId), removedHere: removedHere) {
             ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
                 detail(
                     contact: contact, isContact: viewModel.isContact(messageId: messageId),
                     resolved: resolved)
             }
         } else {
-            ContentUnavailableView(
-                l10n.t("contacts.detail.gone_title"),
-                systemImage: "person.crop.circle.badge.questionmark",
-                description: Text(l10n.t("contacts.detail.gone_body"))
-            )
-            .navigationTitle(l10n.t("chat.info.contact"))
-            .navigationBarTitleDisplayMode(.inline)
+            // Removed here, or removed with no one-to-one left on this device
+            // or another: the page goes.
+            Color.clear.onAppear { dismiss() }
         }
+    }
+
+    /// The person the card draws. Remove closes it in every case, also when
+    /// the one-to-one left behind still reads them under this row id:
+    /// `Add to contacts` is what the card shows when opened again, not the
+    /// answer to Remove.
+    static func cardPerson(_ person: AcceptedContact?, removedHere: Bool) -> AcceptedContact? {
+        removedHere ? nil : person
+    }
+
+    /// The line under the name of a contact with no chat on this device.
+    /// Right after an accept the Welcome is on its way; a contact whose
+    /// account is not known cannot be messaged from here; a contact a backup
+    /// brought back waits for a member to add this device.
+    static func noChatLineKey(_ contact: AcceptedContact) -> String {
+        if contact.request.fromAccountId == nil { return "contacts.detail.message_unavailable" }
+        return contact.request.messageId >= 0 ? "contacts.detail.chat_starting" : "chats.new_chat.not_available"
     }
 
     @ViewBuilder
@@ -89,7 +107,8 @@ struct ContactDetailScreen: View {
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
                 membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
-                isContact: isContact))
+                isContact: isContact,
+                contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -121,7 +140,7 @@ struct ContactDetailScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if chat == nil {
-                        Text(l10n.t("chats.new_chat.not_available"))
+                        Text(l10n.t(Self.noChatLineKey(contact)))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
@@ -164,6 +183,10 @@ struct ContactDetailScreen: View {
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
                 }
+            }
+
+            if sections.contains(.theirContactsCanFindMe), let accountId = contact.request.fromAccountId {
+                TheirContactsCanFindMeSection(accountId: accountId)
             }
 
             Section {
@@ -266,6 +289,7 @@ struct ContactDetailScreen: View {
             [
                 .danger(l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name])) {
                     viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
+                    removedHere = true
                 },
                 .cancel(),
             ]

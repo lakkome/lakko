@@ -60,20 +60,23 @@ use lakko_contacts::reach::{
 };
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
-    decode_reach_state as rust_decode_reach_state, decode_visibility as rust_decode_visibility,
-    merge_reach_state as rust_merge_reach_state, reach_state_is_newer as rust_reach_state_is_newer,
-    visibility_is_newer as rust_visibility_is_newer, GroupsForm as RustGroupsForm,
-    ReachState as RustReachState, ReachStateEntry as RustReachStateEntry, ScopeId as RustScopeId,
-    ScopeKind as RustScopeKind, VisibilityError, VisibilityMode as RustVisibilityMode,
-    VisibilitySetting as RustVisibilitySetting, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES,
-    MAX_SCOPE_ID_LEN,
+    contact_account_id, decode_reach_state as rust_decode_reach_state,
+    decode_visibility as rust_decode_visibility, merge_reach_state as rust_merge_reach_state,
+    reach_state_is_newer as rust_reach_state_is_newer,
+    visibility_is_newer as rust_visibility_is_newer, ContactsForm as RustContactsForm,
+    GroupsForm as RustGroupsForm, ReachState as RustReachState,
+    ReachStateEntry as RustReachStateEntry, ScopeId as RustScopeId, ScopeKind as RustScopeKind,
+    VisibilityError, VisibilityMode as RustVisibilityMode,
+    VisibilitySetting as RustVisibilitySetting, CONTACT_ACCOUNT_ID_LEN, MAX_CHOSEN_CONTACTS,
+    MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_SCOPE_ID_LEN,
 };
 use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::VerifyingKey;
 use lakko_ds_proof::{
     check_committer_delegations as rust_check_committer_delegations,
-    delegation_for as rust_delegation_for, CommitterDelegationCheckError, Delegation,
-    DelegationError,
+    committer_envelope_due as rust_committer_envelope_due, delegation_for as rust_delegation_for,
+    CommitterDelegationCheckError, Delegation, DelegationError, SentCommitterEnvelope,
+    COMMITTER_ENVELOPE_RESEND_AFTER_MS,
 };
 use wasm_bindgen::prelude::*;
 
@@ -548,6 +551,10 @@ pub struct IntroductionPayload {
 }
 
 impl IntroductionPayload {
+    pub(crate) const fn from_rust(inner: RustIntroductionPayload) -> Self {
+        Self { inner }
+    }
+
     fn new_inner(
         identity_pk: &[u8],
         account_id: &[u8],
@@ -1089,6 +1096,42 @@ impl From<RustGroupsForm> for GroupsForm {
     }
 }
 
+/// The contacts of all contacts, or only of the chosen ones. Numeric values
+/// are the frozen wire bytes.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactsForm {
+    /// The contacts of every contact the person has.
+    All = 1,
+    /// Only the contacts of the ones in the chosen list.
+    Chosen = 2,
+}
+
+impl From<ContactsForm> for RustContactsForm {
+    fn from(f: ContactsForm) -> Self {
+        match f {
+            ContactsForm::All => Self::All,
+            ContactsForm::Chosen => Self::Chosen,
+        }
+    }
+}
+
+impl From<RustContactsForm> for ContactsForm {
+    fn from(f: RustContactsForm) -> Self {
+        match f {
+            RustContactsForm::All => Self::All,
+            RustContactsForm::Chosen => Self::Chosen,
+        }
+    }
+}
+
+/// Split concatenated 16-byte account ids.
+pub(crate) fn flat_contact_ids(flat: &[u8]) -> Result<Vec<[u8; CONTACT_ACCOUNT_ID_LEN]>, Refusal> {
+    flat.chunks(CONTACT_ACCOUNT_ID_LEN)
+        .map(|id| Ok(contact_account_id(id)?))
+        .collect()
+}
+
 /// Group or channel. Numeric values are the frozen wire bytes.
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1172,14 +1215,47 @@ impl VisibilitySetting {
     pub(crate) const fn from_rust(inner: RustVisibilitySetting) -> Self {
         Self { inner }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        mode: VisibilityMode,
+        contacts_of_contacts: bool,
+        groups: Option<GroupsForm>,
+        chosen: &[ScopeId],
+        last_contacts_of_contacts: bool,
+        last_groups: Option<GroupsForm>,
+        updated_at_ms: u64,
+        contacts_form: ContactsForm,
+        chosen_contacts: &[u8],
+    ) -> Result<Self, Refusal> {
+        Ok(Self {
+            inner: RustVisibilitySetting {
+                mode: mode.into(),
+                contacts_of_contacts,
+                contacts_form: contacts_form.into(),
+                chosen_contacts: flat_contact_ids(chosen_contacts)?,
+                groups: groups.map(Into::into),
+                chosen: chosen.iter().map(Into::into).collect(),
+                last_contacts_of_contacts,
+                last_groups: last_groups.map(Into::into),
+                updated_at_ms,
+            },
+        })
+    }
 }
 
 #[wasm_bindgen]
 impl VisibilitySetting {
-    /// Build a setting from all of its fields (as stored). Validity is
-    /// checked by `composeVisibilityEnvelope`.
+    /// Build a setting from all of its fields (as stored). `chosenContacts`
+    /// is concatenated 16-byte account ids. Validity is checked by
+    /// `composeVisibilityEnvelope`, except the ids' length, which cannot be
+    /// held in a setting.
+    ///
+    /// # Errors
+    ///
+    /// Throws with `visibilityError` `contactIdLength`.
     #[wasm_bindgen(constructor)]
-    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: VisibilityMode,
         contacts_of_contacts: bool,
@@ -1188,18 +1264,20 @@ impl VisibilitySetting {
         last_contacts_of_contacts: bool,
         last_groups: Option<GroupsForm>,
         updated_at_ms: u64,
-    ) -> VisibilitySetting {
-        Self {
-            inner: RustVisibilitySetting {
-                mode: mode.into(),
-                contacts_of_contacts,
-                groups: groups.map(Into::into),
-                chosen: chosen.iter().map(Into::into).collect(),
-                last_contacts_of_contacts,
-                last_groups: last_groups.map(Into::into),
-                updated_at_ms,
-            },
-        }
+        contacts_form: ContactsForm,
+        chosen_contacts: &[u8],
+    ) -> Result<VisibilitySetting, JsValue> {
+        js(Self::new_inner(
+            mode,
+            contacts_of_contacts,
+            groups,
+            &chosen,
+            last_contacts_of_contacts,
+            last_groups,
+            updated_at_ms,
+            contacts_form,
+            chosen_contacts,
+        ))
     }
 
     /// The position.
@@ -1214,6 +1292,22 @@ impl VisibilitySetting {
     #[must_use]
     pub fn contacts_of_contacts(&self) -> bool {
         self.inner.contacts_of_contacts
+    }
+
+    /// Part 2.1's form: meaningful only while part 2.1 is on, and kept
+    /// whatever the position.
+    #[wasm_bindgen(getter, js_name = contactsForm)]
+    #[must_use]
+    pub fn contacts_form(&self) -> ContactsForm {
+        self.inner.contacts_form.into()
+    }
+
+    /// The chosen contacts as concatenated 16-byte account ids (kept
+    /// whatever the form).
+    #[wasm_bindgen(getter, js_name = chosenContacts)]
+    #[must_use]
+    pub fn chosen_contacts(&self) -> Vec<u8> {
+        self.inner.chosen_contacts.concat()
     }
 
     /// Part 2.2 and its form; `undefined` when off.
@@ -1276,7 +1370,8 @@ pub fn default_visibility_setting() -> VisibilitySetting {
 /// # Errors
 ///
 /// Throws with `visibilityError` (`someWithNoPart`, `partsOutsideSome`,
-/// `tooManyChosen`, `duplicateScope`, `scopeIdLength`).
+/// `tooManyChosen`, `duplicateScope`, `scopeIdLength`,
+/// `tooManyChosenContacts`, `duplicateContact`).
 #[wasm_bindgen(js_name = composeVisibilityEnvelope)]
 pub fn compose_visibility_envelope(setting: &VisibilitySetting) -> Result<Vec<u8>, JsValue> {
     js(rust_compose_visibility(&setting.inner).map_err(Refusal::from))
@@ -1320,6 +1415,23 @@ pub fn allows_scope(setting: &VisibilitySetting, scope: &ScopeId) -> bool {
 #[must_use]
 pub fn allows_contacts_of_contacts(setting: &VisibilitySetting) -> bool {
     setting.inner.allows_contacts_of_contacts()
+}
+
+/// Whether the contacts of `accountId` can find the person: Everyone, or
+/// Some people with part 2.1 on and either all contacts or this one chosen.
+/// A permission, not a delivery decision. An id that is not 16 bytes names
+/// no contact, so the answer is `false`.
+#[wasm_bindgen(js_name = allowsContact)]
+#[must_use]
+pub fn allows_contact(setting: &VisibilitySetting, account_id: &[u8]) -> bool {
+    contact_account_id(account_id).is_ok_and(|id| setting.inner.allows_contact(&id))
+}
+
+/// Most contacts the chosen list holds: 4096.
+#[wasm_bindgen(js_name = maxChosenContacts)]
+#[must_use]
+pub fn max_chosen_contacts() -> usize {
+    MAX_CHOSEN_CONTACTS
 }
 
 /// Most groups and channels the chosen list holds: 1024.
@@ -1887,6 +1999,72 @@ pub fn max_committer_delegations() -> usize {
     MAX_COMMITTER_DELEGATIONS
 }
 
+fn flat_account_keys(flat: &[u8], what: &str) -> Result<Vec<[u8; 32]>, Refusal> {
+    if flat.len() % ADDED_ACCOUNT_KEY_LEN != 0 {
+        return Err(Refusal::new(
+            "committerDelegationError",
+            "keyLength",
+            format!("{what} must be concatenated 32-byte keys"),
+        ));
+    }
+    Ok(flat
+        .chunks_exact(ADDED_ACCOUNT_KEY_LEN)
+        .map(|chunk| {
+            let mut key = [0u8; ADDED_ACCOUNT_KEY_LEN];
+            key.copy_from_slice(chunk);
+            key
+        })
+        .collect())
+}
+
+fn committer_envelope_due_inner(
+    sent_at_ms: Option<u64>,
+    delegated: bool,
+    covered: &[u8],
+    candidates: &[u8],
+    now_ms: u64,
+) -> Result<bool, Refusal> {
+    let covered = flat_account_keys(covered, "covered candidates")?;
+    let candidates = flat_account_keys(candidates, "candidates")?;
+    let last = sent_at_ms.map(|sent_at_ms| SentCommitterEnvelope {
+        sent_at_ms,
+        signed: delegated,
+        covered: &covered,
+    });
+    Ok(rust_committer_envelope_due(last, &candidates, now_ms))
+}
+
+/// Is a proposer's committer-delegation envelope due for a pending `Add`
+/// (ADR-0060 §6)? `sentAtMs` is `undefined` when none was sent; `delegated` and
+/// `covered` describe the last one (whether it carried delegations, and the
+/// committer candidates it covered), `candidates` the group's now, both as
+/// concatenated 32-byte keys. The caller checks the `Add` is still pending
+/// and that it has something to send.
+///
+/// # Errors
+///
+/// Throws with `committerDelegationError` `keyLength`.
+#[wasm_bindgen(js_name = committerEnvelopeDue)]
+pub fn committer_envelope_due(
+    sent_at_ms: Option<u64>,
+    delegated: bool,
+    covered: &[u8],
+    candidates: &[u8],
+    now_ms: u64,
+) -> Result<bool, JsValue> {
+    js(committer_envelope_due_inner(
+        sent_at_ms, delegated, covered, candidates, now_ms,
+    ))
+}
+
+/// How long after sending a signed committer envelope it is due again, in
+/// milliseconds.
+#[wasm_bindgen(js_name = committerEnvelopeResendAfterMs)]
+#[must_use]
+pub fn committer_envelope_resend_after_ms() -> u64 {
+    COMMITTER_ENVELOPE_RESEND_AFTER_MS
+}
+
 /// Length of one delegation blob: 185.
 #[wasm_bindgen(js_name = committerDelegationBlobLen)]
 #[must_use]
@@ -2075,13 +2253,32 @@ mod tests {
         let refusal = committer_delegation_for_inner(&bad, &owner).unwrap_err();
         assert_eq!(refusal.property, "committerDelegationError");
         assert_eq!(refusal.code, "wrongMailbox");
+        // A person in Everyone: no delegation, the binding alone names the
+        // open mailbox.
+        let open = CommitterDelegationEnvelope::new_inner(&added, &binding, &[]).unwrap();
+        let wire = compose_committer_delegation_inner(&open).unwrap();
+        assert!(decode_committer_delegation_inner(&wire).is_ok());
+        assert!(check_committer_delegations_inner(&open).unwrap().is_empty());
+        let too_many: Vec<_> = (0u8..17).map(|i| blob(&mailbox, owner, i)).collect();
         let refusal = compose_committer_delegation_inner(
-            &CommitterDelegationEnvelope::new_inner(&added, &binding, &[]).unwrap(),
+            &CommitterDelegationEnvelope::new_inner(&added, &binding, &too_many).unwrap(),
         )
         .unwrap_err();
         assert_eq!(refusal.code, "badCount");
         assert_eq!(max_committer_delegations(), 16);
         assert_eq!(committer_delegation_blob_len(), 185);
+    }
+
+    #[test]
+    fn the_envelope_resend_rule_crosses_the_boundary_as_the_core_has_it() {
+        let due = committer_envelope_resend_after_ms();
+        let one = [0x11; 32];
+        assert!(committer_envelope_due_inner(None, false, &[], &one, 0).unwrap());
+        assert!(!committer_envelope_due_inner(Some(1), true, &one, &one, due).unwrap());
+        assert!(committer_envelope_due_inner(Some(1), true, &one, &one, due + 1).unwrap());
+        assert!(committer_envelope_due_inner(Some(1), false, &[], &one, 2).unwrap());
+        let refusal = committer_envelope_due_inner(None, true, &[0; 31], &[], 0).unwrap_err();
+        assert_eq!(refusal.code, "keyLength");
     }
 
     /// `(certificate, expected OPRF hash, expected account id, code)`.
@@ -2343,20 +2540,32 @@ mod tests {
     #[test]
     fn visibility_and_reach_state_round_trip() {
         let chosen = ScopeId::new(ScopeKind::Channel, vec![3; 16]);
-        let setting = VisibilitySetting::new(
+        let contacts = [[4u8; 16], [5u8; 16]].concat();
+        let setting = VisibilitySetting::new_inner(
             VisibilityMode::Some,
             true,
             Some(GroupsForm::Chosen),
-            vec![chosen.clone()],
+            std::slice::from_ref(&chosen),
             true,
             Some(GroupsForm::All),
             9,
-        );
+            ContactsForm::Chosen,
+            &contacts,
+        )
+        .unwrap();
         let wire = compose_visibility_envelope(&setting).unwrap();
         let decoded = decode_visibility_envelope(&wire).unwrap();
         assert_eq!(decoded, setting);
         assert_eq!(decoded.chosen(), vec![chosen.clone()]);
         assert_eq!(decoded.groups(), Some(GroupsForm::Chosen));
+        assert_eq!(decoded.contacts_form(), ContactsForm::Chosen);
+        assert_eq!(decoded.chosen_contacts(), contacts);
+        assert!(allows_contact(&setting, &[5; 16]));
+        assert!(!allows_contact(&setting, &[6; 16]));
+        assert!(
+            !allows_contact(&setting, &[5; 15]),
+            "a malformed id names no contact"
+        );
         assert!(allows_scope(&setting, &chosen));
         assert!(!allows_scope(
             &setting,
@@ -2388,19 +2597,38 @@ mod tests {
             (
                 max_chosen_scopes(),
                 max_visibility_scope_id_len(),
-                max_reach_state_entries()
+                max_reach_state_entries(),
+                max_chosen_contacts()
             ),
-            (1024, 64, 4096)
+            (1024, 64, 4096, 4096)
         );
     }
 
     #[test]
     fn visibility_refusals_carry_their_code() {
-        let bad = VisibilitySetting::new(VisibilityMode::Some, false, None, vec![], false, None, 1);
+        let build = |contacts: &[u8]| {
+            VisibilitySetting::new_inner(
+                VisibilityMode::Some,
+                false,
+                None,
+                &[],
+                false,
+                None,
+                1,
+                ContactsForm::All,
+                contacts,
+            )
+        };
+        let bad = build(&[]).unwrap();
         let e = Refusal::from(rust_compose_visibility(bad.rust()).unwrap_err());
         assert_eq!(
             (e.property, e.code.as_str()),
             ("visibilityError", "someWithNoPart")
+        );
+        let e = build(&[1; 23]).unwrap_err();
+        assert_eq!(
+            (e.property, e.code.as_str()),
+            ("visibilityError", "contactIdLength")
         );
         assert_eq!(
             decode_visibility_inner(b"x").unwrap_err().code,

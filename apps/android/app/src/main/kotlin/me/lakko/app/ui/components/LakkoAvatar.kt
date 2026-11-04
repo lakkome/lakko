@@ -67,10 +67,17 @@ public fun LakkoAvatar(
     large: Boolean = false,
     localStill: Bitmap? = null,
     localVideo: File? = null,
+    /** ADR-0087 4.5.4 — for a group, its id (hex): the circle shows the
+     *  group's photo when this device holds it. */
+    groupIdHex: String? = null,
 ) {
     val tint = avatarTintFor(seed, isLakkoDark())
     val inspection = LocalInspectionMode.current
-    val refs = if (inspection || group) avatar else avatar ?: personAvatar(personKey)
+    val refs = when {
+        inspection -> avatar
+        group -> avatar ?: groupAvatar(groupIdHex)
+        else -> avatar ?: personAvatar(personKey)
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
@@ -103,6 +110,22 @@ public fun LakkoAvatar(
                 if (large && localVideo != null) AvatarVideo(localVideo)
             }
             refs != null && !inspection -> StoredAvatar(refs, large)
+        }
+    }
+}
+
+/** The stored photo of the group [groupIdHex] (ADR-0087 18.1). */
+@Composable
+private fun groupAvatar(groupIdHex: String?): AvatarRefs? {
+    if (groupIdHex.isNullOrEmpty()) return null
+    val context = LocalContext.current
+    val version by me.lakko.app.chat.GroupSettingsStore.version.collectAsState()
+    val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+    return remember(groupIdHex, version, account) {
+        try {
+            me.lakko.app.chat.GroupSettingsStore.photo(context, account, groupIdHex)?.avatar
+        } catch (_: Throwable) {
+            null
         }
     }
 }
@@ -199,6 +222,36 @@ public fun rememberOwnAvatar(): AvatarRefs? {
         } catch (_: Throwable) {
             null
         }
+    }
+}
+
+/**
+ * The name the owner's initials come from when they have no photo: their
+ * display name, their username when they have none. "You" is a label, not a
+ * name, so a caller keeps [fallback] only when neither is known yet.
+ */
+@Composable
+public fun rememberOwnAvatarName(fallback: String): String {
+    if (LocalInspectionMode.current) return fallback
+    val context = LocalContext.current
+    val revision by me.lakko.app.profile.OwnProfileStore.revision.collectAsState()
+    val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+    return remember(account, revision, fallback) {
+        val id = account?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        } ?: return@remember fallback
+        val own = try {
+            me.lakko.app.profile.OwnProfileStore.load(context, id)
+        } catch (_: Throwable) {
+            null
+        }
+        own?.displayName?.takeIf { it.isNotBlank() }
+            ?: own?.username?.takeIf { it.isNotBlank() }
+            ?: fallback
     }
 }
 

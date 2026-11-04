@@ -16,6 +16,30 @@ final class ContactsPresentationTests: XCTestCase {
         Item(id: id, name: name, username: username, isPlaceholder: placeholder)
     }
 
+    // MARK: - One person, one row
+
+    /// What the search field leaves out in Contacts: every row the list shows
+    /// for the text, an invited one too; never a row it does not.
+    func testTheListedKeysAreThePeopleOfTheRowsShown() {
+        func contact(_ id: Int64, _ byte: UInt8) -> AcceptedContact {
+            AcceptedContact(request: IncomingContactRequest(
+                messageId: id, fromPubkey: Data(repeating: byte, count: 32),
+                fromAccountId: nil, fromPseudonym: Data(count: 32), validAfterMs: 0,
+                intro: nil, createdAt: ""))
+        }
+        func invited(_ hex: String, _ byte: UInt8) -> PendingContact {
+            PendingContact(
+                accountIdHex: hex, signaturePubkey: Data(repeating: byte, count: 32),
+                x25519Pubkey: Data(count: 32), displayName: "Anna", username: "", addedAtMs: 0,
+                linkId: Data(count: 16))
+        }
+        let keys = ContactRowId.listedKeys(
+            shown: [.contact(1), .invited("aa")],
+            accepted: [contact(1, 1), contact(2, 2)],
+            invited: [invited("aa", 3), invited("bb", 4)])
+        XCTAssertEqual(keys, [Data(repeating: 1, count: 32), Data(repeating: 3, count: 32)])
+    }
+
     // MARK: - Grouping
 
     func testIndexLetterIsTheUppercasedFirstLetterOrTheCatchAll() {
@@ -289,5 +313,39 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(copy, Localization.text("search.people.not_found"))
         XCTAssertFalse(copy.contains("registered"))
         XCTAssertFalse(copy.contains("anna"))
+    }
+
+    // MARK: - A row under Sent
+
+    private func sentRequest(username: String, name: String?) -> SentContactRequest {
+        SentContactRequest(
+            recipientUsername: username, recipientAccountIdB64: "AA==", messageId: 1, createdAt: "",
+            recipientName: name)
+    }
+
+    func testASentRowShowsTheNameAsFoundWithTheUsernameUnderIt() {
+        let row = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: "Qa Ann"))
+        XCTAssertEqual(row.name, "Qa Ann")
+        XCTAssertEqual(row.username, "@qa_1")
+    }
+
+    func testASentRowWithoutANameFallsBackToTheUsernameOnce() {
+        let bare = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: nil))
+        XCTAssertEqual(bare.name, "@qa_1")
+        XCTAssertNil(bare.username)
+        let same = ContactListPresentation.sentRow(sentRequest(username: "qa_1", name: "@qa_1"))
+        XCTAssertEqual(same.name, "@qa_1")
+        XCTAssertNil(same.username)
+        let neither = ContactListPresentation.sentRow(sentRequest(username: "", name: nil))
+        XCTAssertNil(neither.name)
+        XCTAssertNil(neither.username)
+    }
+
+    func testARowStoredBeforeTheNameWasKeptStillDecodes() throws {
+        let json = #"[{"recipientUsername":"a","recipientAccountIdB64":"AA==","messageId":1,"createdAt":"","intro":""}]"#
+        let rows = SentRequests.decode(Data(json.utf8))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0].recipientName)
+        XCTAssertNil(rows[0].recipientKeyB64)
     }
 }

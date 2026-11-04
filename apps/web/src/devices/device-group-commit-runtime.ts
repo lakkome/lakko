@@ -36,12 +36,13 @@ import {
 import { ensureDeviceGroup, type EnsuredDeviceGroup } from "./lifecycle";
 import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { publishWelcome } from "./welcome-courier";
+import type { DeviceCipher } from "../auth/device-cipher";
 
 /** Who the commit is for. */
 export interface DeviceGroupCommitAccount {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
 }
 
 /** What a commit path hands the outbox once it has built its commit on the

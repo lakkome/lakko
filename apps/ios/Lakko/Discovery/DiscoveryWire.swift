@@ -18,7 +18,7 @@ import Foundation
 /// invite codec endpoints land with 1.14e6.
 ///
 /// No body carries a proof of work since ADR-0054 S3: the anonymous routes
-/// (`/discovery/oprf`, `/discovery/channel/register`, the three consumes)
+/// (`/discovery/oprf`, `/discovery/handle/claim`, the three consumes)
 /// spend an anonymous token in the `x-lakko-anon-token` header instead, and
 /// the bearer routes are counted per account server-side.
 
@@ -46,6 +46,27 @@ public struct OprfResponse: Codable, Equatable {
     public let evaluated: String
 
     public init(evaluated: String) {
+        self.evaluated = evaluated
+    }
+}
+
+/// Body of `POST /discovery/oprf/batch` (maintainer, 2026-11-04): the blinded
+/// elements of every term the account publishes about its own name, in one
+/// request with one `discovery-register` token (1..=65 entries).
+public struct OprfBatchRequest: Codable, Equatable {
+    public let blinded: [String]
+
+    public init(blinded: [String]) {
+        self.blinded = blinded
+    }
+}
+
+/// Response body of `POST /discovery/oprf/batch`: one evaluation per blinded
+/// element, in the same order.
+public struct OprfBatchResponse: Codable, Equatable {
+    public let evaluated: [String]
+
+    public init(evaluated: [String]) {
         self.evaluated = evaluated
     }
 }
@@ -111,18 +132,24 @@ public struct LookupRequest: Codable, Equatable {
 /// ``DiscoveryClient/lookupRaw(_:)``; this type only describes
 /// the 200-OK path.
 public struct LookupResponse: Codable, Equatable {
-    public let accountId: String
+    /// `"person"`, or `"handle"` for a public group or channel (ADR-0087:
+    /// one namespace, one lookup). Absent on an older server.
+    public let kind: String?
+    /// A person only: a group or channel names no account.
+    public let accountId: String?
     /// base64 of the account's public record (ADR-0060 section 5), opened
     /// with the OPRF **output** of the looked-up username (`openPublicRecord`).
     /// Optional on the wire so an older server still decodes.
     public let publicRecord: String?
 
-    public init(accountId: String, publicRecord: String? = nil) {
+    public init(accountId: String?, publicRecord: String? = nil, kind: String? = nil) {
+        self.kind = kind
         self.accountId = accountId
         self.publicRecord = publicRecord
     }
 
     enum CodingKeys: String, CodingKey {
+        case kind
         case accountId = "account_id"
         case publicRecord = "public_record_b64"
     }
@@ -158,7 +185,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// server-side, never stripping a still-valid stored value). Opaque to the
     /// server — verified operator-side + by the peer on a first observation.
     public let genesisAttest: String?
-    /// ADR-0073 section 4.1: standard base64 of the 177-byte key-reset
+    /// ADR-0073 section 4.1: standard base64 of the 145-byte key-reset
     /// attestation `POST /account/keys/reset/finish` minted, carried on the
     /// upload that installs the reset identity. Discovery verifies it under
     /// its pinned attest key, requires a generation strictly above the
@@ -166,6 +193,12 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// same transaction. `nil` on every other upload; an unattested,
     /// unproven key CHANGE is refused (`409 identity-change-needs-attestation`).
     public let keyResetAttest: String?
+    /// ADR-0074 section 3.7: standard base64 of the 201-byte two-way
+    /// conversation link a rotation mints (signed by the key the
+    /// conversations are bound to and by this key). Opaque to the server,
+    /// which keeps it across a same-key re-upload and clears it on a key
+    /// change that carries none. `nil` on every upload but a rotation's.
+    public let conversationLink: String?
 
     public init(
         accountId: String,
@@ -174,7 +207,8 @@ public struct IdentityUploadRequest: Codable, Equatable {
         supersessionProof: String? = nil,
         leafAuth: String? = nil,
         genesisAttest: String? = nil,
-        keyResetAttest: String? = nil
+        keyResetAttest: String? = nil,
+        conversationLink: String? = nil
     ) {
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
@@ -183,6 +217,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         self.leafAuth = leafAuth
         self.genesisAttest = genesisAttest
         self.keyResetAttest = keyResetAttest
+        self.conversationLink = conversationLink
     }
 
     enum CodingKeys: String, CodingKey {
@@ -193,6 +228,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case leafAuth = "leaf_auth"
         case genesisAttest = "genesis_attest"
         case keyResetAttest = "key_reset_attest"
+        case conversationLink = "conversation_link"
     }
 }
 
@@ -226,19 +262,26 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// longer binds the fetched key, and that path carries a supersession
     /// proof instead.
     public let keyResetAttest: String?
+    /// ADR-0074 section 3.7: standard base64 of the conversation link of the
+    /// account's newest rotation, absent when it never rotated (or reset
+    /// since). Verified locally against the key the gate left trusted
+    /// (`verifyConversationLink`); one that does not verify is ignored.
+    public let conversationLink: String?
 
     public init(
         signaturePubkey: String,
         x25519Pubkey: String,
         supersessionProof: String? = nil,
         keyGeneration: UInt64 = 1,
-        keyResetAttest: String? = nil
+        keyResetAttest: String? = nil,
+        conversationLink: String? = nil
     ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
         self.keyGeneration = keyGeneration
         self.keyResetAttest = keyResetAttest
+        self.conversationLink = conversationLink
     }
 
     public init(from decoder: Decoder) throws {
@@ -248,6 +291,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         supersessionProof = try c.decodeIfPresent(String.self, forKey: .supersessionProof)
         keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
         keyResetAttest = try c.decodeIfPresent(String.self, forKey: .keyResetAttest)
+        conversationLink = try c.decodeIfPresent(String.self, forKey: .conversationLink)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -256,6 +300,7 @@ public struct IdentityFetchResponse: Codable, Equatable {
         case supersessionProof = "supersession_proof"
         case keyGeneration = "key_generation"
         case keyResetAttest = "key_reset_attest"
+        case conversationLink = "conversation_link"
     }
 }
 
@@ -386,9 +431,20 @@ public struct InviteFetchResponse: Codable, Equatable {
     /// Standard-alphabet base64 of the sealed link blob; opened on the device
     /// with the link's fragment secret (`XCapability.openLink`).
     public let sealed: String
+    /// Every use of the link is spent. The row is still served, because a
+    /// person who already used the link must reach "already in your contacts"
+    /// and only a consume can tell them apart: this answers only a visitor
+    /// with no session. Absent reads as not used up.
+    public let usedUp: Bool?
 
-    public init(sealed: String) {
+    public init(sealed: String, usedUp: Bool? = nil) {
         self.sealed = sealed
+        self.usedUp = usedUp
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sealed
+        case usedUp = "used_up"
     }
 }
 
@@ -463,79 +519,3 @@ public struct InviteRevokeRequest: Codable, Equatable {
     }
 }
 
-// ----------------------------------------------------------------------------
-// /discovery/channel/{register,lookup}
-//   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
-// ----------------------------------------------------------------------------
-// Mirror of `apps/web/src/discovery/wire.ts` (channel section). Same OPRF
-// ciphersuite + wire shape as the username `RegisterRequest` / `LookupRequest`
-// (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf` evaluate endpoint
-// is namespace-agnostic, so the client reuses `OprfBlinder.blind(handle)`
-// verbatim. Only the second endpoint + the id type (a 16-byte channel_id
-// pseudonym rather than a 16-byte account UUIDv7) differ.
-
-/// Body of `POST /discovery/channel/register`. Binds an OPRF-hashed
-/// `@channelname` to a 16-byte `channel_id` pseudonym. First-come-
-/// first-served via a UNIQUE on `oprf_hash`; a repeat of the same hash
-/// with a different channel id is 409 Conflict.
-public struct ChannelRegisterRequest: Codable, Equatable {
-    /// base64 of the 64-byte lookup key (`OprfResult.lookupKey`), never the
-    /// OPRF output — same rule as ``RegisterRequest/oprfHash``.
-    public let oprfHash: String
-    /// base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire surfaces").
-    public let channelId: String
-
-    public init(oprfHash: String, channelId: String) {
-        self.oprfHash = oprfHash
-        self.channelId = channelId
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case oprfHash = "oprf_hash"
-        case channelId = "channel_id"
-    }
-}
-
-/// Response body of `POST /discovery/channel/register`. Server returns
-/// 409 on handle collision; that surfaces as
-/// ``DiscoveryClientError/http(status:endpoint:body:)`` with
-/// `status == 409`. The type only describes the 200-OK path.
-public struct ChannelRegisterResponse: Codable, Equatable {
-    public let ok: Bool
-
-    public init(ok: Bool) {
-        self.ok = ok
-    }
-}
-
-/// Body of `POST /discovery/channel/lookup`. Resolves an OPRF-hashed
-/// `@channelname` to its `channel_id`. Exact-match only.
-public struct ChannelLookupRequest: Codable, Equatable {
-    /// Same shape as ``ChannelRegisterRequest/oprfHash``.
-    public let oprfHash: String
-
-    public init(oprfHash: String) {
-        self.oprfHash = oprfHash
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case oprfHash = "oprf_hash"
-    }
-}
-
-/// Response body of `POST /discovery/channel/lookup`. The server
-/// returns 404 for an unknown `@channelname`; the high-level client
-/// surfaces that as a `nil` rather than an error class. This type only
-/// describes the 200-OK path.
-public struct ChannelLookupResponse: Codable, Equatable {
-    /// base64(channel_id) — raw 16 bytes.
-    public let channelId: String
-
-    public init(channelId: String) {
-        self.channelId = channelId
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case channelId = "channel_id"
-    }
-}

@@ -99,6 +99,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-device-link/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-feed/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-vault/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-circle/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-l10n/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
@@ -164,6 +165,8 @@ fuzz-list:
     @ls crates/lakko-feed/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-vault:"
     @ls crates/lakko-vault/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-circle:"
+    @ls crates/lakko-circle/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-l10n:"
     @ls crates/lakko-l10n/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"
@@ -498,6 +501,92 @@ dev-sfu:
 #   cd apps/web && npm install
 dev-web:
     cd apps/web && npm run dev
+
+# Build the web client for the desktop app (ADR-0085) into apps/web/dist,
+# which the desktop binary embeds at compile time. Run before dev-desktop
+# whenever the web client changed. This is the dev and test build: its token
+# bucket refills on a take and the device-link answer limit is off, as on the
+# test stack. A release build must not set either.
+build-desktop-web:
+    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_SFU_URL="${VITE_LAKKO_SFU_URL:-wss://test.lakko.me/sfu}" VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
+
+# Build, sign and run the desktop app (macOS debug build).
+#
+# The binary runs from a minimal `Lakko.app` bundle in the debug target
+# directory, registered with Launch Services: macOS attributes system
+# notifications to an app by its bundle, so a bare binary cannot show them as
+# Lakko (ADR-0085 section 5). The executable inside is started directly, so
+# its log stays in this terminal.
+#
+# The linker only ad-hoc signs a debug binary, with an identifier derived
+# from its own hash, so after every rebuild macOS takes it for a new app and
+# asks again for the login-keychain password the debug device-key fallback
+# needs. Signing with a fixed identifier and a real certificate lets
+# "Always Allow" survive rebuilds. The identity is the first
+# "Apple Development" certificate in the keychain unless
+# LAKKO_DESKTOP_SIGN_IDENTITY names one; with neither, the bundle runs
+# ad-hoc signed, as before.
+dev-desktop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Anti-censorship pin of the test stack, when this machine deployed it
+    # (`just deploy-test-obfs`). Without it the build says the setting is not
+    # available and stays direct.
+    if [[ -f "$HOME/.lakko/test-stack/trust-anchor" ]]; then
+        export LAKKO_DESKTOP_BOOTSTRAP_TRUST_ANCHOR="$(cat "$HOME/.lakko/test-stack/trust-anchor")"
+        export LAKKO_DESKTOP_BOOTSTRAP_DOH_DOMAIN=test.lakko.me
+        export LAKKO_DESKTOP_BOOTSTRAP_CONFIG_PATH=/bootstrap.json
+    fi
+    cd apps/desktop/src-tauri
+    cargo build
+    id=me.lakko.desktop.dev
+    app=target/debug/Lakko.app
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp target/debug/lakko-desktop "$app/Contents/MacOS/lakko-desktop"
+    if [ ! -f "$app/Contents/Resources/icon.icns" ] || [ icons/icon.png -nt "$app/Contents/Resources/icon.icns" ]; then
+        set_dir=$(mktemp -d)/icon.iconset
+        mkdir -p "$set_dir"
+        for s in 16 32 128 256 512; do
+            sips -z $s $s icons/icon.png --out "$set_dir/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s * 2)) $((s * 2)) icons/icon.png --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
+        done
+        iconutil -c icns "$set_dir" -o "$app/Contents/Resources/icon.icns"
+    fi
+    cat > "$app/Contents/Info.plist" <<PLIST
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>$id</string>
+    <key>CFBundleName</key><string>Lakko</string>
+    <key>CFBundleDisplayName</key><string>Lakko</string>
+    <key>CFBundleExecutable</key><string>lakko-desktop</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Lakko uses the microphone for calls.</string>
+    <key>NSCameraUsageDescription</key><string>Lakko uses the camera for video calls.</string>
+    <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>$id</string>
+    <key>CFBundleURLSchemes</key><array><string>lakko</string></array>
+    </dict></array>
+    </dict></plist>
+    PLIST
+    identity="${LAKKO_DESKTOP_SIGN_IDENTITY:-}"
+    if [ -z "$identity" ]; then
+        identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1)
+    fi
+    if [ -n "$identity" ]; then
+        codesign --force --sign "$identity" --identifier "$id" "$app"
+        echo "signed with: $identity"
+    else
+        codesign --force --sign - --identifier "$id" "$app"
+        echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
+    fi
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+    RUST_LOG="${RUST_LOG:-info}" "./$app/Contents/MacOS/lakko-desktop"
 
 # Production build of apps/web — wasm-pack release + tsc --noEmit +
 # `vite build`. Output lands in `apps/web/dist/`.
@@ -934,6 +1023,25 @@ mint-release-manifest latest min_supported:
     cargo run -q -p lakko-release-manifest-tool -- \
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
+
+# ADR-0026 - put the anti-censorship tunnel on the test stack: obfs-proxy
+# alone, no other service restarted, and a freshly signed bootstrap config.
+deploy-test-obfs:
+    infra/test-stack/deploy-obfs-proxy.sh
+
+# ADR-0026 - generate the bootstrap-signing keypair. Writes
+# bootstrap-signing-key.seed (mode 0600; keep OFFLINE, never commit) and prints
+# the base64 public key every client pins as its trust anchor.
+gen-bootstrap-key:
+    cargo run -q -p lakko-bootstrap-config-tool -- keygen
+
+# ADR-0026 - sign the bootstrap config clients fetch to arm anti-censorship,
+# from a JSON array of transport specs. Writes bootstrap.json.
+# Example: just sign-bootstrap-config transports.json 30
+sign-bootstrap-config transports ttl_days:
+    cargo run -q -p lakko-bootstrap-config-tool -- \
+        sign --transports {{transports}} --ttl-days {{ttl_days}} \
+        --key bootstrap-signing-key.seed --out bootstrap.json
 
 # ADR-0061 S6 — generate the dedicated translation-publisher keypair. Writes
 # translation-signing-key.seed (mode 0600; keep OFFLINE, never commit) and

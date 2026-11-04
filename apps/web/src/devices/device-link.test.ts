@@ -36,7 +36,6 @@ import {
   DEVICE_LINK_ANSWER_LIMIT,
   DEVICE_LINK_ANSWER_WINDOW_MS,
   LINK_DECLINED_OLD,
-  LINK_DEVICE_ADDED,
   LINK_ENTER_SIX_DIGITS,
   LINK_HANDLED_ELSEWHERE,
   LINK_NEW_WRONG_CODE,
@@ -48,6 +47,7 @@ import {
   createDeviceLinkResponder,
   deviceLinkCoreOf,
   initiatorEndMessage,
+  refundAnswer,
   type AnswerLogStore,
   type DeviceLinkCore,
   type InitiatorPorts,
@@ -290,7 +290,7 @@ describe("old device: the fresh-auth proof (UX 17.4)", () => {
     refuse = false;
     await h.flow.resume();
     expect(h.ports.pair).toHaveBeenCalledTimes(1);
-    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(h.flow.view()).toEqual({ kind: "idle" });
   });
 
   it("a request that goes away under the open question closes with 'expired'", async () => {
@@ -405,8 +405,24 @@ describe("old device: the decision", () => {
     });
     expect(h.ports.pair).toHaveBeenCalledWith(PAYLOAD);
     expect(h.calls).toEqual(["answer", "check", "result:accepted", "pair"]);
-    expect(h.views.map((v) => v.kind)).toEqual(["asking", "answering", "showing", "adding", "closed"]);
-    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(h.views.map((v) => v.kind)).toEqual(["asking", "answering", "showing", "adding", "idle"]);
+    expect(h.flow.view()).toEqual({ kind: "idle" });
+  });
+
+  it("on success the prompt simply closes, with no added line (UX second-device 2.1)", async () => {
+    const h = responderHarness();
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.ports.pair).toHaveBeenCalledTimes(1);
+    // No result toast of any kind: the last view is the closed prompt.
+    expect(h.views.some((v) => v.kind === "closed")).toBe(false);
+    expect(h.flow.view()).toEqual({ kind: "idle" });
+    // The request now carries its outcome; a later poll keeps it closed.
+    h.setListed({ ...sealedRequest(GOOD_CONFIRM_A), outcome: "accepted" });
+    await h.flow.poll();
+    expect(h.flow.view()).toEqual({ kind: "idle" });
   });
 
   it("a wrong code posts wrong_code and pairs nothing", async () => {
@@ -534,6 +550,51 @@ describe("old device: the answer limit (5 per 24 h, chosen, not measured)", () =
     expect(h.answers.times).toHaveLength(5);
   });
 
+  it("a right code whose pairing fails on this side gives the answer back", async () => {
+    const h = responderHarness({
+      pair: vi.fn(async () => {
+        throw new Error("commit refused");
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    expect(h.answers.times).toHaveLength(1);
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.flow.view().kind).toBe("closed");
+    expect(h.answers.times).toEqual([]);
+  });
+
+  it("a right code whose outcome could not be recorded gives the answer back", async () => {
+    const h = responderHarness({
+      result: vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.answers.times).toEqual([]);
+  });
+
+  it("a wrong code keeps the answer counted", async () => {
+    const h = responderHarness();
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(0xee));
+    await h.flow.poll();
+    expect(h.answers.times).toHaveLength(1);
+  });
+
+  it("refundAnswer removes one entry and leaves the rest", () => {
+    const log = memoryAnswerLog([5, 7, 7, 9]);
+    refundAnswer(log, 7);
+    expect(log.times).toEqual([5, 7, 9]);
+    refundAnswer(log, 42);
+    expect(log.times).toEqual([5, 7, 9]);
+  });
+
   it("answersInWindow drops old, future and non-finite times", () => {
     const now = 10 * DEVICE_LINK_ANSWER_WINDOW_MS;
     expect(
@@ -546,7 +607,10 @@ describe("old device: the answer limit (5 per 24 h, chosen, not measured)", () =
 // New device
 // ---------------------------------------------------------------------------
 
-function initiatorHarness(over: Partial<InitiatorPorts> = {}) {
+function initiatorHarness(
+  over: Partial<InitiatorPorts> = {},
+  atSeal?: () => Promise<Uint8Array>,
+) {
   const views: InitiatorView[] = [];
   let status: DeviceRequestStatus = { pending: true, pakeB: null, outcome: null, confirmB: null };
   let clock = 0;
@@ -561,7 +625,11 @@ function initiatorHarness(over: Partial<InitiatorPorts> = {}) {
     onView: (v) => views.push(v),
     ...over,
   };
-  const flow = createDeviceLinkInitiator(ports, { loginHandle: OWN_HANDLE, pairingPayload: PAYLOAD });
+  const flow = createDeviceLinkInitiator(ports, {
+    loginHandle: OWN_HANDLE,
+    pairingPayload: PAYLOAD,
+    ...(atSeal !== undefined ? { pairingPayloadAtSeal: atSeal } : {}),
+  });
   return {
     flow,
     ports,
@@ -616,6 +684,39 @@ describe("new device: the code field", () => {
       confirmA: new Uint8Array([GOOD_CONFIRM_A]),
     });
     expect(h.flow.view().kind).toBe("checking");
+  });
+});
+
+describe("new device: the payload is read when the code seals it", () => {
+  // docs/ux/second-device.md section 2.1: a city that arrived by the time
+  // the code is typed rides the sealed payload.
+  it("seals the payload the session gives at that moment", async () => {
+    const late = new Uint8Array([8, 8, 8]);
+    const h = initiatorHarness({}, async () => late);
+    await toReady(h);
+    await h.flow.submit("471903");
+    expect(h.core.finishes).toEqual([{ code: "471903", payload: late }]);
+    expect(h.flow.view().kind).toBe("checking");
+  });
+
+  it("falls back to the QR payload when reading it fails", async () => {
+    const h = initiatorHarness({}, async () => {
+      throw new Error("no card");
+    });
+    await toReady(h);
+    await h.flow.submit("471903");
+    expect(h.core.finishes).toEqual([{ code: "471903", payload: PAYLOAD }]);
+  });
+
+  it("a second Continue while the payload is read seals once", async () => {
+    let release: (b: Uint8Array) => void = () => undefined;
+    const h = initiatorHarness({}, () => new Promise<Uint8Array>((r) => (release = r)));
+    await toReady(h);
+    const first = h.flow.submit("471903");
+    await h.flow.submit("471903");
+    release(PAYLOAD);
+    await first;
+    expect(h.core.finishes).toHaveLength(1);
   });
 });
 
@@ -961,7 +1062,7 @@ describe("the device link over the real wasm core", () => {
     expect(r.results).toEqual(["accepted"]);
     expect(r.paired).toEqual([r.payload]);
     expect(r.confirmed).toBe(true);
-    expect(r.oldView).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+    expect(r.oldView).toEqual({ kind: "idle" });
     expect(r.freshView.kind).toBe("confirmed");
   });
 

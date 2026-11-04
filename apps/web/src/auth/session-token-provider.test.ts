@@ -39,6 +39,8 @@ interface Harness {
   now: number;
   refreshAnswer: (refreshToken: string) => RefreshTransportResult | Promise<RefreshTransportResult>;
   responses: Response[];
+  /** Runs once, after a request went out and before its answer. */
+  beforeAnswer?: (() => void) | undefined;
 }
 
 function harness(): Harness {
@@ -64,6 +66,8 @@ function harness(): Harness {
     fetchImpl: async (input, init) => {
       const headers = new Headers(init?.headers);
       h.sent.push({ url: String(input), authorization: headers.get("authorization") });
+      h.beforeAnswer?.();
+      h.beforeAnswer = undefined;
       const next = h.responses.shift();
       return next ?? new Response("{}", { status: 200 });
     },
@@ -253,6 +257,24 @@ describe("fetch()", () => {
       `Bearer ${pair(2).sessionToken}`,
     ]);
     expect(h.refreshes).toEqual([pair(1).refreshToken]);
+  });
+
+  it("a late superseded answer to a replaced token goes out again and raises nothing", async () => {
+    // This device's own key rotation: the request left with the old token,
+    // the new pair was installed, and the refusal arrived after that.
+    const h = harness();
+    h.provider.install(ACCT, pair(1));
+    h.beforeAnswer = () => h.provider.install(ACCT, pair(2));
+    h.responses.push(unauthorized(JSON.stringify({ error: "key-generation-superseded" })), ok());
+    const response = await h.provider.fetch("/a", {
+      headers: { authorization: `Bearer ${pair(1).sessionToken}` },
+    });
+    expect(response.status).toBe(200);
+    expect(h.sent.map((s) => s.authorization)).toEqual([
+      `Bearer ${pair(1).sessionToken}`,
+      `Bearer ${pair(2).sessionToken}`,
+    ]);
+    expect(h.events).toEqual([]);
   });
 
   it("reports a second 401 as it is, with no further refresh", async () => {

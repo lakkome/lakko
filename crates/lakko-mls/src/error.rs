@@ -67,6 +67,17 @@ pub enum Error {
         detail: String,
     },
 
+    /// This device still holds `group_id` as active: a Welcome into it was
+    /// refused, or its local state was not deleted. Nothing changed. The group
+    /// id is read from the Welcome's verified `GroupContext`, so the caller
+    /// knows which journal to read before it tries again
+    /// ([`RefusalReason::GroupStillActive`], C-88).
+    #[error("this device still holds group {} as active", group_id_hex(.group_id))]
+    GroupStillActive {
+        /// The group the refusal is about.
+        group_id: Vec<u8>,
+    },
+
     /// A DeviceGroup `FolderChanges` or `StateSnapshot` payload broke an
     /// ADR-0058 section 4 bound and was refused whole (never truncated).
     #[error("device-group payload out of bounds: {0}")]
@@ -116,9 +127,23 @@ impl Error {
     pub const fn refusal_reason(&self) -> Option<RefusalReason> {
         match self {
             Self::MembershipRefused { reason, .. } => Some(*reason),
+            Self::GroupStillActive { .. } => Some(RefusalReason::GroupStillActive),
             _ => None,
         }
     }
+}
+
+/// Lower-case hex, for the one sentence that names a group.
+#[must_use]
+pub fn group_id_hex(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            // Writing to a `String` cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// Convenience alias.

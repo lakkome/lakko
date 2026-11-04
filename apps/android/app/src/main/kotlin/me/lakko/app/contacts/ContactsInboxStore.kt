@@ -302,6 +302,92 @@ public fun withoutAcceptedSenders(
     return pending.filterNot { it.fromPubkey.toList() in acceptedKeys }
 }
 
+/**
+ * The Sent list once these people answered with a Welcome: a Welcome from the
+ * person asked is the answer, whether or not an ack follows (an ack written
+ * after the requester retired their reply key is refused).
+ */
+public fun withoutSentAnsweredBy(
+    sent: List<SentContactRequest>,
+    answeredKeysB64: Set<String>,
+): List<SentContactRequest> =
+    if (answeredKeysB64.isEmpty()) sent else sent.filterNot { it.recipientKeyB64 in answeredKeysB64 }
+
+/** The contact list and the Sent list once these people answered. */
+public data class AnsweredRequests(
+    val accepted: List<AcceptedContact>,
+    val sent: List<SentContactRequest>,
+    /** `true` when [accepted] differs from the input and must be persisted. */
+    val acceptedChanged: Boolean,
+)
+
+/**
+ * The person asked joined this device to a one-to-one: they are a contact, in
+ * the same step that retires their Sent entry, so there is no moment with
+ * neither. Between the two a search row would offer a second request. The
+ * account id comes from the Sent entry; [answered] is account key (standard
+ * base64) -> the one-to-one. A person with no Sent entry is left to the
+ * one-to-one rule.
+ */
+public fun applyAnsweringWelcomes(
+    accepted: List<AcceptedContact>,
+    sent: List<SentContactRequest>,
+    answered: Map<String, String>,
+    nowMs: ULong,
+    createdAt: String,
+): AnsweredRequests {
+    var next = accepted
+    var changed = false
+    val decoder = java.util.Base64.getDecoder()
+    for ((keyB64, groupIdHex) in answered) {
+        val asked = sent.firstOrNull { it.recipientKeyB64 == keyB64 } ?: continue
+        val key = decoder.decode(keyB64)
+        val accountId = try {
+            decoder.decode(asked.recipientAccountIdB64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        adoptingOneToOnePeer(next, key, accountId, groupIdHex, nowMs, createdAt)?.let {
+            next = it
+            changed = true
+        }
+        // A row the one-to-one rule wrote first may hold no account id yet.
+        val index = next.indexOfFirst { it.request.fromPubkey.contentEquals(key) }
+        if (index >= 0 && next[index].request.fromAccountId == null && accountId != null) {
+            val row = next[index]
+            next = next.toMutableList().also {
+                it[index] = row.copy(request = row.request.copy(fromAccountId = accountId))
+            }
+            changed = true
+        }
+    }
+    return AnsweredRequests(next, withoutSentAnsweredBy(sent, answered.keys), changed)
+}
+
+/** The length of a contact's account id. */
+internal const val CONTACT_ACCOUNT_ID_LEN: Int = 16
+
+/** The Sent list once the person with this account id is dismissed from it. */
+public fun withoutSentTo(
+    sent: List<SentContactRequest>,
+    recipientAccountIdB64: String,
+): List<SentContactRequest> = sent.filterNot { it.recipientAccountIdB64 == recipientAccountIdB64 }
+
+/** Accepting someone answers a request sent to them too: it leaves Sent. */
+public fun sentAfterAccepting(
+    sent: List<SentContactRequest>,
+    accepted: List<IncomingContactRequest>,
+): List<SentContactRequest> {
+    val encoder = java.util.Base64.getEncoder()
+    return accepted.mapNotNull { it.fromAccountId }.fold(sent) { rest, accountId ->
+        withoutSentTo(rest, encoder.encodeToString(accountId))
+    }
+}
+
+/** How many incoming requests are waiting, as the Contacts list shows them. */
+public fun waitingRequestCount(pending: List<IncomingContactRequest>): Int =
+    pending.distinctBy { it.messageId }.size
+
 /** The contact list after a batch of accept acknowledgements was applied. */
 public data class AppliedContactAcks(
     val accepted: List<AcceptedContact>,
@@ -332,6 +418,9 @@ public fun applyContactAcks(
     accepted: List<AcceptedContact>,
     sent: List<SentContactRequest>,
     acks: List<IncomingContactAck>,
+    /** Joins the keys of one person across proven rotations (ADR-0074 section
+     *  3.7): an ack from a rotated key is the person, not a second row. */
+    samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
 ): AppliedContactAcks {
     if (acks.isEmpty()) return AppliedContactAcks(accepted, sent, acceptedChanged = false)
     val encoder = java.util.Base64.getEncoder()
@@ -341,7 +430,7 @@ public fun applyContactAcks(
     for (ack in acks) {
         val accepterAccountIdB64 = encoder.encodeToString(ack.accepterAccountId)
         nextSent = nextSent.filterNot { it.recipientAccountIdB64 == accepterAccountIdB64 }
-        val index = nextAccepted.indexOfFirst { it.request.fromPubkey.contentEquals(ack.accepterPubkey) }
+        val index = nextAccepted.indexOfFirst { samePerson(it.request.fromPubkey, ack.accepterPubkey) }
         if (index >= 0) {
             val known = nextAccepted[index]
             if (known.request.fromAccountId == null) {
@@ -369,6 +458,59 @@ public fun applyContactAcks(
         changed = true
     }
     return AppliedContactAcks(nextAccepted, nextSent, changed)
+}
+
+/** What a Sent record knew about the person it went to. */
+public data class FoundName(
+    /** The person's signature key, standard base64. */
+    val signatureKeyB64: String,
+    /** The name the row showed; `null` when it showed the username alone. */
+    val displayName: String?,
+    /** The username the row showed, which the search had verified. */
+    val verifiedUsername: String?,
+)
+
+/**
+ * The names [sent] holds for the people who just answered (an ack, or the
+ * Welcome of [answeredKeysB64]), read before the answer drops the records. A
+ * new contact has no name until their profile arrives, and this is what stands
+ * in for it (`docs/ux/who-can-find-me.md` section 6.1).
+ *
+ * Matched on the KEY the request was sealed to, not the account id an ack
+ * claims: anyone can sign an ack naming another account, and a name found for
+ * one key must not land on a different one. A record with no name or no key
+ * gives nothing, and neither does a name that is only the key's fingerprint,
+ * which is a label and not a name. A found person's username is only ever kept
+ * on the record when the row showed it, so it counts as verified; a request
+ * sent by typing a username keeps no name and never reaches here. A person who
+ * rotated keys between the search and the ack reads as before until their
+ * profile arrives.
+ */
+public fun foundNamesOfAnswers(
+    sent: List<SentContactRequest>,
+    acks: List<IncomingContactAck>,
+    answeredKeysB64: Set<String>,
+): List<FoundName> {
+    val encoder = java.util.Base64.getEncoder()
+    val keys = answeredKeysB64 + acks.map { encoder.encodeToString(it.accepterPubkey) }
+    return sent.mapNotNull { record ->
+        val key = record.recipientKeyB64?.takeIf { it in keys } ?: return@mapNotNull null
+        val name = record.recipientName?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        val keyBytes = try {
+            java.util.Base64.getDecoder().decode(key)
+        } catch (_: IllegalArgumentException) {
+            return@mapNotNull null
+        }
+        if (name == me.lakko.app.profile.fingerprintLabel(keyBytes)) return@mapNotNull null
+        val username = record.recipientUsername.takeIf { it.isNotEmpty() }
+        FoundName(
+            signatureKeyB64 = key,
+            // A person found by username alone is listed under `@username`:
+            // that is the username again, not a name they gave.
+            displayName = name.takeUnless { username != null && it == "@$username" },
+            verifiedUsername = username,
+        )
+    }.distinctBy { it.signatureKeyB64 }
 }
 
 // =============================================================================

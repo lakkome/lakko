@@ -393,7 +393,9 @@ public final class SessionTokenProvider: @unchecked Sendable {
                 let callback = onPairRefreshed
                 fire = { callback?(fresh, account) }
             case .superseded:
-                if !superseded {
+                // A pair that changed while the refresh was out is not the
+                // one refused.
+                if !superseded, pair?.refreshToken == refreshToken {
                     superseded = true
                     let callback = onSuperseded
                     fire = { callback?(account) }
@@ -416,13 +418,21 @@ public final class SessionTokenProvider: @unchecked Sendable {
         return outcome
     }
 
+    /// The access token held now, without refreshing.
+    private func heldAccessToken() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pair?.sessionToken
+    }
+
     /// A bearer route of auth or discovery answered `key-generation-superseded`
     /// directly (ADR-0073 sections 3.2 and 4.1): mark the session and fire the
-    /// callback once.
-    public func noteSuperseded() {
+    /// callback once. `refused` is the token the answer was to; a late answer
+    /// to a token already replaced is ignored.
+    public func noteSuperseded(refused: String?) {
         var fire: (() -> Void)?
         lock.lock()
-        if !superseded, let account = accountIdB64 {
+        if !superseded, let account = accountIdB64, refused == nil || refused == pair?.sessionToken {
             superseded = true
             let callback = onSuperseded
             fire = { callback?(account) }
@@ -478,7 +488,21 @@ public final class SessionTokenProvider: @unchecked Sendable {
         let meaning = SessionTokenRule.classify401(body: data)
         switch SessionTokenRule.afterBearer401(meaning: meaning, alreadyRetried: false) {
         case .signOutSuperseded:
-            noteSuperseded()
+            // An answer to a token this device has since replaced says
+            // nothing about the one it holds: this device's own key rotation
+            // looks exactly like this. The held token decides.
+            let used = Self.bearer(of: first)
+            if let held = heldAccessToken(), held != used {
+                var retry = request
+                Self.setBearer(held, on: &retry)
+                let (again, againResponse) = try await send(retry)
+                if let http = againResponse as? HTTPURLResponse, http.statusCode == 401,
+                    SessionTokenRule.classify401(body: again) == .keyGenerationSuperseded {
+                    noteSuperseded(refused: held)
+                }
+                return (again, againResponse)
+            }
+            noteSuperseded(refused: used)
             return (data, response)
         case .signOutRevoked:
             // Only auth's answer is proof of a removal (ADR-0074 section

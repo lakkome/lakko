@@ -660,6 +660,23 @@ device from the ledger's sealed blob, which the ledger serves without a
 session; nothing is consumed before Add. UX spec
 `docs/ux/contact-invite-link.md` section 3, "Signed out".
 
+## Amendment (2026-11-01): a used-up link is flagged, not hidden
+
+Found walking the base scenarios: a single-use link already used still showed
+the inviter's card to a signed-out visitor, because `GET /discovery/invite/{id}`
+serves a row until it is revoked or expires. Answering 404 once the uses run out
+would be wrong: the person who used the link, signed in, must still open it to
+reach "already in your contacts", and a retry after a failed send must reach the
+idempotent consume, and only the consume can tell that person from anyone else
+(the joiner tag needs the capability, so the blob has to be served first).
+
+`GET /discovery/invite/{id}` and `GET /discovery/group-invite/{id}` therefore
+answer `{sealed, used_up}`. A visitor with no session reads `used_up` as a dead
+link; a signed-in client ignores it and the consume decides, as before. The flag
+tells nothing a consume would not (410) and needs no token. `/c/` has no flag: its
+links are minted with unlimited uses by default; a call link minted with a limit
+still shows its page signed out and is refused at the consume.
+
 ## Amendment (2026-10-26): a link is created with defaults and edited until shared
 
 Decided by the maintainer. **Create link** mints a link with the default

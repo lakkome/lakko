@@ -25,6 +25,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 > conversation Welcome without a role table, so no client holds one. The core
 > keeps its staged twins, uncalled. Obligation 5 (every direct path becomes
 > propose-or-sweep) is therefore complete.
+>
+> **Amended 2026-10-31: a person removed from a group can come back.** See
+> [Amendment (2026-10-31)](#amendment-2026-10-31-a-removed-person-can-come-back).
+> Where this document calls the end of a membership terminal, read "for that
+> handle": a Welcome may replace an ended group.
 
 - **Status:** **Accepted.** **The arc is built end to end** — the core (sprints
   S0-S3 plus four unplanned ones), both FFI surfaces, and **all three clients**
@@ -2750,6 +2755,94 @@ holding it — but the **DS** now reads the key directly instead of a hash whose
 it would have to guess. Invariant #5 still holds (the DS learns no account identity), and
 the disclosure is stated here rather than left to be discovered.
 
+
+## Amendment (2026-10-31): a removed person can come back
+
+**What was found.** On the test stack a person removed from a group and added
+back by an admin stayed out of it, showing "You are no longer a member". This
+ADR built the removal and its end state, and nothing tested the return: no test
+covered a removal followed by re-adding the same identity. The adder's side
+works in the core: the proposal, the sweep and the Welcome are all produced.
+The join fails: `StagedWelcome::new_from_welcome` ends in
+`into_staged_welcome_inner`, which refuses `WelcomeError::GroupAlreadyExists`
+whenever `MlsGroup::load` finds a group under the id, an evicted one included
+(`openmls-0.8.1/src/group/mls_group/creation.rs:281-286`). One provider holds
+every group of an identity and `Group` exposed no delete, so even `Delete this
+chat` left the rows that refuse the return. All three clients then read past the
+refused Welcome.
+
+**What changed in `lakko-mls`.**
+
+1. `join_admitted` stages the Welcome with OpenMLS's own refusal turned off,
+   runs every existing check on the staged Welcome, and only then looks at what
+   is stored, on the id from the verified `GroupContext`. Stored and active:
+   refused with `Error::GroupStillActive { group_id }`
+   (`RefusalReason::GroupStillActive`, disposition `DoNotRetry`). Stored and
+   ended, for a conversation: its rows are deleted and the join lands. Stored and
+   ended, for a `PublisherGroup` or `DeviceGroup`: refused as before, not widened.
+2. A refused join leaves the storage as it found it. Staging writes nothing, and
+   OpenMLS keeps the KeyPackage because every package Lakko mints is a
+   last-resort one (a one-time package would be spent during decryption, before
+   any check can run). The same bytes open once the removal has been applied.
+3. `Group::delete(identity)` deletes a group this device is out of. It reads the
+   STORED state, so an ended handle held across a rejoin cannot delete the group
+   that replaced it, and it is repeatable. `MlsGroup::delete` alone would leave
+   two things. A commit removing this device merges through the `PublicState`
+   arm, which moves the context to N+1 and never touches the key pairs, so the
+   leaf and path private keys stay under epoch N while `delete` clears N+1. And
+   `clear_proposal_queue` in `openmls_memory_storage` 0.5.0 removes its rows under
+   a key with neither label nor version (`lib.rs:859-862`), so no queued-proposal
+   row is ever removed. Both are deleted by hand, with the ADR-0027
+   retained-requests row.
+
+**Why an active group is refused rather than replaced.** A Welcome proves that
+some group of that id invited this device. Anyone who knows the id and fetches
+a published KeyPackage can build one that passes every admission check, with a
+role table of their own. Tying replacement to `is_active() == false` is what
+keeps that from overwriting a live chat (**C-88**), and the forgery is a test.
+The refusal is typed and names the group because a device that was closed through
+both the removal and the re-add sees the Welcome before it has applied the
+removal: it has to hold the Welcome, read that journal, and try again.
+
+**What this did not change.** The state machine's commit, proposal and sweep
+paths are untouched, and `is_active` still answers for a handle: an ended handle
+never comes back, a new one replaces it. What stays after a delete is the
+last-resort KeyPackage bundle (ADR-0050 section 2.6) and the identity's signature
+key, neither of which names a group.
+
+**Residuals.** A forged Welcome can still replace an ENDED group, as one can land
+under any id a device holds nothing for. It yields a local group the DS will not
+serve, and client deletion on removal closes it. The clients are not wired yet:
+none calls `deleteLocally` or holds a Welcome on the refusal. A person whose
+Welcome was already refused and read past needs one more removal and add. This
+amendment widens the surface of G-39.
+
+**Added the same day: deleting a group that has not ended here
+(`Group::delete_after_ended_elsewhere`).** `Group::delete` refuses an active group,
+and that refusal is what ADR-0087 section 9 needs to get past: a person's other
+device hears of the end from a `conversation_ended` register in the account's
+synced state, holds the group active because the commit is still ahead of it in
+the journal, and past the 30-day retention that commit never arrives. So this one
+entry point deletes an active group, on the condition that its caller holds such a
+register from its own account. It reuses `delete_stored_group`, so the same rows
+go, a staged sweep's among them.
+
+It takes the register's MLS epoch, and this is what keeps it from being a loaded
+gun: a group that is stored active at an epoch ABOVE `ended_epoch` is one this
+device has rejoined since that end, and it is refused with `GroupStillActive`,
+nothing changed. A Welcome comes back under the same group id at a later epoch, so
+the epoch separates the group that ended from the group that replaced it with no
+clock involved. A stale handle changes nothing, since the stored state is what is
+judged. A group that is not active goes at any epoch, as under `Group::delete`.
+
+The core cannot verify the register. What this rests on is the DeviceGroup carrying
+it, so the threat is the account's own device, and such a device already holds every
+key this deletes. A server cannot reach it: a refused read is not a register, and
+clients are told so in the documentation of both FFI surfaces. Deleting this way
+says nothing to the group, and the leaf stays in the tree until a commit removes
+it. Pinned by the `delete_after_ended_elsewhere` tests in `tests/group_rejoin.rs`,
+the proptest `a_register_takes_the_ended_group_and_never_a_later_one` among them.
+Host-tested; no client calls it yet.
 
 ## Blast radius, per sprint
 

@@ -28,19 +28,26 @@
  *                          journal, old root -> new root.
  *   7. `journals`          the plain root transfer of every other journal the
  *                          account owns, and the registrars re-appointed.
- *   8. `channels`          the owner key of every channel the account owns.
- *   9. `reach`             the new mailbox and the reach keys: every wanted
+ *   8. `knock-keys`        ADR-0087 section 5: each owned group's knock key
+ *                          moved to a new version under the new root (the
+ *                          earlier versions stay with the old one), the
+ *                          public record's republish recorded.
+ *   9. `handles`           ADR-0087 section 3: an owed `rekey` recorded for
+ *                          each `@name` an owned group holds (its key comes
+ *                          from the journal root too).
+ *  10. `channels`          the owner key of every channel the account owns.
+ *  11. `reach`             the new mailbox and the reach keys: every wanted
  *                          key registered on the mailbox of the NEW key.
- *  10. `profile`           the profile envelope, with grants for the new
+ *  12. `profile`           the profile envelope, with grants for the new
  *                          mailbox, re-sent to every one-to-one and group
  *                          (ADR-0074 section 3.5a rule 3). Owed until every
  *                          conversation has it.
- *  11. `links`             the invite links minted before the rotation,
+ *  13. `links`             the invite links minted before the rotation,
  *                          revoked at the ledger and forgotten locally
  *                          (section 3.5a rule 5: they are spent).
- *  12. `requests`          the unanswered outgoing contact requests, sent
+ *  14. `requests`          the unanswered outgoing contact requests, sent
  *                          again from the new key with a new reply grant.
- *  13. `backup`            the backup re-sealed under the new phrase.
+ *  15. `backup`            the backup re-sealed under the new phrase.
  *
  * A failure before `commit` changes nothing on the server: the device WAS
  * removed and the keys are unchanged. A failure after it resumes from the
@@ -63,6 +70,8 @@ export const ROTATION_STEPS = [
   "key-package",
   "device-group-root",
   "journals",
+  "knock-keys",
+  "handles",
   "channels",
   "reach",
   "profile",
@@ -314,6 +323,8 @@ export type PublishStep =
   | "key-package"
   | "device-group-root"
   | "journals"
+  | "knock-keys"
+  | "handles"
   | "channels"
   | "reach"
   | "profile"

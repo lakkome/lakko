@@ -209,6 +209,13 @@ internal fun buildBackgroundDecryptDeps(
         // ADR-0073 R.5 — mute is a fact of the CONVERSATION: a successor
         // group is muted exactly when its conversation is. The lineage is
         // read from its plain mirror (a READ, C-59).
+        override fun reactionNotificationsOn(accountIdB64: String): Boolean =
+            me.lakko.app.chat.ReactionNotifyPref.isOn(appContext)
+
+        // The group's stored name, for the notification's title. A READ (C-59).
+        override fun groupName(accountIdB64: String, groupHex: String): String? =
+            me.lakko.app.chat.GroupNameStore.name(appContext, accountIdB64, groupHex)
+
         override fun isMuted(accountIdB64: String, groupHex: String): Boolean =
             me.lakko.app.devices.sync.ConversationMute.isMuted(
                 context = appContext,
@@ -286,8 +293,12 @@ private class RealThrowawayGroup(
     private val identity: Identity,
     private val group: Group,
     /** ADR-0048 — read-only name lookup, or `null`. */
-    private val names: me.lakko.app.profile.ProfileNameSnapshot?,
+    initialNames: me.lakko.app.profile.ProfileNameSnapshot?,
 ) : ThrowawayGroup {
+
+    /** The lookup for this batch: what the app stored, plus every profile
+     *  envelope this batch carried so far (in memory, [withBatchProfile]). */
+    private var names: me.lakko.app.profile.ProfileNameSnapshot? = initialNames
 
     // ADR-0053 — an exporter read on the throwaway group; no state is written.
     override fun dsSigner(): me.lakko.app.ds.DsJournalSigner? =
@@ -300,16 +311,22 @@ private class RealThrowawayGroup(
     override fun process(payload: ByteArray): ProcessedRow? {
         // ADR-0022 — the same role-verifying receive path the live poll
         // loop uses. A bad frame / wrong epoch / own echo / role-refused
-        // commit throws and is dropped by the pure core (fail-closed).
-        val processed = try {
-            group.processIncomingVerifyingRoles(identity, payload)
-        } catch (_: Throwable) {
-            return null
-        }
+        // commit throws, and the throw reaches the caller's loop, which
+        // drops the row (fail-closed) and tells this device's own message
+        // apart from one it cannot read.
+        val processed = group.processIncomingVerifyingRoles(identity, payload)
         // Only Application messages carry a user-visible preview. A
         // Commit / Proposal / ExternalJoinProposal advances state (in
         // the THROWAWAY provider only) but has no body to show.
         val app = processed as? ProcessedMessage.Application ?: return null
+        // ADR-0048 — a member's profile names their next row in this batch:
+        // the app has not polled it yet (that is why there is a wake), so
+        // dropping it would leave the message that follows nameless. Applied
+        // in memory, keyed as the app keys it; still never a preview.
+        if (me.lakko.app.chat.looksLikeProfileEnvelope(app.data)) {
+            acceptBatchProfile(app)
+            return null
+        }
         // A SERVICE envelope (ADR-0042/0044 push-routing-secret, an
         // ADR-0045 committer beacon, a profile, a group name, a profile
         // request) is
@@ -357,7 +374,32 @@ private class RealThrowawayGroup(
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),
             resendOrigin = me.lakko.app.chat.resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
+            // reactions-and-emoji section 12 — what a reaction notification
+            // needs: add or take off, the emoji, and whose message it names.
+            reactionAdd = if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.REACTION) {
+                body.reactionAction != uniffi.lakko_ffi_uniffi.ReactionAction.REMOVE
+            } else {
+                null
+            },
+            reactionEmoji = body.emoji,
+            reactionTargetAuthorB64 = body.reactionTargetAuthor?.let { java.util.Base64.getEncoder().encodeToString(it) },
         )
+    }
+
+    private fun acceptBatchProfile(app: ProcessedMessage.Application) {
+        val current = names ?: return
+        try {
+            val profile = uniffi.lakko_ffi_uniffi.decodeProfileEnvelope(app.data)
+            names = withBatchProfile(
+                names = current,
+                roster = group.members(),
+                senderLeaf = app.senderLeaf,
+                profile = me.lakko.app.profile.peerProfileOf(profile),
+                isNewer = { incoming, stored -> uniffi.lakko_ffi_uniffi.profileIsNewer(incoming, stored) },
+            )
+        } catch (_: Throwable) {
+            // A malformed profile names nobody; the row is still suppressed.
+        }
     }
 
     /** The account key the core resolved the sender leaf to at receipt. */
@@ -401,11 +443,13 @@ private class RealThrowawayGroup(
 
     private fun senderNameOf(senderLeaf: UInt?): String? {
         val lookup = names ?: return null
-        val leaf = senderLeaf ?: return null
         return try {
-            val member = group.members().firstOrNull { it.leafIndex == leaf } ?: return null
-            val resolved = lookup.resolve(java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey))
-            resolved.primary.takeIf { !resolved.isPlaceholder }
+            // Profiles and contact renames are filed under the PERSON's key
+            // (ADR-0050: the account key a device leaf is bound to), so a
+            // group member who is no contact is found too; the leaf's own key
+            // is tried after it. `null` (no name stored) makes the
+            // notification the generic banner, logged as a defect.
+            backgroundSenderNameOf(group.members(), senderLeaf, lookup::resolve)
         } catch (_: Throwable) {
             null
         }

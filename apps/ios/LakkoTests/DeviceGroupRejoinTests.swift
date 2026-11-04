@@ -313,3 +313,50 @@ final class DeviceGroupRejoinTests: XCTestCase {
         s.deleteSnapshot(accountIdB64: account)
     }
 }
+
+/// A publish stopped by a handle that fell behind the disk is sealed once
+/// more on the reloaded handle, so the message is not lost to that race.
+@MainActor
+final class StaleHandlePublishTests: XCTestCase {
+
+    private struct Other: Error {}
+
+    func testAStaleHandleIsRetriedOnce() async throws {
+        var calls = 0
+        let id: Int64 = try await DeviceGroupSyncRepository.retryingOnceOnStaleHandle {
+            calls += 1
+            if calls == 1 { throw DeviceGroupSnapshotStore.SnapshotChanged() }
+            return 7
+        }
+        XCTAssertEqual(id, 7)
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testASecondStaleHandleIsTheCallers() async {
+        var calls = 0
+        do {
+            let _: Int64 = try await DeviceGroupSyncRepository.retryingOnceOnStaleHandle {
+                calls += 1
+                throw DeviceGroupSnapshotStore.SnapshotChanged()
+            }
+            XCTFail("must throw")
+        } catch {
+            XCTAssertTrue(error is DeviceGroupSnapshotStore.SnapshotChanged)
+        }
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testAnyOtherErrorIsNotRetried() async {
+        var calls = 0
+        do {
+            let _: Int64 = try await DeviceGroupSyncRepository.retryingOnceOnStaleHandle {
+                calls += 1
+                throw Other()
+            }
+            XCTFail("must throw")
+        } catch {
+            XCTAssertTrue(error is Other)
+        }
+        XCTAssertEqual(calls, 1)
+    }
+}

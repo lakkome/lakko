@@ -62,6 +62,7 @@ import {
   loadRestoredKnownGroups,
 } from "../backup/restored-known-groups";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
+import { markRestoreFinished } from "../backup/restored-marker";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -141,7 +142,11 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     // ADR-0084: the decrypted-avatar cache, one row per blob.
     { db: "lakko-avatars", store: "blobs", row: { id: `${acct}|blob1`, ciphertext: ct } },
     byId("lakko-group-names", "rows"),
+    // ADR-0087: the small sealed rows (group photo, reactions, handle, knock
+    // seeds, requests sent).
+    { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|group-photos`, ciphertext: ct } },
     byId("lakko-group-closed", "rows"),
+    byId("lakko-membership-end", "rows"),
     byId("lakko-registrar-seeds", "rows"),
     byId("lakko-pending-root-seeds", "rows"),
     byId("lakko-pins", "rows"),
@@ -160,6 +165,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
     byId("lakko-sent-request-intros", "rows"),
     byId("lakko-pending-contacts", "rows"),
+    byId("lakko-carried-copies", "rows"),
     // ADR-0073 R.8: the service worker's plaintext copy of the retired keys.
     { db: "lakko-superseded-keys", store: "rows", row: { accountId: acct, keys: ["a2V5"] } },
     {
@@ -252,12 +258,16 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
+  put(`lakko.unseen-reactions.v1:${acct}`, "{}");
+  put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
   put(`lakko.device-city.v1.${acct}`, "{}");
   put(`lakko.device-city-shown.v1.${acct}`, "0");
   put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
+  put(`lakko.device-ack.unsent.v1.${acct}`, "1");
   put(`lakko.link-records.unsent.v1.${acct}`, "1");
   put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
   put(`lakko.blob-deletes-owed.v1.${acct}`, JSON.stringify(["00".repeat(32)]));
@@ -270,6 +280,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
+  put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -291,6 +302,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   saveKnownGroupIds([G], acct);
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
+  markRestoreFinished(acct, 1);
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -306,7 +318,6 @@ function seedDeviceSettings(): void {
   local.setItem("lakko.push.token.v1", "cHNldWRv");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
-  local.setItem("lakko.gif.privacyNoteDismissed", "1");
   local.setItem("lakko.feed.device-banner-dismissed", "1");
 }
 
@@ -389,7 +400,6 @@ describe("wipeAccountLocalData", () => {
       "lakko.push.token.v1",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
-      "lakko.gif.privacyNoteDismissed",
     ]) {
       expect(local.getItem(k), k).not.toBeNull();
     }
@@ -567,6 +577,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-avatars": "account",
   "lakko-group-names": "account",
   "lakko-group-closed": "account",
+  "lakko-membership-end": "account",
   "lakko-registrar-seeds": "account",
   "lakko-pending-root-seeds": "account",
   "lakko-pins": "account",
@@ -582,6 +593,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
   "lakko-pending-contacts": "account",
+  "lakko-carried-copies": "account",
   "lakko-superseded-keys": "account",
   "lakko-push-routing": "account",
   "lakko-anon-tokens": "account",
@@ -632,6 +644,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.recovery-email.unsent.v1.": "account",
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
+  "lakko.device-ack.unsent.v1.": "account",
   "lakko.link-records.unsent.v1.": "account",
   "lakko.link-claims.v1.": "account",
   "lakko.blob-deletes-owed.v1.": "account",
@@ -641,6 +654,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
+  "lakko.channels.claimed-handles.v1.": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",
@@ -657,6 +671,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.auto.": "account",
   "lakko.backup.restored-groups.v1.": "account",
   "lakko.backup.restore-owed.v1.": "account",
+  "lakko.backup.restored-marker.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
@@ -664,6 +679,12 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
   "lakko.emoji.recent:": "account",
+  "lakko.emoji.recent-reactions:": "account",
+  "lakko.quick-reaction.unsent.v1.": "account",
+  "lakko.unseen-reactions.v1:": "account",
+  "lakko-account-kv": "account",
+  // Reactions section 12: this device's notification filter.
+  "lakko.notify.reactions.off": "device",
   "lakko.emoji.tones:": "account",
   // retired device-wide rows
   "lakko.contacts.v1": "retired",
@@ -695,6 +716,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // call without audio/video alignment. Names no account.
   "lakko.call.av-align": "device",
   // not storage names
+  // The notification tag of identity-recovery 17.5 (`added-notice.ts`).
+  "lakko-device-added:": "not-storage",
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",
   "lakko/feed-marks/v1": "not-storage",

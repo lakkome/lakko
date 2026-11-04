@@ -141,4 +141,35 @@ class SyncedStateBlobTest {
         /** `STATE_VERSION` in `crates/lakko-sync/src/synced/state.rs`. */
         const val CURRENT: Byte = 0x02
     }
+
+    /** ADR-0087 section 9 - a flag day: the state file of the version before
+     *  does not stop a sign-in, the session starts clean. */
+    @Test
+    fun `a state file this build refuses starts clean and carries on`() {
+        val gate = VersionGate()
+        var refusals = 0
+        val seeded = seedStateOrFresh(
+            stored = byteArrayOf(0x06, 9),
+            open = { gate.canonical(it) },
+            fresh = { byteArrayOf(CURRENT) },
+            onRefused = { refusals += 1 },
+        )
+        assertArrayEquals(byteArrayOf(CURRENT), seeded)
+        assertEquals(1, refusals)
+    }
+
+    @Test
+    fun `no state file is a fresh state, with nothing to report`() {
+        var refusals = 0
+        val seeded = seedStateOrFresh<ByteArray>(null, { error("nothing to open") }, { byteArrayOf(CURRENT) }, { refusals += 1 })
+        assertArrayEquals(byteArrayOf(CURRENT), seeded)
+        assertEquals(0, refusals)
+    }
+
+    @Test
+    fun `a state file this build reads is opened`() {
+        val gate = VersionGate()
+        val seeded = seedStateOrFresh(byteArrayOf(CURRENT, 9), { gate.canonical(it) }, { ByteArray(0) }, {})
+        assertArrayEquals(byteArrayOf(CURRENT, 9), seeded)
+    }
 }

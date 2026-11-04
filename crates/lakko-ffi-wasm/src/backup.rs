@@ -28,8 +28,9 @@
 
 use lakko_attest::BackupHeadError;
 use lakko_backup::{
-    open as inner_open, payload::AcceptedContactRecord, seal as inner_seal, BackupBlob,
-    BackupPayload,
+    fit_received_profiles, open as inner_open, payload::AcceptedContactRecord, seal as inner_seal,
+    BackupBlob, BackupPayload, OwnPredecessor, ReceivedProfile, PREDECESSOR_SEED_LEN,
+    RECEIVED_PROFILE_KEY_LEN,
 };
 use lakko_crypto::signing::VerifyingKey;
 use wasm_bindgen::prelude::*;
@@ -150,6 +151,48 @@ impl BackupContact {
     }
 }
 
+/// The newest profile envelope this device holds from one other person
+/// (ADR-0048), passed to [`build_backup_payload`] and returned by
+/// `ParsedBackupPayload.receivedProfiles`, so a device restored with no other
+/// device alive shows every sender with a name.
+#[wasm_bindgen]
+pub struct BackupReceivedProfile {
+    person_key: [u8; RECEIVED_PROFILE_KEY_LEN],
+    envelope: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl BackupReceivedProfile {
+    /// `person_key` is the person's 32-byte account signature key, the key
+    /// the client stored the profile under at receipt; `envelope` is the
+    /// profile envelope exactly as received.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` when `person_key` is not 32 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(person_key: &[u8], envelope: Vec<u8>) -> Result<BackupReceivedProfile, JsError> {
+        let person_key = <[u8; RECEIVED_PROFILE_KEY_LEN]>::try_from(person_key)
+            .map_err(|_| JsError::new("person_key must be 32 bytes"))?;
+        Ok(Self {
+            person_key,
+            envelope,
+        })
+    }
+
+    /// The person's 32-byte account signature key.
+    #[wasm_bindgen(getter, js_name = personKey)]
+    pub fn person_key(&self) -> Vec<u8> {
+        self.person_key.to_vec()
+    }
+
+    /// The profile envelope bytes.
+    #[wasm_bindgen(getter)]
+    pub fn envelope(&self) -> Vec<u8> {
+        self.envelope.clone()
+    }
+}
+
 /// Lakko mints 32-byte MLS group ids, which is what lets the caller hand them
 /// over flat-concatenated and this split them back apart with no per-id length
 /// prefix.
@@ -184,6 +227,7 @@ const GROUP_ID_LEN: usize = 32;
 /// multiple of 32, a `synced_state` the fold refuses, or any other
 /// [`BackupPayload::encode`] failure mode.
 #[wasm_bindgen(js_name = buildBackupPayload)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_backup_payload(
     account_id: &[u8],
     created_at_ms: u64,
@@ -196,6 +240,21 @@ pub fn build_backup_payload(
     // ADR-0058: `SyncedState.toBytes()`, or omitted / empty when none is
     // held. Optional, so a five-argument call is valid.
     synced_state: Option<Vec<u8>>,
+    // ADR-0074 section 3.7: the keys the conversations still name, oldest
+    // first, flat-concatenated 64-byte seeds, with one adoption time each.
+    // Omitted for an account that never rotated.
+    own_predecessor_seeds: Option<Vec<u8>>,
+    own_predecessor_adopted_at_ms: Option<Vec<u64>>,
+    // The account's own profile and "who can find me" envelopes, so a device
+    // restored with no other device alive learns them.
+    own_profile: Option<Vec<u8>>,
+    visibility: Option<Vec<u8>>,
+    // ADR-0048: the newest profile envelope held from each other person,
+    // most wanted first. Fitted to the payload's bounds
+    // (`lakko_backup::fit_received_profiles`): the first entry per key wins,
+    // an empty or over-long envelope is dropped, entries past the count or
+    // size bound are left out. Omitted = none.
+    received_profiles: Option<Vec<BackupReceivedProfile>>,
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -219,6 +278,26 @@ pub fn build_backup_payload(
         ));
     }
 
+    let predecessor_seeds = own_predecessor_seeds.unwrap_or_default();
+    let predecessor_times = own_predecessor_adopted_at_ms.unwrap_or_default();
+    if predecessor_seeds.len() != predecessor_times.len() * PREDECESSOR_SEED_LEN {
+        return Err(JsError::new(
+            "own predecessors must be one 64-byte seed per adoption time",
+        ));
+    }
+    let own_predecessors = predecessor_seeds
+        .chunks_exact(PREDECESSOR_SEED_LEN)
+        .zip(predecessor_times)
+        .map(|(seed, adopted_at_ms)| {
+            let mut bytes = [0u8; PREDECESSOR_SEED_LEN];
+            bytes.copy_from_slice(seed);
+            OwnPredecessor {
+                seed: bytes,
+                adopted_at_ms,
+            }
+        })
+        .collect();
+
     let payload = BackupPayload {
         account_id: acct,
         created_at_ms,
@@ -229,6 +308,19 @@ pub fn build_backup_payload(
             .map(<[u8]>::to_vec)
             .collect(),
         synced_state: synced_state.unwrap_or_default(),
+        own_predecessors,
+        own_profile: own_profile.unwrap_or_default(),
+        visibility: visibility.unwrap_or_default(),
+        received_profiles: fit_received_profiles(
+            received_profiles
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| ReceivedProfile {
+                    person_key: p.person_key,
+                    envelope: p.envelope,
+                })
+                .collect(),
+        ),
     };
     payload.encode().map_err(err_to_js)
 }
@@ -294,6 +386,58 @@ impl ParsedBackupPayload {
     #[wasm_bindgen(getter, js_name = syncedState)]
     pub fn synced_state(&self) -> Vec<u8> {
         self.inner.synced_state.clone()
+    }
+
+    /// The account's own predecessor seeds, oldest first, flat-concatenated
+    /// 64-byte seeds (ADR-0074 section 3.7). Empty for an account that never
+    /// rotated. Never log them.
+    #[wasm_bindgen(getter, js_name = ownPredecessorSeeds)]
+    pub fn own_predecessor_seeds(&self) -> Vec<u8> {
+        self.inner
+            .own_predecessors
+            .iter()
+            .flat_map(|p| p.seed)
+            .collect()
+    }
+
+    /// When the account adopted the key that replaced each predecessor, unix
+    /// millis, in the order of `ownPredecessorSeeds`.
+    #[wasm_bindgen(getter, js_name = ownPredecessorAdoptedAtMs)]
+    pub fn own_predecessor_adopted_at_ms(&self) -> Vec<u64> {
+        self.inner
+            .own_predecessors
+            .iter()
+            .map(|p| p.adopted_at_ms)
+            .collect()
+    }
+
+    /// The account's own profile envelope; empty when none was set.
+    #[wasm_bindgen(getter, js_name = ownProfile)]
+    pub fn own_profile(&self) -> Vec<u8> {
+        self.inner.own_profile.clone()
+    }
+
+    /// The account's own "who can find me" envelope; empty when none was
+    /// chosen.
+    #[wasm_bindgen(getter)]
+    pub fn visibility(&self) -> Vec<u8> {
+        self.inner.visibility.clone()
+    }
+
+    /// The other people's profile envelopes this device held, sorted by key.
+    /// Restore each one through the ordinary profile receive gate under its
+    /// `personKey` (the strictly-newer-stamp rule), never by writing it over
+    /// what the device holds, so a stale backup cannot replace a newer name.
+    #[wasm_bindgen(getter, js_name = receivedProfiles)]
+    pub fn received_profiles(&self) -> Vec<BackupReceivedProfile> {
+        self.inner
+            .received_profiles
+            .iter()
+            .map(|p| BackupReceivedProfile {
+                person_key: p.person_key,
+                envelope: p.envelope.clone(),
+            })
+            .collect()
     }
 }
 
@@ -691,8 +835,20 @@ mod tests {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
-        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &[], None)
-            .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1_700_000_000_000,
+            &seed,
+            contacts,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);
@@ -719,9 +875,20 @@ mod tests {
         let without_id = sample_contact();
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
-        let wire =
-            build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[], None)
-                .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1,
+            &seed,
+            vec![with_id, without_id],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 2);
@@ -744,7 +911,20 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[], None).unwrap();
+        let payload = build_backup_payload(
+            &account_id,
+            99,
+            &seed,
+            contacts,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();
@@ -767,6 +947,11 @@ mod tests {
             vec![sample_contact()],
             &ids,
             Some(state.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -776,10 +961,59 @@ mod tests {
     }
 
     #[test]
-    fn the_built_payload_is_wire_v6() {
-        let wire = build_backup_payload(&[0u8; 16], 0, &[0u8; 32], vec![], &[], None).unwrap();
-        assert_eq!(wire[0], 6);
+    fn the_built_payload_is_wire_v8() {
+        let wire = build_backup_payload(
+            &[0u8; 16],
+            0,
+            &[0u8; 32],
+            vec![],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(wire[0], 8);
         assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
+    }
+
+    #[test]
+    fn received_profiles_round_trip_through_wasm_surface() {
+        let list = vec![
+            BackupReceivedProfile::new(&[9; 32], b"nine".to_vec()).unwrap(),
+            BackupReceivedProfile::new(&[2; 32], b"two".to_vec()).unwrap(),
+            BackupReceivedProfile::new(&[9; 32], b"an older nine".to_vec()).unwrap(),
+        ];
+        let wire = build_backup_payload(
+            &[0u8; 16],
+            0,
+            &[0u8; 32],
+            vec![],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(list),
+        )
+        .unwrap();
+        let got: Vec<(Vec<u8>, Vec<u8>)> = parse_backup_payload(&wire)
+            .unwrap()
+            .received_profiles()
+            .iter()
+            .map(|p| (p.person_key(), p.envelope()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (vec![2; 32], b"two".to_vec()),
+                (vec![9; 32], b"nine".to_vec())
+            ]
+        );
     }
 
     // Error-path tests intentionally omitted from the host-side

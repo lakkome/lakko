@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import UserNotifications
 
 /// The conversation name a background process may show for a call
 /// (`docs/ux/calls.md` section 2.1: "Caller identity in the wake, resolved
@@ -62,6 +63,75 @@ public enum LakkoCallNotification {
 /// account (the push route carries it). No account: no name, no write. Logout
 /// keeps the rows; forget-device removes that account's through
 /// ``clear(accountIdB64:defaults:)``.
+/// Reactions-and-emoji spec section 12 — the reaction notification's
+/// identity in `userInfo`, so a removal can withdraw it.
+public enum LakkoReactionNotification {
+    public static let userInfoKey = "lakko_reaction"
+
+    /// Remove the delivered notifications of these reactions.
+    public static func withdraw(keys: Set<String>) async {
+        let center = UNUserNotificationCenter.current()
+        let delivered = await center.deliveredNotifications()
+        let ids = delivered.filter {
+            ($0.request.content.userInfo[userInfoKey] as? String).map(keys.contains) == true
+        }.map(\.request.identifier)
+        if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+    }
+}
+
+/// Section 12 — the Reactions switch as the extension reads it (the app
+/// writes it: ``ReactionNotificationPreference``).
+public enum ReactionNotificationMirror {
+    public static let key = "notify.reactions"
+    /// The markers the stored reaction line carries for the name and the
+    /// emoji (the extension's `nseReactionNameMark` / `nseReactionEmojiMark`).
+    public static let nameMark = "\u{E000}"
+    public static let emojiMark = "\u{E001}"
+    public static var isOn: Bool {
+        SharedStorage.sharedDefaults()?.object(forKey: key) as? Bool ?? true
+    }
+}
+
+/// Section 12 — people's names for the extension's reaction notification,
+/// written by the app (it resolved them) into the App Group suite, read by
+/// the extension (C-59: it resolves nothing). Per account; account key ->
+/// name.
+public enum PersonNameMirror {
+    private static func key(_ accountIdB64: String) -> String { "me.lakko.person-names.v1.\(accountIdB64)" }
+
+    public static func name(accountIdB64: String, keyB64: String) -> String? {
+        guard let map = SharedStorage.sharedDefaults()?.dictionary(forKey: key(accountIdB64)) as? [String: String],
+              let name = map[keyB64], !name.isEmpty else { return nil }
+        return name
+    }
+
+    public static func replace(accountIdB64: String, names: [String: String]) {
+        guard let defaults = SharedStorage.sharedDefaults(),
+              let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        if (defaults.dictionary(forKey: key(accountIdB64)) as? [String: String]) == names { return }
+        defaults.set(names, forKey: key(accountIdB64))
+        // The app may be suspended right after this write (it is also made
+        // when the app goes to the background): hand it to cfprefsd now so
+        // the extension, a separate process, reads it.
+        CFPreferencesAppSynchronize(SharedStorage.appGroupIdentifier as CFString)
+    }
+
+    public static func clear(accountIdB64: String) {
+        SharedStorage.sharedDefaults()?.removeObject(forKey: key(accountIdB64))
+    }
+
+    /// DEBUG diagnostics for the extension's trace: how many keys the mirror
+    /// dictionary held as this process read it, or what was there instead.
+    public static func debugShape(accountIdB64: String) -> String {
+        guard let raw = SharedStorage.sharedDefaults()?.object(forKey: key(accountIdB64)) else {
+            return "mirror=absent"
+        }
+        if let map = raw as? [String: String] { return "mirror=\(map.count) keys" }
+        return "mirror=wrong type \(type(of: raw))"
+    }
+}
+
 public enum CallPeerNameMirror {
 
     /// Key prefix in the App Group shared suite; the account and the group

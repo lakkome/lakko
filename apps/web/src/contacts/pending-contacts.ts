@@ -36,6 +36,7 @@ import { registerAccountMemory } from "../auth/account-memory";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import type { DeviceCipher } from "../auth/device-cipher";
 
 /** After this long without an answer the chat line changes (UX section 4). */
 export const PENDING_STALE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -289,7 +290,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
+async function deviceKeyOf(accountIdB64: string): Promise<DeviceCipher | null> {
   try {
     return await getDeviceKey(accountIdB64);
   } catch {
@@ -297,7 +298,7 @@ async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
   }
 }
 
-async function read(accountIdB64: string, key: CryptoKey): Promise<PendingContact[]> {
+async function read(accountIdB64: string, key: DeviceCipher): Promise<PendingContact[]> {
   const db = await openDb();
   let row: PersistedRow | undefined;
   try {
@@ -312,16 +313,12 @@ async function read(accountIdB64: string, key: CryptoKey): Promise<PendingContac
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return [];
   const plaintext = new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      key,
-      row.ciphertext.slice(IV_LEN),
-    ),
+    await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
   );
   return decodePendingContacts(new TextDecoder().decode(plaintext));
 }
 
-async function write(accountIdB64: string, key: CryptoKey, list: readonly PendingContact[]): Promise<void> {
+async function write(accountIdB64: string, key: DeviceCipher, list: readonly PendingContact[]): Promise<void> {
   const db = await openDb();
   try {
     if (list.length === 0) {
@@ -333,7 +330,7 @@ async function write(accountIdB64: string, key: CryptoKey, list: readonly Pendin
     }
     const plaintext = new TextEncoder().encode(encodePendingContacts(list));
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+    const ct = new Uint8Array(await key.encrypt(iv, plaintext));
     const blob = new Uint8Array(IV_LEN + ct.length);
     blob.set(iv, 0);
     blob.set(ct, IV_LEN);
@@ -375,6 +372,26 @@ export async function loadPendingContacts(accountIdB64: string): Promise<void> {
   } catch {
     /* an unreadable row reads as none */
   }
+}
+
+/**
+ * Read the account's pending contacts from the store, behind the account's
+ * write queue (so a write in flight is seen). `[]` when there are none or
+ * the row cannot be read. Never throws.
+ */
+export function readPendingContacts(accountIdB64: string): Promise<readonly PendingContact[]> {
+  const run = async (): Promise<readonly PendingContact[]> => {
+    const key = await deviceKeyOf(accountIdB64);
+    if (key === null) return [];
+    try {
+      return await read(accountIdB64, key);
+    } catch {
+      return [];
+    }
+  };
+  const queued = (queues.get(accountIdB64) ?? Promise.resolve()).then(run, run);
+  queues.set(accountIdB64, queued);
+  return queued;
 }
 
 /**

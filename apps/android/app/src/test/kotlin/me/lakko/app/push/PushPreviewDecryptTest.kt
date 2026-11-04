@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -30,6 +31,14 @@ class PushPreviewDecryptTest {
     private val groupHex = "a".repeat(64)
     private val groupIdBytes = ByteArray(32) { 0xAA.toByte() }
     private val accountId = "acct-b64=="
+
+    /** The preview words (attachment hint, newer-version sentence) come from
+     *  the catalog; load English here rather than rely on another class
+     *  having loaded it earlier in the same JVM. */
+    @Before
+    fun englishCatalog() {
+        me.lakko.app.l10n.EnglishForTests.install()
+    }
 
     // -----------------------------------------------------------------
     // Fakes
@@ -166,7 +175,7 @@ class PushPreviewDecryptTest {
     private fun row(id: Long, tag: Int): FetchedRow = FetchedRow(id, byteArrayOf(tag.toByte()))
 
     private fun chat(text: String, attachments: Int = 0) =
-        ProcessedRow(ProcessedKind.CHAT, text, attachments)
+        ProcessedRow(ProcessedKind.CHAT, text, attachments, senderName = "Anna")
 
     // -----------------------------------------------------------------
     // Happy path
@@ -189,7 +198,7 @@ class PushPreviewDecryptTest {
         val preview = decryptPushPreview(PushWake(groupHex, pointer = 12, accountIdB64 = accountId), deps)
 
         assertEquals("Lakko", preview?.title)
-        assertEquals("world", preview?.body) // newest-wins
+        assertEquals("Anna: world", preview?.body) // newest-wins
         assertEquals(groupHex, preview?.tag)
         // Throwaway discarded; never persisted.
         assertTrue("throwaway group must be closed", group.closed)
@@ -211,7 +220,7 @@ class PushPreviewDecryptTest {
 
         val preview = decryptPushPreview(PushWake(groupHex, pointer = 11, accountIdB64 = accountId), deps)
 
-        assertEquals("hello", preview?.body)
+        assertEquals("Anna: hello", preview?.body)
         assertSame(signer, deps.lastSigner)
     }
 
@@ -232,7 +241,7 @@ class PushPreviewDecryptTest {
     fun `attachment-only chat renders the attachment hint`() = runTest {
         val one = FakeThrowawayGroup(decode = { chat("", attachments = 1) })
         assertEquals(
-            "Sent an attachment",
+            "Anna: Sent an attachment",
             decryptPushPreview(
                 PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = one, rows = listOf(row(5, 1))),
@@ -240,7 +249,7 @@ class PushPreviewDecryptTest {
         )
         val many = FakeThrowawayGroup(decode = { chat("", attachments = 3) })
         assertEquals(
-            "Sent 3 attachments",
+            "Anna: Sent 3 attachments",
             decryptPushPreview(
                 PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = many, rows = listOf(row(5, 1))),
@@ -250,9 +259,9 @@ class PushPreviewDecryptTest {
 
     @Test
     fun `an edit surfaces the new text`() = runTest {
-        val group = FakeThrowawayGroup(decode = { ProcessedRow(ProcessedKind.EDIT, "edited body", 0) })
+        val group = FakeThrowawayGroup(decode = { ProcessedRow(ProcessedKind.EDIT, "edited body", 0, senderName = "Anna") })
         assertEquals(
-            "edited body",
+            "Anna: edited body",
             decryptPushPreview(
                 PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
@@ -279,7 +288,7 @@ class PushPreviewDecryptTest {
             PushWake(groupHex, 12, accountIdB64 = accountId),
             FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
         )
-        assertEquals("hi", preview?.body)
+        assertEquals("Anna: hi", preview?.body)
     }
 
     @Test
@@ -315,12 +324,12 @@ class PushPreviewDecryptTest {
      *  the catalog sentence, never as core text. */
     @Test
     fun `a newer-version message previews as the catalog sentence`() = runTest {
-        val group = FakeThrowawayGroup(decode = { ProcessedRow(ProcessedKind.UNSUPPORTED, "", 0) })
+        val group = FakeThrowawayGroup(decode = { ProcessedRow(ProcessedKind.UNSUPPORTED, "", 0, senderName = "Anna") })
         val preview = decryptPushPreview(
             PushWake(groupHex, 5, accountIdB64 = accountId),
             FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
         )
-        assertEquals("This message needs a newer version of Lakko.", preview?.body)
+        assertEquals("Anna: This message needs a newer version of Lakko.", preview?.body)
     }
 
     // -----------------------------------------------------------------
@@ -392,7 +401,7 @@ class PushPreviewDecryptTest {
             PushWake(groupHex, 12, accountIdB64 = accountId),
             FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
         )
-        assertEquals("survivor", preview?.body)
+        assertEquals("Anna: survivor", preview?.body)
         assertEquals(2, group.processCount)
     }
 
@@ -461,7 +470,7 @@ class PushPreviewDecryptTest {
         )
         val preview = decryptPushPreview(PushWake(pushGidHex, pointer = 11, accountIdB64 = accountId), deps)
 
-        assertEquals("routed hello", preview?.body)
+        assertEquals("Anna: routed hello", preview?.body)
         assertEquals(1, deps.lookupCount)
         assertEquals(pushGidHex, deps.lastLookupGid)
         // ...and everything downstream used the REAL group_id.
@@ -538,7 +547,7 @@ class PushPreviewDecryptTest {
             route = accountId to groupHex,
         )
         assertEquals(
-            "mine",
+            "Anna: mine",
             decryptPushPreview(PushWake(pushGidHex, 11, accountIdB64 = accountId), deps)?.body,
         )
         assertEquals(accountId, deps.lastLookupAccount)
@@ -589,7 +598,7 @@ class PushPreviewDecryptTest {
         val deps = FakeDeps(okAccount(), group = group, rows = listOf(row(9, 1)))
         val preview = decryptPushPreview(PushWake(groupHex, 10, accountIdB64 = accountId), deps)
 
-        assertEquals("final", preview?.body)
+        assertEquals("Anna: final", preview?.body)
         // The throwaway is discarded exactly once...
         assertTrue("group must be closed (discarded)", group.closed)
         // ...and no persist / snapshot / cursor-advance was reachable.
@@ -841,7 +850,7 @@ class PushPreviewDecryptTest {
                 textRow(11, "hello there"),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -858,7 +867,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, routingSecretEnvelope()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -872,7 +881,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, callSignalingPayload()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     // -----------------------------------------------------------------
@@ -998,7 +1007,7 @@ class PushPreviewDecryptTest {
                 textRow(11, "hello there"),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -1015,7 +1024,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, committerBeacon()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -1033,7 +1042,7 @@ class PushPreviewDecryptTest {
                 rowOf(13, committerBeacon()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 14, accountIdB64 = accountId), deps)?.body)
+        assertEquals("Anna: hello there", decryptPushPreview(PushWake(groupHex, 14, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test

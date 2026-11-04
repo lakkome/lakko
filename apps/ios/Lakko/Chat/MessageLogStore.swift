@@ -337,17 +337,27 @@ public struct PersistedGroup: Codable, Equatable {
     /// on screen long enough to count as seen. Folded into the watermark as
     /// soon as they are contiguous with it. Absent when empty.
     public let feedSeen: [Int64]?
+    /// `docs/ux/second-device.md` section 2, "History is not news": the highest
+    /// message id of this group the pairing history bundle carried. A row at
+    /// or below it is never unread on this device, whatever read position the
+    /// account's other devices hold. Local: it sends no read receipt and no
+    /// read cursor, and it is not ``lastViewedMessageId``, which says what the
+    /// person saw. Absent when no bundle brought this group. Every writer of
+    /// the log carries it through.
+    public let syncedThroughMessageId: Int64?
 
     public init(
         cursor: Int64,
         messages: [PersistedMessage],
         lastViewedMessageId: Int64? = nil,
-        feedSeen: [Int64]? = nil
+        feedSeen: [Int64]? = nil,
+        syncedThroughMessageId: Int64? = nil
     ) {
         self.cursor = cursor
         self.messages = messages
         self.lastViewedMessageId = lastViewedMessageId
         self.feedSeen = feedSeen
+        self.syncedThroughMessageId = syncedThroughMessageId
     }
 }
 
@@ -501,10 +511,17 @@ public struct PersistedReply: Codable, Equatable {
 public struct PersistedReaction: Codable, Equatable {
     public let reactorKeyB64: String
     public let emoji: String
+    /// Reactions-and-emoji spec section 17.3 — the op's action; `nil` reads
+    /// as an add.
+    public let remove: Bool?
+    /// The op's DS message id (`nil` reads as 0).
+    public let at: Int64?
 
-    public init(reactorKeyB64: String, emoji: String) {
+    public init(reactorKeyB64: String, emoji: String, remove: Bool? = nil, at: Int64? = nil) {
         self.reactorKeyB64 = reactorKeyB64
         self.emoji = emoji
+        self.remove = remove
+        self.at = at
     }
 }
 

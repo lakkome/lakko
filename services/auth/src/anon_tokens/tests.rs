@@ -194,6 +194,18 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::CallJoin),
         "LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN"
     );
+    assert_eq!(
+        quota_var(TokenContext::CircleClaim),
+        "LAKKO_ANON_TOKEN_QUOTA_CIRCLE_CLAIM"
+    );
+    assert_eq!(
+        quota_var(TokenContext::ChannelReact),
+        "LAKKO_ANON_TOKEN_QUOTA_CHANNEL_REACT"
+    );
+    assert_eq!(
+        quota_var(TokenContext::ChannelComment),
+        "LAKKO_ANON_TOKEN_QUOTA_CHANNEL_COMMENT"
+    );
     // Every context has exactly one default, in wire order.
     let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed, TokenContext::ALL);
@@ -210,7 +222,7 @@ fn default_quota(context: TokenContext) -> u32 {
 #[test]
 fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::DiscoveryLookup), 300);
-    assert_eq!(default_quota(TokenContext::DiscoveryRegister), 10);
+    assert_eq!(default_quota(TokenContext::DiscoveryRegister), 20);
     assert_eq!(default_quota(TokenContext::InviteConsume), 30);
     assert_eq!(default_quota(TokenContext::DsKnock), 200);
     assert_eq!(default_quota(TokenContext::PushRegister), 400);
@@ -221,6 +233,9 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::BlobRead), 96);
     assert_eq!(default_quota(TokenContext::MailboxWrite), 50);
     assert_eq!(default_quota(TokenContext::CallJoin), 100);
+    assert_eq!(default_quota(TokenContext::CircleClaim), 10);
+    assert_eq!(default_quota(TokenContext::ChannelReact), 500);
+    assert_eq!(default_quota(TokenContext::ChannelComment), 200);
 }
 
 #[test]
@@ -431,7 +446,7 @@ async fn issued_tokens_finalize_against_the_published_key_and_verify() {
     assert_eq!(status, StatusCode::OK, "{}", json(&body));
     let res = json(&body);
     assert_eq!(res["epoch"], epoch);
-    assert_eq!(res["remaining"], 95);
+    assert_eq!(res["remaining"], 295);
     let evaluations: Vec<[u8; 32]> = res["evaluations"]
         .as_array()
         .unwrap()

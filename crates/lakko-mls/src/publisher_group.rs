@@ -98,7 +98,7 @@
 //! → the channel seed survives.
 
 use crate::error::{Error, Result};
-use crate::group::{Group, MemberAddition, GROUP_ID_LEN};
+use crate::group::{Group, JoinRequest, MemberAddition, GROUP_ID_LEN};
 use crate::identity::Identity;
 
 /// MLS-exporter domain-separation label for channel content
@@ -504,6 +504,23 @@ impl PublisherGroup {
             .approve_external_join_directly(identity, proposal_ref)
     }
 
+    /// Retain a co-publisher's request to join carried as a bare KeyPackage
+    /// (ADR-0087 section 5: the co-publisher join moves to the same sealed
+    /// knock row as a group's). The same checks and the same quarantine as
+    /// [`Group::retain_join_request`]; [`Self::approve_external_join`] then
+    /// approves it as a direct commit.
+    ///
+    /// # Errors
+    ///
+    /// What [`Group::retain_join_request`] returns.
+    pub fn retain_join_request(
+        &mut self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest> {
+        self.inner.retain_join_request(identity, key_package)
+    }
+
     /// Borrow the underlying [`Group`] for the rare caller
     /// who needs the full MLS surface (membership ops,
     /// application messages between publishers, etc.).
@@ -811,6 +828,67 @@ mod tests {
             .expect("Some");
         let reloaded_seed = reloaded.channel_seed(&identity).expect("seed reload");
         assert_eq!(post_rotation_seed, reloaded_seed);
+    }
+
+    /// C-88 at this entry point, which is narrower than a conversation's: an
+    /// active PublisherGroup is refused, typed, and so is an ENDED one, which a
+    /// Welcome does not replace here. A co-publisher's re-invitation has no
+    /// path through this provider, and this change does not add one.
+    #[test]
+    fn a_welcome_replaces_no_publisher_group() {
+        let alice = Identity::generate("alice").unwrap();
+        let bob = Identity::generate("bob").unwrap();
+        let cid = ChannelId([0x5b; CHANNEL_ID_LEN]);
+        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("create");
+        let gid = alice_pg.group_id();
+        let addition = alice_pg
+            .inner_mut()
+            .add_member(&alice, bob.create_key_package().unwrap())
+            .expect("add");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
+        let mut bob_pg =
+            PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid).expect("joins");
+
+        let err = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid)
+            .err()
+            .expect("an active group is not replaced");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(crate::RefusalReason::GroupStillActive)
+        );
+
+        let bob_leaf = alice_pg
+            .inner_mut()
+            .members()
+            .iter()
+            .find(|m| m.signature_public_key == bob.signature_public_key())
+            .expect("bob is in")
+            .leaf_index;
+        let removal = alice_pg
+            .inner_mut()
+            .remove_member(&alice, crate::LeafNodeIndex::new(bob_leaf))
+            .expect("remove");
+        let removal = crate::group::encode_message(&removal).expect("encode");
+        bob_pg
+            .inner_mut()
+            .process_incoming(&bob, &removal)
+            .expect("bob applies");
+        assert!(!bob_pg.inner_mut().is_active());
+
+        let addition = alice_pg
+            .inner_mut()
+            .add_member(&alice, bob.create_key_package().unwrap())
+            .expect("add again");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
+        let err = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid)
+            .err()
+            .expect("an ended group is not replaced here");
+        assert_eq!(err.refusal_reason(), None, "the plain refusal, got {err}");
+        assert!(!PublisherGroup::load_joined(&bob, &gid, &cid)
+            .unwrap()
+            .expect("the ended group is still stored")
+            .inner_mut()
+            .is_active());
     }
 
     #[test]

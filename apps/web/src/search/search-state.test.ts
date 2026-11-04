@@ -17,6 +17,8 @@ import {
   SEARCH_OUT_OF_SEARCHES,
   foldSearch,
   legOutcomeOf,
+  peopleLineOf,
+  showsNoMatchLine,
   searchStateMessage,
 } from "./search-state";
 
@@ -85,5 +87,32 @@ describe("searchStateMessage", () => {
     expect(searchStateMessage({ kind: "searching" })).toBeNull();
     expect(searchStateMessage({ kind: "found" })).toBeNull();
     expect(searchStateMessage({ kind: "idle" })).toBeNull();
+  });
+});
+
+describe("showsNoMatchLine", () => {
+  const nothing = { rowsAbove: 0, peopleRows: 0, channel: false, searchOut: false };
+
+  it("shows when nothing stands in the field and nothing is on its way", () => {
+    expect(showsNoMatchLine(nothing)).toBe(true);
+  });
+
+  it("anything standing hides it, and so does a search out", () => {
+    expect(showsNoMatchLine({ ...nothing, rowsAbove: 1 })).toBe(false);
+    expect(showsNoMatchLine({ ...nothing, peopleRows: 1 })).toBe(false);
+    expect(showsNoMatchLine({ ...nothing, channel: true })).toBe(false);
+    expect(showsNoMatchLine({ ...nothing, searchOut: true })).toBe(false);
+  });
+});
+
+describe("peopleLineOf", () => {
+  it("says not found only when no person row stands under People", () => {
+    expect(peopleLineOf({ kind: "not-found" }, 0)).toBe(SEARCH_NOT_FOUND());
+    expect(peopleLineOf({ kind: "not-found" }, 1)).toBeNull();
+  });
+
+  it("still says the search failed over a row", () => {
+    expect(peopleLineOf({ kind: "failed" }, 1)).toBe(SEARCH_FAILED());
+    expect(peopleLineOf({ kind: "allowance-used" }, 1)).toBe(SEARCH_OUT_OF_SEARCHES());
   });
 });

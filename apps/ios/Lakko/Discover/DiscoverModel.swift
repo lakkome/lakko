@@ -11,8 +11,6 @@ enum DiscoverCopy {
     static var pickTitle: String { Localization.text("discover.pick.title") }
     static var pickBody: String { Localization.text("discover.pick.body") }
     static var mixLabel: String { Localization.text("discover.mix.label") }
-    static var mixOffLine: String { Localization.text("discover.mix.off_line") }
-    static var searchHelper: String { Localization.text("discover.search.helper") }
     static var unavailable: String { Localization.text("discover.unavailable") }
     static var noResults: String { Localization.text("discover.search.no_results") }
     static var gone: String { Localization.text("discover.gone") }

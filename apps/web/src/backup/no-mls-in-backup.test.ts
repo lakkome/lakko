@@ -21,6 +21,7 @@
  * written unframed, which is the documented soft-fail; the gate then takes
  * its fresh-install fail-open branch).
  */
+import { type DeviceCipher, WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -46,7 +47,7 @@ const G1 = base64Encode(new Uint8Array(32).fill(0xa1));
 const G2 = base64Encode(new Uint8Array(32).fill(0xa2));
 
 let phrase: Uint8Array;
-let deviceKey: CryptoKey;
+let deviceKey: DeviceCipher;
 
 /** A storage tier that keeps the one blob it was given. */
 function recorder(): { client: StorageClient; blob: () => Uint8Array | null } {
@@ -67,10 +68,10 @@ beforeAll(async () => {
   const mnemonic = wasm.RecoveryMnemonic.generate();
   phrase = new TextEncoder().encode(mnemonic.phrase);
   mnemonic.free();
-  deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+  deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 });
 
 beforeEach(() => {
@@ -178,7 +179,13 @@ describe("the backup payload (real wasm core)", () => {
       "ed25519Seed",
       "kind",
       "knownGroupIds",
+      // ADR-0074 section 3.7: account seeds, which go to the key-rotation
+      // row. No provider is built from them.
+      "ownPredecessors",
+      // Two opaque envelopes of the person themselves (D31, D37).
+      "ownProfile",
       "syncedState",
+      "visibility",
     ]);
     expect(result.acceptedContacts.map((c) => c.signaturePubkeyB64)).toEqual([peer]);
     expect(result.knownGroupIds).toEqual([G1, G2]);
@@ -231,7 +238,7 @@ describe("no path from a backup to MLS state (source)", () => {
     expect(text).toMatch(/rehydrateMlsState\(chats, /);
   });
 
-  it("the only `buildBackupPayload` call passes six arguments, the ids fifth", () => {
+  it("the only `buildBackupPayload` call passes ten arguments, the ids fifth", () => {
     const text = code(join(src, "backup", "client.ts"));
     const calls = text.match(/wasm\.buildBackupPayload\(([^;]*?)\);/gs) ?? [];
     expect(calls).toHaveLength(1);
@@ -248,6 +255,10 @@ describe("no path from a backup to MLS state (source)", () => {
       "contacts",
       "flatGroupIds",
       "currentSyncedStateBytes() ?? undefined",
+      "own.length === 0 ? undefined : seeds",
+      "own.length === 0 ? undefined : adoptedAtMs",
+      "ownProfile ?? undefined",
+      "visibility ?? undefined",
     ]);
     // And nowhere else in the app.
     const others: string[] = [];

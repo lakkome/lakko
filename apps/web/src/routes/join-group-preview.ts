@@ -69,9 +69,12 @@ export function inviteHeadline(preview: GroupInvitePreviewData | null): InviteHe
   return { lead, title: group, members: memberCountLine(preview.memberCount) };
 }
 
-/** The muted foot line: `Invited by <fingerprint>`. */
-export function invitedByLine(fingerprint: string): string {
-  return t("invite.group.invited_by", { fingerprint });
+/** The muted foot line: `Invited by <name>` from the sealed preview. `null`
+ *  with no name: the line goes, and the issuer's key is never shown as a
+ *  string of digits instead. */
+export function invitedByLine(preview: GroupInvitePreviewData | null): string | null {
+  const name = trimmed(preview?.inviterName);
+  return name === null ? null : t("invite.group.invited_by", { name });
 }
 
 export interface PreviewSource {

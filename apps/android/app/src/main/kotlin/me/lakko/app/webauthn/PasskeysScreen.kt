@@ -44,9 +44,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import java.text.DateFormat
-import java.util.Date
-import java.util.Locale
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
@@ -82,6 +79,9 @@ import me.lakko.app.ui.components.LakkoDialogTone
 public fun PasskeysScreen(
     viewModel: PasskeysViewModel,
     onBack: () -> Unit,
+    /** Reached from Settings > Danger zone: the delete dialog is what was
+     *  asked for, and closing it goes back there. */
+    deleteAccountOnly: Boolean = false,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -89,7 +89,7 @@ public fun PasskeysScreen(
     val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     // A3 — drives the delete-account confirmation dialog. Saved, so a
     // rotation brings the dialog back (its typed password is the ViewModel's).
-    var confirmingDelete by rememberSaveable { mutableStateOf(false) }
+    var confirmingDelete by rememberSaveable { mutableStateOf(deleteAccountOnly) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
     // "Stop restoring keys" asks first.
@@ -277,6 +277,7 @@ public fun PasskeysScreen(
             onClose = {
                 viewModel.clearDeleteError()
                 confirmingDelete = false
+                if (deleteAccountOnly) onBack()
             },
         )
     }
@@ -394,13 +395,8 @@ private fun metadataLine(c: CredentialSummary, language: String): String {
 /** A date and time in the interface language (docs/l10n/batch-2-settings.md). */
 private fun format(ms: Long?, language: String): String? {
     if (ms == null) return null
-    val date = Date(ms)
-    val formatter = DateFormat.getDateTimeInstance(
-        DateFormat.MEDIUM,
-        DateFormat.SHORT,
-        Locale.forLanguageTag(language),
-    )
-    return formatter.format(date)
+    // Words from the language, order and clock from the device (localization.md 5).
+    return me.lakko.app.l10n.DeviceFormats.mediumDateTime(ms, language)
 }
 
 /**

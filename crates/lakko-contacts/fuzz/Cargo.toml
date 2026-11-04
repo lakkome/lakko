@@ -133,6 +133,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "group_reactions_decode"
+path = "fuzz_targets/group_reactions_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_photo_decode"
+path = "fuzz_targets/group_photo_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "device_card_decode"
 path = "fuzz_targets/device_card_decode.rs"
 test = false
@@ -261,6 +275,55 @@ bench = false
 [[bin]]
 name = "link_refusal_decode"
 path = "fuzz_targets/link_refusal_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_statement_decode"
+path = "fuzz_targets/handle_statement_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_record_decode"
+path = "fuzz_targets/handle_record_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "conversation_handle_decode"
+path = "fuzz_targets/conversation_handle_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_knock_open"
+path = "fuzz_targets/sealed_knock_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "knock_seed_decode"
+path = "fuzz_targets/knock_seed_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_invite_card_open"
+path = "fuzz_targets/channel_invite_card_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admission_seed_decode"
+path = "fuzz_targets/admission_seed_decode.rs"
 test = false
 doc = false
 bench = false

@@ -10,6 +10,7 @@
  * The groups are the REAL core; the Delivery Service and the snapshot store
  * are fakes.
  */
+import { type DeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -244,7 +245,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
         ACCOUNT_ID,
         "acc",
         new Uint8Array(64).fill(0x31),
-        {} as CryptoKey,
+        {} as unknown as DeviceCipher,
         new Uint8Array(64).fill(0x32),
         ALONE,
       ),
@@ -258,7 +259,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
     const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     await expect(
-      ensureDeviceGroup(ACCOUNT_ID, "acc", new Uint8Array(64).fill(0x33), {} as CryptoKey, undefined, ALONE),
+      ensureDeviceGroup(ACCOUNT_ID, "acc", new Uint8Array(64).fill(0x33), {} as unknown as DeviceCipher, undefined, ALONE),
     ).rejects.toBeDefined();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(putDeviceGroupSnapshot).not.toHaveBeenCalled();
@@ -281,7 +282,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
       ACCOUNT_ID,
       "acc",
       new Uint8Array(64).fill(0x34),
-      {} as CryptoKey,
+      {} as unknown as DeviceCipher,
       new Uint8Array(64).fill(0x35),
       ALONE,
     );

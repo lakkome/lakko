@@ -258,6 +258,7 @@ public fun NewChannelScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Scaffold(topBar = { ChannelTopBar(title = t("channels.new.title"), onBack = onBack) }) { inner ->
         Column(
@@ -301,8 +302,12 @@ public fun NewChannelScreen(
                     if (busy || name.trim().isEmpty()) return@Button
                     busy = true
                     error = null
-                    val id = ChannelsComposer.freshChannelIdHex()
                     val wantedHandle = handle.trim().removePrefix("@")
+                    val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
+                    val claimAccount = state.boundAccount.orEmpty()
+                    // A retry of a failed create reuses the id its handle was
+                    // claimed for.
+                    val id = claims.idFor(claimAccount, wantedHandle)
                     scope.launch {
                         try {
                             val publisher = state.publisher
@@ -335,21 +340,45 @@ public fun NewChannelScreen(
                             // channel. An empty handle skips discovery.
                             if (wantedHandle.isNotEmpty()) {
                                 try {
-                                    ChannelDiscovery.registerChannelHandle(
-                                        handle = wantedHandle,
-                                        channelIdHex = id,
-                                        sessionToken = sessionToken,
-                                    )
-                                } catch (e: DiscoveryHttpError) {
-                                    Log.w(TAG, "handle registration failed: ${e.status}", e)
-                                    error = if (e.status == 409) {
+                                    publisher.withIdentity { identity ->
+                                        ChannelDiscovery.claimChannelHandle(
+                                            identity = identity,
+                                            handle = wantedHandle,
+                                            channelIdHex = id,
+                                            name = name.trim(),
+                                            description = description.trim(),
+                                        )
+                                    }
+                                } catch (e: me.lakko.app.discovery.HandleWriteError) {
+                                    Log.w(TAG, "handle claim failed: ${e.status}", e)
+                                    error = if (e.code == "name-taken") {
+                                        // Bound to another channel id: not ours.
+                                        claims.forget(claimAccount, wantedHandle)
                                         UiText(
                                             "channels.new.error.handle_taken",
                                             texts = mapOf("handle" to "@$wantedHandle"),
                                         )
+                                    } else if (e.status == 429) {
+                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
                                     } else {
                                         UiText("channels.new.error.handle")
                                     }
+                                    busy = false
+                                    return@launch
+                                } catch (e: me.lakko.app.discovery.DiscoveryHttpError) {
+                                    // The OPRF evaluation or a lookup before the
+                                    // claim: a 429 is the per-network limit.
+                                    Log.w(TAG, "handle claim: discovery ${e.status}", e)
+                                    error = if (e.status == 429) {
+                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
+                                    } else {
+                                        UiText("channels.new.error.handle")
+                                    }
+                                    busy = false
+                                    return@launch
+                                } catch (e: me.lakko.app.discovery.DiscoveryNetworkError) {
+                                    Log.w(TAG, "handle claim: no network", e)
+                                    error = UiText("channels.new.error.handle_offline")
                                     busy = false
                                     return@launch
                                 } catch (e: me.lakko.app.anon.AnonTokenException) {
@@ -392,6 +421,7 @@ public fun NewChannelScreen(
                                 ),
                             )
                             state.setKeys(id, keys)
+                            claims.forget(claimAccount, wantedHandle)
                             // ADR-0051 §4 — the metadata record is the first
                             // post: subscribers title the channel from it. A
                             // failed post leaves the channel created; the next
@@ -496,7 +526,12 @@ public fun ChannelDetailScreen(
     val isOrphaned = me.lakko.app.channels.channelIsOrphaned(channelId, orphaned)
     val channel = channels.firstOrNull { it.id == channelId }
     val keys = keysByChannel[channelId]?.takeIf { !isOrphaned }
-    val isSubscriber = subscriberKeysByChannel.containsKey(channelId) && !isOrphaned
+    // Following needs the list row too: a reader key alone is what a subscribe
+    // that never finished left, and this screen registers nobody.
+    val isSubscriber = channelIsFollowed(
+        listed = channel != null,
+        readerKeyHeld = subscriberKeysByChannel.containsKey(channelId),
+    ) && !isOrphaned
     val strings = LocalStrings.current
     val title = channel?.let { channelTitle(it, strings) } ?: t("channels.fallback_name")
     // The header card below carries the name, the handle, the description and
@@ -598,30 +633,51 @@ public fun ChannelDetailScreen(
                     state = state,
                     client = client,
                 )
-                else -> Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    channel?.let { channelDescription(it) }?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(12.dp))
-                    }
-                    Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
-                }
+                else -> SubscribePrompt(
+                    description = channel?.let { channelDescription(it) },
+                    onSubscribe = onSubscribe,
+                )
             }
         }
     }
 }
 
 /**
- * The subscribe route for a channel found by handle or id: registers this
- * device's reader key, waits for the channel owner's key, then shows the
- * posts — the same view the channel screen shows a subscriber afterwards.
+ * The page of a channel this account does not follow. It spends no token and
+ * registers no key: a person becomes a subscriber only by pressing Subscribe
+ * (`docs/ux/group-and-channel-privacy.md` section 5.1).
+ */
+@Composable
+private fun SubscribePrompt(description: String?, onSubscribe: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        description?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+        }
+        Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            t("channels.subscribe.prompt_body"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
+    }
+}
+
+/**
+ * A channel found by handle or id. Until Subscribe is pressed it is the
+ * [SubscribePrompt] page and nothing else; once pressed, here or on the card
+ * that led here, it registers this device's reader key, waits for the channel
+ * owner's key, then shows the posts — the same view the channel screen shows a
+ * subscriber afterwards.
  */
 @Composable
 public fun ChannelSubscribeScreen(
@@ -630,19 +686,29 @@ public fun ChannelSubscribeScreen(
     client: ChannelsClient,
     /** The handle the channel was found by, if any: its list name until it has a better one. */
     handle: String?,
+    /** Subscribe was already pressed, on the card that opened this page. */
+    subscribePressed: Boolean,
     onBack: () -> Unit,
+    /** The channel's name as the card that opened this page read it. */
+    name: String? = null,
 ) {
     val channels by state.channels.collectAsState()
+    val subscriberKeys by state.subscriberKeysByChannel.collectAsState()
     val channel = channels.firstOrNull { it.id == channelId }
+    var pressed by rememberSaveable(channelId) { mutableStateOf(subscribePressed) }
+    val reading = channelPageReads(
+        followed = channelIsFollowed(listed = channel != null, readerKeyHeld = subscriberKeys.containsKey(channelId)),
+        pressed = pressed,
+    )
     // A channel this device subscribes to belongs in its list, else there is
     // no way back to it after leaving this screen.
-    LaunchedEffect(channelId) {
-        if (state.channels.value.none { it.id == channelId }) {
+    LaunchedEffect(channelId, reading) {
+        if (reading && state.channels.value.none { it.id == channelId }) {
             val bare = handle?.trim()?.removePrefix("@").orEmpty()
             state.addChannel(
                 ChannelHandle(
                     id = channelId,
-                    localName = bare,
+                    localName = name?.trim()?.takeIf { it.isNotEmpty() } ?: bare,
                     localDescription = "",
                     addedAtMs = System.currentTimeMillis().toULong(),
                     handle = bare,
@@ -653,7 +719,10 @@ public fun ChannelSubscribeScreen(
     Scaffold(
         topBar = {
             ChannelTopBar(
-                title = channel?.let { channelTitle(it, LocalStrings.current) } ?: t("channels.fallback_name"),
+                title = channel?.let { channelTitle(it, LocalStrings.current) }
+                    ?: name?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: handle?.takeIf { it.isNotBlank() }?.let { "@" + it.trim().removePrefix("@") }
+                    ?: t("channels.fallback_name"),
                 onBack = onBack,
             )
         },
@@ -663,12 +732,19 @@ public fun ChannelSubscribeScreen(
                 .fillMaxSize()
                 .padding(inner),
         ) {
-            SubscriberChannelView(
-                channelId = channelId,
-                header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
-                state = state,
-                client = client,
-            )
+            if (reading) {
+                SubscriberChannelView(
+                    channelId = channelId,
+                    header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
+                    state = state,
+                    client = client,
+                )
+            } else {
+                SubscribePrompt(
+                    description = channel?.let { channelDescription(it) },
+                    onSubscribe = { pressed = true },
+                )
+            }
         }
     }
 }
@@ -724,8 +800,8 @@ private fun OwnerChannelView(
     // channel is open (or its Manage screen is): the same 5 s fan-out as before.
     SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
 
-    suspend fun refresh() {
-        loading = true
+    suspend fun refresh(quiet: Boolean = false) {
+        if (!quiet) loading = true
         loadError = null
         try {
             val fetched = client.fetchPosts(channelId, 0u)
@@ -770,6 +846,12 @@ private fun OwnerChannelView(
         // ADR-0060 section 3 — publishers upload a member card like anyone
         // else, under a subscriber key registered on the channel.
         me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
+        // A co-publisher's post appears here without reopening, as a reader's
+        // list does.
+        while (true) {
+            kotlinx.coroutines.delay(OPEN_CHANNEL_REFRESH_MS)
+            refresh(quiet = true)
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -937,7 +1019,13 @@ private fun PostList(
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
     val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
-    val now = System.currentTimeMillis()
+    // "5 min ago" moves on while the screen stays open.
+    val now by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
+        while (true) {
+            kotlinx.coroutines.delay(RELATIVE_TIME_TICK_MS)
+            value = System.currentTimeMillis()
+        }
+    }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val readable = visible.filter { renderOf(it) is PostRender.Plain }.map { it.cursor.toLong() }.toSet()
     if (onShown != null) {
@@ -1016,7 +1104,7 @@ private fun ChannelInfoSheet(
     /** Open the channel's member list (ADR-0060 section 3). */
     onOpenMembers: () -> Unit,
     onManage: () -> Unit,
-    /** Stop following on this device (`channels.info.unsubscribe_sub`). */
+    /** Stop following on every device of the person (`channels.info.unsubscribe_sub`). */
     onStopFollowing: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1232,10 +1320,11 @@ private fun PostCard(time: String, render: PostRender?) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                is PostRender.Plain -> Text(
-                    render.value,
+                is PostRender.Plain -> me.lakko.app.ui.components.MessageLinkText(
+                    text = render.value,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface,
+                    linkColor = MaterialTheme.colorScheme.primary,
                 )
                 PostRender.Hidden -> Unit
             }
@@ -1400,7 +1489,9 @@ private fun SubscriberChannelView(
             // it already holds is not registered again on every open; the
             // catch-up re-registers when the current epoch's seed is missing.
             val existingKeys = state.subscriberKeysByChannel.value[channelId]
-            val alreadyFollowing = existingKeys != null &&
+            // `attempt` above 0 is `Try again` after a failed subscribe, whose
+            // key and list row are already here: that press must register.
+            val alreadyFollowing = attempt == 0 && existingKeys != null &&
                 state.channels.value.any { it.id == channelId }
             val kp = existingKeys
                 ?: ChannelsComposer.freshSubscriberKeys().also {
@@ -1410,6 +1501,8 @@ private fun SubscriberChannelView(
             if (!alreadyFollowing) {
                 registeredThisOpen[0] = true
                 client.subscribe(channelId, pubHex)
+                // ADR-0087 section 9.5 - back on a channel this account left.
+                me.lakko.app.channels.ChannelUnsubscribe.noteFollowing(channelId)
             }
 
             if (state.subscribedSeeds(channelId).isNotEmpty()) {
@@ -1522,6 +1615,8 @@ private fun StatusLine(text: String) {
 private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
 private const val SEED_WAIT_MS: Long = 3_000L
 private const val READER_REFRESH_MS: Long = 5_000L
+private const val OPEN_CHANNEL_REFRESH_MS: Long = 5_000L
+private const val RELATIVE_TIME_TICK_MS: Long = 30_000L
 private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
 
 /**
@@ -1707,6 +1802,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
     // "Saved." after a successful post, cleared by the next edit or save (web ManagePanel).
     var saved by remember(channel.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
     val dirty = name.trim() != channelTitle(channel, LocalStrings.current) || description.trim() != channelDescription(channel).orEmpty()
 
     SectionCard(
@@ -1770,6 +1866,17 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             updatedAtMs = System.currentTimeMillis().toULong(),
                         )
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
+                        // group-and-channel-privacy.md 4.5.4 — a channel with
+                        // an @name publishes its name and description in its
+                        // public record: owed now, durably, sent at once and
+                        // retried by the heartbeat until it lands.
+                        val acct = state.boundAccount
+                        val owner = state.publisher
+                        if (acct != null && owner != null && channel.handle.isNotBlank()) {
+                            me.lakko.app.chat.GroupSettingsStore.saveOwedChannelRecord(context, acct, channel.id, true)
+                            val current = state.channels.value.firstOrNull { it.id == channel.id } ?: channel
+                            ChannelDiscovery.sendOwedRecordIfAny(context, owner, acct, current)
+                        }
                         // ADR-0059 — a listed channel's listing carries the name
                         // and description too; editing them updates it (UX 6.4).
                         var listingOk = true
@@ -2128,6 +2235,7 @@ private fun KeysCard(
         state.saveRotationState(channelId, next.toStored())
     }
 
+    val heartbeatContext = LocalContext.current.applicationContext
     // The rotation heartbeat, armed once the publisher handle is open,
     // cancelled when this card leaves the composition. One pass at once, then
     // one per interval, the [RotationCron.start] cadence — driven here rather
@@ -2137,6 +2245,12 @@ private fun KeysCard(
         val pub = publisher ?: return@LaunchedEffect
         val pg = publisherGroup ?: return@LaunchedEffect
         while (true) {
+            // 4.5.4 — an owed republish of the channel's public record.
+            state.boundAccount?.let { acct ->
+                state.channels.value.firstOrNull { it.id == channelId }?.let { ch ->
+                    ChannelDiscovery.sendOwedRecordIfAny(heartbeatContext, pub, acct, ch)
+                }
+            }
             try {
                 val result = rotateOnce(
                     pub, pg, channelId, client, state,

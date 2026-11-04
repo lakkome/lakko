@@ -97,8 +97,6 @@ class ResetRepairTest {
         assertFalse(
             deviceSwapAcrossCommits(listOf("me", "old", "c"), listOf("me"), accountOf, superseded, emptyMap(), 1).suppress,
         )
-        // No key changed at all: not this rule's row to suppress.
-        assertFalse(deviceSwapAcrossCommits(listOf("me"), listOf("me"), accountOf, superseded, emptyMap(), 1).suppress)
         // A torn read keeps the row and the memory.
         assertEquals(
             DeviceSwapVerdict(false, mapOf("A" to 5L)),
@@ -109,6 +107,23 @@ class ResetRepairTest {
             listOf("me"), listOf("me", "new"), accountOf, superseded, mapOf("A" to 0L), DEVICE_SWAP_PAIR_WINDOW_MS,
         )
         assertEquals(DeviceSwapVerdict(false, emptyMap()), late)
+    }
+
+    @Test
+    fun `a commit that only changes devices leaves no row and keeps the memory`() {
+        // The person keys are account keys (ADR-0050): a device added or
+        // retired leaves them equal. No person joined or left.
+        val v = deviceSwapAcrossCommits(listOf("me", "c"), listOf("c", "me"), accountOf, superseded, mapOf("A" to 5L), 10)
+        assertEquals(DeviceSwapVerdict(true, mapOf("A" to 5L)), v)
+        // Also for an account that never saw a key reset (nothing superseded,
+        // nothing awaited).
+        val plain = deviceSwapAcrossCommits(listOf("x", "y"), listOf("x", "y"), { null }, { false }, emptyMap(), 1)
+        assertEquals(DeviceSwapVerdict(true, emptyMap()), plain)
+        // A torn read on either side still suppresses nothing.
+        assertFalse(deviceSwapAcrossCommits(listOf("x"), null, { null }, { false }, emptyMap(), 1).suppress)
+        // A person who really joined still draws the row.
+        assertFalse(deviceSwapAcrossCommits(listOf("x"), listOf("x", "y"), { null }, { false }, emptyMap(), 1).suppress)
+        assertFalse(deviceSwapAcrossCommits(listOf("x", "y"), listOf("x"), { null }, { false }, emptyMap(), 1).suppress)
     }
 
     @Test

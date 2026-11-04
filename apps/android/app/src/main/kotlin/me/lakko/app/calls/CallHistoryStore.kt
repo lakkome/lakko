@@ -49,6 +49,10 @@ import kotlinx.coroutines.flow.asStateFlow
  * [CALL_HISTORY_MAX]. A line this build cannot read is dropped on load rather
  * than failing the read.
  */
+/** [entries] without the calls of [conversationIdHex] (ADR-0087 section 9). */
+internal fun callHistoryWithout(entries: List<CallHistoryEntry>, conversationIdHex: String): List<CallHistoryEntry> =
+    entries.filterNot { it.conversationIdHex.equals(conversationIdHex, ignoreCase = true) }
+
 public object CallHistoryStore {
     private const val PREFS_NAME = "lakko-call-history"
     private const val KEY_PREFIX = "calls-v1:"
@@ -97,6 +101,27 @@ public object CallHistoryStore {
                 changed.value += 1
             } catch (cause: Throwable) {
                 android.util.Log.w(TAG, "recording the call history entry failed", cause)
+            }
+        }
+    }
+
+    /** Take one conversation out of the list (ADR-0087 section 9). */
+    public fun deleteConversation(context: Context, accountIdB64: String?, conversationIdHex: String) {
+        if (accountIdB64.isNullOrEmpty()) return
+        val store = prefs(context) ?: return
+        val hex = conversationIdHex.lowercase()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val held = load(context, accountIdB64)
+                val next = callHistoryWithout(held, hex)
+                if (next.size != held.size) {
+                    store.edit()
+                        .putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
+                        .apply()
+                    changed.value += 1
+                }
+            } catch (cause: Throwable) {
+                android.util.Log.w(TAG, "removing a conversation's call history failed", cause)
             }
         }
     }

@@ -46,6 +46,8 @@ export function composeOwnProfileForDevices(
   wasm: OwnProfileComposer & Partial<AvatarWasm>,
   own: OwnProfile,
   accountIdBytes: Uint8Array | null,
+  /** The backup carries it too; a device of the account keeps the session's. */
+  username: string | null = null,
 ): Uint8Array | null {
   if (own.updatedAtMs <= 0) return null;
   // ADR-0084 — the photo travels with the name to the account's other
@@ -56,7 +58,7 @@ export function composeOwnProfileForDevices(
       : avatarToWasm<never>(wasm as AvatarWasm, own.avatar);
   return wasm.composeProfileEnvelope(
     own.displayName,
-    undefined,
+    username ?? undefined,
     BigInt(own.updatedAtMs),
     accountIdBytes ?? undefined,
     undefined,
@@ -73,6 +75,7 @@ interface Binding {
 
 let bound: Binding | null = null;
 const listeners = new Set<(own: OwnProfile) => void>();
+const restoredListeners = new Set<() => void>();
 
 setServiceEnvelopeComposer("profile", async () => {
   const b = bound;
@@ -145,5 +148,28 @@ export function subscribeOwnProfileAdopted(listener: (own: OwnProfile) => void):
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
+  };
+}
+
+/**
+ * A restore of the account's backup finished: the own profile may have just
+ * been written, and the person must be told again to every conversation and
+ * device, as after any change.
+ */
+export function announceOwnStateRestored(): void {
+  for (const listener of restoredListeners) {
+    try {
+      listener();
+    } catch {
+      /* a listener's failure is its own */
+    }
+  }
+}
+
+/** Called after a restore finished. Returns the unsubscribe function. */
+export function subscribeOwnStateRestored(listener: () => void): () => void {
+  restoredListeners.add(listener);
+  return () => {
+    restoredListeners.delete(listener);
   };
 }

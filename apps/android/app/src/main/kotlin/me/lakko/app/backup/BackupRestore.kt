@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.CancellationException
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 
 /**
  * Restoring the account backup, on every route that ends with the recovery
@@ -14,8 +15,9 @@ import uniffi.lakko_ffi_uniffi.BackupContactRecord
  * device with no cached seed).
  *
  * What a backup is (maintainer decision, 2026-10-02): the account's contacts,
- * the ADR-0058 synced state and the NAMES of its conversations. It carries no
- * MLS state. A provider snapshot belongs to the device that made it: loaded on
+ * the ADR-0058 synced state, the NAMES of its conversations, (ADR-0074
+ * section 3.7) the account's own predecessor keys, and the own profile and
+ * visibility envelopes. It carries no MLS state. A provider snapshot belongs to the device that made it: loaded on
  * another device it clones a leaf (ADR-0050), loaded on the same device after
  * a reinstall it rolls the device back behind commits it already published
  * (ADR-0040) and re-uses ratchet positions (G-34). A restored device keeps
@@ -39,10 +41,18 @@ public enum class BackupRestoreOutcome {
      *  declined a stale head, or it did not open under the phrase. */
     NOT_APPLIED,
 
-    /** The fetch itself failed: no answer yet. The restore stays pending and
-     *  the next session landing tries again. */
+    /** The fetch itself failed, or the own predecessors it carried could not
+     *  be stored: no answer yet. The restore stays pending and the next
+     *  session landing tries again. */
     FETCH_FAILED,
 }
+
+/** What storing a backup's own predecessors did. */
+internal class OwnPredecessorsStored(
+    /** The key this account's conversation leaves are bound to moved: a chat
+     *  layer already loaded under another one is rebuilt. */
+    val conversationKeyChanged: Boolean,
+)
 
 /** Everything [restoreBackupAndApply] touches, so a test can stand in for it. */
 internal interface BackupRestorePorts {
@@ -50,6 +60,16 @@ internal interface BackupRestorePorts {
      *  [confirmStaleOverride] is asked on a stale head and must never
      *  auto-accept. */
     suspend fun fetch(confirmStaleOverride: suspend (RestoreReason) -> Boolean): GatedRestoreOutcome
+
+    /** ADR-0074 section 3.7: store the account's own predecessors where a
+     *  kept device holds them. `null` when they could not be stored. Called
+     *  only with a non-empty list. Never log a seed. */
+    fun storeOwnPredecessors(predecessors: List<BackupOwnPredecessor>): OwnPredecessorsStored?
+
+    /** The path a device takes after a pairing bundle delivered predecessors:
+     *  the binding is minted again under the oldest one while the device
+     *  holds no conversation, and the KeyPackage published again. */
+    suspend fun rebindConversationKey()
 
     /** Add the contacts this device does not hold yet. Never drops one it
      *  holds. Returns how many were added. */
@@ -61,6 +81,22 @@ internal interface BackupRestorePorts {
     /** Remember the conversations the backup named (see
      *  [RestoredKnownGroups]). */
     fun rememberRestoredGroups(groupIdsHex: List<String>)
+
+    /** Keep the backup's own profile envelope: decode it fail closed (a throw
+     *  changes nothing) and store the name and photo unless this device holds
+     *  something newer. */
+    fun applyOwnProfile(envelope: ByteArray)
+
+    /** The backup's visibility envelope: decode it fail closed and hand it to
+     *  the path an incoming DeviceGroup envelope takes. */
+    fun applyVisibility(envelope: ByteArray)
+
+    /** What this device noted about the Everyone publication is out of date. */
+    fun noteEveryoneUnknown()
+
+    /** The restore finished: the chat list explains an empty list until the
+     *  first conversation arrives (`docs/ux/identity-recovery.md` 7.2). */
+    fun markRestored(knewConversations: Boolean)
 
     /** The merged state is worth uploading again. */
     fun markBackupDirty()
@@ -81,8 +117,10 @@ internal interface BackupRestorePorts {
 /**
  * THE restore: download, gate, open, apply. One function for every route.
  *
- * Applies contacts (merged), the synced state (merged) and the known group
- * ids. There is no MLS state in a backup and nothing here can load any.
+ * Applies the account's own predecessors first (nothing below may leave the
+ * device bound under the newest key), then contacts (merged), the synced state
+ * (merged) and the known group ids. There is no MLS state in a backup and
+ * nothing here can load any.
  *
  * Never throws (cancellation aside) and never fails the sign-in around it: a
  * missing backup is [BackupRestoreOutcome.NO_BACKUP]; a failed fetch is
@@ -119,6 +157,7 @@ internal suspend fun restoreBackupAndApply(
         is GatedRestoreOutcome.Restored -> fetched.payload
         is GatedRestoreOutcome.NoBackup -> {
             ports.log("backup restore ($route): no backup on the server")
+            runCatching { ports.markRestored(knewConversations = false) }
             ports.setRetryPending(false)
             return BackupRestoreOutcome.NO_BACKUP
         }
@@ -144,6 +183,15 @@ internal suspend fun restoreBackupAndApply(
         }
     }
 
+    // ADR-0074 section 3.7. On a phrase route this runs before the session
+    // lands, so the session bootstrap mints the first binding under the
+    // oldest key; on the retry the chat layer is rebuilt below.
+    val predecessors = try {
+        applyOwnPredecessors(route, ports, parsed.ownPredecessors)
+    } finally {
+        parsed.ownPredecessors.forEach { it.seed.fill(0) }
+    }
+
     // Each part stands alone: one that fails must not cost the others.
     try {
         val added = ports.mergeContacts(parsed.acceptedContacts, parsed.createdAtMs)
@@ -165,13 +213,67 @@ internal suspend fun restoreBackupAndApply(
     } catch (cause: Throwable) {
         ports.log("backup restore ($route): known groups not recorded", cause)
     }
+    // An empty field, or one that does not decode, changes nothing.
+    try {
+        ports.noteEveryoneUnknown()
+        if (parsed.ownProfile.isNotEmpty()) ports.applyOwnProfile(parsed.ownProfile)
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): own profile not restored", cause)
+    }
+    try {
+        if (parsed.visibility.isNotEmpty()) ports.applyVisibility(parsed.visibility)
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): visibility not restored", cause)
+    }
+    try {
+        ports.markRestored(knewConversations = parsed.knownGroupIds.isNotEmpty())
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): restored marker not set", cause)
+    }
+    if (predecessors == OwnPredecessorStep.NOT_STORED) {
+        // The next backup from this device would leave them out, and nothing
+        // else on the server holds them: uploads stay held and the next
+        // landing tries again.
+        return BackupRestoreOutcome.FETCH_FAILED
+    }
     try {
         ports.markBackupDirty()
     } catch (cause: Throwable) {
         ports.log("backup restore ($route): backup not marked dirty", cause)
     }
+    if (predecessors == OwnPredecessorStep.KEY_MOVED) {
+        try {
+            ports.rebindConversationKey()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            // The next bootstrap reads the predecessor store itself.
+            ports.log("backup restore ($route): conversation identity not rebuilt", cause)
+        }
+    }
     ports.setRetryPending(false)
     return BackupRestoreOutcome.APPLIED
+}
+
+private enum class OwnPredecessorStep { NOTHING, STORED, KEY_MOVED, NOT_STORED }
+
+private fun applyOwnPredecessors(
+    route: String,
+    ports: BackupRestorePorts,
+    predecessors: List<BackupOwnPredecessor>,
+): OwnPredecessorStep {
+    if (predecessors.isEmpty()) return OwnPredecessorStep.NOTHING
+    val stored = try {
+        ports.storeOwnPredecessors(predecessors)
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): own predecessors not stored", cause)
+        null
+    }
+    return when {
+        stored == null -> OwnPredecessorStep.NOT_STORED
+        stored.conversationKeyChanged -> OwnPredecessorStep.KEY_MOVED
+        else -> OwnPredecessorStep.STORED
+    }.also { ports.log("backup restore ($route): ${predecessors.size} own predecessor(s), $it") }
 }
 
 /**
@@ -259,6 +361,7 @@ public object BackupRestoreStore {
     private const val PREFS = "lakko.backup.restore"
     private const val GROUPS_PREFIX = "restored-groups:"
     private const val RETRY_PREFIX = "retry:"
+    private const val RESTORED_CHATS_PREFIX = "restored-chats:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -333,11 +436,63 @@ public object BackupRestoreStore {
         editor.apply()
     }
 
+    /** Record that a restore finished on this device (the phrase or a
+     *  passkey). Read by the chat list ([restoredChatsHint]). */
+    public fun markRestoredChats(context: Context, accountIdB64: String, knewConversations: Boolean) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putBoolean(RESTORED_CHATS_PREFIX + accountIdB64, knewConversations).apply()
+        }
+    }
+
+    /** `null` when no restore is waiting for its first conversation, else
+     *  whether the backup named at least one. */
+    public fun restoredChats(context: Context, accountIdB64: String): Boolean? {
+        val key = RESTORED_CHATS_PREFIX + accountIdB64
+        val held = prefs(context)
+        return if (held.contains(key)) held.getBoolean(key, false) else null
+    }
+
+    /** The first conversation arrived: the hint is gone for good. */
+    public fun clearRestoredChats(context: Context, accountIdB64: String) {
+        prefs(context).edit().remove(RESTORED_CHATS_PREFIX + accountIdB64).apply()
+    }
+
     /** Forget device / Delete account: everything of [accountIdB64]. */
     public fun clear(context: Context, accountIdB64: String) {
         prefs(context).edit()
             .remove(GROUPS_PREFIX + accountIdB64)
             .remove(RETRY_PREFIX + accountIdB64)
+            .remove(RESTORED_CHATS_PREFIX + accountIdB64)
             .apply()
     }
+}
+
+/** What the chat list says after a restore (`docs/ux/identity-recovery.md` 7.2). */
+public enum class RestoredChatsHint {
+    /** The ordinary list. */
+    NONE,
+
+    /** The card on the empty list, with a button to Contacts. */
+    CARD,
+
+    /** The line that another device is adding this one. */
+    BANNER,
+}
+
+/**
+ * @param knewConversations [BackupRestoreStore.restoredChats]: `null` when no
+ *        restore is waiting for its first conversation.
+ * @param listEmpty no conversation on this device yet.
+ * @param otherDevice whether another device of the account is signed in;
+ *        `null` until that was read.
+ */
+public fun restoredChatsHint(
+    knewConversations: Boolean?,
+    listEmpty: Boolean,
+    otherDevice: Boolean?,
+): RestoredChatsHint = when {
+    knewConversations == null || !listEmpty || otherDevice == null -> RestoredChatsHint.NONE
+    otherDevice -> RestoredChatsHint.BANNER
+    knewConversations -> RestoredChatsHint.CARD
+    else -> RestoredChatsHint.NONE
 }

@@ -142,12 +142,12 @@ final class CallSignalingWakeTests: XCTestCase {
 
     // MARK: - The wake the publisher asks for
 
-    /// The port in `CallHost.live` asks for `.call` exactly when the decision
-    /// says wake, and for nothing otherwise. Restated here against the two
-    /// bodies that matter so a change to either side has to change this test.
+    /// The port in `CallHost.live` asks for `.call` only for an offer or an
+    /// end, and only when the session asks. Restated here against the bodies
+    /// that matter so a change to either side has to change this test.
     func testThePublisherAsksForACallWakeOnlyForOfferAndEnd() throws {
         func requested(_ bytes: Data) -> DsWake.Kind? {
-            CallSignalingWake.shouldWake(bytes) ? .call : nil
+            CallSignalingWake.wakeKind(for: bytes, sessionAsks: true)
         }
         XCTAssertEqual(requested(try offer()), .call)
         XCTAssertEqual(requested(try end()), .call)
@@ -155,6 +155,122 @@ final class CallSignalingWakeTests: XCTestCase {
             body: .answer(callId: callId, sdp: "v=0"))))
         XCTAssertNil(requested(try composeCallSignaling(body: .groupJoin(
             callId: callId, leafIndex: 2, joinedAtMs: 1))))
+    }
+
+    // MARK: - The session's ask: the dial, and the end of a call that never connected
+
+    /// The dial rings the other person; a renegotiation offer (camera on or
+    /// off, the peer's screen share) is the same body for a call both sides
+    /// are in, and must not: on iOS a call wake is a VoIP push, reported to
+    /// CallKit as a new incoming call.
+    func testTheDialOfferAsksForAWakeAndARenegotiationOfferDoesNot() throws {
+        XCTAssertTrue(CallSignalingWake.sessionAsks(.dialOffer, everConnected: false))
+        XCTAssertFalse(CallSignalingWake.sessionAsks(.renegotiationOffer, everConnected: true))
+        XCTAssertFalse(CallSignalingWake.sessionAsks(.renegotiationOffer, everConnected: false))
+
+        XCTAssertEqual(CallSignalingWake.wakeKind(for: try offer(), sessionAsks: true), .call)
+        XCTAssertNil(
+            CallSignalingWake.wakeKind(for: try offer(video: true), sessionAsks: false),
+            "a renegotiation offer carries no wake")
+    }
+
+    /// An end stops a ring: the caller cancelling, the callee declining or
+    /// missing it. After the call connected nobody is ringing, and a wake rang
+    /// the other phone for a call that is over.
+    func testAnEndAsksForAWakeOnlyWhileTheCallNeverConnected() throws {
+        XCTAssertTrue(CallSignalingWake.sessionAsks(.end, everConnected: false))
+        XCTAssertFalse(CallSignalingWake.sessionAsks(.end, everConnected: true))
+
+        XCTAssertEqual(
+            CallSignalingWake.wakeKind(
+                for: try end(.declined),
+                sessionAsks: CallSignalingWake.sessionAsks(.end, everConnected: false)),
+            .call)
+        XCTAssertNil(CallSignalingWake.wakeKind(
+            for: try end(.hungUp),
+            sessionAsks: CallSignalingWake.sessionAsks(.end, everConnected: true)))
+    }
+
+    func testAnswersAndCandidatesNeverAsk() {
+        for connected in [false, true] {
+            XCTAssertFalse(CallSignalingWake.sessionAsks(.answer, everConnected: connected))
+            XCTAssertFalse(CallSignalingWake.sessionAsks(.candidate, everConnected: connected))
+        }
+    }
+
+    /// The bytes bound the session's ask: a frame that is not an offer or an
+    /// end carries no wake whatever the session says.
+    func testTheBytesBoundTheSessionsAsk() throws {
+        XCTAssertNil(CallSignalingWake.wakeKind(
+            for: try composeCallSignaling(body: .answer(callId: callId, sdp: "v=0")),
+            sessionAsks: true))
+        XCTAssertNil(CallSignalingWake.wakeKind(
+            for: Data(#"{"v":1,"text":"hi"}"#.utf8), sessionAsks: true))
+    }
+
+    /// Through a real session: a call cancelled before it connected, and a
+    /// ring declined, each send an end that asks for a wake.
+    @MainActor
+    func testARealSessionsCancelAndDeclineAskForAWake() async throws {
+        var sent: [(FfiCallSignalingBody, Bool)] = []
+
+        let caller = CallSession(callId: callId) { bytes, wake in
+            if let body = try? parseCallSignaling(plaintext: bytes) { sent.append((body, wake)) }
+        }
+        caller.setCallKey(seed: Data(repeating: 0x07, count: 32), localLeaf: 0)
+        caller.dial(audio: true, video: false)
+        caller.hangUp()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(sent.count, 1)
+        guard case .end? = sent.first?.0 else { return XCTFail("the cancel sends the End") }
+        XCTAssertEqual(sent.first?.1, true, "a cancelled call stops the other phone ringing")
+
+        sent.removeAll()
+        let callee = CallSession(callId: callId) { bytes, wake in
+            if let body = try? parseCallSignaling(plaintext: bytes) { sent.append((body, wake)) }
+        }
+        callee.applyIncomingSignaling(.offer(
+            callId: callId, sdp: "v=0\r\n", createdAtMs: 1,
+            media: FfiCallMediaFlags(audio: true, video: false)))
+        callee.declineCall()
+        XCTAssertEqual(sent.count, 1)
+        guard case .end? = sent.first?.0 else { return XCTFail("the decline sends the End") }
+        XCTAssertEqual(sent.first?.1, true, "a declined ring stops the caller's other devices")
+    }
+
+    // MARK: - Receive: a wake for a call already on this device
+
+    func testAWakeForTheConversationOfACallOnThisDeviceIsSuppressed() {
+        let rule = CallWakeSuppression()
+        for state: CallSession.WebCallState in [.ringing, .outgoing, .connecting, .connected, .ending] {
+            XCTAssertTrue(
+                rule.suppresses(groupIdHex: "AA11", activeGroupIdHex: "aa11", activeState: state, nowMs: 0),
+                "state \(state)")
+            XCTAssertFalse(
+                rule.suppresses(groupIdHex: "bb22", activeGroupIdHex: "aa11", activeState: state, nowMs: 0),
+                "another conversation still rings, state \(state)")
+        }
+        // A pre-join check has sent nothing; a new call in it still rings.
+        XCTAssertFalse(rule.suppresses(
+            groupIdHex: "aa11", activeGroupIdHex: "aa11", activeState: .idle, nowMs: 0))
+        XCTAssertFalse(rule.suppresses(
+            groupIdHex: "aa11", activeGroupIdHex: nil, activeState: nil, nowMs: 0))
+    }
+
+    func testAWakeShortlyAfterACallEndedIsSuppressedThenRingsAgain() {
+        var rule = CallWakeSuppression()
+        let window = CallWakeSuppression.recentEndWindowMs
+        rule.noteEnded(groupIdHex: "AA11", atMs: 1_000)
+        func suppressed(_ group: String, at now: Int64) -> Bool {
+            rule.suppresses(groupIdHex: group, activeGroupIdHex: nil, activeState: nil, nowMs: now)
+        }
+        XCTAssertTrue(suppressed("aa11", at: 1_000))
+        XCTAssertTrue(suppressed("aa11", at: 1_000 + window - 1))
+        XCTAssertFalse(suppressed("aa11", at: 1_000 + window))
+        XCTAssertFalse(suppressed("bb22", at: 1_000))
+
+        rule.reset()
+        XCTAssertFalse(suppressed("aa11", at: 1_000))
     }
 
     /// The wire value the DS matches on in `x-lakko-wake`. A malformed header

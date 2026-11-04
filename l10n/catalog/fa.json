@@ -27,11 +27,11 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "گفتگوها، گروه‌ها، کانال‌ها و تماس‌ها به‌طور پیش‌فرض رمزگذاری سرتاسری دارند. سرورهای Lakko هرگز پیام‌های شما را نمی‌بینند.",
+      "text": "گفتگوها، گروه‌ها، کانال‌ها و تماس‌ها به‌طور پیش‌فرض رمزگذاری سرتاسری دارند.",
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "متن‌باز. بدون نیاز به شماره تلفن.",
+      "text": "ارتباط به روش خودتان. بدون نیاز به شماره تلفن.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -56,6 +56,14 @@
     },
     "auth.explainer.ways_back": {
       "text": "اگر آن را فراموش کنید، با دستگاه دیگری که هنوز وارد شده، یک کلید عبور، عبارت بازیابی، سه کلمه از آن، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "دسته‌کلید سیستم در دسترس نیست. قفل آن را باز کنید یا یکی نصب کنید، سپس دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko نمی‌تواند کلیدهای شما را روی این رایانه به‌طور امن نگه دارد.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -183,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود. در مرحله بعد یک عبارت بازیابی می‌گیرید که باید آن را یادداشت کنید.",
+      "text": "گذرواژه شما هرگز از دستگاهتان خارج نمی‌شود.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -578,6 +586,10 @@
       "text": "{name} تماس را برای همه پایان داد",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "دیگر در این گروه نیستید.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "راه‌اندازی رمزگذاری تماس ممکن نشد، برای همین تماس شروع نشد.",
       "status": "machine"
@@ -674,24 +686,8 @@
       "text": "تماس‌هایی که می‌گیرید و دریافت می‌کنید اینجا نمایش داده می‌شوند.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "پیوستن با پیوند",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "این شبیه پیوند تماس نیست. کل پیوند را جای‌گذاری کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "تماس جدید",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "کسی که تماس را ساخته، پیوند را به اشتراک می‌گذارد.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "پیوند تماس را جای‌گذاری کنید",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
@@ -952,6 +948,10 @@
     },
     "call.log.declined": {
       "text": "ردشده",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "تماس ناموفق بود",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -1363,7 +1363,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "کانال را از فهرست شما برمی‌دارد و این دستگاه دیگر آن را نمی‌خواند. بعداً می‌توانید دوباره مشترک شوید.",
+      "text": "کانال را از فهرست شما برمی‌دارد و پست‌هایش را از همهٔ دستگاه‌هایتان حذف می‌کند. بعداً می‌توانید دوباره مشترک شوید.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "نام و توضیحات به‌صورت رمزگذاری‌شده به همه مشترکان می‌رسد. سرور هرگز آن‌ها را نمی‌خواند.",
+      "text": "نام و توضیحات به همه مشترکان می‌رسد.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1571,11 +1571,11 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "مشترکان نام و توضیحات را می‌بینند. این‌ها رمزگذاری‌شده منتقل می‌شوند و فقط متن رمزشده به سرور می‌رسد.",
+      "text": "مشترکان نام و توضیحات را می‌بینند.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -1775,7 +1775,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "از فهرست شما برداشته می‌شود و این دستگاه دیگر آن را نمی‌خواند. بعداً می‌توانید دوباره مشترک شوید.",
+      "text": "از فهرست شما خارج می‌شود و پست‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند. بعداً می‌توانید دوباره مشترک شوید.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2070,6 +2070,10 @@
       "text": "رنگ‌های پوست برای {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "پیشنهاد ایموجی",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "ایموجی",
       "status": "machine"
@@ -2088,6 +2092,14 @@
     },
     "chat.ended.no_longer_member": {
       "text": "دیگر عضو این گروه نیستید.",
+      "status": "machine"
+    },
+    "chat.ended.notice": {
+      "text": "دیگر در {name} نیستید.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "گروه و پیام‌هایش از دستگاه‌های شما حذف شده‌اند.",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -2210,16 +2222,8 @@
       "text": "هیچ GIFی پیدا نشد",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "متوجه شدم",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "باز کردن GIF در تمام صفحه",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "جستجوی GIF از طریق سرور Lakko انجام می‌شود و سرور می‌بیند چه چیزی جستجو می‌کنید. GIFهای ارسال‌شده مانند هر فایل دیگری رمزگذاری می‌شوند.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -2302,8 +2306,16 @@
       "text": "اطلاعات گروه",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "پیوند کپی شد.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "کپی پیوند",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "پیوند کپی نشد.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2331,7 +2343,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "تا وقتی مالک یا یکی از مدیران درخواست شما را اعمال کند، همچنان پیام دریافت می‌کنید. برای پیوستن دوباره به دعوت جدیدی نیاز خواهید داشت.",
+      "text": "از فهرست شما خارج می‌شود و پیام‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند. تا وقتی مالک یا یکی از مدیران درخواست شما را اعمال کند، همچنان پیام دریافت می‌کنید.",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -2407,11 +2419,7 @@
       "status": "machine"
     },
     "chat.members.add.action": {
-      "text": "افزودن عضو",
-      "status": "machine"
-    },
-    "chat.members.add.done": {
-      "text": "{name} اضافه شد.",
+      "text": "افزودن اعضا",
       "status": "machine"
     },
     "chat.members.add.error.no_bundle": {
@@ -2419,27 +2427,23 @@
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "افزودن {names} ممکن نشد. آن‌ها را از بخش اعضا اضافه کنید.",
+      "text": "افزودن {names} ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "هیچ حسابی با نام {name} ثبت نشده است.",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
-      "status": "machine"
-    },
-    "chat.members.add.requested": {
-      "text": "افزودن {name} درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
+    "chat.members.add.search_placeholder": {
+      "text": "جست‌وجوی مخاطبان یا افراد",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "افزودن",
       "status": "machine"
     },
-    "chat.members.admin.demoted": {
-      "text": "از مدیریت برداشته شد.",
+    "chat.members.add.submit_count": {
+      "text": "افزودن {count}",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "افزودن اعضا",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2454,8 @@
       "text": "مدیر",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "به مدیر ارتقا یافت.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "برداشتن از مدیریت",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "تغییر درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2482,24 +2478,48 @@
       "text": "تأیید",
       "status": "machine"
     },
-    "chat.members.join.approved_added": {
-      "text": "عضویت تأیید شد. به گروه اضافه شد.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "عضویت تأیید شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
+    "chat.members.join.asked": {
+      "text": "درخواست داد {when}",
       "status": "machine"
     },
     "chat.members.join.heading": {
       "text": "درخواست‌های عضویت ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "درخواست‌های پیوستن (+۶۴)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "دعوت‌شده توسط {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "دعوت از {name}",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "پیوند دعوت نامشخص است",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "درخواست‌های بیشتری در انتظارند. با پاسخ دادن به این‌ها نمایش داده می‌شوند.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "رد کردن",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "رد همه",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "این کار همهٔ درخواست‌های در انتظار را برمی‌دارد، حتی آن‌هایی که هنوز ندیده‌اید.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "همهٔ درخواست‌ها رد شوند؟",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2526,10 +2546,6 @@
       "text": "تغییرات عضویت را مالک گروه یا یکی از مدیران اعمال می‌کند. هر وقت یکی از آن‌ها این کار را بکند، به‌طور خودکار اعمال می‌شوند.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {اکنون # تغییر در انتظار اعمال است.} other {اکنون # تغییر در انتظار اعمال است.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "در انتظار افزوده شدن.",
       "status": "machine"
@@ -2548,18 +2564,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "حذف {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "عضو حذف شد.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "حذف درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "حذف درخواست شد.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -2726,6 +2730,18 @@
       "text": "طرف گفتگو",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "وقتی {name} وصل شود در دسترس است.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} هنوز پاسخ نداده است. می‌توانید از او پیوند تازه بخواهید.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} پیام‌هایتان را وقتی برنامه‌اش دوباره آنلاین شود دریافت می‌کند.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "بارگیری عکس ممکن نشد",
       "status": "machine"
@@ -2802,6 +2818,26 @@
       "text": "واکنش - واکنش‌دهندگان: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "حداکثر ۳ واکنش می‌توانید بگذارید. برای افزودن واکنش دیگر، یکی را بردارید.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}، {count, plural, one {# واکنش} other {# واکنش}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}، واکنش شما",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "همه {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "واکنش‌دهندگان: {names}",
       "status": "machine"
@@ -2814,8 +2850,16 @@
       "text": "حذف واکنش شما - واکنش‌دهندگان: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "دیدن اینکه چه کسی واکنش داد",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "واکنش باید فقط یک ایموجی باشد.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "واکنش‌های تازه به پیام‌های شما، {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3134,8 +3178,12 @@
       "text": "درخواست عضویت",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "اعضا تغییر کردند",
+    "chat.system.member_joined": {
+      "text": "{name} پیوست",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} دیگر در گروه نیست",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3164,14 +3212,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}، مدیر",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "اکنون {name} مالک گروه است. شما همچنان مدیر هستید.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "اکنون {name} مالک گروه است. شما اکنون عضو عادی هستید.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3212,10 +3252,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "در انتظار مالک شدن {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "انتقال مالکیت درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -3490,6 +3526,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "دستگاه‌های دیگرتان این دستگاه را به گفتگوها اضافه می‌کنند.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "کلیدهای شما بازیابی شد. گفتگوهایتان وقتی مخاطبانتان Lakko را باز کنند برمی‌گردند. پیام‌های قبلی بازیابی نمی‌شوند.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "کارهای گفتگو",
       "status": "machine"
@@ -3524,6 +3568,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "واکنش‌های تازه",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -3604,6 +3652,10 @@
     },
     "common.copy": {
       "text": "کپی",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "کپی نشد.",
       "status": "machine"
     },
     "common.creating": {
@@ -3842,12 +3894,28 @@
       "text": "اشتراک‌گذاری پیوند دعوت",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "افزودن به مخاطبان",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} را به فهرست مخاطبان این حساب برمی‌گرداند.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "کارهای مخاطب",
       "status": "machine"
     },
     "contacts.detail.call_needs_chat": {
       "text": "برای شروع تماس ابتدا پیامی بفرستید.",
+      "status": "machine"
+    },
+    "contacts.detail.chat_starting": {
+      "text": "گفتگوی شما در حال آماده شدن است.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -4014,6 +4082,10 @@
       "text": "پذیرفتن",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "پذیرفتن ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "رد کردن",
       "status": "machine"
@@ -4056,6 +4128,58 @@
     },
     "contacts.safety.title": {
       "text": "تأیید شماره امنیتی",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "اسکن کد QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "درخواست دوباره",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "آن را در تنظیمات حریم خصوصی سیستم مجاز کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko نمی‌تواند از دوربین شما استفاده کند.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko نمی‌تواند از میکروفون شما استفاده کند.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "باز کردن تنظیمات",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "پایان تماس و خروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "تماس پایان یابد و خارج شوید؟",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "پیام‌ها و تماس‌ها را دریافت می‌کنید. برای توقف، از نماد سینی سیستم خارج شوید.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko همچنان در حال اجراست.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "باز کردن Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "خروج از Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4180,10 +4304,6 @@
     },
     "device_link.qr.waiting": {
       "text": "در انتظار اسکن این کد با دستگاه دیگرتان...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "دستگاه اضافه شد.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -4312,10 +4432,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "برای دیدن دستگاه‌های خود Lakko را باز کنید.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "باز کردن دستگاه‌ها",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -4486,12 +4602,12 @@
       "text": "دستگاه‌های دیگرتان گفتگوهایشان را نگه می‌دارند و کلیدهای جدید را خودشان می‌گیرند.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "پیوندهای دعوت و پیوندهای تماسی که قبلاً ساخته‌اید دیگر کار نمی‌کنند. پیوندهای تازه بسازید.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -4552,6 +4668,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "این دستگاه متصل شود؟",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "«{name}» پیوند داده شود؟",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -4718,10 +4838,6 @@
       "text": "افزودن موضوع‌های تصادفی",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "داده کمتری مصرف می‌کند. سرور Lakko دقیقاً می‌بیند کدام موضوع‌ها را انتخاب کرده‌اید.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "هنوز پیشنهادی نیست. موضوع‌هایی انتخاب کنید یا از افراد گروه‌هایتان بخواهید کانال‌هایشان را به اشتراک بگذارند.",
       "status": "machine"
@@ -4731,7 +4847,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko برای آن‌ها پیشنهادهایی بارگیری می‌کند، آمیخته با چند موضوع تصادفی، تا سرور Lakko نتواند دقیقاً بفهمد کدام را انتخاب کرده‌اید. هرگز نمی‌بیند کدام کانال‌ها را باز می‌کنید.",
+      "text": "Lakko برای آن‌ها پیشنهادهایی بارگیری می‌کند، آمیخته با چند موضوع تصادفی.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4882,6 @@
       "text": "جستجو",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "جستجوها به سرور Lakko فرستاده می‌شوند.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "کانالی پیدا نشد.",
       "status": "machine"
@@ -4799,11 +4911,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "افراد این گروه می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید. سرور Lakko نمی‌تواند.",
+      "text": "افراد این گروه می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "گروه‌هایی که افرادشان می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید. سرور Lakko نمی‌تواند.",
+      "text": "گروه‌هایی که افرادشان می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -4964,14 +5076,6 @@
     },
     "feed.attachments.count": {
       "text": "{count, plural, one {# پیوست} other {# پیوست}}",
-      "status": "machine"
-    },
-    "feed.banner.dismiss": {
-      "text": "متوجه شدم",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "فید شما پیام‌هایی را نشان می‌دهد که این دستگاه دریافت کرده است.",
       "status": "machine"
     },
     "feed.divider.new": {
@@ -5755,7 +5859,275 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
+      "text": "اگر اتفاقی نیفتاد، می‌توانید درخواست را دوباره بفرستید.",
+      "status": "machine"
+    },
+    "group_delete.action": {
+      "text": "حذف گروه",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "گروه و پیام‌هایش از همهٔ دستگاه‌هایتان برداشته می‌شود و @{name} پس از ۳۰ روز آزاد می‌شود. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "این گروه حذف شود؟",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "۳ تا ۳۲ نویسه: حروف a-z، رقم و _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "ذخیره نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "این @نام در دسترس نیست. نام دیگری امتحان کنید.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "دسترسی به Lakko ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "این @نام گرفته شده است.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "امروز گروه‌های زیادی ساخته‌اید. فردا دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "انتخاب",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "کپی @نام",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "این گروه @نام ندارد. یکی انتخاب کنید.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "گروه",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "گروه خصوصی · {count, plural, one {# عضو} other {# عضو}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "گروه عمومی · {count, plural, one {# عضو} other {# عضو}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "به سقف ارسال فایل رسیده‌اید. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "فقط مالک و مدیران می‌توانند عکس را تغییر دهند.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "بارگذاری عکس ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "این عکس دیگر در دسترس نیست. عکس دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "وقتی دوباره آنلاین شوید اعمال می‌شود.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "همهٔ اعضای گروه به جای آن حروف اول را می‌بینند.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "برداشتن",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "عکس گروه برداشته شود؟",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "همهٔ واکنش‌ها",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "اعضا می‌توانند با هر ایموجی واکنش نشان دهند.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "دست‌کم یکی را انتخاب کنید.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "حداکثر ۱۰۰ مورد می‌توانید انتخاب کنید.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "بدون واکنش",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "اعضا نمی‌توانند به پیام‌ها واکنش نشان دهند.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "برداشتن {emoji}",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "ذخیره نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "برخی واکنش‌ها",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "اعضا فقط با ایموجی‌هایی که انتخاب می‌کنید واکنش نشان می‌دهند.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "اگر تغییرات را ذخیره نکنید، از بین می‌روند.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "همه",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# واکنش} other {# واکنش}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "خاموش",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "افزودن اعضا",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "کپی پیوند دعوت",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "شما این گروه را ساختید",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "فقط شما اینجا هستید.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "از جستجو بیرون می‌رود. فقط با دعوت مالک یا یک مدیر می‌توان پیوست. همهٔ اعضا می‌مانند.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "خصوصی کن",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "این گروه خصوصی شود؟",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# نفر منتظر پیوستن است. هنوز می‌توانید به او پاسخ دهید.} other {# نفر منتظر پیوستن هستند. هنوز می‌توانید به آن‌ها پاسخ دهید.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "هر کسی می‌تواند آن را پیدا کند و درخواست پیوستن بدهد. نام، عکس، توضیح و اندازهٔ تقریبی آن برای همه دیده می‌شود.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "عمومی کن",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "این گروه عمومی شود؟",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "@نام قبلی از همین حالا کار نمی‌کند. تا ۳۰ روز برای این گروه نگه داشته می‌شود.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "تغییر",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "@نام تغییر کند؟",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@نام",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "فقط اعضا این را می‌بینند.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "هر کسی می‌تواند این گروه را با این نام پیدا کند.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "گروه عمومی باید نام داشته باشد.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "تغییر «چه کسی می‌تواند بپیوندد» ذخیره نشد. آن را باز کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "وقتی دوباره آنلاین شوید اعمال می‌شود.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "در انتظار ذخیره",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "خصوصی",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "فقط کسانی که مدیر دعوت کند می‌توانند بپیوندند. در جستجو دیده نمی‌شود.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "عمومی",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "هر کسی می‌تواند این گروه را پیدا کند و درخواست پیوستن بدهد.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "نوع گروه",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "چه کسی می‌تواند بپیوندد",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -5874,6 +6246,74 @@
       "text": "این پیوند دیگر معتبر نیست. از آن شخص پیوند جدیدی بخواهید.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "افزودن {name} ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} از قبل در مخاطبان شماست",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "این پیوند دعوت دیگر کار نمی‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "تمام",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "از قبل حساب دارم",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "حالا نه",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "آن را با کسی که می‌خواهید اضافه کنید به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "این پیوند دعوت خودتان است",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} شما را به Lakko دعوت می‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} را به مخاطبانتان اضافه می‌کنید؟",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "این شخص",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "دعوت",
       "status": "machine"
@@ -5975,7 +6415,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "دعوت از طرف {fingerprint}",
+      "text": "دعوت از طرف {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6026,8 +6466,44 @@
       "text": "ساخته‌شده در {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "مدت",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "تعداد افراد",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف پیوند",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "این پیوند حذف شود؟",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "پیوند حذف شد.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "هر کسی یکی از پیوندهای شما را باز کند، تا وقتی پیوند منقضی نشده یا ظرفیتش تمام نشده، می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "ویرایش پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شرایط پیوند",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6036,6 +6512,22 @@
     },
     "invite.links.error.copy": {
       "text": "کپی پیوند ممکن نشد.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "مدتی بین ۱ ساعت تا ۳۶۵ روز وارد کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6074,6 +6566,10 @@
       "text": "انقضا تا {count} دقیقه",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "سفارشی",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {پس از # روز} other {پس از # روز}}",
       "status": "machine"
@@ -6110,12 +6606,28 @@
       "text": "جدید",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "پیوند لغو شد.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "در حال لغو...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "نمایش کد QR",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "روز",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "ساعت",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6132,6 +6644,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# استفاده باقی مانده} other {# استفاده باقی مانده}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "سفارشی",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -6258,20 +6774,24 @@
       "text": "تنظیمات",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "تنظیمات. یک دستگاه به حساب شما اضافه شد",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "گروه‌ها",
+      "status": "machine"
+    },
+    "new_group.error.secure_setup": {
+      "text": "این گروه ساخته نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
       "text": "برای ساخت گروه دوباره وارد شوید.",
       "status": "machine"
     },
-    "new_group.index_hint": {
-      "text": "برای شروع پیام‌رسانی یک گروه را انتخاب کنید",
-      "status": "machine"
-    },
     "new_group.name_hint": {
-      "text": "همه اعضا نام را می‌بینند. نام رمزگذاری‌شده فرستاده می‌شود و سرور هرگز آن را نمی‌خواند.",
+      "text": "همه اعضا نام را می‌بینند.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6283,7 +6803,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "ابتدا مخاطب اضافه کنید؛ گروه با افرادی شروع می‌شود که از قبل می‌شناسید.",
+      "text": "گروه می‌تواند فقط با شما شروع شود. افراد را اکنون یا بعداً اضافه کنید.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6356,6 +6876,14 @@
     },
     "notification.message.new": {
       "text": "پیام جدید",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} با {emoji} به پیام شما واکنش نشان داد",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "باز کردن در برنامه",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -6535,7 +7063,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 کلمه که فقط شما نگه می‌دارید. قوی‌تر است و ربطی به ایمیل ندارد.",
+      "text": "۱۲ کلمه که فقط شما نگه می‌دارید. مطمئن‌ترین راه بازگشت.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
@@ -6627,7 +7155,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "نام کاربری خود را وارد کنید، سپس Lakko را در دستگاهی که هنوز وارد آن هستید باز کنید و کدی را که نشان می‌دهد تایپ کنید. چیزی که سرورهای Lakko بتوانند بخوانند فرستاده نمی‌شود. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
+      "text": "نام کاربری خود را وارد کنید، سپس Lakko را در دستگاهی که هنوز وارد آن هستید باز کنید و کدی را که نشان می‌دهد تایپ کنید. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7122,8 +7650,24 @@
       "text": "کلمه {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "دوباره درخواست کن",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "هنوز پاسخی نیامده.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "درخواست‌های فرستاده‌شده",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "در انتظار یک مدیر.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
-      "text": "دستگاهی که هنوز وارد آن هستید یک کد شش‌رقمی نشان می‌دهد؛ آن را اینجا تایپ کنید. انتقال سرتاسری رمزگذاری شده است؛ سرورهای Lakko نمی‌توانند آن را بخوانند. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
+      "text": "دستگاهی که هنوز وارد آن هستید یک کد شش‌رقمی نشان می‌دهد؛ آن را اینجا تایپ کنید. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7266,6 +7810,50 @@
       "text": "بازیابی کلیدهای حساب",
       "status": "machine"
     },
+    "search.conversation.channel_line": {
+      "text": "کانال عمومی · {band} مشترک",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "گروه عمومی · {band} عضو",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "باز کردن",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "امروز برای پیوستن به گروه‌های زیادی درخواست داده‌اید. فردا دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "این گروه الان درخواست‌های زیادی دارد. بعداً دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "درخواست پیوستن",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "درخواست فرستاده شد. یک مدیر دفعهٔ بعد که Lakko را باز کند آن را می‌بیند.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "درخواست فرستاده شد",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "اشتراک",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "گروه‌ها و کانال‌ها",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "چیزی پیدا نشد. املای آن را بررسی کنید یا پیوند دعوت بخواهید.",
+      "status": "machine"
+    },
     "search.people.add_contact": {
       "text": "افزودن مخاطب",
       "status": "machine"
@@ -7307,11 +7895,59 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "پیام‌ها، تماس‌ها و درخواست‌های مخاطب رمزگذاری سرتاسری دارند: فقط افراد حاضر در گفتگو می‌توانند آن‌ها را بخوانند و سرورهای Lakko هرگز نمی‌توانند. رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود و هر مخاطب یک شماره امنیتی دارد که می‌توانید حضوری مقایسه کنید.",
+      "text": "پیام‌ها، تماس‌ها و درخواست‌های مخاطب رمزگذاری سرتاسری دارند: فقط افراد حاضر در گفتگو می‌توانند آن‌ها را بخوانند. رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود و هر مخاطب یک شماره امنیتی دارد که می‌توانید حضوری مقایسه کنید.",
       "status": "machine"
     },
     "settings.about.protection.title": {
       "text": "Lakko چگونه از شما محافظت می‌کند",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "بستن پنجره",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "گفتگوها، فید، مخاطبان، تماس‌ها، تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "ویرایش آخرین پیام من (در کادر خالی پیام)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "بستن منو، کادر گفتگو یا برگه؛ خروج از جستجو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تغییر پوشه گفتگو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "گفتگوی جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "گفتگوی قبلی یا بعدی",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "خروج از Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "جستجوی گفتگوها و افراد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "ارسال یا شروع خط جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "میان‌برهای صفحه‌کلید",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7454,6 +8090,18 @@
       "text": "پوسته در این دستگاه.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "واکنش سریع",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "تغییر واکنش سریع",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "برای فرستادنش روی پیام دو بار بزنید.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "پوسته",
       "status": "machine"
@@ -7502,12 +8150,40 @@
       "text": "داده‌های شما",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "وقتی پنجره بسته است پیام‌ها و تماس‌ها دریافت می‌شوند.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "اجرا ماندن پس از بستن پنجره",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "نحوه اجرای Lakko در این رایانه.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "باز شدن Lakko هنگام ورود به این رایانه",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "خواندن این تنظیمات ممکن نشد. تنظیمات را دوباره باز کنید.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تغییر این تنظیم ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "ابتدا روی دستگاه جدید وارد Lakko شوید. سپس انتخاب کنید کدام‌یک از دو دستگاه کد را نشان می‌دهد.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "هیچ‌کدام از دستگاه‌ها دوربین ندارد؟ روی دستگاه جدید وارد شوید و «{method}» را انتخاب کنید: پیام «{prompt}» با یک کد برای مقایسه اینجا ظاهر می‌شود.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "دستگاه‌ها. یک دستگاه به حساب شما اضافه شد",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -7531,7 +8207,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "تلفن‌ها، تبلت‌ها و رایانه‌هایی که با حساب شما وارد شده‌اند. افزودن دستگاه رمزگذاری سرتاسری دارد؛ سرورهای Lakko نمی‌توانند آن را بخوانند.",
+      "text": "تلفن‌ها، تبلت‌ها و رایانه‌هایی که با حساب شما وارد شده‌اند.",
       "status": "machine"
     },
     "settings.devices.list.lede": {
@@ -7568,10 +8244,6 @@
     },
     "settings.devices.reset_note": {
       "text": "کلیدهای حساب شما امروز روی این دستگاه بازنشانی شد. دستگاه‌های دیگر از حساب خارج و حذف شدند. آن‌ها را دوباره از تنظیمات > دستگاه‌ها > افزودن دستگاه اضافه کنید.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "دستگاه افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -7652,6 +8324,14 @@
     },
     "settings.notifications.off.title": {
       "text": "اعلان‌ها را روشن کنید",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "وقتی کسی به پیام‌های شما واکنش نشان می‌دهد",
       "status": "machine"
     },
     "settings.passkeys.add": {
@@ -8044,6 +8724,10 @@
     },
     "settings.section.security": {
       "text": "امنیت",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "امنیت. یک دستگاه به حساب شما اضافه شد",
       "status": "machine"
     },
     "settings.security.devices.sub": {
@@ -8446,6 +9130,22 @@
       "text": "در حال اعمال",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "همهٔ مخاطبانم",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "فقط آن‌هایی که انتخاب می‌کنم",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "فقط مخاطبان افرادی که انتخاب می‌کنید ({chosen} از {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "اکنون فقط مخاطبانی که انتخاب می‌کنید. در {privacy} تغییر دهید.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "مخاطبان مخاطبانم",
       "status": "machine"
@@ -8492,6 +9192,18 @@
     },
     "who_can_find_me.list.choose": {
       "text": "گروه‌ها و کانال‌ها را انتخاب کنید",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "انتخاب مخاطبان",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "هنوز مخاطبی ندارید.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "جستجوی مخاطبان",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8558,184 +9270,12 @@
       "text": "وقتی دوباره آنلاین شوید اعمال می‌شود.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "مخاطبان این فرد می‌توانند مرا پیدا کنند",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "چه کسی می‌تواند مرا پیدا کند",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} را به مخاطبانتان اضافه می‌کنید؟",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "افزودن",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "حالا نه",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} از قبل در مخاطبان شماست",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "باز کردن گفتگو",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "این پیوند دعوت خودتان است",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "آن را با کسی که می‌خواهید اضافه کنید به اشتراک بگذارید.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "تمام",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "افزودن {name} ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "این شخص",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} پیام‌هایتان را وقتی برنامه‌اش دوباره آنلاین شود دریافت می‌کند.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} هنوز پاسخ نداده است. می‌توانید از او پیوند تازه بخواهید.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "وقتی {name} وصل شود در دسترس است.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "افزودن به مخاطبان",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} را به فهرست مخاطبان این حساب برمی‌گرداند.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "افزودن",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "نمایش کد QR",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "اسکن کد QR",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "سفارشی",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "سفارشی",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "مدت",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "ساعت",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "روز",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "تعداد افراد",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "مدتی بین ۱ ساعت تا ۳۶۵ روز وارد کنید.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} شما را به Lakko دعوت می‌کند",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "ساخت حساب",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "از قبل حساب دارم",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "این پیوند دعوت دیگر کار نمی‌کند",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "ویرایش پیوند",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "شرایط پیوند",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "حذف پیوند",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "این پیوند حذف شود؟",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "پیوند حذف شد.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     }
   }

@@ -105,6 +105,17 @@ public object PendingContacts {
     public fun shown(list: List<PendingContact>, knownPeerKeysB64: Set<String>): List<PendingContact> =
         list.filter { it.signaturePubkeyB64 !in knownPeerKeysB64 }
 
+    /** The pending contacts whose stated name or username matches [query];
+     *  all of them with nothing typed. */
+    public fun matching(list: List<PendingContact>, query: String): List<PendingContact> {
+        val q = query.trim()
+        if (q.isEmpty()) return list
+        return list.filter { c ->
+            name(c)?.contains(q, ignoreCase = true) == true ||
+                c.username.contains(q.removePrefix("@"), ignoreCase = true)
+        }
+    }
+
     /** The pending contact a joined one-to-one belongs to: the one whose
      *  account key is one of its people. */
     public fun forConversation(list: List<PendingContact>, personKeysB64: List<String>): PendingContact? {

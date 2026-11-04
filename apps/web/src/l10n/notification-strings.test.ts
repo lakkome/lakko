@@ -36,7 +36,14 @@ describe("notification words for the service worker", () => {
       incomingCall: "Incoming call",
       newMessage: "New message",
       unsupportedMessage: "This message needs a newer version of Lakko.",
+      reactedToYourMessage: expect.stringContaining("reacted"),
+      senderPrefixed: expect.stringContaining(":"),
+      reactionsOff: false,
     });
+    expect(words.senderPrefixed).toContain("\u0001");
+    expect(words.senderPrefixed).toContain("\u0002");
+    expect(words.reactedToYourMessage).toContain("\u0001");
+    expect(words.reactedToYourMessage).toContain("\u0002");
     expect(attachments).toHaveLength(NOTIFICATION_ATTACHMENT_COUNTS);
     expect(attachmentsLine(words, 1)).toBe("Sent an attachment");
     expect(attachmentsLine(words, 3)).toBe("Sent 3 attachments");

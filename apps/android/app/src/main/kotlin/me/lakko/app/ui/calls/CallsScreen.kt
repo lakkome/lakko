@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.calls
 
-import android.text.format.DateFormat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +29,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
@@ -90,9 +88,6 @@ import java.util.Locale
  * media choice, no participants, no name, no form. Someone who wants to call
  * one particular contact has a faster route from that conversation, which is
  * why this button does not try to be it.
- *
- * [onJoinByLink] stays for a link that did not open by itself, in the top bar
- * rather than as a second main action.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -107,8 +102,6 @@ public fun CallsScreen(
      * (`docs/ux/call-links.md` section 2). Nothing is asked first.
      */
     onNewCall: () -> Unit,
-    /** Join the call a pasted `/c/` link names. */
-    onJoinByLink: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -120,7 +113,7 @@ public fun CallsScreen(
     val zone = remember { ZoneId.systemDefault() }
     val strings = me.lakko.app.l10n.LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val use24h = remember(context) { me.lakko.app.l10n.DeviceFormats.is24Hour(context) }
 
     // Calls placed before the index existed live only in their conversations.
     // Filled once per account, so this screen never opens empty while the
@@ -142,9 +135,6 @@ public fun CallsScreen(
         topBar = {
             TopAppBar(
                 title = { Text(me.lakko.app.l10n.t("nav.calls")) },
-                actions = {
-                    TextButton(onClick = onJoinByLink) { Text(me.lakko.app.l10n.t("call.history.join_by_link")) }
-                },
             )
         },
         floatingActionButton = {
@@ -283,6 +273,7 @@ private fun CallHistoryRow(
                 size = 40.dp,
                 group = entry.kind == me.lakko.app.chat.ConversationKind.Group,
                 personKey = personKey,
+                groupIdHex = entry.conversationIdHex.takeIf { entry.kind == me.lakko.app.chat.ConversationKind.Group },
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

@@ -37,6 +37,7 @@ import me.lakko.app.devices.DEVICE_LINK_RESTORING_COPY
 import me.lakko.app.devices.DEVICE_LINK_SHOW_QR
 import me.lakko.app.devices.DEVICE_LINK_WAITING_COPY
 import me.lakko.app.devices.DEVICE_LINK_WRONG_CODE_COPY
+import me.lakko.app.devices.DeviceCardCenter
 import me.lakko.app.devices.DeviceLinkInvalidCode
 import me.lakko.app.devices.FfiDeviceLinkInitiator
 import me.lakko.app.devices.NewDeviceLink
@@ -60,6 +61,9 @@ internal fun DeviceLinkCodePanel(
     known: PairingOrchestrator.KnownAccount?,
     onRecovered: suspend (PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     onShowQr: () -> Unit,
+    /** The city for this pairing, started when the screen opened (UX
+     *  second-device.md section 2.1); settled when the code is sealed. */
+    place: DeviceCardCenter.PairingPlace,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -84,15 +88,21 @@ internal fun DeviceLinkCodePanel(
         error = null
         code = ""
         try {
+            // The payload is sealed after the code is typed; its card takes
+            // the place that has arrived by then, so nothing is built with a
+            // card here.
             val js = session ?: PairingOrchestrator.prepareJoinFlow(
                 context = context,
                 loginHandle = loginHandle,
                 known = known,
+                deviceCardEnvelope = null,
             ).also { session = it }
             val l = NewDeviceLink(
                 api = AuthClientDeviceLinkApi(),
                 initiatorFor = { id -> FfiDeviceLinkInitiator(id, loginHandle) },
-                pairingPayload = js.qrPayload,
+                payloadForSeal = {
+                    js.payloadWithCard(DeviceCardCenter.pairingCardEnvelope(place.settled()))
+                },
             )
             link = l
             l.start(loginHandle)

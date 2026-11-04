@@ -49,6 +49,8 @@ vi.mock("../profile/ProfileContext", () => ({
   useProfiles: () => ({
     version: () => 0,
     resolve: (k: Uint8Array | string) => ({ name: typeof k === "string" ? k : "Member" }),
+    ownProfile: () => ({ displayName: "Self" }),
+    ownUsername: () => "self",
   }),
 }));
 
@@ -129,6 +131,12 @@ function host(over: Partial<BubbleHost> = {}): BubbleHost {
     onSaveEdit: () => {},
     onDeleteMessage: () => {},
     onReact: () => {},
+    onQuickReact: () => {},
+    reactionAllowed: () => ({ mode: "all" }),
+    chipConversation: "one-to-one",
+    reactionRowFor: () => ["👍", "❤️", "😂", "😮", "😢", "🙏"],
+    ownReactorKey: "own-key",
+    capNoticeId: null,
     onReply: () => {},
     onJumpTo: () => {},
     onForward: () => {},
@@ -516,7 +524,7 @@ describe("Copy", () => {
 
   it("copies what the person is reading, not the original, once edited", async () => {
     const { items } = openMenuOn(incoming("before"), {
-      opState: () => ({ editedText: "after", reactions: new Map() }),
+      opState: () => ({ editedText: "after", held: [], reactions: new Map() }),
     });
     mouse(itemNamed(items as HTMLElement, "Copy"), "click");
     await settle();
@@ -819,7 +827,7 @@ describe("Select", () => {
     const toggled: number[] = [];
     mount(incoming("hello"), {
       selecting: true,
-      opState: () => ({ deleted: true, reactions: new Map() }),
+      opState: () => ({ deleted: true, held: [], reactions: new Map() }),
       onToggleSelect: (id) => toggled.push(id),
     });
     expect(present(MARK)).toBe(false);

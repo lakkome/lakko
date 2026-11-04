@@ -135,7 +135,9 @@ public enum ContactsInboxMerge {
     /// (the requester rotated and asked again: its old request's reply grant
     /// names a mailbox it left); one from a key a pending or kept request's
     /// key superseded is dropped; and an accepted contact is recognised under
-    /// any of their keys. An unproven key change is two people here.
+    /// any of their keys. An unproven key change is two people here. A newer
+    /// request from the same key replaces the row too: the person asked again
+    /// (search offers that once they stop waiting), and they are one row.
     public static func merge(
         fetched: [IncomingContactRequest],
         pending: [IncomingContactRequest],
@@ -162,11 +164,9 @@ public enum ContactsInboxMerge {
                 // there (from this key or a later one) stands.
                 dropped.append((request, .alreadyPending))
             } else {
-                // From the person's current key: every row of theirs under an
-                // EARLIER key goes.
-                let stale: (IncomingContactRequest) -> Bool = {
-                    $0.fromPubkey != request.fromPubkey && currentKey($0.fromPubkey) == person
-                }
+                // From the person's current key: every earlier row of theirs
+                // goes, under this key (they asked again) or an EARLIER one.
+                let stale: (IncomingContactRequest) -> Bool = { currentKey($0.fromPubkey) == person }
                 replaced += live.filter(stale).map(\.messageId)
                 live.removeAll(where: stale)
                 kept.removeAll(where: stale)

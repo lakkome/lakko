@@ -187,3 +187,75 @@ describe("failures", () => {
     expect(h.published).toHaveLength(0);
   });
 });
+
+describe("a profile owed to a group goes out before this device's next message (beforeSend)", () => {
+  it("a waiting growth republish is published at once, with no throttle and no jitter", async () => {
+    const h = harness({ random: 0.99 });
+    await h.scheduler.joined("g1");
+    h.scheduler.groupGrew("g1");
+    expect(h.scheduler.hasPending("g1")).toBe(true);
+    const at = h.now();
+    await h.scheduler.beforeSend("g1");
+    expect(h.published.map((p) => [p.group, p.reason, p.at])).toEqual([
+      ["g1", "join", at],
+      ["g1", "growth", at],
+    ]);
+    expect(h.scheduler.hasPending("g1")).toBe(false);
+    // The timer it replaced never fires a second publish.
+    await h.advanceTo(at + GROWTH_MIN_INTERVAL_MS + GROWTH_JITTER_MAX_MS);
+    expect(h.published).toHaveLength(2);
+  });
+
+  it("a failed join publish waiting for its retry is the one sent", async () => {
+    let failing = true;
+    const h = harness({ fail: () => failing });
+    await h.scheduler.joined("g1");
+    expect(h.scheduler.hasPending("g1")).toBe(true);
+    failing = false;
+    await h.scheduler.beforeSend("g1");
+    expect(h.published.map((p) => p.reason)).toEqual(["join", "retry"]);
+    expect(h.scheduler.hasPending("g1")).toBe(false);
+  });
+
+  it("waits for a publish already on its way", async () => {
+    let release!: () => void;
+    const order: string[] = [];
+    const scheduler = new ProfilePublishScheduler<number>({
+      now: () => 0,
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+      random: () => 0,
+      publish: () =>
+        new Promise<void>((resolve) => {
+          release = () => {
+            order.push("profile");
+            resolve();
+          };
+        }),
+    });
+    const joining = scheduler.joined("g1");
+    const waiting = scheduler.beforeSend("g1").then(() => order.push("send"));
+    await Promise.resolve();
+    expect(order).toEqual([]);
+    release();
+    await Promise.all([joining, waiting]);
+    expect(order).toEqual(["profile", "send"]);
+  });
+
+  it("nothing owed, another group, or stopped: no publish", async () => {
+    const h = harness();
+    await h.scheduler.beforeSend("g1");
+    h.scheduler.groupGrew("g2");
+    await h.scheduler.beforeSend("g1");
+    expect(h.published).toHaveLength(0);
+    h.scheduler.stop();
+    await h.scheduler.beforeSend("g2");
+    expect(h.published).toHaveLength(0);
+  });
+
+  it("the idle republish keeps its jitter", async () => {
+    const h = harness({ random: 0.5 });
+    h.scheduler.groupGrew("g1");
+    expect(h.pending()[0]?.at).toBe(h.now() + Math.floor(0.5 * (GROWTH_JITTER_MAX_MS + 1)));
+  });
+});

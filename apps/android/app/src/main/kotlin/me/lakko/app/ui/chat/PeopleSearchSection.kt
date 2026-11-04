@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -32,15 +33,22 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.search.OutgoingRequests
 import me.lakko.app.search.PeopleSearchService
 import me.lakko.app.search.PeopleSearchSession
 import me.lakko.app.search.PeopleSearchState
 import me.lakko.app.search.PersonResult
 import me.lakko.app.search.RowAction
 import me.lakko.app.search.RowSendState
+import me.lakko.app.search.channelResultLabel
+import me.lakko.app.search.keptGrantsToCheck
 import me.lakko.app.search.mergePeople
+import me.lakko.app.search.peopleRows
 import me.lakko.app.search.personRowView
-import me.lakko.app.search.searchStateMessage
+import me.lakko.app.search.rowSendState
+import me.lakko.app.search.searchEndLine
+import me.lakko.app.search.searchShowsNothingFound
+import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -54,7 +62,9 @@ import me.lakko.app.ui.components.LakkoAvatar
  * A row shows avatar, name and a verified `@username`, and never WHY the
  * person was found. Its control: a contact shows **Open**; someone who lets
  * this account find them shows **Add contact**, which sends the request at
- * once, with no introduction; anyone else shows their name only.
+ * once, with no introduction; anyone else shows their name only. A grant this
+ * device merely kept is offered only after the Delivery Service answered for
+ * it: until then the row is the name alone.
  */
 @Composable
 internal fun PeopleSearchSection(
@@ -68,28 +78,67 @@ internal fun PeopleSearchSection(
     /** Open a contact's page (their chat). */
     onOpenContact: (keyB64: String) -> Unit,
     /** The line when nothing local matches; `null` for none. */
-    noLocalMatchKey: String? = "chats.search.no_results",
+    noLocalMatchKey: String? = "search.nothing_found",
     /** People already listed above (standard base64 account keys), left out. */
     excludeKeysB64: Set<String> = emptySet(),
+    /** The people whose one-to-one is among the conversations above (standard
+     *  base64 account keys): a contact among them is left out. */
+    chatPeersB64: Set<String> = emptySet(),
+    /** The name of a channel this device knows, by its id; `null` when none. */
+    channelName: (channelIdHex: String) -> String? = { null },
+    /** ADR-0087 section 5 — public groups and channels under People. */
+    conversations: ConversationSearchPort? = null,
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
+    val contactsState by service.contactsState.collectAsState()
+    val invited by service.invited.collectAsState()
+    val outgoing = remember(contactsState.sent, invited) { OutgoingRequests.of(contactsState.sent, invited) }
+    LaunchedEffect(outgoing) { session.onOutgoing(outgoing) }
     val ownKeyHex = remember(profileVersion) { service.ownKeyHex() }
-    val local = remember(query, profileVersion) {
-        if (query.isBlank()) emptyList() else runCatching { service.local(query) }.getOrDefault(emptyList())
+    val candidates = remember(query, profileVersion, contactsState.accepted) {
+        if (query.isBlank()) emptyList() else runCatching { service.localCandidates() }.getOrDefault(emptyList())
+    }
+    val grantChecks by session.keptGrantChecks.collectAsState()
+    val local = remember(query, candidates, grantChecks) {
+        runCatching { service.local(query, candidates, grantChecks) }.getOrDefault(emptyList())
+    }
+    LaunchedEffect(query, candidates) {
+        session.checkKeptGrants(keptGrantsToCheck(candidates, query, service.normalize, ownKeyHex))
     }
     val view by session.view.collectAsState()
     val sends by session.sendStates.collectAsState()
     val shown = view.shown.takeIf { view.asks }
-    val people = remember(local, shown, ownKeyHex, excludeKeysB64) {
-        mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex).filter { it.keyB64 !in excludeKeysB64 }
+    val contactKeys = remember(contactsState.accepted) {
+        contactsState.accepted.mapTo(HashSet()) { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
+    }
+    LaunchedEffect(contactKeys) { session.onContacts(contactKeys) }
+    val people = remember(local, shown, ownKeyHex, excludeKeysB64, chatPeersB64, contactKeys) {
+        val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
+        peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
     val channel = shown?.channel
-    val state = view.state
-    val nothingLocal = conversationMatches == 0 && local.none { it.keyB64 !in excludeKeysB64 } && channel == null
+    // ADR-0087 section 5 — the public groups and channels, asked here so the
+    // field knows whether anything matched at all.
+    val found = rememberFoundConversations(query, conversations)
+    // who-can-find-me.md section 6.1, "One list": no headings. The rows this
+    // device holds stand above (the caller's list), then the people (local
+    // first), the groups and channels, the channel a handle names; the spinner
+    // and the failure line at the end. "Nothing found" only when nothing
+    // stands at all.
+    val searching = view.searching || found.pending
+    val endLine = if (view.searching) null else searchEndLine(view.state)
+    val nothing = noLocalMatchKey != null && searchShowsNothingFound(
+        listRows = conversationMatches,
+        people = people.size,
+        channelFound = channel != null,
+        conversationsFound = found.rows.size,
+        searching = searching,
+        endLine = endLine != null,
+    )
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (noLocalMatchKey != null && nothingLocal && state != PeopleSearchState.FOUND) {
+        if (nothing && noLocalMatchKey != null) {
             Text(
                 t(noLocalMatchKey),
                 style = MaterialTheme.typography.bodyMedium,
@@ -97,24 +146,26 @@ internal fun PeopleSearchSection(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
         }
-        if (people.isNotEmpty() || channel != null || view.asks) {
-            Heading(searching = view.searching)
-        }
         for (person in people) {
             PersonRow(
                 person = person,
-                send = sends[person.keyHex],
+                send = rowSendState(person, sends[person.keyHex], outgoing),
+                canAskAgain = outgoing.canAskAgain(person),
                 onAdd = { session.add(person) },
+                onAskAgain = { session.askAgain(person) },
                 onOpenContact = onOpenContact,
             )
         }
+        if (conversations != null) GroupsAndChannelsSection(found = found.rows, port = conversations)
         if (channel != null) {
             ChannelRow(
-                label = t("search.people.channel_result", mapOf("handle" to "@${channel.handle}")),
+                label = channelResultLabel(channelName(channel.idHex), channel.handle),
+                handle = channel.handle,
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
             )
         }
-        searchStateMessage(state)?.let {
+        if (searching) SearchingRow()
+        endLine?.let {
             Text(
                 it.text(),
                 style = MaterialTheme.typography.bodySmall,
@@ -125,40 +176,41 @@ internal fun PeopleSearchSection(
     }
 }
 
+/** The spinner at the end of the list while the network is asked. */
 @Composable
-private fun Heading(searching: Boolean) {
+private fun SearchingRow() {
+    val label = t("search.people.searching_a11y")
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        horizontalArrangement = Arrangement.Center,
     ) {
-        Text(
-            t("search.people.heading"),
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp).semantics { contentDescription = label },
+            strokeWidth = 2.dp,
         )
-        if (searching) {
-            Spacer(Modifier.width(8.dp))
-            val label = t("search.people.searching_a11y")
-            CircularProgressIndicator(
-                modifier = Modifier.size(14.dp).semantics { contentDescription = label },
-                strokeWidth = 2.dp,
-            )
-        }
     }
 }
 
 @Composable
-private fun ChannelRow(label: String, onClick: () -> Unit) {
+private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Campaign, contentDescription = null)
+        Icon(Icons.Filled.Campaign, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
         Spacer(Modifier.width(12.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            // Its second line says what it is.
+            Text(
+                t("search.people.channel_result", mapOf("handle" to "@$handle")),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Icon(Icons.Filled.ChevronRight, contentDescription = null)
     }
 }
@@ -167,10 +219,12 @@ private fun ChannelRow(label: String, onClick: () -> Unit) {
 private fun PersonRow(
     person: PersonResult,
     send: RowSendState?,
+    canAskAgain: Boolean,
     onAdd: () -> Unit,
+    onAskAgain: () -> Unit,
     onOpenContact: (String) -> Unit,
 ) {
-    val row = personRowView(person, send)
+    val row = personRowView(person, send, canAskAgain)
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -205,6 +259,8 @@ private fun PersonRow(
                     TextButton(onClick = onAdd) { Text(t("search.people.add_contact")) }
                 RowAction.ADDING ->
                     TextButton(onClick = {}, enabled = false) { Text(t("search.people.add_contact")) }
+                RowAction.ASK_AGAIN ->
+                    TextButton(onClick = onAskAgain) { Text(t("contacts.search.ask_again")) }
                 RowAction.NONE -> Unit
             }
         }

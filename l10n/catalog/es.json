@@ -27,11 +27,11 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Chats, grupos, canales y llamadas, con cifrado de extremo a extremo por defecto. Los servidores de Lakko nunca ven tus mensajes.",
+      "text": "Chats, grupos, canales y llamadas, con cifrado de extremo a extremo por defecto.",
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Código abierto. No necesitas número de teléfono.",
+      "text": "Comunícate a tu manera. Sin número de teléfono.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -56,6 +56,14 @@
     },
     "auth.explainer.ways_back": {
       "text": "Si la olvidas, puedes volver a entrar con otro dispositivo que siga con la sesión iniciada, una llave de acceso, tu frase de recuperación, tres palabras de ella o una app de autenticación.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "El llavero del sistema no está disponible. Desbloquéalo o instala uno y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko no puede guardar tus claves de forma segura en este ordenador.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -183,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Tu contraseña nunca sale de tu dispositivo. A continuación recibirás una frase de recuperación para anotar.",
+      "text": "Tu contraseña nunca sale de tu dispositivo.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -578,6 +586,10 @@
       "text": "{name} finalizó la llamada para todos",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Ya no estás en este grupo.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "No se pudo configurar el cifrado de la llamada, así que la llamada no se inició.",
       "status": "machine"
@@ -674,24 +686,8 @@
       "text": "Aquí aparecen las llamadas que haces y recibes.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Unirse con un enlace",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Eso no parece un enlace de llamada. Pega el enlace completo e inténtalo de nuevo.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Nueva llamada",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Quien creó la llamada comparte el enlace.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Pega un enlace de llamada",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
@@ -952,6 +948,10 @@
     },
     "call.log.declined": {
       "text": "Rechazada",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Llamada fallida",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -1363,7 +1363,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Quita el canal de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "text": "Quita el canal de tu lista y elimina sus publicaciones de todos tus dispositivos. Podrás suscribirte de nuevo más adelante.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "El nombre y la descripción llegan cifrados a todos los suscriptores. El servidor nunca los lee.",
+      "text": "El nombre y la descripción llegan a todos los suscriptores.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1571,11 +1571,11 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@mi-canal",
+      "text": "@mi_canal",
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Los suscriptores ven el nombre y la descripción. Viajan cifrados: al servidor solo llega texto cifrado.",
+      "text": "Los suscriptores ven el nombre y la descripción.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -1775,7 +1775,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Sale de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "text": "Saldrá de tu lista y sus publicaciones se eliminarán de todos tus dispositivos. Podrás suscribirte de nuevo más adelante.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2070,6 +2070,10 @@
       "text": "Tonos de piel para {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Sugerencias de emoji",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Emoji",
       "status": "machine"
@@ -2088,6 +2092,14 @@
     },
     "chat.ended.no_longer_member": {
       "text": "Ya no eres miembro de este grupo.",
+      "status": "machine"
+    },
+    "chat.ended.notice": {
+      "text": "Ya no estás en {name}.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "El grupo y sus mensajes ya no están en tus dispositivos.",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -2210,16 +2222,8 @@
       "text": "No se encontraron GIF",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Entendido",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "Abrir GIF en pantalla completa",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "La búsqueda de GIF pasa por el servidor de Lakko, que ve lo que buscas. Los GIF enviados se cifran como cualquier archivo.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -2302,8 +2306,16 @@
       "text": "Información del grupo",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Enlace copiado.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Copiar enlace",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "No se pudo copiar el enlace.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2331,7 +2343,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Seguirás recibiendo mensajes hasta que el propietario o un administrador aplique tu solicitud. Necesitarás una nueva invitación para volver a unirte.",
+      "text": "Saldrá de tu lista y sus mensajes se eliminarán de todos tus dispositivos. Seguirás recibiendo mensajes hasta que el propietario o un administrador aplique tu solicitud.",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -2407,11 +2419,7 @@
       "status": "machine"
     },
     "chat.members.add.action": {
-      "text": "Añadir miembro",
-      "status": "machine"
-    },
-    "chat.members.add.done": {
-      "text": "{name} se añadió.",
+      "text": "Añadir miembros",
       "status": "machine"
     },
     "chat.members.add.error.no_bundle": {
@@ -2419,27 +2427,23 @@
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "No se pudo añadir a {names}. Añádelos desde el panel de miembros.",
+      "text": "No se pudo añadir a {names}. Inténtalo de nuevo.",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "No hay ninguna cuenta registrada como {name}.",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@usuario",
-      "status": "machine"
-    },
-    "chat.members.add.requested": {
-      "text": "Se solicitó añadir a {name}. Se unirá cuando el propietario o un administrador aplique el cambio.",
+    "chat.members.add.search_placeholder": {
+      "text": "Buscar contactos o personas",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "Añadir",
       "status": "machine"
     },
-    "chat.members.admin.demoted": {
-      "text": "Ya no es administrador.",
+    "chat.members.add.submit_count": {
+      "text": "Añadir {count}",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "Añadir miembros",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2454,8 @@
       "text": "Administrador",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Ahora es administrador.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Quitar administrador",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Cambio solicitado. Se aplicará cuando el propietario o un administrador aplique el cambio.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2482,24 +2478,48 @@
       "text": "Aprobar",
       "status": "machine"
     },
-    "chat.members.join.approved_added": {
-      "text": "Solicitud aprobada. Se añadió al grupo.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Solicitud aprobada. Se unirá cuando el propietario o un administrador aplique el cambio.",
+    "chat.members.join.asked": {
+      "text": "Lo pidió {when}",
       "status": "machine"
     },
     "chat.members.join.heading": {
       "text": "Solicitudes para unirse ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Solicitudes para unirse (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "Invitado por {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Invitado por {name}",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Enlace de invitación desconocido",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Hay más solicitudes esperando. Aparecen a medida que respondes a estas.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Rechazar",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Rechazar todas",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Esto quita todas las solicitudes que esperan, incluidas las que aún no has visto.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "¿Rechazar todas las solicitudes?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2526,10 +2546,6 @@
       "text": "Los cambios de miembros los aplica el propietario del grupo o un administrador. Se aplicarán automáticamente cuando uno de ellos lo haga.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Ahora # cambio está pendiente de aplicarse.} other {Ahora # cambios están pendientes de aplicarse.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Pendiente de añadir.",
       "status": "machine"
@@ -2548,18 +2564,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Quitar a {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Miembro quitado.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Eliminación solicitada. Se aplicará cuando el propietario o un administrador aplique el cambio.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Eliminación solicitada.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -2726,6 +2730,18 @@
       "text": "Contacto",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "Disponible cuando {name} se conecte.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} aún no ha respondido. Puedes pedirle un enlace nuevo.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} recibirá tus mensajes cuando su aplicación vuelva a estar en línea.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "No se pudo cargar la foto",
       "status": "machine"
@@ -2802,6 +2818,26 @@
       "text": "Reaccionar - Reaccionaron {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "Puedes añadir hasta 3 reacciones. Quita una para añadir otra.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# reacción} other {# reacciones}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, tu reacción",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Todas {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Reacciones",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Reaccionaron {names}",
       "status": "machine"
@@ -2814,8 +2850,16 @@
       "text": "Quitar tu reacción - Reaccionaron {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Ver quién reaccionó",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Una reacción debe ser un solo emoji.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Nuevas reacciones a tus mensajes, {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3134,8 +3178,12 @@
       "text": "Solicitud para unirse",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Cambiaron los miembros",
+    "chat.system.member_joined": {
+      "text": "{name} se unió",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} ya no está en el grupo",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3164,14 +3212,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, administrador",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} es ahora el propietario del grupo. Sigues siendo administrador.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} es ahora el propietario del grupo. Ahora eres un miembro normal.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3212,10 +3252,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Pendiente de hacer propietario a {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Transferencia de propiedad solicitada. Se aplicará cuando el propietario o un administrador aplique el cambio.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -3490,6 +3526,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Tus otros dispositivos están añadiendo este a tus chats.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Tus claves se han restaurado. Tus chats vuelven cuando tus contactos abren Lakko. Los mensajes anteriores no se restauran.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Acciones de la conversación",
       "status": "machine"
@@ -3524,6 +3568,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Nuevas reacciones",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -3604,6 +3652,10 @@
     },
     "common.copy": {
       "text": "Copiar",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "No se pudo copiar.",
       "status": "machine"
     },
     "common.creating": {
@@ -3842,12 +3894,28 @@
       "text": "Compartir enlace de invitación",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Añadir",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Añadir a contactos",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Vuelve a poner a {name} en tu lista de contactos de esta cuenta.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Acciones del contacto",
       "status": "machine"
     },
     "contacts.detail.call_needs_chat": {
       "text": "Envía primero un mensaje para poder llamar.",
+      "status": "machine"
+    },
+    "contacts.detail.chat_starting": {
+      "text": "Tu chat se está preparando.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -4014,6 +4082,10 @@
       "text": "Aceptar",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "No se pudo aceptar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "Rechazar",
       "status": "machine"
@@ -4056,6 +4128,58 @@
     },
     "contacts.safety.title": {
       "text": "Verificar número de seguridad",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Escanear código QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Este código no es un enlace de Lakko. Prueba con otro código.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Volver a pedir",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "Permítelo en los ajustes de privacidad del sistema y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko no puede usar la cámara.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko no puede usar el micrófono.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Abrir ajustes",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Terminar llamada y salir",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "¿Terminar la llamada y salir?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Recibirás mensajes y llamadas. Para detenerlo, sal desde el icono de la bandeja.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko sigue en ejecución.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Abrir Lakko",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Salir de Lakko",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4180,10 +4304,6 @@
     },
     "device_link.qr.waiting": {
       "text": "Esperando a que tu otro dispositivo escanee este código...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "Dispositivo añadido.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -4312,10 +4432,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Abre Lakko para ver tus dispositivos.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Abrir Dispositivos",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -4486,12 +4602,12 @@
       "text": "Tus otros dispositivos conservan sus chats y reciben las claves nuevas por sí solos.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Los enlaces de invitación y de llamada que creaste antes dejarán de funcionar. Crea otros nuevos.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -4552,6 +4668,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "¿Vincular este dispositivo?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "¿Vincular «{name}»?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -4718,10 +4838,6 @@
       "text": "Mezclar temas al azar",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Usa menos datos. El servidor de Lakko verá exactamente qué temas elegiste.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Aún no hay sugerencias. Elige temas o pide a la gente de tus grupos que comparta sus canales.",
       "status": "machine"
@@ -4731,7 +4847,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko descarga sugerencias sobre ellos, mezcladas con algunos temas al azar para que el servidor de Lakko no sepa exactamente cuáles elegiste. Nunca ve qué canales abres.",
+      "text": "Lakko descarga sugerencias sobre ellos, mezcladas con algunos temas al azar.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4882,6 @@
       "text": "Buscar",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "Las búsquedas se envían al servidor de Lakko.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "No se encontraron canales.",
       "status": "machine"
@@ -4799,11 +4911,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "La gente de este grupo puede ver qué canales sigues. El servidor de Lakko no.",
+      "text": "La gente de este grupo puede ver qué canales sigues.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Grupos donde la gente puede ver qué canales sigues. El servidor de Lakko no puede.",
+      "text": "Grupos donde la gente puede ver qué canales sigues.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -4964,14 +5076,6 @@
     },
     "feed.attachments.count": {
       "text": "{count, plural, one {# archivo adjunto} other {# archivos adjuntos}}",
-      "status": "machine"
-    },
-    "feed.banner.dismiss": {
-      "text": "Entendido",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Tu feed muestra los mensajes que ha recibido este dispositivo.",
       "status": "machine"
     },
     "feed.divider.new": {
@@ -5755,7 +5859,275 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "Ninguno de los dos pasos tiene límite de tiempo. Si no pasa nada, puedes volver a enviar la solicitud.",
+      "text": "Si no pasa nada, puedes enviar la solicitud de nuevo.",
+      "status": "machine"
+    },
+    "group_delete.action": {
+      "text": "Eliminar grupo",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Esto quita el grupo y sus mensajes de todos tus dispositivos y libera @{name} en 30 días. No se puede deshacer.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Eliminar",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "¿Eliminar este grupo?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "De 3 a 32 caracteres: letras a-z, dígitos y _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "No se pudo guardar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Ese @nombre no está disponible. Prueba otro.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "No se pudo conectar con Lakko. Comprueba tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Ese @nombre ya está en uso.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Hoy has creado muchos grupos. Inténtalo mañana.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Elegir",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Copiar @nombre",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "Este grupo no tiene @nombre. Elige uno.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Grupo",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Grupo privado · {count, plural, one {# miembro} other {# miembros}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Grupo público · {count, plural, one {# miembro} other {# miembros}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Has alcanzado el límite de envío de archivos. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Solo el propietario y los administradores pueden cambiar la foto.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "No se pudo subir la foto. Comprueba tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "La foto ya no está disponible. Elige otra.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Se aplicará cuando vuelvas a tener conexión.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Todos en el grupo verán sus iniciales en su lugar.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Quitar",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "¿Quitar la foto del grupo?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Añadir",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Todas las reacciones",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Los miembros pueden reaccionar con cualquier emoji.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "Elige al menos uno.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "Puedes elegir hasta 100.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Sin reacciones",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Los miembros no pueden reaccionar a los mensajes.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Quitar {emoji}",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "No se pudo guardar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Algunas reacciones",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Los miembros solo pueden reaccionar con los emoji que elijas.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Reacciones",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Tus cambios se perderán si no los guardas.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Todas",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# reacción} other {# reacciones}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Desactivadas",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Añadir miembros",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Copiar enlace de invitación",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Creaste este grupo",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Solo estás tú.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Desaparece de la búsqueda. Solo se podrá entrar con una invitación del propietario o de un administrador. Todos los miembros se quedan.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Hacer privado",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "¿Hacer privado este grupo?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# persona espera para unirse. Aún puedes responderle.} other {# personas esperan para unirse. Aún puedes responderles.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Cualquiera podrá encontrarlo y pedir unirse. Su nombre, foto, descripción y tamaño aproximado serán visibles para todos.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Hacer público",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "¿Hacer público este grupo?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "El @nombre anterior deja de funcionar ya. Queda reservado para este grupo durante 30 días.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Cambiar",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "¿Cambiar el @nombre?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@nombre",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Solo los miembros lo ven.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "Cualquiera puede encontrar este grupo con este nombre.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "Un grupo público necesita un nombre.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "No se pudo guardar el cambio de quién puede unirse. Ábrelo para volver a intentarlo.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Se aplicará cuando vuelvas a estar en línea.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Pendiente de guardar",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Privado",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Solo pueden entrar las personas invitadas por un administrador. No aparece en la búsqueda.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Público",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Cualquiera puede encontrar este grupo y pedir unirse.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Tipo de grupo",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Quién puede unirse",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -5874,6 +6246,74 @@
       "text": "Este enlace ya no es válido. Pide uno nuevo a esa persona.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko es una app de mensajería en la que cada chat y llamada tiene cifrado de extremo a extremo.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Añadir",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "No se pudo añadir a {name}. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} ya está en tus contactos",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "No se pudo contactar con {name}. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Crear una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Pide a quien te lo envió uno nuevo.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este enlace de invitación ya no funciona",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Listo",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Ya tengo una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Abrir chat",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Compártelo con la persona que quieres añadir.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Este es tu propio enlace de invitación",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} te invita a Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "¿Añadir a {name} a tus contactos?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "esta persona",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Invitación",
       "status": "machine"
@@ -5975,7 +6415,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Invitación de {fingerprint}",
+      "text": "Invitación de {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6026,8 +6466,44 @@
       "text": "Creado el {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Periodo",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Número de personas",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Eliminar enlace",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Quien ya lo tenga no podrá usarlo.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "¿Eliminar este enlace?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Enlace eliminado.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Cualquiera que abra uno de tus enlaces puede enviarte una solicitud de contacto hasta que caduque o se agoten sus usos.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Editar enlace",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Al guardar se crea un enlace nuevo. El anterior deja de funcionar.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Condiciones del enlace",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6036,6 +6512,22 @@
     },
     "invite.links.error.copy": {
       "text": "No se pudo copiar el enlace.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Indica un periodo de 1 hora a 365 días.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Indica un número de personas de 1 a {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "No se pudo eliminar el enlace. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "No se pudo guardar el enlace. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6074,6 +6566,10 @@
       "text": "Caduca en {count} min",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {En # día} other {En # días}}",
       "status": "machine"
@@ -6110,12 +6606,28 @@
       "text": "Nuevo",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "Quien escanee este código podrá enviarte una solicitud de contacto.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "Enlace revocado.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "Revocando...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Mostrar código QR",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Días",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Horas",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6132,6 +6644,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {Queda # uso} other {Quedan # usos}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Personalizado",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -6258,20 +6774,24 @@
       "text": "Ajustes",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ajustes. Se añadió un dispositivo a tu cuenta",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Grupos",
+      "status": "machine"
+    },
+    "new_group.error.secure_setup": {
+      "text": "No se pudo crear este grupo. No se creó nada. Inténtalo de nuevo.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
       "text": "Vuelve a iniciar sesión para crear un grupo.",
       "status": "machine"
     },
-    "new_group.index_hint": {
-      "text": "Selecciona un grupo para empezar a enviar mensajes",
-      "status": "machine"
-    },
     "new_group.name_hint": {
-      "text": "Todos los miembros ven el nombre. Se envía cifrado; el servidor nunca lo lee.",
+      "text": "Todos los miembros ven el nombre.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6283,7 +6803,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Primero añade contactos: un grupo empieza con personas que ya conoces.",
+      "text": "Un grupo puede empezar solo contigo. Añade personas ahora o más tarde.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6356,6 +6876,14 @@
     },
     "notification.message.new": {
       "text": "Mensaje nuevo",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} reaccionó {emoji} a tu mensaje",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Abrir en la app",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -6535,7 +7063,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "12 palabras que solo tú guardas. Más fuerte, y sin relación con el correo.",
+      "text": "12 palabras que solo guardas tú. La forma más segura de volver.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
@@ -6627,7 +7155,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Introduce tu nombre de usuario y luego abre Lakko en un dispositivo que siga con la sesión iniciada y escribe el código que muestra. No se envía nada que los servidores de Lakko puedan leer. No hace falta cámara; si lo prefieres, hay un código QR.",
+      "text": "Introduce tu nombre de usuario y luego abre Lakko en un dispositivo que siga con la sesión iniciada y escribe el código que muestra. No hace falta cámara; si lo prefieres, hay un código QR.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7122,8 +7650,24 @@
       "text": "palabra {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Volver a pedir",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Aún sin respuesta.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Solicitudes enviadas",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Esperando a un administrador.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
-      "text": "Un dispositivo que sigue con la sesión iniciada muestra un código de seis dígitos; escríbelo aquí. La transferencia está cifrada de extremo a extremo; los servidores de Lakko no pueden leerla. No hace falta cámara; si lo prefieres, hay un código QR.",
+      "text": "Un dispositivo que sigue con la sesión iniciada muestra un código de seis dígitos; escríbelo aquí. No hace falta cámara; si lo prefieres, hay un código QR.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7266,6 +7810,50 @@
       "text": "Restaura tus claves",
       "status": "machine"
     },
+    "search.conversation.channel_line": {
+      "text": "Canal público · {band} suscriptores",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Grupo público · {band} miembros",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Abrir",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Hoy has pedido unirte a muchos grupos. Inténtalo mañana.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "Este grupo tiene demasiadas solicitudes ahora. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Pedir unirse",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "Solicitud enviada. Un administrador la verá la próxima vez que abra Lakko.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Solicitud enviada",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Suscribirse",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Grupos y canales",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "No se encontró nada. Revisa la ortografía o pide un enlace de invitación.",
+      "status": "machine"
+    },
     "search.people.add_contact": {
       "text": "Añadir contacto",
       "status": "machine"
@@ -7307,11 +7895,59 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Los mensajes, las llamadas y las solicitudes de contacto tienen cifrado de extremo a extremo: solo las personas de una conversación pueden leerlos, nunca los servidores de Lakko. Tu contraseña nunca sale de tu dispositivo, y cada contacto tiene un número de seguridad que puedes comparar en persona.",
+      "text": "Los mensajes, las llamadas y las solicitudes de contacto tienen cifrado de extremo a extremo: solo las personas de una conversación pueden leerlos. Tu contraseña nunca sale de tu dispositivo, y cada contacto tiene un número de seguridad que puedes comparar en persona.",
       "status": "machine"
     },
     "settings.about.protection.title": {
       "text": "Cómo te protege Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contactos, Llamadas, Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Editar mi último mensaje (con el campo vacío)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Cerrar un menú, diálogo u hoja; salir de una búsqueda",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Cambiar de carpeta de chats",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Nuevo chat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Conversación anterior o siguiente",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Salir de Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Buscar conversaciones y personas",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Enviar o empezar una línea nueva",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Atajos de teclado",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7454,6 +8090,18 @@
       "text": "El tema en este dispositivo.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Reacción rápida",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Cambiar la reacción rápida",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Toca dos veces un mensaje para enviarla.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Tema",
       "status": "machine"
@@ -7502,12 +8150,40 @@
       "text": "Tus datos",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Recibirás mensajes y llamadas con la ventana cerrada.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Seguir abierto al cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Cómo funciona Lakko en este ordenador.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Abrir Lakko al iniciar sesión en este ordenador",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "No se pudieron leer estos ajustes. Vuelve a abrir Ajustes.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "No se pudo cambiar este ajuste. Inténtalo de nuevo.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Primero inicia sesión en Lakko en el nuevo dispositivo. Luego elige cuál de los dos muestra un código.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "¿Ninguno de los dos dispositivos tiene cámara? Inicia sesión en el nuevo y elige «{method}»: aquí aparecerá un aviso «{prompt}» con un código para comparar.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Dispositivos. Se añadió un dispositivo a tu cuenta",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -7531,7 +8207,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Los teléfonos, tabletas y computadoras con sesión iniciada en tu cuenta. Añadir uno tiene cifrado de extremo a extremo; los servidores de Lakko no pueden leerlo.",
+      "text": "Los teléfonos, tabletas y computadoras con sesión iniciada en tu cuenta.",
       "status": "machine"
     },
     "settings.devices.list.lede": {
@@ -7568,10 +8244,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Las claves de tu cuenta se restablecieron hoy en este dispositivo. Se cerró la sesión en los demás dispositivos y se quitaron. Vuelve a añadirlos desde Ajustes > Dispositivos > Añadir un dispositivo.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Dispositivo añadido. Aparecerá en la lista cuando termine de unirse.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -7652,6 +8324,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Activa las notificaciones",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Reacciones",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Cuando alguien reacciona a tus mensajes",
       "status": "machine"
     },
     "settings.passkeys.add": {
@@ -8044,6 +8724,10 @@
     },
     "settings.section.security": {
       "text": "Seguridad",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Seguridad. Se añadió un dispositivo a tu cuenta",
       "status": "machine"
     },
     "settings.security.devices.sub": {
@@ -8446,6 +9130,22 @@
       "text": "Aplicando",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Todos mis contactos",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Solo los que elija",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Solo los contactos de las personas que elijas ({chosen} de {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Ahora solo los contactos que elijas. Cámbialo en {privacy}.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contactos de mis contactos",
       "status": "machine"
@@ -8492,6 +9192,18 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Elige grupos y canales",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Elegir contactos",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Aún no tienes contactos.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Buscar contactos",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8558,184 +9270,12 @@
       "text": "Se aplicará cuando vuelvas a estar en línea.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Sus contactos pueden encontrarme",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "Quién puede encontrarme",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "¿Añadir a {name} a tus contactos?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "Añadir",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "Ahora no",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} ya está en tus contactos",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "Abrir chat",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "Este es tu propio enlace de invitación",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "Compártelo con la persona que quieres añadir.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "Listo",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "No se pudo añadir a {name}. Revisa tu conexión e inténtalo de nuevo.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "esta persona",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name} recibirá tus mensajes cuando su aplicación vuelva a estar en línea.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} aún no ha respondido. Puedes pedirle un enlace nuevo.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "Disponible cuando {name} se conecte.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "Añadir a contactos",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "Vuelve a poner a {name} en tu lista de contactos de esta cuenta.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "Añadir",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "No se pudo contactar con {name}. Revisa tu conexión e inténtalo de nuevo.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "Mostrar código QR",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "Quien escanee este código podrá enviarte una solicitud de contacto.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "Escanear código QR",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "Este código no es un enlace de Lakko. Prueba con otro código.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Personalizado",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Personalizado",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Periodo",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "Horas",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "Días",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Número de personas",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "Indica un periodo de 1 hora a 365 días.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "Indica un número de personas de 1 a {max}.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} te invita a Lakko",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko es una app de mensajería en la que cada chat y llamada tiene cifrado de extremo a extremo.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Crear una cuenta",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "Ya tengo una cuenta",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Este enlace de invitación ya no funciona",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Pide a quien te lo envió uno nuevo.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "Editar enlace",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "Condiciones del enlace",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "Al guardar se crea un enlace nuevo. El anterior deja de funcionar.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "Eliminar enlace",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "¿Eliminar este enlace?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Quien ya lo tenga no podrá usarlo.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "Enlace eliminado.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "No se pudo eliminar el enlace. Revisa tu conexión e inténtalo de nuevo.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "No se pudo guardar el enlace. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
     }
   }

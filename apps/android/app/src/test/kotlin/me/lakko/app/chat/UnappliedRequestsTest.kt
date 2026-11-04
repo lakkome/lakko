@@ -6,7 +6,6 @@ package me.lakko.app.chat
 import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -112,24 +111,14 @@ class UnappliedRequestsTest {
     }
 
     /**
-     * The joiner cannot be TOLD anything, so what it gets is the truth about the
-     * wait plus the one repair available to it.
-     *
-     * DISCRIMINATION (RUN, then reverted): with `JOIN_WAIT_SECONDARY` reverted
-     * to the pre-change copy `Waiting for an admin to approve, then for the
-     * change to be applied.`:
-     *
-     *     java.lang.AssertionError: the joiner is not told the wait is unbounded
+     * The joiner cannot be TOLD anything, so what it gets is the one repair
+     * available to it.
      */
     @Test
-    fun `the joiner is told the wait is unbounded and offered the one repair`() {
+    fun `the joiner is offered the one repair`() {
         assertEquals(
             "Request sent. An admin approves it, then the change is applied to the group.",
             JOIN_WAIT_PRIMARY.en,
-        )
-        assertTrue(
-            "the joiner is not told the wait is unbounded",
-            JOIN_WAIT_SECONDARY.en.contains("time limit"),
         )
         assertTrue(JOIN_WAIT_SECONDARY.en.contains("send the request again"))
         assertEquals("Request again", JOIN_REQUEST_AGAIN.en)
@@ -261,45 +250,5 @@ class UnappliedRequestsTest {
             mapOf(joinItem.rowKey to UnappliedRow(UnappliedKind.JOIN_APPROVE, joiner)),
         )
         assertTrue("the VALUE must not carry a NUL", !encoded.contains('\u0000'))
-    }
-
-    // -----------------------------------------------------------------------
-    // Residual 2 — the queue an approve grows
-    // -----------------------------------------------------------------------
-
-    /**
-     * DISCRIMINATION (RUN, then reverted): with the threshold changed from
-     * `< 2` to `< 1` (in the same pass as the `of 64` probe below, which is why
-     * the observed string carries both changes):
-     *
-     *     java.lang.AssertionError: expected null, but was:<1 of 64 changes are
-     *     now waiting to apply.>
-     */
-    @Test
-    fun `the queue line stays silent for one change and counts from two`() {
-        assertNull(waitingQueueLine(0))
-        assertNull(waitingQueueLine(1))
-        assertEquals("2 changes are now waiting to apply.", waitingQueueLine(2)?.en)
-        assertEquals("64 changes are now waiting to apply.", waitingQueueLine(64)?.en)
-    }
-
-    /**
-     * It states what IS, never a limit — the cap is `pub(crate)` in `lakko-mls`
-     * and on neither FFI surface, so this layer has no number to compare against
-     * and must not imply one.
-     *
-     * DISCRIMINATION (RUN, then reverted): with the line changed to
-     * `${'$'}pendingCount of 64 changes are now waiting to apply.`:
-     *
-     *     java.lang.AssertionError: implies a limit: 2 of 64 changes are now
-     *     waiting to apply.
-     */
-    @Test
-    fun `the queue line never implies a limit it cannot read`() {
-        val banned = Regex("limit|maximum|of \\d+|full|cap")
-        for (n in listOf(2, 10, 64, 100)) {
-            val line = waitingQueueLine(n)?.en.orEmpty()
-            assertTrue("implies a limit: $line", !banned.containsMatchIn(line))
-        }
     }
 }

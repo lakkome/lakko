@@ -205,6 +205,34 @@ final class GroupCallHostRulesTests: XCTestCase {
             .startOneToOne, "a one-to-one places a 1x1 call")
     }
 
+    /// `docs/ux/group-and-channel-privacy.md` section 10.
+    func testAGroupOfOneHasNobodyToCall() {
+        XCTAssertFalse(GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: 1))
+        XCTAssertFalse(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: nil),
+            "a roster that cannot be read names nobody")
+        XCTAssertTrue(GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: 2))
+        XCTAssertTrue(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: false, people: 1),
+            "a one-to-one keeps its buttons")
+        XCTAssertEqual(
+            GroupCallHostRules.chatCallAction(
+                membershipEnded: false, callInProgress: false, affordance: .none, isGroup: true,
+                someoneToCall: false),
+            .unavailable, "tapping an old call row in a group of one calls nobody")
+    }
+
+    /// ADR-0050 — two phones of one person are one person.
+    func testOnePersonOnTwoPhonesIsStillAlone() {
+        let account = Data(repeating: 1, count: 32)
+        let phones = [
+            GroupMember(leafIndex: 0, signaturePublicKey: Data(repeating: 2, count: 32), accountKey: account),
+            GroupMember(leafIndex: 1, signaturePublicKey: Data(repeating: 3, count: 32), accountKey: account),
+        ]
+        XCTAssertFalse(
+            GroupCallHostRules.hasSomeoneToCall(isGroup: true, people: PersonKey.people(phones).count))
+    }
+
     // MARK: Alone in the call (docs/ux/calls.md section 4.3)
 
     func testTheAloneEndArmsOnlyOnceARemoteWasSeenAndTheRosterIsEmpty() {
@@ -749,6 +777,33 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertEqual(h.published.count, publishedBefore, "no Leave or End to a group this device left")
     }
 
+    /// UX 9.1 — this account is out of the group of the live call: the call
+    /// ends now, publishes nothing, and says why.
+    func testAnEndOfMembershipEndsTheCallWithTheLine() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        let publishedBefore = h.published.count
+        host.endForMembership(groupIdHex: otherGroup, left: false)
+        XCTAssertEqual(handle.hangUps, 0, "another group's end is not this call's")
+        host.endForMembership(groupIdHex: group, left: false)
+        XCTAssertEqual(handle.hangUps, 1)
+        XCTAssertFalse(host.occupiesSlot)
+        XCTAssertEqual(host.callNotice?.text, Localization.text("call.ended.no_longer_in_group"))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(h.published.count, publishedBefore)
+    }
+
+    /// UX 9.4 — a person who left asked for it: no line.
+    func testALeaveLandingInACallEndsItQuietly() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        host.endForMembership(groupIdHex: group, left: true)
+        XCTAssertEqual(handle.hangUps, 1)
+        XCTAssertNil(host.callNotice)
+    }
+
     /// The in-call End button only moves the screen to `ended`; the host turns
     /// that into a hang-up and the Leave / End the group is owed, in order.
     func testEndingFromTheCallScreenHangsUpAndTellsTheGroup() async throws {
@@ -767,6 +822,31 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertNotNil(host.presentation, "the screen stays for its \"Call ended\" overlay")
         host.dismissPresentation()
         XCTAssertNil(host.presentation)
+    }
+
+    /// The VoIP report reads this: a call wake for the conversation of the
+    /// group call this device is in, or left moments ago, rings nothing (older
+    /// senders woke for group-call ends). Another conversation, and the same
+    /// one after the window, decide nothing here.
+    func testACallWakeForTheGroupCallOnThisDeviceIsSuppressed() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
+        let handle = try await startLiveCall(host, h)
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group))
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group.uppercased()))
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: otherGroup))
+
+        try XCTUnwrap(host.presentation).endCall()
+        try await waitUntil { handle.hangUps == 1 }
+        XCTAssertNil(host.activeCall)
+        XCTAssertTrue(host.suppressesCallWake(groupIdHex: group), "the end that raced the poll")
+
+        h.nowMs = t0 + CallWakeSuppression.recentEndWindowMs
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
+        h.nowMs = t0
+        host.reset()
+        XCTAssertFalse(host.suppressesCallWake(groupIdHex: group))
     }
 
     /// The participant heartbeat: every interval the live call re-publishes its
@@ -1642,7 +1722,7 @@ final class CallSlotWiringTests: XCTestCase {
     private func makeOneToOne(_ published: Published) -> CallHost {
         let now = t0
         return CallHost(ports: CallHost.Ports(
-            publish: { _, bytes in
+            publish: { _, bytes, _ in
                 if case .end(_, let reason)? = try? parseCallSignaling(plaintext: bytes) {
                     published.ends.append(reason)
                 }

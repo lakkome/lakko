@@ -8,6 +8,7 @@
  * the mark or be lost to it.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { MESSAGE_LOG_VERSION, updateMessageLog } from "../chat/message-log-store";
 import { markSeenInSlot, type ContiguousSeen } from "./feed-seen";
 
@@ -18,7 +19,7 @@ import { markSeenInSlot, type ContiguousSeen } from "./feed-seen";
  */
 export async function recordFeedSeen(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   seen: ReadonlyMap<string, readonly string[]>,
   contiguous: ContiguousSeen,
 ): Promise<Map<string, bigint>> {

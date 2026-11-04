@@ -14,7 +14,9 @@
  * Nothing here leaves the device.
  */
 import { createEffect, createRoot } from "solid-js";
+import { isDesktop } from "../platform";
 import { currentLanguage, t } from "./index";
+import { reactionNotificationsOn } from "../chat/reaction-notify-pref";
 
 /** Cache name; must equal `NOTIFICATION_STRINGS_CACHE` in the worker. */
 export const NOTIFICATION_STRINGS_CACHE = "lakko-l10n";
@@ -42,6 +44,15 @@ export interface NotificationWords {
   unsupportedMessage: string;
   /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
   attachments: string[];
+  /** Reactions section 12 — "{name} reacted {emoji} to your message", with
+   *  U+0001 where the name goes and U+0002 where the emoji goes (the worker
+   *  cannot run the formatter). */
+  reactedToYourMessage: string;
+  /** A group message's body, "{name}: {text}" (the list preview's rule),
+   *  U+0001 = sender name, U+0002 = text. */
+  senderPrefixed: string;
+  /** The `Reactions` switch is off on this device. */
+  reactionsOff: boolean;
 }
 
 /** The words, rendered now. */
@@ -59,11 +70,17 @@ export function renderNotificationStrings(): NotificationWords {
     newMessage: t("notification.message.new"),
     unsupportedMessage: t("chat.message.unsupported"),
     attachments,
+    reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
+    senderPrefixed: t("chats.preview.sender", { name: "\u0001", text: "\u0002" }),
+    reactionsOff: !reactionNotificationsOn(),
   };
 }
 
 async function store(words: NotificationWords): Promise<void> {
   if (typeof caches === "undefined") return;
+  // The desktop app has no service worker to read them (ADR-0085), and its
+  // webview refuses Cache Storage for the app's own URL scheme.
+  if (isDesktop()) return;
   try {
     const cache = await caches.open(NOTIFICATION_STRINGS_CACHE);
     await cache.put(
@@ -86,6 +103,7 @@ export function publishNotificationStrings(): void {
     createEffect(() => {
       // Re-run on a language switch: `t` reads the current dictionary.
       currentLanguage();
+      reactionNotificationsOn();
       void store(renderNotificationStrings());
     });
   });

@@ -2929,3 +2929,114 @@ async fn the_recovery_flow_logs_neither_the_address_nor_the_account() {
         assert!(!log.contains(&needle), "the log carries {needle}: {log}");
     }
 }
+
+// ---- saving a phrase without a rotation (ADR-0075 section 3, amended) ------
+
+async fn phrase_status(state: &AppState, bearer: &str) -> Value {
+    let (st, body) = get(state, "/account/phrase", bearer).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    json_of(&body)
+}
+
+#[tokio::test]
+async fn a_phrase_never_in_a_vault_is_saved_with_no_key_change() {
+    let pool = db_or_skip!("a_phrase_never_in_a_vault_is_saved_with_no_key_change");
+    let rig = rig(pool);
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await,
+        json!({ "saved": false, "rotation_needed": false })
+    );
+
+    // The proof of section 17.1 is needed.
+    let (st, _) = post(
+        &rig.state,
+        "/account/phrase/saved",
+        Some(&bearer),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await["saved"],
+        json!(false)
+    );
+
+    let body = json!({ "fresh_grant": grant(&who.session) });
+    let (st, answer) = post(&rig.state, "/account/phrase/saved", Some(&bearer), &body).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{}", text(&answer));
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await,
+        json!({ "saved": true, "rotation_needed": false })
+    );
+
+    // Saying it twice writes one notice, and no key moved.
+    let (st, _) = post(&rig.state, "/account/phrase/saved", Some(&bearer), &body).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(
+        notices(&rig.state, &bearer).await,
+        vec!["recovery-phrase-saved".to_string()]
+    );
+    let generation: u64 = sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ?")
+        .bind(&who.account.id[..])
+        .fetch_one(&rig.state.db)
+        .await
+        .unwrap();
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
+async fn a_phrase_that_was_in_a_vault_takes_a_rotation_even_after_the_email_is_gone() {
+    let pool =
+        db_or_skip!("a_phrase_that_was_in_a_vault_takes_a_rotation_even_after_the_email_is_gone");
+    let rig = rig(pool);
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+    enrol(&rig, &who, &fresh_address(), Some(&sealed_vault())).await;
+
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await["rotation_needed"],
+        json!(true)
+    );
+    let (st, answer) = post(
+        &rig.state,
+        "/account/phrase/saved",
+        Some(&bearer),
+        &json!({ "fresh_grant": grant(&who.session) }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(
+        json_of(&answer)["error"],
+        json!("phrase-save-needs-rotation")
+    );
+
+    // A copy taken while the vault existed still opens this phrase.
+    let (st, _) = delete(
+        &rig.state,
+        "/recovery-email",
+        &bearer,
+        &json!({ "fresh_grant": grant(&who.session) }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await,
+        json!({ "saved": false, "rotation_needed": true })
+    );
+}
+
+#[tokio::test]
+async fn an_address_with_no_vault_does_not_call_for_a_rotation() {
+    let pool = db_or_skip!("an_address_with_no_vault_does_not_call_for_a_rotation");
+    let rig = rig(pool);
+    let who = person(&rig.state).await;
+    let bearer = token(&who.session);
+    enrol(&rig, &who, &fresh_address(), None).await;
+    assert_eq!(
+        phrase_status(&rig.state, &bearer).await["rotation_needed"],
+        json!(false)
+    );
+}

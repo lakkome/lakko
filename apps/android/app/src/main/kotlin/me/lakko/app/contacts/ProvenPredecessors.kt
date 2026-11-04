@@ -29,6 +29,11 @@ import kotlinx.serialization.json.Json
  * (the links are then recorded by the rotation, which signed the proof
  * itself).
  *
+ * A contact first met after a rotation holds no older key a proof could be
+ * checked against. Its step comes from a conversation link instead (ADR-0074
+ * section 3.7): signed by both keys, verified against the key the gate left
+ * trusted, and recorded the same way.
+ *
  * Everything here is pure; the store holds public keys only.
  */
 

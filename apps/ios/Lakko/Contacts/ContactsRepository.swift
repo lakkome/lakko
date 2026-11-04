@@ -138,7 +138,18 @@ public final class ContactsRepository: ObservableObject {
     /// live in `@StateObject` slots at the `LakkoApp` scope and
     /// outlive any single view tree, so a `weak` reference is
     /// safe.
-    public weak var chatRepository: ChatRepository?
+    public weak var chatRepository: ChatRepository? {
+        didSet {
+            chatRepository?.owedAnswerAck = { [weak self] messageId, groupIdHex in
+                await self?.ackOwedAnswer(requestMessageId: messageId, groupIdHex: groupIdHex)
+            }
+            // ADR-0087 section 9 — a held Welcome that landed is a Welcome.
+            chatRepository?.onHeldWelcomeJoined = { [weak self] groupIdHex in
+                self?.noteAnsweredByWelcome(groupIdHex: groupIdHex)
+                self?.handOverJoinedPendingContacts()
+            }
+        }
+    }
 
     /// ADR-0079 section 4 — the synced link-record register: the verdict on
     /// a request's link answer, the use count, the revocations, and (reworked
@@ -163,7 +174,16 @@ public final class ContactsRepository: ObservableObject {
 
     /// ADR-0079 section 5 — the inviters added through their link whose app
     /// has not answered yet, for the bound account.
-    @Published public private(set) var invited: [PendingContact] = []
+    @Published public private(set) var invited: [PendingContact] = [] {
+        didSet {
+            // ADR-0079 — a pending contact is named by its link's statement
+            // on every surface (a group roster included), so the resolver
+            // must see the list as it changes, like the renames above.
+            if invited != oldValue {
+                ProfileDirectory.shared.setPendingContacts(invited)
+            }
+        }
+    }
 
     /// The one-to-one each pending contact moved into this session (account
     /// id hex to group id hex): an open pending chat follows it there.
@@ -210,10 +230,14 @@ public final class ContactsRepository: ObservableObject {
         stateBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
         ) { [weak self] note in
-            guard let contacts = note.object as? [AcceptedContact], !contacts.isEmpty,
-                  let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String
-            else { return }
-            Task { @MainActor in self?.mergeBundledContacts(contacts, accountIdB64: accountIdB64) }
+            guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            let contacts = note.object as? [AcceptedContact] ?? []
+            // Bundle v3 — pending contacts the bundle added to the store.
+            let pendingAdded = note.userInfo?[StateBundle.pendingAddedKey] as? Bool == true
+            Task { @MainActor in
+                if !contacts.isEmpty { self?.mergeBundledContacts(contacts, accountIdB64: accountIdB64) }
+                if pendingAdded { self?.reloadBundledPendingContacts(accountIdB64: accountIdB64) }
+            }
         }
         // Follow the session: bind the persisted accepted list and inbox of
         // whichever account is live, unbind on logout / forgetDevice. The
@@ -262,8 +286,11 @@ public final class ContactsRepository: ObservableObject {
         let sent = sentStore.load(accountIdB64: accountIdB64)
         boundAccountIdB64 = accountIdB64
         loadingBoundRows = true
+        // One person is one row, also for rows stored before that was so.
+        let rows = Self.reconciled(
+            accepted: accepted, pending: persisted.pending, samePerson: provenSamePerson)
         state = state.with(
-            pending: persisted.pending, accepted: accepted, sent: sent, outstandingInvites: [],
+            pending: rows.pending, accepted: rows.accepted, sent: sent, outstandingInvites: [],
             cursor: persisted.cursor)
         loadingBoundRows = false
         invited = PendingContactStore.load(accountIdB64: accountIdB64)
@@ -364,9 +391,19 @@ public final class ContactsRepository: ObservableObject {
                 recipientAccountIdB64: base64Encode(accountId),
                 messageId: result.messageId,
                 createdAt: result.createdAt,
-                intro: SentRequests.storedIntro(introMessage)),
+                intro: SentRequests.storedIntro(introMessage),
+                recipientName: person.displayName,
+                recipientKeyB64: base64Encode(person.accountKey)),
             to: state.sent))
         return result
+    }
+
+    /// Stop waiting for a request that was not answered: the row under Sent
+    /// goes, and search can offer the person again. Local; the person is told
+    /// nothing, and a request they already hold stays theirs to answer.
+    public func dismissSentRequest(_ request: SentContactRequest) {
+        state = state.with(sent: SentRequests.answered(
+            recipientAccountIdB64: request.recipientAccountIdB64, in: state.sent))
     }
 
     /// A contact request against a bundle in hand, with rule 6 of ADR-0074
@@ -417,6 +454,10 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
+    /// Kept across searches, and across accounts: a lookup key names a
+    /// username, which is the same for everyone, and opens nothing.
+    private let usernameLookupKeys = KeptUsernameLookupKeys()
+
     /// The production lookups a people search makes.
     public func peopleSearchPorts() -> PeopleSearchPorts {
         let factory = clientFactory
@@ -444,6 +485,7 @@ public final class ContactsRepository: ObservableObject {
                     return ReachCenter.shared.currentAccountKey(of: key)
                 }
             })
+            .with(kept: usernameLookupKeys)
     }
 
     /// ADR-0060 section 6 — an outgoing request carries a fresh `reply` grant
@@ -633,14 +675,27 @@ public final class ContactsRepository: ObservableObject {
                     // here are Welcomes that were never this device's to open.
                     if let chatRepository = chatRepository {
                         do {
-                            _ = try await chatRepository
+                            let joined = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                            noteAnsweredByWelcome(groupIdHex: joined)
                             // ADR-0079 section 5 — a one-to-one with a person
                             // added through their link: what was written to
                             // them goes out now, in order.
                             handOverJoinedPendingContacts()
                         } catch {
-                            NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            // ADR-0087 section 9 — a Welcome for a group this
+                            // device still holds as active: the removal it
+                            // answers may still be in that group's journal.
+                            // The cursor moves past this row, so it is kept.
+                            if let held = MembershipEndRules.stillActiveGroupIdHex(error) {
+                                chatRepository.holdWelcomeForActiveGroup(
+                                    groupIdHex: held, welcome: welcomeBytes)
+                                Task { @MainActor [weak chatRepository] in
+                                    await chatRepository?.resolveHeldWelcomes()
+                                }
+                            } else {
+                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            }
                         }
                     }
                     continue
@@ -653,44 +708,7 @@ public final class ContactsRepository: ObservableObject {
                     // batch was in flight: the ack belongs to the old
                     // account, never to whoever is bound now.
                     guard boundAccountIdB64 == pollAccountIdB64 else { continue }
-                    // The recipient of one of our outgoing requests pressed
-                    // Accept. The signature was verified in the UniFFI layer,
-                    // so this is the moment the person becomes a contact on
-                    // this side too: the Welcome that follows creates the
-                    // chat, never the contact row (a requester whose request
-                    // was accepted on Android had a named chat and an empty
-                    // Contacts tab, seen live on 2026-09-16). One row per
-                    // person; the matching sent request is retired.
-                    let alreadyKnown = state.accepted.contains {
-                        $0.request.fromPubkey == ack.accepterPubkey
-                    }
-                    let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
-                    // ADR-0060 — the request was answered: its `reply` key goes.
-                    ReachCenter.shared.retireReplies(
-                        purpose: ReplyPurpose.contact(ack.accepterAccountId))
-                    let remainingSent = SentRequests.answered(
-                        recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
-                    if alreadyKnown {
-                        if remainingSent.count != state.sent.count {
-                            state = state.with(sent: remainingSent)
-                        }
-                        continue
-                    }
-                    let syntheticRequest = IncomingContactRequest(
-                        messageId: ack.messageId,
-                        fromPubkey: ack.accepterPubkey,
-                        fromAccountId: ack.accepterAccountId,
-                        fromPseudonym: ack.ackToPseudonym,
-                        validAfterMs: ack.acceptedAtMs,
-                        intro: nil,
-                        createdAt: ack.createdAt
-                    )
-                    state = state.with(
-                        accepted: state.accepted + [
-                            AcceptedContact(request: syntheticRequest, groupIdHex: nil)
-                        ],
-                        sent: remainingSent
-                    )
+                    applyContactAck(ack)
                     continue
                 }
             }
@@ -750,6 +768,9 @@ public final class ContactsRepository: ObservableObject {
             // undecided link requests.
             handOverJoinedPendingContacts()
             await revokeLinksRevokedElsewhere()
+            // An accept whose Welcome is owed: at launch (the first poll) and
+            // on every poll.
+            await chatRepository?.resolveAllOwedAnswers()
             if undecidedArrived || !LinkRequestInbox(accountIdB64: pollAccountIdB64).rows().isEmpty {
                 await decideLinkRequests()
             }
@@ -876,13 +897,26 @@ public final class ContactsRepository: ObservableObject {
         // A person removed from the list stays removed although the
         // conversation remains (seen on web 2026-10-24: a removed contact
         // came back on the next load).
-        guard !removedKeys.contains(signatureKey) else { return false }
-        guard let next = Self.adopting(
+        let samePerson = provenSamePerson
+        guard !removedKeys.contains(where: { samePerson($0, signatureKey) }) else { return false }
+        let next = Self.adopting(
             state.accepted, signatureKey: signatureKey, accountId: accountId,
-            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt)
-        else { return false }
-        state = state.with(accepted: next)
+            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt,
+            samePerson: samePerson) ?? state.accepted
+        // A request from them is gone with it (a process that died inside an
+        // accept left both), carried on the row so its ack can still go out.
+        let rows = Self.reconciled(accepted: next, pending: state.pending, samePerson: samePerson)
+        guard rows.accepted != state.accepted || rows.pending != state.pending else { return false }
+        state = state.with(pending: rows.pending, accepted: rows.accepted)
         return true
+    }
+
+    /// Whether two account keys are one person across proven rotations
+    /// (ADR-0074 section 3.7): the rule every contact row is matched by, so a
+    /// person is one row whichever of their keys an event names.
+    private var provenSamePerson: (Data, Data) -> Bool {
+        let proven = ProvenPredecessorStore().load()
+        return { proven.samePerson(base64Encode($0), base64Encode($1)) }
     }
 
     /// Put a person the viewer removed back on the contact list, with their
@@ -924,6 +958,79 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
+    /// One person is one row, and a request whose contact exists is gone:
+    /// two rows of one key become one, and a pending request from a contact
+    /// moves onto that contact's row. Pure.
+    nonisolated static func reconciled(
+        accepted: [AcceptedContact], pending: [IncomingContactRequest],
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
+    ) -> (accepted: [AcceptedContact], pending: [IncomingContactRequest]) {
+        var rows: [AcceptedContact] = []
+        for row in accepted {
+            if let idx = rows.firstIndex(where: { samePerson($0.request.fromPubkey, row.request.fromPubkey) }) {
+                rows[idx] = merging(rows[idx], with: row)
+            } else {
+                rows.append(row)
+            }
+        }
+        var left: [IncomingContactRequest] = []
+        for request in pending {
+            if rows.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
+                rows = accepting(request, into: rows, groupIdHex: nil)
+            } else {
+                left.append(request)
+            }
+        }
+        return (rows, left)
+    }
+
+    /// The accepted list with `request` accepted: one more row, or, when the
+    /// person already has one, that row carrying the request. A rename, a
+    /// recorded chat and the keys they held stay. The row takes the request's
+    /// id, which is what its owed ack is found by.
+    nonisolated static func accepting(
+        _ request: IncomingContactRequest, into accepted: [AcceptedContact], groupIdHex: String?,
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
+    ) -> [AcceptedContact] {
+        guard let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, request.fromPubkey) }) else {
+            return accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)]
+        }
+        var rows = accepted
+        rows[idx] = merging(
+            accepted[idx], with: AcceptedContact(request: request, groupIdHex: groupIdHex))
+        return rows
+    }
+
+    /// Two rows of one person as one. A mailbox request beats a synthetic
+    /// one (``syntheticContactMessageId(signatureKey:)``), the later of two
+    /// mailbox requests wins; nothing either row knew is lost.
+    private nonisolated static func merging(
+        _ held: AcceptedContact, with other: AcceptedContact
+    ) -> AcceptedContact {
+        let request = other.request.messageId > 0 || held.request.messageId < 0 ? other.request : held.request
+        var previous = (held.previousKeysB64 ?? []) + (other.previousKeysB64 ?? [])
+        // Two keys of one person (ADR-0074 section 3.7): the one that does
+        // not name the row stays an alias of it.
+        for key in [held.request.fromPubkey, other.request.fromPubkey] where key != request.fromPubkey {
+            previous.append(base64Encode(key))
+        }
+        var seen = Set<String>()
+        let keys = previous.filter { seen.insert($0).inserted }
+        return AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: request.messageId,
+                fromPubkey: request.fromPubkey,
+                fromAccountId: request.fromAccountId ?? held.request.fromAccountId ?? other.request.fromAccountId,
+                fromPseudonym: request.fromPseudonym,
+                validAfterMs: request.validAfterMs,
+                intro: request.intro,
+                profile: request.profile,
+                createdAt: request.createdAt),
+            groupIdHex: held.groupIdHex ?? other.groupIdHex,
+            displayName: held.displayName ?? other.displayName,
+            previousKeysB64: keys.isEmpty ? nil : keys)
+    }
+
     /// The pure half of ``adoptOneToOnePeer(signatureKey:accountId:groupIdHex:nowMs:createdAt:)``:
     /// the accepted list after adopting the peer, or `nil` when it is already
     /// complete. A row minted here carries a synthetic request (no mailbox
@@ -936,14 +1043,23 @@ public final class ContactsRepository: ObservableObject {
         accountId: Data?,
         groupIdHex: String,
         nowMs: UInt64,
-        createdAt: String
+        createdAt: String,
+        samePerson: (Data, Data) -> Bool = { $0 == $1 }
     ) -> [AcceptedContact]? {
-        if let idx = accepted.firstIndex(where: { $0.request.fromPubkey == signatureKey }) {
+        if let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, signatureKey) }) {
             let old = accepted[idx]
-            guard old.groupIdHex == nil else { return nil }
+            // A person met after a rotation (ADR-0074 section 3.7): the row
+            // is under the key they asked with, the conversation under the
+            // key their leaves are bound to. One person, one row.
+            var previous = old.previousKeysB64 ?? []
+            let alias = base64Encode(signatureKey)
+            let newAlias = old.request.fromPubkey != signatureKey && !previous.contains(alias)
+            if newAlias { previous.append(alias) }
+            guard old.groupIdHex == nil || newAlias else { return nil }
             var rows = accepted
             rows[idx] = AcceptedContact(
-                request: old.request, groupIdHex: groupIdHex, displayName: old.displayName)
+                request: old.request, groupIdHex: old.groupIdHex ?? groupIdHex,
+                displayName: old.displayName, previousKeysB64: previous.isEmpty ? nil : previous)
             return rows
         }
         let synthetic = IncomingContactRequest(
@@ -1025,6 +1141,127 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Accept / decline (local-state mutations)
 
+    /// Accept a request: found the one-to-one, file the contact, ack.
+    /// ``ContactAccept`` is the order and the failure rule.
+    public func acceptIncomingRequest(_ request: IncomingContactRequest) async -> ContactAccept.Outcome {
+        let bound = binding.capture()
+        return await ContactAccept.run(request: request, ports: ContactAccept.Ports(
+            found: { [weak self] request, accountId in
+                guard let chat = self?.chatRepository else { throw ContactAccept.Unavailable() }
+                let founding = try await chat.foundOneToOneAnswering(
+                    requestMessageId: request.messageId, recipientAccountId: accountId,
+                    recipientSignaturePubkey: request.fromPubkey)
+                try bound.require()
+                return founding
+            },
+            file: { [weak self] messageId, groupIdHex in
+                self?.acceptContactRequest(messageId: messageId, groupIdHex: groupIdHex)
+            },
+            ack: { [weak self] request in
+                _ = try await self?.sendContactAck(request: request)
+            }))
+    }
+
+    /// The Welcome of an accept landed late: its ack goes out now. A request
+    /// still listed (the process died inside the accept) is filed first.
+    func ackOwedAnswer(requestMessageId: Int64, groupIdHex: String) async {
+        acceptContactRequest(messageId: requestMessageId, groupIdHex: groupIdHex)
+        guard let contact = state.accepted.first(where: { $0.request.messageId == requestMessageId }) else {
+            return
+        }
+        do {
+            _ = try await sendContactAck(request: contact.request)
+        } catch {
+            NSLog("contact accept: the ack was not delivered: %@", ContactAccept.reason(of: error))
+        }
+    }
+
+    /// An ack from the recipient of one of this account's outgoing requests:
+    /// they pressed Accept. The signature was verified in the UniFFI layer,
+    /// so this is the moment the person becomes a contact on this side too:
+    /// the Welcome that follows creates the chat, never the contact row (a
+    /// requester whose request was accepted on Android had a named chat and
+    /// an empty Contacts tab, seen live on 2026-09-16). One row per person;
+    /// the matching sent request is retired.
+    func applyContactAck(_ ack: IncomingContactAck) {
+        let samePerson = provenSamePerson
+        let alreadyKnown = state.accepted.contains {
+            samePerson($0.request.fromPubkey, ack.accepterPubkey)
+        }
+        let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
+        // ADR-0060 — the request was answered: its `reply` key goes.
+        ReachCenter.shared.retireReplies(
+            purpose: ReplyPurpose.contact(ack.accepterAccountId))
+        // Before the row goes: it holds the name they were found under.
+        fileFoundName(
+            answering: SentRequests.row(recipientAccountIdB64: accepterAccountIdB64, in: state.sent),
+            signatureKey: ack.accepterPubkey)
+        let remainingSent = SentRequests.answered(
+            recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
+        if alreadyKnown {
+            if remainingSent.count != state.sent.count {
+                state = state.with(sent: remainingSent)
+            }
+            return
+        }
+        let syntheticRequest = IncomingContactRequest(
+            messageId: ack.messageId,
+            fromPubkey: ack.accepterPubkey,
+            fromAccountId: ack.accepterAccountId,
+            fromPseudonym: ack.ackToPseudonym,
+            validAfterMs: ack.acceptedAtMs,
+            intro: nil,
+            createdAt: ack.createdAt
+        )
+        state = state.with(
+            accepted: state.accepted + [
+                AcceptedContact(request: syntheticRequest, groupIdHex: nil)
+            ],
+            sent: remainingSent
+        )
+    }
+
+    /// `docs/ux/who-can-find-me.md` section 6.1 — the person holding
+    /// `signatureKey` answered `row`: the name it found them under stands
+    /// until their own profile arrives.
+    private func fileFoundName(answering row: SentContactRequest?, signatureKey: Data) {
+        guard let row, let claim = SentRequests.foundClaim(row, signatureKey: signatureKey) else { return }
+        ProfileDirectory.shared.fileFoundName(
+            claim, signatureKeyB64: base64Encode(signatureKey), accountIdB64: boundAccountIdB64)
+    }
+
+    /// A Welcome joined `groupIdHex`. When it is the one-to-one with someone
+    /// this account asked, the request was answered, whether or not the ack
+    /// ever arrives: their row under Sent goes and they are a contact. The
+    /// reply key stays until the ack, which is written with it.
+    private func noteAnsweredByWelcome(groupIdHex: String) {
+        guard let peer = chatRepository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return }
+        let answered = SentRequests.answered(
+            byPeer: peer, in: state.sent,
+            keyOfAccount: { accountIdB64 in
+                PeerPinStore().readPin(accountIdB64: accountIdB64)
+                    .flatMap { base64Decode($0.pinnedSignaturePubkeyB64) }
+            },
+            current: { ReachCenter.shared.currentAccountKey(of: $0) })
+        guard answered.remaining.count != state.sent.count else { return }
+        // Usually ahead of the ack, which then finds no row to read the name
+        // from.
+        fileFoundName(
+            answering: answered.accountIdB64.flatMap { SentRequests.row(recipientAccountIdB64: $0, in: state.sent) },
+            signatureKey: peer)
+        // The contact first, and only then the row under Sent: a search row
+        // reads the two, and must never find them in neither and offer Add
+        // contact to someone who accepted. Asking them was a decision to have
+        // them back, so a removal does not hold here.
+        restoreRemovedContact(
+            signatureKey: peer,
+            accountId: answered.accountIdB64.flatMap(base64Decode),
+            groupIdHex: groupIdHex,
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+        state = state.with(sent: answered.remaining)
+    }
+
     /// Mark an incoming ContactRequest as accepted locally.
     ///
     /// Moves the matching pending row to ``ContactsState/accepted``
@@ -1044,9 +1281,10 @@ public final class ContactsRepository: ObservableObject {
         let accepted = pending[idx]
         var remaining = pending
         remaining.remove(at: idx)
-        let newAccepted = state.accepted + [
-            AcceptedContact(request: accepted, groupIdHex: groupIdHex)
-        ]
+        // One person is one row: a one-to-one already made them a contact
+        // when a process died inside the accept.
+        let newAccepted = Self.accepting(
+            accepted, into: state.accepted, groupIdHex: groupIdHex, samePerson: provenSamePerson)
         state = state.with(pending: remaining, accepted: newAccepted)
     }
 
@@ -1091,9 +1329,13 @@ public final class ContactsRepository: ObservableObject {
         }
         // ADR-0060 sections 1 and 4 — the removed person held this account's
         // `contact` and `fof` keys: rotate both (the old keys are unregistered
-        // at once), and forget what they offered and relayed.
+        // at once), and forget what they offered and relayed. A removed
+        // contact leaves the chosen list (UX section 4.1); adding them back
+        // brings them in switched off. Dropping them there already rotated
+        // `fof`.
         ReachCenter.shared.rotate(.contact)
-        ReachCenter.shared.rotate(.fof)
+        let dropped = ReachCenter.shared.dropChosenContacts(removed.compactMap(\.request.fromAccountId))
+        if !dropped { ReachCenter.shared.rotate(.fof) }
         for contact in removed {
             ReachCenter.shared.dropIntroductions(
                 fromAccountKeyB64: base64Encode(contact.request.fromPubkey))
@@ -1157,7 +1399,11 @@ public final class ContactsRepository: ObservableObject {
             return false
         }
         // Read BEFORE the check below, which may write a first pin.
-        guard establishedContact(ofAccountId: fromAccountId) != nil else { return false }
+        guard establishedContact(ofAccountId: fromAccountId) != nil
+            || KnownContactRequest.isContactKey(
+                base64Encode(request.fromPubkey),
+                in: state.accepted.map { base64Encode($0.request.fromPubkey) })
+        else { return false }
         let check: KnownContactRequest.Check
         do {
             check = try await client.checkContactIdentity(accountId: fromAccountId) != nil
@@ -1192,6 +1438,7 @@ public final class ContactsRepository: ObservableObject {
             // Kept on disk: the cursor is about to move past this row.
             waiting.hold(request, accountIdB64: accountIdB64)
         case .drop:
+            NSLog("contacts inbox: a request from a contact's account was dropped")
             waiting.drop(messageId: request.messageId, accountIdB64: accountIdB64)
         }
         return true
@@ -1262,24 +1509,26 @@ public final class ContactsRepository: ObservableObject {
         }
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        // The answer to a request goes out under its reply grant, then a
+        // contact grant, and nothing else (``ReachCenter/answerPlans(toRequester:)``).
         // ADR-0074 section 3.5a rule 6 — a refused ack re-checks the
         // requester's address once (the client derives the mailbox from the
         // same proven-predecessor store the re-check writes).
         return try await RefusedMailboxWrite.write(
-            resolve: {
-                AckAttempt(plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
-            },
+            resolve: { ReachCenter.shared.answerPlans(toRequester: request.fromPubkey) },
             recheck: {
                 await PersonAddressRecheck.recheck(
                     accountKey: request.fromPubkey, accountIdHint: request.fromAccountId)
             },
-            publish: { attempt in
-                try await client.sendContactAck(
-                    accepterSigningSeed: identity.ed25519Seed(),
-                    accepterAccountId: secrets.accountId,
-                    accepterX25519Pubkey: identity.x25519PublicKey(),
-                    originalRequest: request,
-                    plan: attempt.plan)
+            publish: { plans in
+                try await RefusedMailboxWrite.tryingPlans(plans) { plan in
+                    try await client.sendContactAck(
+                        accepterSigningSeed: identity.ed25519Seed(),
+                        accepterAccountId: secrets.accountId,
+                        accepterX25519Pubkey: identity.x25519PublicKey(),
+                        originalRequest: request,
+                        plan: plan)
+                }
             })
     }
 
@@ -1293,17 +1542,17 @@ public final class ContactsRepository: ObservableObject {
         let client = clientFactory()
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         try await RefusedMailboxWrite.write(
-            resolve: {
-                AckAttempt(plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
-            },
+            resolve: { ReachCenter.shared.answerPlans(toRequester: request.fromPubkey) },
             recheck: {
                 await PersonAddressRecheck.recheck(
                     accountKey: request.fromPubkey, accountIdHint: request.fromAccountId)
             },
-            publish: { attempt in
-                try await client.sendLinkRefusal(
-                    inviterSigningSeed: identity.ed25519Seed(), linkId: linkId,
-                    originalRequest: request, plan: attempt.plan)
+            publish: { plans in
+                try await RefusedMailboxWrite.tryingPlans(plans) { plan in
+                    try await client.sendLinkRefusal(
+                        inviterSigningSeed: identity.ed25519Seed(), linkId: linkId,
+                        originalRequest: request, plan: plan)
+                }
             })
     }
 
@@ -1325,11 +1574,6 @@ public final class ContactsRepository: ObservableObject {
             ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(accountId))
         }
         return true
-    }
-
-    /// One attempt at an ack: who it is addressed to and how it is signed.
-    private struct AckAttempt: Equatable {
-        let plan: MailboxWritePlan?
     }
 
     /// Compute the Signal-style safety number (Phase 1.9b3 —
@@ -1929,22 +2173,31 @@ public final class ContactsRepository: ObservableObject {
     /// the fragment's secret. The ledger GET needs no session; nothing is
     /// spent and nothing is sent. A missing or malformed fragment is a
     /// damaged link (ADR-0028 amendment 2026-09-28).
-    private func fetchAndOpenLink(token: String, client: DiscoveryClient) async -> LinkFetch {
+    private func fetchAndOpenLink(
+        token: String, client: DiscoveryClient, hasSession: Bool = true
+    ) async -> LinkFetch {
         let parts = InviteLinkSecret.split(token)
         guard let blobId = Self.parseInviteSlug(parts.base),
               let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
-        let sealed: Data?
+        let row: (sealed: Data, usedUp: Bool)?
         do {
-            sealed = try await client.fetchInvite(blobId: blobId)
+            row = try await client.fetchInviteRow(blobId: blobId)
         } catch {
             if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
             return .failed((error as? LocalizedError)?.errorDescription ?? "fetch failed")
         }
-        guard let sealed,
-              let capability = try? InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret),
+        guard let row, !Self.usedUpReadsDead(usedUp: row.usedUp, hasSession: hasSession),
+              let capability = try? InviteCapability.openLink(sealed: row.sealed, linkSecret: linkSecret),
               capability.isValidNow(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
         else { return .dead }
         return .opened(blobId: blobId, linkSecret: linkSecret, capability: capability)
+    }
+
+    /// A used-up link is dead to a visitor with no session. With a session
+    /// the flag is ignored: this person may be one who already used the link,
+    /// bound for "already in your contacts", and only the consume can say.
+    static func usedUpReadsDead(usedUp: Bool, hasSession: Bool) -> Bool {
+        usedUp && !hasSession
     }
 
     /// The signed-out invite page (`docs/ux/contact-invite-link.md` section
@@ -1954,7 +2207,7 @@ public final class ContactsRepository: ObservableObject {
     /// and nothing is sent. Signing in or creating an account then lands on
     /// the default page through the parked link.
     public func previewInviteLink(slug token: String) async -> InvitePreviewResult {
-        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory()) {
+        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory(), hasSession: false) {
         case .opened(_, _, let capability):
             return .preview(InvitePreview(
                 displayName: capability.inviterDisplayName(), username: capability.inviterUsername(),
@@ -2150,6 +2403,19 @@ public final class ContactsRepository: ObservableObject {
             introMessage: Data(),
             link: link,
             linkAnswer: FfiLinkAnswer(linkId: invite.linkId, linkSecret: invite.linkSecret))
+    }
+
+    /// Pairing state bundle v3 — the bundle added pending contacts to the
+    /// store of `accountIdB64`: the bound list takes them, keeping any record
+    /// written here meanwhile (``PendingContacts/adding(_:to:)``).
+    func reloadBundledPendingContacts(accountIdB64: String) {
+        guard boundAccountIdB64 == accountIdB64 else { return }
+        var list = invited
+        for contact in PendingContactStore.load(accountIdB64: accountIdB64)
+        where !list.contains(where: { $0.accountIdHex == contact.accountIdHex }) {
+            list = PendingContacts.adding(contact, to: list)
+        }
+        if list != invited { setInvited(list, accountIdB64: accountIdB64) }
     }
 
     private func setInvited(_ list: [PendingContact], accountIdB64: String) {
@@ -2682,6 +2948,72 @@ public struct ContactsState: Equatable {
     }
 }
 
+/// Accepting a contact request: the order and the failure rule, over injected
+/// steps. Nothing is filed until the group stands, so a request whose accept
+/// failed stays listed and Accept works again; there is never an accepted
+/// contact without a chat. The ack follows only after the Welcome landed.
+public enum ContactAccept {
+
+    public enum Outcome: Equatable {
+        /// The Welcome landed; the contact is filed with its chat.
+        case accepted(groupIdHex: String)
+        /// The group stands and the requester's Welcome is owed: the contact
+        /// is filed with its chat, and the ack waits for the Welcome.
+        case welcomeOwed(groupIdHex: String)
+        /// Nothing was delivered and nothing stands: the request stays.
+        case failed
+    }
+
+    /// No chat bridge is wired.
+    public struct Unavailable: Error {}
+
+    struct Ports {
+        var found: @MainActor (_ request: IncomingContactRequest, _ accountId: Data) async throws -> AnswerFounding
+        var file: @MainActor (_ messageId: Int64, _ groupIdHex: String) -> Void
+        var ack: @MainActor (_ request: IncomingContactRequest) async throws -> Void
+    }
+
+    /// A fixed reason for a log line: never an identifier, never error text
+    /// (a DS error names the mailbox).
+    static func reason(of error: Error) -> String {
+        if error is MailboxUnknown { return "no-mailbox" }
+        if error is Unavailable { return "no-chat" }
+        if RefusedMailboxWrite.isRefusal(error) { return "refused" }
+        if case .wrapped(_, let inner)? = error as? ChatError { return reason(of: inner) }
+        if case .wrapped(let inner)? = error as? ContactsError { return reason(of: inner) }
+        return "failed"
+    }
+
+    @MainActor
+    static func run(request: IncomingContactRequest, ports: Ports) async -> Outcome {
+        guard let accountId = request.fromAccountId else {
+            NSLog("contact accept failed: no-account-id")
+            return .failed
+        }
+        let founding: AnswerFounding
+        do {
+            founding = try await ports.found(request, accountId)
+        } catch {
+            NSLog("contact accept failed: %@", reason(of: error))
+            return .failed
+        }
+        ports.file(request.messageId, founding.groupIdHex)
+        switch founding {
+        case .welcomeOwed(let groupIdHex):
+            return .welcomeOwed(groupIdHex: groupIdHex)
+        case .delivered(let groupIdHex):
+            do {
+                try await ports.ack(request)
+            } catch {
+                // The Welcome landed: the chat stands and the requester sees
+                // it. Only their reply key stays open.
+                NSLog("contact accept: the ack was not delivered: %@", reason(of: error))
+            }
+            return .accepted(groupIdHex: groupIdHex)
+        }
+    }
+}
+
 /// A request the user has accepted locally.
 public struct AcceptedContact: Equatable, Codable {
     public let request: IncomingContactRequest
@@ -2780,19 +3112,29 @@ public struct SentContactRequest: Equatable, Codable {
     /// The intro the person wrote, kept so a re-send after a key rotation
     /// carries it (ADR-0074 section 3.5a rule 5). Empty when none.
     public let intro: String
+    /// The name the person was found under, `nil` when the request went out
+    /// by username alone: the Sent row shows it.
+    public let recipientName: String?
+    /// The person's account key (base64) as found: the Sent row's photo, and
+    /// one of the two things a search row is matched to this list by.
+    public let recipientKeyB64: String?
 
     public init(
         recipientUsername: String,
         recipientAccountIdB64: String,
         messageId: Int64,
         createdAt: String,
-        intro: String = ""
+        intro: String = "",
+        recipientName: String? = nil,
+        recipientKeyB64: String? = nil
     ) {
         self.recipientUsername = recipientUsername
         self.recipientAccountIdB64 = recipientAccountIdB64
         self.messageId = messageId
         self.createdAt = createdAt
         self.intro = intro
+        self.recipientName = recipientName
+        self.recipientKeyB64 = recipientKeyB64
     }
 }
 

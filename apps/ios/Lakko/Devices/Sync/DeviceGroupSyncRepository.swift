@@ -79,6 +79,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// continues which conversation. Read through ``ConversationLineage``.
     @Published public private(set) var lineage: [LineageEntry] = []
 
+    /// ADR-0087 section 9 — the conversations this account's membership of
+    /// ended (the fold's reading: a later `joined` takes one off the list).
+    @Published public private(set) var endedConversations: [ConversationEndRegister] = []
+
     /// ADR-0075 (amended 2026-10-13) — the account's recovery email address,
     /// as this account's devices keep it: one register of the synced state,
     /// so it is on disk under the device key, with the sibling devices and in
@@ -114,6 +118,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// (docs/ux/second-device.md section 3.1). Reset on sign-out and on an
     /// account switch.
     @Published public private(set) var deviceRemoved: Bool = false
+    /// Whether another device of this account is signed in, as far as this
+    /// one knows: the DeviceGroup roster, or the directory while this device
+    /// holds no DeviceGroup. `nil` until it is known.
+    @Published public private(set) var otherDeviceSignedIn: Bool?
 
     // MARK: - Internals
 
@@ -193,6 +201,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     var onKeyRotationEnvelope: @MainActor (Data) -> Void = { _ in
         NSLog("ADR-0074: a key-rotation envelope arrived with no receiver wired; dropped")
     }
+    /// UX second-device.md section 3 — an open Devices screen hears of a
+    /// received commit once its snapshot is on disk.
+    private var rosterChange = RosterChangeAfterPersist()
     /// When the poll loop last completed a fetch that reached the journal's
     /// head (unix ms); 0 before the first one. Read by
     /// ``waitForJournalHead(timeoutMs:)``.
@@ -219,6 +230,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             MainActor.assumeIsolated {
                 self?.reloadFromDisk(accountIdB64: account)
             }
+        }
+        // A relaunch must not lose a fold that is still waiting for its
+        // half-second persist: a read cursor written just before the app
+        // went to the background read as unread again after the restart.
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: Self.resignActiveName, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.persistNowIfScheduled() }
         }
         restoreObserver = NotificationCenter.default.addObserver(
             forName: .lakkoSyncedStateRestored, object: nil, queue: .main
@@ -303,15 +322,24 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         refreshDerived()
         ready = true
         onSyncedStateReady?()
+        // UX 17.5 — opening Settings > Devices acknowledges the pending
+        // devices for the account through this repository.
+        NewDeviceNoticeCenter.shared.setAcknowledger(accountIdB64: accountIdB64) { [weak self] keys in
+            self?.acknowledgeDevices(keys)
+        }
         // UX 17.5 — the roster as restored: the first reading on this device
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
         reportRoster(group: ensured.group)
+        DeviceRosterChanges.note(accountIdB64: accountIdB64)
         // ADR-0080 — this account's device cards, sent through this
         // repository's DeviceGroup `ServiceEnvelope`.
         DeviceCardCenter.shared.bind(accountIdB64: accountIdB64) { [weak self] envelope in
             await self?.sendServiceEnvelope(envelope)
         }
+        // A touch before the account bound was not noted: an account bound
+        // while the app is in front counts as the person's action once.
+        DeviceCardCenter.shared.noteForeground()
 
         let groupId: Data
         do {
@@ -356,6 +384,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         activeAccountId = nil
         ready = false
         deviceRemoved = false
+        otherDeviceSignedIn = nil
         syncedState = SyncedState()
         pending = nil
         refreshDerived()
@@ -382,6 +411,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     ///
     /// Debounced because a draft moves on a keystroke and each write is an
     /// AES seal plus a file replace.
+    /// `UIApplication.willResignActiveNotification`, by name: this file does
+    /// not import UIKit.
+    private static let resignActiveName = Notification.Name("UIApplicationWillResignActiveNotification")
+    private var resignObserver: NSObjectProtocol?
+
+    /// The scheduled persist, written now.
+    private func persistNowIfScheduled() {
+        guard let task = persistTask, !task.isCancelled else { return }
+        task.cancel()
+        persistTask = nil
+        persistSyncState()
+    }
+
     private func scheduleSyncStatePersist() {
         persistTask?.cancel()
         if deviceRemoved { return }
@@ -411,6 +453,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// not re-render every screen that observes one map.
     private func refreshDerived() {
         let s = syncedState
+        QuickReactionSetting.shared.adopt((try? s.quickReaction()).flatMap { $0 })
         var d: [String: DraftState] = [:]
         for r in (try? s.allDrafts()) ?? [] {
             d[groupIdHex(r.groupId)] = DraftState(
@@ -445,6 +488,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let savedList = SavedMessages.ordered((try? s.saved()) ?? [])
         if savedList != saved { saved = savedList }
         if lineageList != lineage { lineage = lineageList }
+        let ends = (try? s.endedConversations()) ?? []
+        if ends != endedConversations { endedConversations = ends }
         let address = (try? s.recoveryEmail()).flatMap { $0 }
         if address != recoveryEmail { recoveryEmail = address }
         let name = (try? s.ownUsername()).flatMap { $0 }
@@ -453,6 +498,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if links != linkRecords { linkRecords = links }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
+        // UX 17.5 / 17.6 — the synced acknowledged set ends the new-device
+        // warning on this device for every device in it.
+        if let account = activeAccountIdB64 {
+            NewDeviceNoticeCenter.shared.setAcknowledged(
+                accountIdB64: account, keys: (try? s.acknowledgedDevices()) ?? [])
+        }
     }
 
     /// Fold a restored backup state in, when it is this account's.
@@ -599,6 +650,113 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0087 section 9: the end of a membership
+
+    /// Step 2. A `nil` compose means there is nothing to tell the other
+    /// devices (past the client limit, or the register already says so), and
+    /// that never stops the wipe. A publish that failed is the state's pending
+    /// re-send, as for every other write. A device removed from the account
+    /// has nobody to tell.
+    public func publishConversationEnded(
+        _ conversation: FolderConversationRef, epoch: UInt64
+    ) async -> Bool {
+        if deviceRemoved { return true }
+        guard ready else { return false }
+        do {
+            guard let register = try syncedState.composeConversationEnded(
+                hlc: Hlc.mint(), conversation: conversation, epoch: epoch) else { return true }
+            try await writeConversationEnds([register])
+            return true
+        } catch {
+            NSLog("conversation end not written: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Rule 3 — a join clears an end this state holds; a first join writes
+    /// nothing. A device that could not write this now answers the register
+    /// when it next reads it (rule 4).
+    public func publishConversationJoined(
+        _ conversation: FolderConversationRef, epoch: UInt64
+    ) async {
+        guard ready, !deviceRemoved else { return }
+        do {
+            guard let register = try syncedState.composeConversationJoined(
+                hlc: Hlc.mint(), conversation: conversation, epoch: epoch) else { return }
+            try await writeConversationEnds([register])
+        } catch {
+            NSLog("conversation join not written: %@", error.localizedDescription)
+        }
+    }
+
+    private func writeConversationEnds(_ registers: [ConversationEndRegister]) async throws {
+        try await applyFolderChanges(FolderChangeSet(
+            metas: [], members: [], pins: [], removed: [], order: nil,
+            saved: [], conversationEnds: registers))
+    }
+
+    /// Clear what the synced state holds of `conversations`, through each
+    /// register's own tombstone, and only where something is held: a device
+    /// that hears the end after the device that wiped first writes nothing.
+    /// Profile rows are not tied to a group and stay.
+    public func clearConversation(_ conversations: [FolderConversationRef]) async -> Bool {
+        if deviceRemoved { return true }
+        guard ready else { return false }
+        do {
+            for conversation in conversations {
+                let id = conversation.id
+                let key = groupIdHex(id)
+                if let draft = drafts[key], !draft.text.isEmpty {
+                    try await setDraft(groupId: id, text: "")
+                }
+                if flags[key].map({ $0.pinned || $0.muted || $0.archived || $0.unreadOverride }) == true {
+                    try await setFlags(
+                        groupId: id, pinned: false, muted: false, archived: false, unreadOverride: false)
+                }
+                if let cursor = readCursors[key], !cursor.upToMessageId.isEmpty {
+                    try await setReadCursor(groupId: id, upToMessageId: Data(), readAtMs: 0)
+                }
+            }
+            let ids = Set(conversations.map(\.id))
+            if let order, order.groupIds.contains(where: { ids.contains($0) }) {
+                try await setOrder(groupIds: order.groupIds.filter { !ids.contains($0) })
+            }
+            let changes = Self.conversationClearChanges(
+                folders: folders, conversations: ids, hlc: Hlc.mint())
+            try await applyFolderChanges(changes)
+            try await applySaved(try saved
+                .filter { ids.contains($0.conversation.id) }
+                .map { try composeSavedRemoval(
+                    hlc: Hlc.mint(), conversation: $0.conversation, messageId: $0.messageId) })
+            return true
+        } catch {
+            NSLog("conversation registers not cleared: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// The folder edit that takes `conversations` out of every folder: the
+    /// hand-added and hand-excluded registers back to `none`, and the pins.
+    /// A folder that matches by kind stops showing it with the row itself.
+    nonisolated static func conversationClearChanges(
+        folders: [FolderView], conversations ids: Set<Data>, hlc: UInt64
+    ) -> FolderChangeSet {
+        var members: [FolderMemberRegister] = []
+        var pins: [FolderPinsRegister] = []
+        for folder in folders {
+            for ref in (folder.included + folder.excluded) where ids.contains(ref.id) {
+                members.append(FolderMemberRegister(
+                    hlc: hlc, folderId: folder.folderId, conversation: ref, state: .none))
+            }
+            if folder.pinned.contains(where: { ids.contains($0.id) }) {
+                pins.append(FolderPinsRegister(
+                    hlc: hlc, folderId: folder.folderId,
+                    pinned: folder.pinned.filter { !ids.contains($0.id) }))
+            }
+        }
+        return FolderChangeSet(metas: [], members: members, pins: pins, removed: [], order: nil)
+    }
+
     /// Blob ids of every saved message's files (for the keep tick).
     public func savedBlobIds() -> [Data] { (try? syncedState.savedBlobIds()) ?? [] }
 
@@ -693,6 +851,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
         // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
+        // Reactions-and-emoji spec section 6 (D3) — the quick-reaction register.
+        if isQuickReactionEnvelope(bytes: envelope) { return "quick-reaction" }
+        // UX 17.6 — every device acknowledgement is its own slot.
+        if isDeviceAckEnvelope(bytes: envelope) { return "device-ack:" + envelope.base64EncodedString() }
         // ADR-0079 — every link record is its own slot.
         if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
@@ -769,6 +931,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         return sealedEpoch
     }
 
+    /// Wait for the DeviceGroup handle of the session that just landed: a
+    /// device with no DeviceGroup yet reads the directory first. Returns
+    /// whether the handle is there. Chosen, not measured: ten seconds.
+    @discardableResult
+    public func waitForHandle(timeoutMs: Int64 = 10_000) async -> Bool {
+        let start = Int64(Date().timeIntervalSince1970 * 1000)
+        while group == nil, !deviceRemoved, activeAccountIdB64 != nil,
+              Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if Task.isCancelled { break }
+        }
+        return group != nil
+    }
+
     /// How long ``waitForJournalHead(timeoutMs:)`` waits by default: one long
     /// poll (25 s) and a margin. Chosen, not measured.
     public static let journalHeadTimeoutMs: Int64 = 30_000
@@ -808,8 +984,31 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     /// Encrypt with `compose` under the DeviceGroup's current epoch and
     /// publish it on the DeviceGroup journal. Returns the DS message id.
+    ///
+    /// A handle that fell behind the disk (another handle of this device
+    /// committed) stops ``publishOnce(_:)`` before anything is sent. It is
+    /// reloaded there, and the message is sealed once more on the reloaded
+    /// handle, so a publish is not lost to that race.
     @discardableResult
     private func publish(
+        _ compose: (DeviceGroup, Identity) throws -> Data
+    ) async throws -> Int64 {
+        try await Self.retryingOnceOnStaleHandle { try await publishOnce(compose) }
+    }
+
+    /// `attempt`, and one more time when it stopped on a handle that fell
+    /// behind the disk. Any other error, and a second stale handle, is the
+    /// caller's.
+    static func retryingOnceOnStaleHandle<T>(_ attempt: () async throws -> T) async throws -> T {
+        do {
+            return try await attempt()
+        } catch is DeviceGroupSnapshotStore.SnapshotChanged {
+            NSLog("DeviceGroupSync: the snapshot moved under this handle; sealing again on the reloaded one")
+            return try await attempt()
+        }
+    }
+
+    private func publishOnce(
         _ compose: (DeviceGroup, Identity) throws -> Data
     ) async throws -> Int64 {
         if deviceRemoved {
@@ -1059,11 +1258,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentRecoveryEmail()
         guard bound.isCurrent else { return }
         await flushUnsentOwnUsername()
+        await flushUnsentQuickReaction()
         guard bound.isCurrent else { return }
         await flushUnsentLinkRecords()
+        guard bound.isCurrent else { return }
+        await flushUnsentDeviceAcks()
         while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
+                guard bound.isCurrent else { return }
+            }
+            // UX 17.6 — an acknowledgement whose send failed this session is
+            // retried on every turn of the loop until it goes through.
+            if deviceAcksUnsent {
+                await flushUnsentDeviceAcks()
                 guard bound.isCurrent else { return }
             }
             let result: FetchResult
@@ -1252,6 +1460,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     }
                 case .commit:
                     noteMembershipChange(before: devicesBefore, group: g)
+                    rosterChange.commitApplied()
                     // ADR-0081 decision 4 — the sibling's record of which keys
                     // it saw added, and when (the row's DS time), so a knock
                     // answered by another sibling is not answered twice.
@@ -1280,9 +1489,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     handleGeneration = try DeviceGroupLifecycle.persistSnapshotOrThrow(
                         identity: id, accountIdB64: accountIdB64, expectedGeneration: handleGeneration)
                     saveAdmissions(accountIdB64: accountIdB64)
+                    if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch is DeviceGroupSnapshotStore.SnapshotChanged {
                     NSLog("DeviceGroupSync: the snapshot moved under this handle; reloading")
                     reloadFromDisk(accountIdB64: accountIdB64)
+                    if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch {
                     NSLog("DeviceGroupSync snapshot persist failed: %@", String(describing: error))
                 }
@@ -1357,6 +1568,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             guard let self, let mayFound, !Task.isCancelled, bound.isCurrent,
                   self.activeAccountIdB64 == accountIdB64 else { return }
+            self.otherDeviceSignedIn = !mayFound
             if mayFound {
                 do {
                     let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
@@ -1724,6 +1936,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let envelopes = Self.handOverEnvelopes(
             accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
             + [DeviceCardCenter.shared.ownEnvelope()].compactMap { $0 }
+        if DeviceCardCenter.shared.ownEnvelope() != nil {
+            NSLog("device card: own card queued to send to a newly added device")
+        }
         Task { @MainActor [weak self] in
             for envelope in envelopes {
                 await self?.sendServiceEnvelope(envelope)
@@ -1772,6 +1987,33 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     }
                 } catch {
                     NSLog("ADR-0079: link-record envelope refused")
+                }
+                return
+            }
+            // UX 17.6 — a device acknowledgement, the same way: the synced
+            // acknowledged set reaches the new-device warning through
+            // ``refreshDerived()``.
+            if isDeviceAckEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyDeviceAckEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("device-ack: envelope refused")
+                }
+                return
+            }
+            // Reactions-and-emoji spec section 6 (D3) — the quick reaction,
+            // the same way.
+            if isQuickReactionEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyQuickReactionEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("quick-reaction: envelope refused")
                 }
                 return
             }
@@ -1859,6 +2101,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func reportRoster(group g: DeviceGroup) {
         guard let accountIdB64 = activeAccountIdB64, !deviceRemoved,
               let devices = try? g.devices(), !devices.isEmpty else { return }
+        otherDeviceSignedIn = devices.count > 1
         let own = (try? g.ownLeafIndex()).flatMap { leaf in
             devices.first { $0.leafIndex == leaf }?.signaturePublicKey
         }
@@ -1878,7 +2121,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     func receiveDeviceCard(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup) -> Bool {
         guard let card = try? decodeDeviceCardEnvelope(plaintext: envelope) else { return false }
         guard let senderLeaf, let roster = try? g.devices(),
-              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else { return true }
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else {
+            NSLog("device card: received a card from no device of the roster and refused it")
+            return true
+        }
         DeviceCardCenter.shared.receive(
             senderKeyHex: hexEncode(sender.signaturePublicKey),
             card: DeviceCardCenter.stored(card),
@@ -1924,8 +2170,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
+        // D3 — and the quick reaction.
+        if let envelope = (try? syncedState.quickReactionEnvelope()).flatMap({ $0 }) {
+            await sendServiceEnvelope(envelope)
+        }
         // ADR-0079 — and every link record, with its original stamp.
         for envelope in (try? syncedState.linkRecordEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
+        // UX 17.6 — and every device acknowledgement, so the newcomer's
+        // synced state (and its backup) carries them.
+        for envelope in (try? syncedState.deviceAckEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
     }
@@ -2044,6 +2299,72 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, pressedAtMs: pressedAtMs)) ?? .dead
     }
 
+    // MARK: - UX 17.5 / 17.6: the device-acknowledgement register
+
+    /// `UserDefaults` marker: an acknowledgement written here has not been
+    /// confirmed sent (the own-username marker's pattern).
+    static func deviceAcksUnsentKey(accountIdB64: String) -> String {
+        "lakko.device-acks.unsent.v1.\(accountIdB64)"
+    }
+
+    private var deviceAcksUnsent: Bool {
+        guard let account = activeAccountIdB64 else { return false }
+        return UserDefaults.standard.object(forKey: Self.deviceAcksUnsentKey(accountIdB64: account)) != nil
+    }
+
+    /// Send every acknowledgement this device holds again when an earlier
+    /// send was not confirmed (registers are write-once, so a re-send is a
+    /// no-op on a device that has them).
+    func flushUnsentDeviceAcks() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.deviceAcksUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.deviceAckEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("device-ack: register send failed; retried")
+        }
+    }
+
+    /// Acknowledge `keys` (32-byte device signature keys) for the account:
+    /// write the registers (write-once), persist at once and send the new
+    /// envelopes to the account's other devices. A send that fails is owed
+    /// and retried by the poll loop.
+    func acknowledgeDevices(_ keys: [Data]) {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64, !keys.isEmpty else { return }
+        let envelopes: [Data]
+        do {
+            envelopes = try syncedState.acknowledgeDevices(
+                hlc: Hlc.mint(), deviceKeys: keys,
+                nowMs: UInt64(max(0, Date().timeIntervalSince1970 * 1000)))
+        } catch {
+            NSLog("device-ack: register refused")
+            return
+        }
+        guard !envelopes.isEmpty else { return }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sendLineageEnvelopes(envelopes)
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.removeObject(
+                        forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+                }
+            } catch {
+                // Set again: an earlier send that succeeded meanwhile may
+                // have cleared the marker this write set.
+                if self.activeAccountIdB64 == account {
+                    UserDefaults.standard.set(true, forKey: Self.deviceAcksUnsentKey(accountIdB64: account))
+                }
+                NSLog("device-ack: register send failed; retried")
+            }
+        }
+    }
+
     // MARK: - ADR-0076: the own-username register
 
     static func ownUsernameUnsentKey(accountIdB64: String) -> String {
@@ -2088,6 +2409,57 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             UserDefaults.standard.removeObject(forKey: Self.ownUsernameUnsentKey(accountIdB64: account))
         } catch {
             NSLog("ADR-0076: own-username register send failed; retried at the next start")
+        }
+        return true
+    }
+
+    // MARK: - Reactions-and-emoji spec section 6: the quick-reaction register
+
+    static func quickReactionUnsentKey(accountIdB64: String) -> String {
+        "lakko.quick-reaction.unsent.v1.\(accountIdB64)"
+    }
+
+    /// The account's quick reaction, `nil` for the default.
+    public var quickReaction: String? { (try? syncedState.quickReaction()).flatMap { $0 } }
+
+    /// Send the register again when an earlier send was not confirmed.
+    func flushUnsentQuickReaction() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.quickReactionUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            if let envelope = try syncedState.quickReactionEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("quick-reaction: register send failed; retried at the next start")
+        }
+    }
+
+    /// D3 — write the account's quick reaction (last writer wins), persist it
+    /// and send it to the account's other devices.
+    @discardableResult
+    public func setQuickReaction(_ emoji: String) async -> Bool {
+        guard ready, !deviceRemoved, let account = activeAccountIdB64 else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setQuickReaction(hlc: Hlc.mint(), emoji: emoji)
+        } catch {
+            NSLog("quick-reaction: register refused")
+            return false
+        }
+        guard written else { return true }
+        stateChanged()
+        persistSyncState()
+        UserDefaults.standard.set(true, forKey: Self.quickReactionUnsentKey(accountIdB64: account))
+        do {
+            if let envelope = try syncedState.quickReactionEnvelope() {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: Self.quickReactionUnsentKey(accountIdB64: account))
+        } catch {
+            NSLog("quick-reaction: register send failed; retried at the next start")
         }
         return true
     }
@@ -2243,3 +2615,5 @@ enum DeviceGroupSyncError: Error {
     /// No ready handle (not bootstrapped, reloading, or this device removed).
     case notReady
 }
+
+extension DeviceGroupSyncRepository: ConversationEndSync {}

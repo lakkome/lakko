@@ -27,6 +27,7 @@
  * would lose to the profile name in exactly one place.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { avatarFromJson } from "./avatar-model";
 import {
@@ -64,12 +65,23 @@ export interface ProfileRowPayload {
   /** keyB64 -> local rename, mirrored from the contacts store for the service
    *  worker. */
   readonly r: Record<string, string>;
+  /** keyB64 -> the label the app shows for that person in a conversation
+   *  (`memberNameOf` of the resolved name), mirrored for the service worker
+   *  under every key it can be handed: a group member's account key and each
+   *  of their leaf keys. Covers what the worker cannot work out itself (a
+   *  retired key's contact, a pending contact's link statement, the unnamed
+   *  word). Additive, absent in older rows. */
+  readonly n?: Record<string, string>;
 }
 
 const VERIFICATION_STATES: ReadonlySet<string> = new Set(["verified", "mismatch", "error"]);
 
 /** Encode a row (plus the rename mirror) to the payload JSON. */
-export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, string>): string {
+export function encodeProfileRow(
+  row: ProfileRow,
+  renames: ReadonlyMap<string, string>,
+  labels: ReadonlyMap<string, string> = new Map(),
+): string {
   const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown }> = {};
   for (const [key, prof] of row.profiles) {
     p[key] = {
@@ -93,7 +105,11 @@ export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, s
   for (const [key, name] of renames) {
     if (name.trim().length > 0) r[key] = name;
   }
-  const payload: ProfileRowPayload = { v: PROFILE_ROW_VERSION, p, vf, r };
+  const n: Record<string, string> = {};
+  for (const [key, label] of labels) {
+    if (label.trim().length > 0) n[key] = label;
+  }
+  const payload: ProfileRowPayload = { v: PROFILE_ROW_VERSION, p, vf, r, ...(labels.size > 0 ? { n } : {}) };
   return JSON.stringify(payload);
 }
 
@@ -187,10 +203,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -198,14 +214,10 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted profile row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
+    await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -215,11 +227,14 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  * @param deviceKeyFor  the account's device root key, or `null` when this
  *                      device holds none (the store then stays in memory)
  * @param renamesFor    the local renames to mirror into the row
+ * @param labelsFor     the labels the app shows per person key, mirrored for
+ *                      the service worker
  */
 export class IdbProfileBackend implements ProfileBackend {
   constructor(
-    private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>,
+    private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>,
     private readonly renamesFor: () => ReadonlyMap<string, string>,
+    private readonly labelsFor: () => ReadonlyMap<string, string> = () => new Map(),
   ) {}
 
   async load(accountId: string): Promise<ProfileRow | null> {
@@ -252,7 +267,7 @@ export class IdbProfileBackend implements ProfileBackend {
   async save(accountId: string, row: ProfileRow): Promise<void> {
     const deviceKey = await this.deviceKeyFor(accountId);
     if (deviceKey === null) return;
-    const json = encodeProfileRow(row, this.renamesFor());
+    const json = encodeProfileRow(row, this.renamesFor(), this.labelsFor());
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {

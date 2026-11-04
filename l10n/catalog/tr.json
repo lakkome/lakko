@@ -27,11 +27,11 @@
       "status": "machine"
     },
     "auth.brand.body": {
-      "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli. Lakko sunucuları mesajlarınızı asla göremez.",
+      "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli.",
       "status": "machine"
     },
     "auth.brand.foot": {
-      "text": "Açık kaynak. Telefon numarası gerekmez.",
+      "text": "İletişim sizin tarzınızda. Telefon numarası gerekmez.",
       "status": "machine"
     },
     "auth.brand.tagline": {
@@ -56,6 +56,14 @@
     },
     "auth.explainer.ways_back": {
       "text": "Şifrenizi unutursanız hâlâ oturumu açık olan başka bir cihaz, bir geçiş anahtarı, kurtarma ifadeniz, ifadenizden üç kelime ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "Sistem anahtarlığınız kullanılamıyor. Kilidini açın veya bir tane yükleyin, sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko anahtarlarınızı bu bilgisayarda güvenle saklayamıyor.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -183,7 +191,7 @@
       "status": "machine"
     },
     "auth.signup.lede": {
-      "text": "Şifreniz cihazınızdan asla çıkmaz. Sonraki adımda not almanız için bir kurtarma ifadesi alacaksınız.",
+      "text": "Parolanız cihazınızdan asla çıkmaz.",
       "status": "machine"
     },
     "auth.signup.name.hint": {
@@ -578,6 +586,10 @@
       "text": "{name} aramayı herkes için bitirdi",
       "status": "machine"
     },
+    "call.ended.no_longer_in_group": {
+      "text": "Artık bu grupta değilsiniz.",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Arama şifrelemesi kurulamadı, bu yüzden arama başlamadı.",
       "status": "machine"
@@ -674,24 +686,8 @@
       "text": "Yaptığınız ve aldığınız aramalar burada görünür.",
       "status": "machine"
     },
-    "call.history.join_by_link": {
-      "text": "Bağlantıyla katıl",
-      "status": "machine"
-    },
-    "call.history.join_invalid": {
-      "text": "Bu bir arama bağlantısına benzemiyor. Bağlantının tamamını yapıştırıp tekrar deneyin.",
-      "status": "machine"
-    },
     "call.history.new_call": {
       "text": "Yeni arama",
-      "status": "machine"
-    },
-    "call.history.paste_hint": {
-      "text": "Aramayı oluşturan kişi bağlantıyı paylaşır.",
-      "status": "machine"
-    },
-    "call.history.paste_label": {
-      "text": "Bir arama bağlantısı yapıştırın",
       "status": "machine"
     },
     "call.history.unknown_conversation": {
@@ -952,6 +948,10 @@
     },
     "call.log.declined": {
       "text": "Reddedildi",
+      "status": "machine"
+    },
+    "call.log.failed": {
+      "text": "Arama başarısız oldu",
       "status": "machine"
     },
     "call.log.incoming": {
@@ -1363,7 +1363,7 @@
       "status": "machine"
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Kanalı listenizden kaldırır ve bu cihaz onu okumayı bırakır. Daha sonra yeniden abone olabilirsiniz.",
+      "text": "Kanalı listenizden kaldırır ve gönderilerini tüm cihazlarınızdan siler. Daha sonra yeniden abone olabilirsiniz.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1483,7 +1483,7 @@
       "status": "machine"
     },
     "channels.meta.desc": {
-      "text": "Ad ve açıklama tüm abonelere şifreli olarak ulaşır. Sunucu bunları asla okumaz.",
+      "text": "Ad ve açıklama tüm abonelere ulaşır.",
       "status": "machine"
     },
     "channels.meta.error.description_bad_character": {
@@ -1575,7 +1575,7 @@
       "status": "machine"
     },
     "channels.new.subtitle": {
-      "text": "Aboneler adı ve açıklamayı görür. Bunlar şifreli iletilir; sunucuya yalnızca şifreli metin ulaşır.",
+      "text": "Aboneler adı ve açıklamayı görür.",
       "status": "machine"
     },
     "channels.new.title": {
@@ -1775,7 +1775,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.body": {
-      "text": "Kanal listenizden çıkar ve bu cihaz onu okumayı bırakır. Daha sonra yeniden abone olabilirsiniz.",
+      "text": "Listenizden kalkar ve gönderileri tüm cihazlarınızdan silinir. Daha sonra yeniden abone olabilirsiniz.",
       "status": "machine"
     },
     "channels.unsubscribe.title": {
@@ -2070,6 +2070,10 @@
       "text": "Ten rengi seçenekleri: {name}",
       "status": "machine"
     },
+    "chat.emoji.suggestions": {
+      "text": "Emoji önerileri",
+      "status": "machine"
+    },
     "chat.emoji.tab": {
       "text": "Emoji",
       "status": "machine"
@@ -2088,6 +2092,14 @@
     },
     "chat.ended.no_longer_member": {
       "text": "Artık bu grubun üyesi değilsiniz.",
+      "status": "machine"
+    },
+    "chat.ended.notice": {
+      "text": "Artık {name} içinde değilsiniz.",
+      "status": "machine"
+    },
+    "chat.ended.notice_body": {
+      "text": "Grup ve mesajları cihazlarınızdan silindi.",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -2210,16 +2222,8 @@
       "text": "GIF bulunamadı",
       "status": "machine"
     },
-    "chat.gif.note_dismiss": {
-      "text": "Anladım",
-      "status": "machine"
-    },
     "chat.gif.open_full": {
       "text": "GIF'i tam ekran aç",
-      "status": "machine"
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF araması, ne aradığınızı gören Lakko sunucusu üzerinden yapılır. Gönderilen GIF'ler her dosya gibi şifrelenir.",
       "status": "machine"
     },
     "chat.gif.rate_limited": {
@@ -2302,8 +2306,16 @@
       "text": "Grup bilgisi",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Bağlantı kopyalandı.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Bağlantıyı kopyala",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Bağlantı kopyalanamadı.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2331,7 +2343,7 @@
       "status": "machine"
     },
     "chat.leave.body": {
-      "text": "Bir sahip veya yönetici isteğinizi uygulayana kadar mesaj almaya devam edeceksiniz. Yeniden katılmak için yeni bir davet gerekir.",
+      "text": "Listenizden kalkar ve mesajları tüm cihazlarınızdan silinir. Bir sahip veya yönetici isteğinizi uygulayana kadar mesaj almaya devam edeceksiniz.",
       "status": "machine"
     },
     "chat.leave.confirm": {
@@ -2410,36 +2422,28 @@
       "text": "Üye ekle",
       "status": "machine"
     },
-    "chat.members.add.done": {
-      "text": "Eklendi: {name}.",
-      "status": "machine"
-    },
     "chat.members.add.error.no_bundle": {
       "text": "Bu kişi Lakko kurulumunu henüz tamamlamadı. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "chat.members.add.error.some_failed": {
-      "text": "Eklenemedi: {names}. Üyeler panelinden ekleyin.",
+      "text": "{names} eklenemedi. Tekrar deneyin.",
       "status": "machine"
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "Bu adla kayıtlı hesap yok: {name}.",
-      "status": "machine"
-    },
-    "chat.members.add.placeholder": {
-      "text": "@kullaniciadi",
-      "status": "machine"
-    },
-    "chat.members.add.requested": {
-      "text": "Ekleme istendi: {name}. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
+    "chat.members.add.search_placeholder": {
+      "text": "Kişilerde veya insanlarda ara",
       "status": "machine"
     },
     "chat.members.add.submit": {
       "text": "Ekle",
       "status": "machine"
     },
-    "chat.members.admin.demoted": {
-      "text": "Yöneticilikten çıkarıldı.",
+    "chat.members.add.submit_count": {
+      "text": "{count} kişiyi ekle",
+      "status": "machine"
+    },
+    "chat.members.add.title": {
+      "text": "Üye ekle",
       "status": "machine"
     },
     "chat.members.admin.make": {
@@ -2450,16 +2454,8 @@
       "text": "Yönetici",
       "status": "machine"
     },
-    "chat.members.admin.promoted": {
-      "text": "Yöneticiliğe yükseltildi.",
-      "status": "machine"
-    },
     "chat.members.admin.remove": {
       "text": "Yöneticiliği kaldır",
-      "status": "machine"
-    },
-    "chat.members.admin.requested": {
-      "text": "Değişiklik istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
       "status": "machine"
     },
     "chat.members.count": {
@@ -2482,24 +2478,48 @@
       "text": "Onayla",
       "status": "machine"
     },
-    "chat.members.join.approved_added": {
-      "text": "Katılma onaylandı. Kişi gruba eklendi.",
-      "status": "machine"
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Katılma onaylandı. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
+    "chat.members.join.asked": {
+      "text": "İstedi: {when}",
       "status": "machine"
     },
     "chat.members.join.heading": {
       "text": "Katılma istekleri ({count})",
       "status": "machine"
     },
+    "chat.members.join.heading_full": {
+      "text": "Katılma istekleri (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "{name} davet etti · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "{name} davet etti",
+      "status": "machine"
+    },
     "chat.members.join.link_unknown": {
       "text": "Davet bağlantısı bilinmiyor",
       "status": "machine"
     },
+    "chat.members.join.more_waiting": {
+      "text": "Bekleyen başka istekler var. Bunları yanıtladıkça görünürler.",
+      "status": "machine"
+    },
     "chat.members.join.reject": {
       "text": "Reddet",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all": {
+      "text": "Tümünü reddet",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "Bu, henüz görmedikleriniz dahil bekleyen tüm istekleri kaldırır.",
+      "status": "machine"
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Tüm istekler reddedilsin mi?",
       "status": "machine"
     },
     "chat.members.join.rejected": {
@@ -2526,10 +2546,6 @@
       "text": "Üyelik değişikliklerini grup sahibi veya bir yönetici uygular. Biri bunu yaptığında otomatik olarak uygulanırlar.",
       "status": "machine"
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {Şimdi # değişiklik uygulanmayı bekliyor.} other {Şimdi # değişiklik uygulanmayı bekliyor.}}",
-      "status": "machine"
-    },
     "chat.members.pending.waiting_added": {
       "text": "Eklenmeyi bekliyor.",
       "status": "machine"
@@ -2548,18 +2564,6 @@
     },
     "chat.members.remove.confirm_named": {
       "text": "Çıkar: {name}",
-      "status": "machine"
-    },
-    "chat.members.remove.done": {
-      "text": "Üye çıkarıldı.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested": {
-      "text": "Çıkarma istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
-      "status": "machine"
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Çıkarma istendi.",
       "status": "machine"
     },
     "chat.members.remove.title": {
@@ -2726,6 +2730,18 @@
       "text": "Karşı taraf",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "{name} bağlandığında kullanılabilir.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} henüz yanıt vermedi. Yeni bir bağlantı isteyebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name}, uygulaması tekrar çevrimiçi olduğunda mesajlarınızı alacak.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "Fotoğraf yüklenemedi",
       "status": "machine"
@@ -2802,6 +2818,26 @@
       "text": "Tepki ver - Tepki verenler: {names}",
       "status": "machine"
     },
+    "chat.reaction.cap_reached": {
+      "text": "En fazla 3 tepki ekleyebilirsiniz. Başka bir tane eklemek için birini kaldırın.",
+      "status": "machine"
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# tepki} other {# tepki}}",
+      "status": "machine"
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, sizin tepkiniz",
+      "status": "machine"
+    },
+    "chat.reaction.list_all": {
+      "text": "Tümü {count}",
+      "status": "machine"
+    },
+    "chat.reaction.list_title": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
     "chat.reaction.reacted_by": {
       "text": "Tepki verenler: {names}",
       "status": "machine"
@@ -2814,8 +2850,16 @@
       "text": "Tepkinizi kaldırın - Tepki verenler: {names}",
       "status": "machine"
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Kimin tepki verdiğini göster",
+      "status": "machine"
+    },
     "chat.reaction.single_emoji": {
       "text": "Tepki tek bir emoji olmalıdır.",
+      "status": "machine"
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "Mesajlarınıza yeni tepkiler, {count}",
       "status": "machine"
     },
     "chat.reauth.action": {
@@ -3134,8 +3178,12 @@
       "text": "Katılma isteği",
       "status": "machine"
     },
-    "chat.system.members_changed": {
-      "text": "Üyeler değişti",
+    "chat.system.member_joined": {
+      "text": "{name} katıldı",
+      "status": "machine"
+    },
+    "chat.system.member_left": {
+      "text": "{name} artık grupta değil",
       "status": "machine"
     },
     "chat.timeline.empty": {
@@ -3164,14 +3212,6 @@
     },
     "chat.transfer.candidate_admin": {
       "text": "{name}, yönetici",
-      "status": "machine"
-    },
-    "chat.transfer.done_admin": {
-      "text": "Grubun yeni sahibi: {name}. Yönetici olarak kalıyorsunuz.",
-      "status": "machine"
-    },
-    "chat.transfer.done_member": {
-      "text": "Grubun yeni sahibi: {name}. Artık normal bir üyesiniz.",
       "status": "machine"
     },
     "chat.transfer.irreversible_body": {
@@ -3212,10 +3252,6 @@
     },
     "chat.transfer.pending_named": {
       "text": "Sahip yapılması bekleniyor: {name}.",
-      "status": "machine"
-    },
-    "chat.transfer.requested": {
-      "text": "Sahiplik devri istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
       "status": "machine"
     },
     "chat.transfer.role_change_pending": {
@@ -3490,6 +3526,14 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Diğer cihazlarınız bunu sohbetlerinize ekliyor.",
+      "status": "machine"
+    },
+    "chats.restored.card": {
+      "text": "Anahtarlarınız geri yüklendi. Kişileriniz Lakko’yu açtıkça sohbetleriniz geri gelir. Önceki iletiler geri yüklenmez.",
+      "status": "machine"
+    },
     "chats.row.actions": {
       "text": "Sohbet işlemleri",
       "status": "machine"
@@ -3524,6 +3568,10 @@
     },
     "chats.row.unread_overflow": {
       "text": "99+",
+      "status": "machine"
+    },
+    "chats.row.unseen_reactions": {
+      "text": "Yeni tepkiler",
       "status": "machine"
     },
     "chats.search.clear": {
@@ -3604,6 +3652,10 @@
     },
     "common.copy": {
       "text": "Kopyala",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "Kopyalanamadı.",
       "status": "machine"
     },
     "common.creating": {
@@ -3842,12 +3894,28 @@
       "text": "Davet bağlantısını paylaş",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Kişilere ekle",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} kişisini bu hesaptaki kişi listenize geri ekler.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Kişi işlemleri",
       "status": "machine"
     },
     "contacts.detail.call_needs_chat": {
       "text": "Arama başlatmak için önce bir mesaj gönderin.",
+      "status": "machine"
+    },
+    "contacts.detail.chat_starting": {
+      "text": "Sohbetiniz hazırlanıyor.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -4014,6 +4082,10 @@
       "text": "Kabul et",
       "status": "machine"
     },
+    "contacts.request.accept_failed": {
+      "text": "Kabul edilemedi. Yeniden deneyin.",
+      "status": "machine"
+    },
     "contacts.request.decline": {
       "text": "Reddet",
       "status": "machine"
@@ -4056,6 +4128,58 @@
     },
     "contacts.safety.title": {
       "text": "Güvenlik numarasını doğrula",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR kodu tara",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
+      "status": "machine"
+    },
+    "contacts.search.ask_again": {
+      "text": "Yeniden iste",
+      "status": "machine"
+    },
+    "desktop.capture.body": {
+      "text": "Sistemin gizlilik ayarlarından izin verin, sonra yeniden deneyin.",
+      "status": "machine"
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko kameranızı kullanamıyor.",
+      "status": "machine"
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko mikrofonunuzu kullanamıyor.",
+      "status": "machine"
+    },
+    "desktop.capture.open_settings": {
+      "text": "Ayarları aç",
+      "status": "machine"
+    },
+    "desktop.quit_call.confirm": {
+      "text": "Aramayı sonlandır ve çık",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Arama sonlandırılıp çıkılsın mı?",
+      "status": "machine"
+    },
+    "desktop.still_running.body": {
+      "text": "Mesajlar ve aramalar gelmeye devam edecek. Durdurmak için tepsi simgesinden çıkın.",
+      "status": "machine"
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko çalışmaya devam ediyor.",
+      "status": "machine"
+    },
+    "desktop.tray.open": {
+      "text": "Lakko'yu aç",
+      "status": "machine"
+    },
+    "desktop.tray.quit": {
+      "text": "Lakko'dan çık",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -4180,10 +4304,6 @@
     },
     "device_link.qr.waiting": {
       "text": "Diğer cihazınızın bu kodu taraması bekleniyor...",
-      "status": "machine"
-    },
-    "device_link.request.added": {
-      "text": "Cihaz eklendi.",
       "status": "machine"
     },
     "device_link.request.adding": {
@@ -4312,10 +4432,6 @@
     },
     "devices.added_notice.notification_body": {
       "text": "Cihazlarınızı görmek için Lakko'yu açın.",
-      "status": "machine"
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Cihazlar'ı aç",
       "status": "machine"
     },
     "devices.added_notice.title": {
@@ -4486,12 +4602,12 @@
       "text": "Diğer cihazlarınız sohbetlerini korur ve yeni anahtarları kendiliğinden alır.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -4552,6 +4668,10 @@
     },
     "devices.scan.confirm.title": {
       "text": "Bu cihaz bağlansın mı?",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title_named": {
+      "text": "“{name}” bağlansın mı?",
       "status": "machine"
     },
     "devices.scan.error.camera_denied": {
@@ -4718,10 +4838,6 @@
       "text": "Rastgele konular karıştır",
       "status": "machine"
     },
-    "discover.mix.off_line": {
-      "text": "Daha az veri kullanır. Lakko sunucusu hangi konuları seçtiğinizi tam olarak görür.",
-      "status": "machine"
-    },
     "discover.nothing_yet": {
       "text": "Henüz öneri yok. Konu seçin ya da gruplarınızdaki kişilerden kanallarını paylaşmalarını isteyin.",
       "status": "machine"
@@ -4731,7 +4847,7 @@
       "status": "machine"
     },
     "discover.pick.body": {
-      "text": "Lakko bunlar için önerileri, Lakko sunucusu tam olarak hangilerini seçtiğinizi anlamasın diye birkaç rastgele konuyla karıştırarak indirir. Hangi kanalları açtığınızı asla görmez.",
+      "text": "Lakko bunlar için önerileri birkaç rastgele konuyla karıştırarak indirir.",
       "status": "machine"
     },
     "discover.pick.title": {
@@ -4766,10 +4882,6 @@
       "text": "Ara",
       "status": "machine"
     },
-    "discover.search.helper": {
-      "text": "Aramalar Lakko sunucusuna gönderilir.",
-      "status": "machine"
-    },
     "discover.search.no_results": {
       "text": "Kanal bulunamadı.",
       "status": "machine"
@@ -4799,11 +4911,11 @@
       "status": "machine"
     },
     "discover.share.line": {
-      "text": "Bu gruptaki kişiler hangi kanalları takip ettiğinizi görebilir. Lakko sunucusu göremez.",
+      "text": "Bu gruptaki kişiler hangi kanalları takip ettiğinizi görebilir.",
       "status": "machine"
     },
     "discover.shared.desc": {
-      "text": "Kişilerin hangi kanalları takip ettiğinizi görebildiği gruplar. Lakko sunucusu göremez.",
+      "text": "Kişilerin hangi kanalları takip ettiğinizi görebildiği gruplar.",
       "status": "machine"
     },
     "discover.shared.empty": {
@@ -4964,14 +5076,6 @@
     },
     "feed.attachments.count": {
       "text": "{count, plural, one {# ek} other {# ek}}",
-      "status": "machine"
-    },
-    "feed.banner.dismiss": {
-      "text": "Anladım",
-      "status": "machine"
-    },
-    "feed.banner.local": {
-      "text": "Akışınız bu cihazın aldığı mesajları gösterir.",
       "status": "machine"
     },
     "feed.divider.new": {
@@ -5755,7 +5859,275 @@
       "status": "machine"
     },
     "group.join.wait_secondary": {
-      "text": "İki adımın da süre sınırı yok. Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
+      "text": "Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
+      "status": "machine"
+    },
+    "group_delete.action": {
+      "text": "Grubu sil",
+      "status": "machine"
+    },
+    "group_delete.body": {
+      "text": "Bu, grubu ve mesajlarını tüm cihazlarınızdan kaldırır ve @{name} adını 30 gün sonra serbest bırakır. Geri alınamaz.",
+      "status": "machine"
+    },
+    "group_delete.confirm": {
+      "text": "Sil",
+      "status": "machine"
+    },
+    "group_delete.title": {
+      "text": "Bu grup silinsin mi?",
+      "status": "machine"
+    },
+    "group_handle.error.bad_form": {
+      "text": "3 ile 32 karakter: a-z harfleri, rakamlar ve _.",
+      "status": "machine"
+    },
+    "group_handle.error.failed": {
+      "text": "Kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.held": {
+      "text": "Bu @ad kullanılamıyor. Başka birini deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.offline": {
+      "text": "Lakko'ya ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_handle.error.taken": {
+      "text": "Bu @ad alınmış.",
+      "status": "machine"
+    },
+    "group_handle.error.too_many": {
+      "text": "Bugün çok sayıda grup oluşturdunuz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_info.handle.choose": {
+      "text": "Seç",
+      "status": "machine"
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "@adı kopyala",
+      "status": "machine"
+    },
+    "group_info.handle.lapsed": {
+      "text": "Bu grubun @adı yok. Bir tane seçin.",
+      "status": "machine"
+    },
+    "group_info.header.aria": {
+      "text": "Grup",
+      "status": "machine"
+    },
+    "group_info.header.private": {
+      "text": "Özel grup · {count, plural, one {# üye} other {# üye}}",
+      "status": "machine"
+    },
+    "group_info.header.public": {
+      "text": "Herkese açık grup · {count, plural, one {# üye} other {# üye}}",
+      "status": "machine"
+    },
+    "group_photo.error.limit": {
+      "text": "Dosya gönderme sınırına ulaştınız. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Fotoğrafı yalnızca sahip ve yöneticiler değiştirebilir.",
+      "status": "machine"
+    },
+    "group_photo.error.upload": {
+      "text": "Fotoğraf yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_photo.gone": {
+      "text": "Fotoğraf artık kullanılamıyor. Başka bir tane seç.",
+      "status": "machine"
+    },
+    "group_photo.owed": {
+      "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
+      "status": "machine"
+    },
+    "group_photo.remove.body": {
+      "text": "Gruptaki herkes onun yerine baş harfleri görecek.",
+      "status": "machine"
+    },
+    "group_photo.remove.confirm": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "group_photo.remove.title": {
+      "text": "Grup fotoğrafı kaldırılsın mı?",
+      "status": "machine"
+    },
+    "group_reactions.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "group_reactions.all": {
+      "text": "Tüm tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.all_sub": {
+      "text": "Üyeler herhangi bir emojiyle tepki verebilir.",
+      "status": "machine"
+    },
+    "group_reactions.choose_one": {
+      "text": "En az birini seçin.",
+      "status": "machine"
+    },
+    "group_reactions.max": {
+      "text": "En fazla 100 seçebilirsiniz.",
+      "status": "machine"
+    },
+    "group_reactions.none": {
+      "text": "Tepki yok",
+      "status": "machine"
+    },
+    "group_reactions.none_sub": {
+      "text": "Üyeler mesajlara tepki veremez.",
+      "status": "machine"
+    },
+    "group_reactions.remove_a11y": {
+      "text": "{emoji} kaldır",
+      "status": "machine"
+    },
+    "group_reactions.save_failed": {
+      "text": "Kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "group_reactions.some": {
+      "text": "Bazı tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.some_sub": {
+      "text": "Üyeler yalnızca seçtiğiniz emojilerle tepki verebilir.",
+      "status": "machine"
+    },
+    "group_reactions.title": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Kaydetmezseniz değişiklikleriniz kaybolacak.",
+      "status": "machine"
+    },
+    "group_reactions.value.all": {
+      "text": "Tümü",
+      "status": "machine"
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# tepki} other {# tepki}}",
+      "status": "machine"
+    },
+    "group_reactions.value.off": {
+      "text": "Kapalı",
+      "status": "machine"
+    },
+    "group_solo.add_members": {
+      "text": "Üye ekle",
+      "status": "machine"
+    },
+    "group_solo.copy_invite": {
+      "text": "Davet bağlantısını kopyala",
+      "status": "machine"
+    },
+    "group_solo.created": {
+      "text": "Bu grubu sen oluşturdun",
+      "status": "machine"
+    },
+    "group_solo.only_you": {
+      "text": "Burada yalnızca siz varsınız.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.body": {
+      "text": "Aramadan çıkar. Yalnızca sahip veya bir yönetici davet ederse katılınabilir. Gruptaki herkes kalır.",
+      "status": "machine"
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Özel yap",
+      "status": "machine"
+    },
+    "group_type.confirm.private.title": {
+      "text": "Bu grup özel yapılsın mı?",
+      "status": "machine"
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# kişi katılmayı bekliyor. Hâlâ yanıt verebilirsiniz.} other {# kişi katılmayı bekliyor. Hâlâ yanıt verebilirsiniz.}}",
+      "status": "machine"
+    },
+    "group_type.confirm.public.body": {
+      "text": "Herkes onu bulup katılmak isteyebilir. Adı, fotoğrafı, açıklaması ve yaklaşık boyutu herkese görünür olur.",
+      "status": "machine"
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Herkese açık yap",
+      "status": "machine"
+    },
+    "group_type.confirm.public.title": {
+      "text": "Bu grup herkese açık yapılsın mı?",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.body": {
+      "text": "Eski @ad hemen çalışmayı bırakır. 30 gün boyunca bu grup için ayrılmış kalır.",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Değiştir",
+      "status": "machine"
+    },
+    "group_type.confirm.rename.title": {
+      "text": "@ad değiştirilsin mi?",
+      "status": "machine"
+    },
+    "group_type.handle": {
+      "text": "@ad",
+      "status": "machine"
+    },
+    "group_type.handle_private": {
+      "text": "Bunu yalnızca üyeler görür.",
+      "status": "machine"
+    },
+    "group_type.handle_public": {
+      "text": "Herkes bu grubu bu adla bulabilir.",
+      "status": "machine"
+    },
+    "group_type.needs_name": {
+      "text": "Herkese açık bir grubun adı olmalı.",
+      "status": "machine"
+    },
+    "group_type.not_saved": {
+      "text": "Kimlerin katılabileceği değişikliği kaydedilemedi. Yeniden denemek için açın.",
+      "status": "machine"
+    },
+    "group_type.owed": {
+      "text": "Yeniden çevrimiçi olduğunda uygulanacak.",
+      "status": "machine"
+    },
+    "group_type.pending": {
+      "text": "Kaydedilmeyi bekliyor",
+      "status": "machine"
+    },
+    "group_type.private": {
+      "text": "Özel",
+      "status": "machine"
+    },
+    "group_type.private_desc": {
+      "text": "Yalnızca bir yöneticinin davet ettiği kişiler katılabilir. Aramada görünmez.",
+      "status": "machine"
+    },
+    "group_type.public": {
+      "text": "Herkese açık",
+      "status": "machine"
+    },
+    "group_type.public_desc": {
+      "text": "Herkes bu grubu bulup katılmak isteyebilir.",
+      "status": "machine"
+    },
+    "group_type.title": {
+      "text": "Grup türü",
+      "status": "machine"
+    },
+    "group_type.who_can_join": {
+      "text": "Kimler katılabilir",
       "status": "machine"
     },
     "guest.claim.error.generic": {
@@ -5874,6 +6246,74 @@
       "text": "Bu bağlantı artık geçerli değil. Kişiden yenisini isteyin.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} zaten kişilerinizde",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Gönderen kişiden yenisini isteyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Bu davet bağlantısı artık çalışmıyor",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Tamam",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Zaten bir hesabım var",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Sohbeti aç",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Eklemek istediğiniz kişiyle paylaşın.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Bu sizin kendi davet bağlantınız",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} sizi Lakko'ya davet ediyor",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} kişilerinize eklensin mi?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "bu kişi",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Davet",
       "status": "machine"
@@ -5975,7 +6415,7 @@
       "status": "machine"
     },
     "invite.group.invited_by": {
-      "text": "Davet eden: {fingerprint}",
+      "text": "Davet eden: {name}",
       "status": "machine"
     },
     "invite.group.lead_anonymous": {
@@ -6026,8 +6466,44 @@
       "text": "Oluşturulma: {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Süre",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Kişi sayısı",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Bağlantıyı sil",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Bağlantıya zaten sahip olan kişi artık onu kullanamaz.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Bu bağlantı silinsin mi?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Bağlantı silindi.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Bağlantılarınızdan birini açan herkes, bağlantının süresi dolana veya kullanım hakkı bitene kadar size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Bağlantıyı düzenle",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Kaydettiğinizde yeni bir bağlantı oluşur. Eskisi çalışmaz.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Bağlantı koşulları",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6036,6 +6512,22 @@
     },
     "invite.links.error.copy": {
       "text": "Bağlantı kopyalanamadı.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 saat ile 365 gün arasında bir süre girin.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 ile {max} arasında bir kişi sayısı girin.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Bağlantı silinemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Bağlantı kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6074,6 +6566,10 @@
       "text": "{count} dk kaldı",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Özel",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {# gün içinde} other {# gün içinde}}",
       "status": "machine"
@@ -6110,12 +6606,28 @@
       "text": "Yeni",
       "status": "machine"
     },
+    "invite.links.qr_hint": {
+      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
     "invite.links.revoked": {
       "text": "Bağlantı iptal edildi.",
       "status": "machine"
     },
     "invite.links.revoking": {
       "text": "İptal ediliyor...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR kodunu göster",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Gün",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Saat",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6132,6 +6644,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {# kullanım kaldı} other {# kullanım kaldı}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Özel",
       "status": "machine"
     },
     "invite.links.uses_option_one": {
@@ -6258,20 +6774,24 @@
       "text": "Ayarlar",
       "status": "machine"
     },
+    "nav.settings.attention_a11y": {
+      "text": "Ayarlar. Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
     "new_group.back": {
       "text": "Gruplar",
+      "status": "machine"
+    },
+    "new_group.error.secure_setup": {
+      "text": "Bu grup oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
       "status": "machine"
     },
     "new_group.error.sign_in": {
       "text": "Grup oluşturmak için tekrar giriş yapın.",
       "status": "machine"
     },
-    "new_group.index_hint": {
-      "text": "Mesajlaşmaya başlamak için bir grup seçin",
-      "status": "machine"
-    },
     "new_group.name_hint": {
-      "text": "Adı tüm üyeler görür. Şifreli gönderilir; sunucu onu asla okumaz.",
+      "text": "Adı tüm üyeler görür.",
       "status": "machine"
     },
     "new_group.name_not_sent": {
@@ -6283,7 +6803,7 @@
       "status": "machine"
     },
     "new_group.no_contacts": {
-      "text": "Önce kişi ekleyin; grup zaten tanıdığınız kişilerle başlar.",
+      "text": "Grup yalnızca sizinle başlayabilir. Kişileri şimdi veya daha sonra ekleyin.",
       "status": "machine"
     },
     "new_group.subtitle": {
@@ -6356,6 +6876,14 @@
     },
     "notification.message.new": {
       "text": "Yeni mesaj",
+      "status": "machine"
+    },
+    "notification.reaction.body": {
+      "text": "{name} mesajınıza {emoji} tepkisi verdi",
+      "status": "machine"
+    },
+    "open_in_app.button": {
+      "text": "Uygulamada aç",
       "status": "machine"
     },
     "proof.add_device.help": {
@@ -6535,7 +7063,7 @@
       "status": "machine"
     },
     "protect.phrase.body": {
-      "text": "Yalnızca sizin sakladığınız 12 kelime. Daha güçlüdür ve e-postayla ilgisi yoktur.",
+      "text": "Yalnızca sizin sakladığınız 12 sözcük. Geri dönmenin en güçlü yolu.",
       "status": "machine"
     },
     "protect.phrase.save.body": {
@@ -6627,7 +7155,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Kullanıcı adınızı girin, ardından Lakko'yu oturumu hâlâ açık olan bir cihazda açın ve gösterdiği kodu buraya yazın. Lakko'nun sunucularının okuyabileceği hiçbir şey gönderilmez. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
+      "text": "Kullanıcı adınızı girin, ardından Lakko'yu oturumu hâlâ açık olan bir cihazda açın ve gösterdiği kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -7122,8 +7650,24 @@
       "text": "kelime {position}",
       "status": "machine"
     },
+    "requests_sent.ask_again": {
+      "text": "Tekrar iste",
+      "status": "machine"
+    },
+    "requests_sent.no_answer": {
+      "text": "Henüz yanıt yok.",
+      "status": "machine"
+    },
+    "requests_sent.title": {
+      "text": "Gönderilen istekler",
+      "status": "machine"
+    },
+    "requests_sent.waiting": {
+      "text": "Bir yönetici bekleniyor.",
+      "status": "machine"
+    },
     "restore_identity.device_intro": {
-      "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Aktarım uçtan uca şifrelidir; Lakko'nun sunucuları onu okuyamaz. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
+      "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -7266,6 +7810,50 @@
       "text": "Hesap anahtarlarınızı geri yükleyin",
       "status": "machine"
     },
+    "search.conversation.channel_line": {
+      "text": "Herkese açık kanal · {band} abone",
+      "status": "machine"
+    },
+    "search.conversation.group_line": {
+      "text": "Herkese açık grup · {band} üye",
+      "status": "machine"
+    },
+    "search.conversation.open": {
+      "text": "Aç",
+      "status": "machine"
+    },
+    "search.conversation.out_of_requests": {
+      "text": "Bugün çok sayıda gruba katılmak istediniz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "search.conversation.queue_full": {
+      "text": "Bu grupta şu an çok fazla istek var. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "search.conversation.request": {
+      "text": "Katılmak iste",
+      "status": "machine"
+    },
+    "search.conversation.request_sent": {
+      "text": "İstek gönderildi. Bir yönetici Lakko'yu bir sonraki açışında görecek.",
+      "status": "machine"
+    },
+    "search.conversation.request_sent_button": {
+      "text": "İstek gönderildi",
+      "status": "machine"
+    },
+    "search.conversation.subscribe": {
+      "text": "Abone ol",
+      "status": "machine"
+    },
+    "search.conversations.heading": {
+      "text": "Gruplar ve kanallar",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "Hiçbir şey bulunamadı. Yazımı kontrol edin veya bir davet bağlantısı isteyin.",
+      "status": "machine"
+    },
     "search.people.add_contact": {
       "text": "Kişi ekle",
       "status": "machine"
@@ -7307,11 +7895,59 @@
       "status": "machine"
     },
     "settings.about.protection.body": {
-      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir, Lakko'nun sunucuları asla okuyamaz. Şifreniz cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
+      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir. Şifreniz cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
       "status": "machine"
     },
     "settings.about.protection.title": {
       "text": "Lakko sizi nasıl korur",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Pencereyi kapat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Sohbetler, Akış, Kişiler, Aramalar, Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Son mesajımı düzenle (boş mesaj alanında)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Menüyü, iletişim kutusunu veya paneli kapat; aramadan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Sohbet klasörünü değiştir",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Yeni sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Önceki veya sonraki sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko'dan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Sohbetlerde ve kişilerde ara",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Gönder veya yeni satıra geç",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Klavye kısayolları",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -7454,6 +8090,18 @@
       "text": "Bu cihazdaki tema.",
       "status": "machine"
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Hızlı tepki",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Hızlı tepkiyi değiştir",
+      "status": "machine"
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Göndermek için bir mesaja iki kez dokunun.",
+      "status": "machine"
+    },
     "settings.appearance.theme": {
       "text": "Tema",
       "status": "machine"
@@ -7502,12 +8150,40 @@
       "text": "Verileriniz",
       "status": "machine"
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "Pencere kapalıyken mesaj ve aramalar gelmeye devam eder.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Pencere kapatıldığında çalışmaya devam et",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko'nun bu bilgisayarda nasıl çalıştığı.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Bu bilgisayarda oturum açtığımda Lakko'yu aç",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Bu ayarlar okunamadı. Ayarlar'ı yeniden açın.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Bu ayar değiştirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
     "settings.devices.add.lede": {
       "text": "Önce yeni cihazda Lakko'ya giriş yapın. Ardından ikisinden hangisinin kod gösterdiğini seçin.",
       "status": "machine"
     },
     "settings.devices.add.no_camera": {
       "text": "İki cihazda da kamera yok mu? Yenisinde giriş yapın ve \"{method}\" seçeneğini seçin: burada karşılaştırılacak bir kodla \"{prompt}\" istemi görünür.",
+      "status": "machine"
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Cihazlar. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.devices.device_n": {
@@ -7531,7 +8207,7 @@
       "status": "machine"
     },
     "settings.devices.lede": {
-      "text": "Hesabınızda oturum açık olan telefonlar, tabletler ve bilgisayarlar. Cihaz eklemek uçtan uca şifrelidir; Lakko'nun sunucuları bunu okuyamaz.",
+      "text": "Hesabınızda oturum açık olan telefonlar, tabletler ve bilgisayarlar.",
       "status": "machine"
     },
     "settings.devices.list.lede": {
@@ -7568,10 +8244,6 @@
     },
     "settings.devices.reset_note": {
       "text": "Hesap anahtarlarınız bugün bu cihazda sıfırlandı. Diğer cihazların oturumu kapatıldı ve cihazlar kaldırıldı. Onları Ayarlar > Cihazlar > Cihaz ekle bölümünden yeniden ekleyin.",
-      "status": "machine"
-    },
-    "settings.devices.scan.done": {
-      "text": "Cihaz eklendi. Katılımı tamamlandığında listede görünecek.",
       "status": "machine"
     },
     "settings.devices.scan.opening": {
@@ -7652,6 +8324,14 @@
     },
     "settings.notifications.off.title": {
       "text": "Bildirimleri açın",
+      "status": "machine"
+    },
+    "settings.notifications.reactions": {
+      "text": "Tepkiler",
+      "status": "machine"
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "Biri mesajlarınıza tepki verdiğinde",
       "status": "machine"
     },
     "settings.passkeys.add": {
@@ -8044,6 +8724,10 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "settings.security.attention_a11y": {
+      "text": "Güvenlik. Hesabınıza bir cihaz eklendi",
       "status": "machine"
     },
     "settings.security.devices.sub": {
@@ -8446,6 +9130,22 @@
       "text": "Uygulanıyor",
       "status": "machine"
     },
+    "who_can_find_me.contacts.all": {
+      "text": "Tüm kişilerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Yalnızca seçtiklerim",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Yalnızca seçtiğiniz kişilerin kişileri ({chosen}/{total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Artık yalnızca seçtiğiniz kişiler. {privacy} bölümünden değiştirin.",
+      "status": "machine"
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Kişilerimin kişileri",
       "status": "machine"
@@ -8492,6 +9192,18 @@
     },
     "who_can_find_me.list.choose": {
       "text": "Grupları ve kanalları seç",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Kişileri seç",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "Henüz kişiniz yok.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Kişilerde ara",
       "status": "machine"
     },
     "who_can_find_me.list.empty": {
@@ -8558,184 +9270,12 @@
       "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
       "status": "machine"
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Bu kişinin kişileri beni bulabilir",
+      "status": "machine"
+    },
     "who_can_find_me.title": {
       "text": "Beni kimler bulabilir",
-      "status": "machine"
-    },
-    "invite.contact.page.title": {
-      "text": "{name} kişilerinize eklensin mi?",
-      "status": "machine"
-    },
-    "invite.contact.page.add": {
-      "text": "Ekle",
-      "status": "machine"
-    },
-    "invite.contact.page.not_now": {
-      "text": "Şimdi değil",
-      "status": "machine"
-    },
-    "invite.contact.page.already_title": {
-      "text": "{name} zaten kişilerinizde",
-      "status": "machine"
-    },
-    "invite.contact.page.open_chat": {
-      "text": "Sohbeti aç",
-      "status": "machine"
-    },
-    "invite.contact.page.own_title": {
-      "text": "Bu sizin kendi davet bağlantınız",
-      "status": "machine"
-    },
-    "invite.contact.page.own_body": {
-      "text": "Eklemek istediğiniz kişiyle paylaşın.",
-      "status": "machine"
-    },
-    "invite.contact.page.done": {
-      "text": "Tamam",
-      "status": "machine"
-    },
-    "invite.contact.page.add_failed": {
-      "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.contact.page.unnamed": {
-      "text": "bu kişi",
-      "status": "machine"
-    },
-    "chat.pending.waiting": {
-      "text": "{name}, uygulaması tekrar çevrimiçi olduğunda mesajlarınızı alacak.",
-      "status": "machine"
-    },
-    "chat.pending.stale": {
-      "text": "{name} henüz yanıt vermedi. Yeni bir bağlantı isteyebilirsiniz.",
-      "status": "machine"
-    },
-    "chat.pending.call_disabled": {
-      "text": "{name} bağlandığında kullanılabilir.",
-      "status": "machine"
-    },
-    "contacts.add_back.control": {
-      "text": "Kişilere ekle",
-      "status": "machine"
-    },
-    "contacts.add_back.sub": {
-      "text": "{name} kişisini bu hesaptaki kişi listenize geri ekler.",
-      "status": "machine"
-    },
-    "contacts.add_back.action": {
-      "text": "Ekle",
-      "status": "machine"
-    },
-    "invite.contact.page.answer_failed": {
-      "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.links.show_qr": {
-      "text": "QR kodunu göster",
-      "status": "machine"
-    },
-    "invite.links.qr_hint": {
-      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
-      "status": "machine"
-    },
-    "contacts.scan_qr": {
-      "text": "QR kodu tara",
-      "status": "machine"
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
-      "status": "machine"
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Özel",
-      "status": "machine"
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Özel",
-      "status": "machine"
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Süre",
-      "status": "machine"
-    },
-    "invite.links.unit_hours": {
-      "text": "Saat",
-      "status": "machine"
-    },
-    "invite.links.unit_days": {
-      "text": "Gün",
-      "status": "machine"
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Kişi sayısı",
-      "status": "machine"
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "1 saat ile 365 gün arasında bir süre girin.",
-      "status": "machine"
-    },
-    "invite.links.error.custom_uses": {
-      "text": "1 ile {max} arasında bir kişi sayısı girin.",
-      "status": "machine"
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} sizi Lakko'ya davet ediyor",
-      "status": "machine"
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Hesap oluştur",
-      "status": "machine"
-    },
-    "invite.contact.page.have_account": {
-      "text": "Zaten bir hesabım var",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Bu davet bağlantısı artık çalışmıyor",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Gönderen kişiden yenisini isteyin.",
-      "status": "machine"
-    },
-    "invite.links.edit": {
-      "text": "Bağlantıyı düzenle",
-      "status": "machine"
-    },
-    "invite.links.edit_title": {
-      "text": "Bağlantı koşulları",
-      "status": "machine"
-    },
-    "invite.links.edit_note": {
-      "text": "Kaydettiğinizde yeni bir bağlantı oluşur. Eskisi çalışmaz.",
-      "status": "machine"
-    },
-    "invite.links.delete": {
-      "text": "Bağlantıyı sil",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Bu bağlantı silinsin mi?",
-      "status": "machine"
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Bağlantıya zaten sahip olan kişi artık onu kullanamaz.",
-      "status": "machine"
-    },
-    "invite.links.deleted": {
-      "text": "Bağlantı silindi.",
-      "status": "machine"
-    },
-    "invite.links.error.delete": {
-      "text": "Bağlantı silinemedi. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "invite.links.error.edit": {
-      "text": "Bağlantı kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     }
   }

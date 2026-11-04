@@ -206,9 +206,12 @@ public data class GroupInvitePageLines(
     val membersLine: UiText?,
 )
 
-/** Text of the muted foot under the button: `Invited by <fingerprint>`. */
-public fun invitedByLine(fingerprint: String): UiText =
-    UiText("invite.group.invited_by", texts = mapOf("fingerprint" to fingerprint))
+/** Text of the muted foot under the button: `Invited by <name>`, from the
+ *  sealed preview; `null` with no name, and then the line is gone. */
+public fun invitedByLine(preview: GroupInvitePreviewUi?): UiText? =
+    preview?.inviterName?.trim()?.takeIf { it.isNotEmpty() }?.let { name ->
+        UiText("invite.group.invited_by", texts = mapOf("name" to name))
+    }
 
 /**
  * Derive the card copy from a preview (or its absence).

@@ -39,6 +39,9 @@ pub(crate) struct MlsFailure {
     /// poisoned lock). `None` is meaningful: it tells a client "this is not a
     /// permission answer", which it renders with its fail-closed fallback.
     pub(crate) reason: Option<MlsRefusalReason>,
+    /// The group a `groupStillActive` refusal names, and `None` for every
+    /// other failure. Becomes `err.refusalGroupId`.
+    pub(crate) group_id: Option<Vec<u8>>,
 }
 
 impl From<lakko_mls::Error> for MlsFailure {
@@ -46,6 +49,10 @@ impl From<lakko_mls::Error> for MlsFailure {
         Self {
             reason: e.refusal_reason(),
             message: e.to_string(),
+            group_id: match e {
+                lakko_mls::Error::GroupStillActive { group_id } => Some(group_id),
+                _ => None,
+            },
         }
     }
 }
@@ -55,6 +62,7 @@ impl From<String> for MlsFailure {
         Self {
             message,
             reason: None,
+            group_id: None,
         }
     }
 }
@@ -64,6 +72,7 @@ impl From<&str> for MlsFailure {
         Self {
             message: message.to_string(),
             reason: None,
+            group_id: None,
         }
     }
 }
@@ -73,7 +82,9 @@ impl MlsFailure {
     /// `instanceof Error`, `.message` and a stack all work as before) carrying
     /// two extra own properties when this is a membership refusal —
     /// `refusalReason` (the stable code) and `refusalDisposition`
-    /// (`"retryLater"` / `"doNotRetry"` / `"notPermitted"`).
+    /// (`"retryLater"` / `"doNotRetry"` / `"notPermitted"`). A
+    /// `groupStillActive` refusal also carries `refusalGroupId`, a
+    /// `Uint8Array`, so the caller knows which journal to read.
     ///
     /// Properties rather than a message prefix: a caller reads
     /// `err.refusalReason`, it parses nothing, and adding the fields breaks no
@@ -94,6 +105,14 @@ impl MlsFailure {
                 target,
                 &JsValue::from_str("refusalDisposition"),
                 &JsValue::from_str(reason.disposition().code()),
+            );
+        }
+        if let Some(group_id) = self.group_id {
+            let target: &JsValue = err.as_ref();
+            let _ = js_sys::Reflect::set(
+                target,
+                &JsValue::from_str("refusalGroupId"),
+                &js_sys::Uint8Array::from(group_id.as_slice()).into(),
             );
         }
         err.into()
@@ -1194,6 +1213,24 @@ impl Group {
         Ok(())
     }
 
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (opened from a knock row with `openKnockRow`); approve or
+    /// reject it like an external-join proposal. Never advances the epoch.
+    #[wasm_bindgen(js_name = retainJoinRequest)]
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.retain_join_request(&identity.inner, key_package)
+            .map_err(mls_err)?
+            .into())
+    }
+
     /// Signature keys of the external-join proposals awaiting a decision
     /// (ADR-0027), flat-concatenated — each is a fixed 32-byte Ed25519 key, so
     /// the caller slices into 32-byte chunks (the role-table FFI convention).
@@ -1916,6 +1953,45 @@ impl Group {
         Ok(g.is_active())
     }
 
+    /// Delete this group's state from `identity`'s storage, for a group this
+    /// device is out of (C-88). This is local: it tells nobody anything and
+    /// does not leave the group. Repeating it changes nothing. Persist the
+    /// snapshot afterwards.
+    ///
+    /// Throws a `groupStillActive` refusal (`err.refusalGroupId`), changing
+    /// nothing, when the group stored under this id is active, which also
+    /// covers a stale handle of a group a Welcome has since replaced.
+    #[wasm_bindgen(js_name = deleteLocally)]
+    pub fn delete_locally(&self, identity: &Identity) -> Result<(), JsValue> {
+        self.delete_locally_core(identity)
+            .map_err(MlsFailure::into_js)
+    }
+
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88). The one way a device offline past the journal's retention stops
+    /// holding a group.
+    ///
+    /// **Call this only holding a `conversationEnded` register from the
+    /// account's own synced state, and pass that register's `epoch`.** The core
+    /// cannot see the register: called on anything else, this deletes a live
+    /// membership. Never on a refused Delivery Service read.
+    ///
+    /// Throws a `groupStillActive` refusal (`err.refusalGroupId`), changing
+    /// nothing, when the stored group is active at an epoch above
+    /// `endedEpoch`: this device came back after that end, so it answers with
+    /// a `joined` register. A group that is not active goes at any epoch.
+    /// Repeating it changes nothing. Persist the snapshot afterwards.
+    #[wasm_bindgen(js_name = deleteAfterEndedElsewhere)]
+    pub fn delete_after_ended_elsewhere(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), JsValue> {
+        self.delete_after_ended_elsewhere_core(identity, ended_epoch)
+            .map_err(MlsFailure::into_js)
+    }
+
     /// Local leaf index of the calling identity.
     #[wasm_bindgen(getter, js_name = ownLeafIndex)]
     pub fn own_leaf_index(&self) -> Result<u32, JsValue> {
@@ -2148,6 +2224,7 @@ impl Group {
                      awaiting a verdict"
                 ),
                 reason: Some(MlsRefusalReason::SweepAlreadyStaged),
+                group_id: None,
             });
         }
         let Some(staged) = g
@@ -2166,6 +2243,22 @@ impl Group {
             welcome_bytes,
             swept_records: staged.swept.into_iter().map(Into::into).collect(),
         }))
+    }
+
+    /// Core of [`Self::delete_locally`].
+    fn delete_locally_core(&self, identity: &Identity) -> Result<(), MlsFailure> {
+        Ok(self.locked()?.delete(&identity.inner)?)
+    }
+
+    /// Core of [`Self::delete_after_ended_elsewhere`].
+    fn delete_after_ended_elsewhere_core(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), MlsFailure> {
+        Ok(self
+            .locked()?
+            .delete_after_ended_elsewhere(&identity.inner, ended_epoch)?)
     }
 
     /// Core of [`Self::has_staged_sweep`].
@@ -2242,6 +2335,51 @@ impl Group {
 // MLS group; web composers go through this instead of the throwaway-group
 // path the prior implementation used.)
 // ============================================================================
+
+/// What `retainJoinRequest` did with a request read off a knock row
+/// (ADR-0087 section 5).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinRequest {
+    joiner_signature_key: Vec<u8>,
+    outcome: &'static str,
+}
+
+impl From<lakko_mls::JoinRequest> for JoinRequest {
+    fn from(r: lakko_mls::JoinRequest) -> Self {
+        use lakko_mls::JoinRequestOutcome as O;
+        Self {
+            joiner_signature_key: r.joiner_signature_key,
+            outcome: match r.outcome {
+                O::Retained => "retained",
+                O::AlreadyPending => "already-pending",
+                O::AlreadyMember => "already-member",
+                O::QueueFull => "queue-full",
+                O::NotAdmissible => "not-admissible",
+            },
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl JoinRequest {
+    /// The joiner's leaf signature key: the handle `approveExternalJoin` /
+    /// `rejectExternalJoin` take.
+    #[wasm_bindgen(getter, js_name = joinerSignatureKey)]
+    #[must_use]
+    pub fn joiner_signature_key(&self) -> Vec<u8> {
+        self.joiner_signature_key.clone()
+    }
+
+    /// `"retained"`, `"already-pending"` (an approve can act on both),
+    /// `"already-member"`, `"queue-full"` (stop the knock cursor before this
+    /// row) or `"not-admissible"` (drop the row).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn outcome(&self) -> String {
+        self.outcome.to_string()
+    }
+}
 
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (ADR-0010 Tier 1). Mirror of the
@@ -2508,6 +2646,45 @@ impl PublisherGroup {
                 retained,
             } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
+    }
+
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (a co-publisher's, opened from the channel's knock with `openKnockRow`);
+    /// approve it with `approveExternalJoin`.
+    #[wasm_bindgen(js_name = retainJoinRequest)]
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.retain_join_request(&identity.inner, key_package)
+            .map_err(mls_err)?
+            .into())
+    }
+
+    /// ADR-0087 section 7 — encrypt an application message for the
+    /// publishers at the current epoch (the admission-seed envelope a channel
+    /// owner hands its co-publishers); read it with
+    /// `processIncomingVerifyingRoles`.
+    #[wasm_bindgen(js_name = createApplicationMessage)]
+    pub fn create_application_message(
+        &self,
+        identity: &Identity,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let msg = g
+            .inner_mut()
+            .create_application_message(&identity.inner, plaintext)
+            .map_err(mls_err)?;
+        group::encode_message(&msg).map_err(mls_err)
     }
 
     /// ADR-0028 OQ3 — signature keys of the pending co-publisher external-join
@@ -5926,6 +6103,49 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), total, "refusal codes must be unique");
+    }
+
+    /// `groupStillActive` is the one refusal that names something, and what it
+    /// names has to reach the failure the JS error is built from: the caller
+    /// reads the journal of exactly that group.
+    #[test]
+    fn a_group_still_active_refusal_carries_the_group_id() {
+        let alice = Identity::from_seed(&[0xE0u8; 64]).unwrap();
+        let group = Group::new(&alice, GroupKind::Group).unwrap();
+        let group_id = group.locked().unwrap().group_id();
+
+        let f = group.delete_locally_core(&alice).unwrap_err();
+        assert_eq!(f.reason, Some(lakko_mls::RefusalReason::GroupStillActive));
+        assert_eq!(f.group_id.as_ref(), Some(&group_id));
+        assert_eq!(
+            f.reason.map(lakko_mls::RefusalReason::code),
+            Some("groupStillActive")
+        );
+
+        // A register older than the group this device holds is refused the
+        // same way, and one at its epoch takes it.
+        let epoch = group.locked().unwrap().epoch();
+        let group_later = Group::new(&alice, GroupKind::Group).unwrap();
+        let later_id = group_later.locked().unwrap().group_id();
+        group_later
+            .locked()
+            .unwrap()
+            .self_update(&alice.inner)
+            .expect("a commit moves the group on");
+        let f = group_later
+            .delete_after_ended_elsewhere_core(&alice, epoch)
+            .unwrap_err();
+        assert_eq!(f.reason, Some(lakko_mls::RefusalReason::GroupStillActive));
+        assert_eq!(f.group_id.as_ref(), Some(&later_id));
+        group
+            .delete_after_ended_elsewhere_core(&alice, epoch)
+            .expect("the register takes the group it names");
+        assert!(lakko_mls::Group::load(&alice.inner, &group_id)
+            .unwrap()
+            .is_none());
+
+        let f = MlsFailure::from(lakko_mls::Error::Codec("bad wire".into()));
+        assert_eq!(f.group_id, None, "only this refusal names a group");
     }
 
     /// A failure that is not a membership refusal carries **no** reason, so the

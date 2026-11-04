@@ -131,11 +131,14 @@ enum GroupCallHostRules {
     /// row: a join that never connected rang nowhere and missed nothing, and the
     /// group-call banner is what announces a live call, so there is no missed
     /// row either.
-    static func transcriptRow(initiator: Bool, connectedAtMs: Int64?, endedAtMs: Int64) -> CallTranscriptRow? {
+    static func transcriptRow(
+        initiator: Bool, connectedAtMs: Int64?, endedAtMs: Int64, video: Bool = false
+    ) -> CallTranscriptRow? {
         guard let connectedAtMs else { return nil }
         return CallTranscriptRow(
             direction: initiator ? .outgoing : .incoming,
-            outcome: .answered(durationMs: max(0, endedAtMs &- connectedAtMs)))
+            outcome: .answered(durationMs: max(0, endedAtMs &- connectedAtMs)),
+            video: video)
     }
 
     // MARK: - Epoch changes
@@ -184,6 +187,16 @@ enum GroupCallHostRules {
 
     // MARK: - The chat's call buttons
 
+    /// `docs/ux/group-and-channel-privacy.md` section 10 — a group of one has
+    /// no call controls: there is nobody to call. They appear with a second
+    /// person. `people` counts persons, not leaves (ADR-0050), so one person
+    /// on two phones is still alone; a roster that cannot be read names nobody
+    /// to call. A one-to-one always has someone.
+    static func hasSomeoneToCall(isGroup: Bool, people: Int?) -> Bool {
+        guard isGroup else { return true }
+        return (people ?? 0) > 1
+    }
+
     /// What a chat's call buttons do.
     enum ChatCallAction: Equatable {
         /// Withdrawn: membership ended, or a call is already running anywhere.
@@ -203,14 +216,16 @@ enum GroupCallHostRules {
     /// start a second one. A group call already in progress in this chat is
     /// JOINED, never shadowed by a new one; otherwise a group (ADR-0062 kind,
     /// any size — a two-person group included) starts an SFU call and a
-    /// one-to-one a 1x1 P2P call.
+    /// one-to-one a 1x1 P2P call. A group with nobody else in it has nothing
+    /// to do here (``hasSomeoneToCall(isGroup:people:)``).
     static func chatCallAction(
         membershipEnded: Bool,
         callInProgress: Bool,
         affordance: GroupCallAffordance,
-        isGroup: Bool
+        isGroup: Bool,
+        someoneToCall: Bool = true
     ) -> ChatCallAction {
-        if membershipEnded || callInProgress { return .unavailable }
+        if membershipEnded || callInProgress || !someoneToCall { return .unavailable }
         if case .joinable(let callId, _, _) = affordance { return .joinGroup(callId: callId) }
         return isGroup ? .startGroup : .startOneToOne
     }

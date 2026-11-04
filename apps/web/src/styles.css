@@ -338,6 +338,18 @@ a:focus-visible {
   line-height: 14px;
   text-decoration: none;
 }
+.lk-rail a.lk-rail-item {
+  position: relative;
+}
+.lk-rail-badge {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+}
 .lk-rail a.lk-rail-item:hover {
   background: var(--surface-hover);
   color: var(--surface-fg);
@@ -1452,6 +1464,18 @@ a.lk-row.active {
     --lk-phrase-columns: 4;
   }
 }
+/* The grid sits in a narrow card on the sign-in pages of a wide window, where
+   four columns cut words in half: the card decides, not the window. */
+.lk-phrase-block,
+.lk-phrase-input {
+  container-type: inline-size;
+}
+@container (max-width: 459px) {
+  .lk-phrase-cols,
+  .lk-phrase-grid {
+    --lk-phrase-columns: 3;
+  }
+}
 
 /* A checkbox with its sentence. */
 .lk-check {
@@ -2289,6 +2313,20 @@ input.lk-sas-code {
 .lk-layer::backdrop {
   background: rgba(15, 18, 32, 0.45);
 }
+/* The confirmation host (ui/ConfirmDialog.tsx) and the conversation-info
+   layer: centred over the whole window, whatever the page around them sets,
+   with a backdrop over the whole window. */
+.lk-confirm-dialog:modal,
+.lk-layer:modal {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+}
+.lk-confirm-dialog::backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 32, 0.45);
+}
 .lk-layer-card {
   display: flex;
   flex-direction: column;
@@ -2439,6 +2477,23 @@ input.lk-sas-code {
 .lk-menu button.danger-item {
   color: var(--danger);
 }
+/* docs/ux/desktop.md section 7: under the card, where a person is looking. In
+   Safari and on Windows and Linux this button is the only way into the app. */
+.lk-open-in-app {
+  position: fixed;
+  inset-block-end: 32px;
+  inset-inline: 16px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.lk-open-in-app > * {
+  pointer-events: auto;
+}
+
 .lk-menu-sep {
   height: 1px;
   margin: 4px 6px;
@@ -2534,6 +2589,7 @@ input.lk-sas-code {
    reaction bar and a menu rather than one panel. */
 .lk-msg-menu-reactions {
   display: flex;
+  flex-direction: column;
   gap: 2px;
   width: max-content;
   padding: 4px 6px;
@@ -2552,6 +2608,31 @@ input.lk-sas-code {
   line-height: 1;
   color: inherit;
   cursor: pointer;
+}
+.lk-msg-menu-reactions:has(.lk-msg-menu-reaction-cap) {
+  border-radius: var(--radius-lg, 16px);
+}
+.lk-msg-menu-reaction-row {
+  display: flex;
+  gap: 2px;
+}
+/* docs/ux/reactions-and-emoji.md section 5: an emoji the person already gave
+   sits on the accent-soft circle; at three, the others are dimmed. */
+.lk-msg-menu-reactions button.mine {
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+.lk-msg-menu-reactions button.dimmed {
+  opacity: 0.35;
+  cursor: default;
+}
+.lk-msg-menu-reaction-cap,
+.lk-reaction-cap {
+  margin: 2px 6px 0;
+  max-width: 16rem;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--surface-muted);
 }
 .lk-msg-menu-reactions button.more {
   display: inline-flex;
@@ -3175,21 +3256,6 @@ input.lk-sas-code {
   object-fit: cover;
   display: block;
 }
-.lakko-picker-note {
-  margin: 0 0.45rem 0.45rem;
-  padding: 0.4rem 0.5rem;
-  font-size: 0.75rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-bg) 85%, var(--accent));
-  display: flex;
-  gap: 0.5rem;
-  align-items: flex-start;
-}
-.lakko-picker-note button {
-  padding: 0.1rem 0.5rem;
-  font-size: 0.75rem;
-  flex: 0 0 auto;
-}
 .lakko-picker-footer {
   font-size: 0.7rem;
   color: var(--surface-muted);
@@ -3290,6 +3356,42 @@ input.lk-sas-code {
 .lk-alert.accent {
   background: var(--accent-soft);
   color: var(--accent);
+}
+/* "You are no longer in {name}." (group-and-channel-privacy UX 9.1). */
+.lk-end-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px;
+}
+.lk-end-dialog {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  box-shadow: var(--shadow-1);
+  padding: 0;
+  width: min(28rem, calc(100vw - 2rem));
+}
+.lk-end-dialog-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+}
+.lk-end-dialog-draft {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.lk-end-dialog-text {
+  margin: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 /* "A device was added to your account" (identity-recovery UX 17.5). */
 .lk-device-added {
@@ -3591,6 +3693,18 @@ a.ghost.small:hover {
 }
 .lk-bubble-text {
   white-space: pre-wrap;
+}
+/* docs/ux/message-links.md: underlined, so a link does not rest on colour
+   alone. On an outgoing bubble the accent is the background, so the link keeps
+   the bubble's text colour there. */
+.lk-text-link {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.lk-bubble.outgoing .lk-text-link {
+  color: inherit;
 }
 /* ADR-0052 / section 3.1 — the quote block inside a reply's bubble: the
    same rule, the name on the first line, the excerpt on the second, both
@@ -3921,6 +4035,13 @@ a.ghost.small:hover {
   text-align: center;
 }
 
+/* docs/ux/second-device.md section 4 — one sentence per person, stacked. */
+.lk-system-row--membership {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 /* docs/ux/calls.md section 6 — a finished call in the conversation. Centred
    like the other system rows (nobody said it), but a real button: tapping it
    calls back. The missed variant is tinted AND says `Missed call` AND carries
@@ -4029,6 +4150,126 @@ a.ghost.small:hover {
 }
 button.lk-reaction {
   cursor: pointer;
+}
+.lk-reaction.more {
+  color: var(--surface-muted);
+}
+/* Section 7: a group chip shows up to three reactors' avatars, overlapping. */
+.lk-reaction-avatars {
+  display: inline-flex;
+}
+.lk-reaction-avatars .lk-reaction-avatar {
+  width: 16px;
+  height: 16px;
+  font-size: 8px;
+  border: 1px solid var(--surface-elevated);
+}
+.lk-reaction-avatars .lk-reaction-avatar + .lk-reaction-avatar {
+  margin-left: -5px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lk-reaction {
+    animation: lk-reaction-in 150ms ease-out;
+  }
+}
+@keyframes lk-reaction-in {
+  from {
+    transform: scale(0.8);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+/* Section 8.1: who reacted, a popover at the chip. */
+.lk-reactors-list {
+  position: fixed;
+  z-index: 1001;
+  width: 280px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  border-radius: var(--radius-lg, 16px);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-reactors-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--surface-border);
+}
+.lk-reactors-tabs button {
+  min-height: 0;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  white-space: nowrap;
+}
+.lk-reactors-tabs button[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+.lk-reactors-rows {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 0;
+  overflow-y: auto;
+}
+.lk-reactors-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+}
+button.lk-reactors-row:hover,
+button.lk-reactors-row:focus-visible {
+  background: var(--surface-hover);
+}
+.lk-reactors-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Section 13: one to three emoji only, drawn large with no bubble; the time
+   sits in a small pill under it. */
+.lk-bubble.emoji-only .lk-bubble-text {
+  line-height: 1.15;
+}
+.lk-bubble.emoji-only-1 .lk-bubble-text {
+  font-size: 56px;
+}
+.lk-bubble.emoji-only-2 .lk-bubble-text {
+  font-size: 44px;
+}
+.lk-bubble.emoji-only-3 .lk-bubble-text {
+  font-size: 36px;
+}
+.lk-bubble.emoji-only .lk-bubble-meta {
+  align-self: flex-end;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+}
+.lakko-picker-notice {
+  margin: 4px 8px;
+  font-size: 12px;
+  color: var(--surface-muted);
+}
+.lakko-emoji-grid button.dimmed {
+  opacity: 0.35;
+  cursor: default;
 }
 /* The quick reaction bar used to be its own popover positioned INSIDE the
    bubble (`top: 1.2rem`), i.e. over the play button on a voice message, one
@@ -5704,6 +5945,8 @@ button.lk-call-chip:focus-visible {
   inset: 0;
   z-index: 12;
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-items: center;
   justify-content: center;
   background: color-mix(in srgb, var(--surface-bg) 72%, transparent);
@@ -5714,6 +5957,9 @@ button.lk-call-chip:focus-visible {
   font-size: 17px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+}
+.lk-call-ended p.lk-call-ended-title {
+  font-weight: 600;
 }
 
 
@@ -6266,26 +6512,55 @@ html[data-call-bar] body {
   gap: 12px;
 }
 .lk-feed-item {
+  /* flex: none - in the scrolling column a card keeps its height; shrinking
+     to the list is what cut every message off at its first line. */
+  flex: none;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 14px 16px 12px;
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-md);
-  overflow: hidden;
 }
-.lk-feed-open {
+.lk-feed-item:hover {
+  background: var(--surface-hover);
+}
+.lk-feed-body {
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+.lk-feed-open {
+  /* Every value here undoes the global button: a centred, nowrap control. */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 4px;
   width: 100%;
-  padding: 14px 16px 10px;
+  min-height: 0;
+  padding: 0;
   border: none;
+  border-radius: 0;
   background: none;
   color: inherit;
   text-align: left;
+  white-space: normal;
   font: inherit;
   cursor: pointer;
 }
-.lk-feed-open:hover {
-  background: var(--surface-hover);
+.lk-feed-open:hover:not(:disabled) {
+  background: none;
+}
+.lk-feed-media {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 .lk-feed-meta {
   display: flex;
@@ -6338,7 +6613,6 @@ html[data-call-bar] body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 16px 10px;
 }
 .lk-feed-reaction {
   padding: 2px 8px;
@@ -6350,9 +6624,13 @@ html[data-call-bar] body {
   display: flex;
   gap: 8px;
   align-items: baseline;
+  justify-content: flex-start;
   width: 100%;
-  padding: 10px 16px;
+  min-height: 0;
+  margin-top: 4px;
+  padding: 10px 0 0;
   border: none;
+  border-radius: 0;
   border-top: 1px solid var(--surface-border);
   background: none;
   color: var(--accent);
@@ -6373,23 +6651,31 @@ html[data-call-bar] body {
 .lk-feed-replies {
   list-style: none;
   margin: 0;
-  padding: 0 0 8px;
+  padding: 0;
+}
+.lk-feed-replies-toggle:hover:not(:disabled) {
+  background: none;
 }
 .lk-feed-reply {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 2px;
   width: 100%;
-  padding: 8px 16px 8px 28px;
+  min-height: 0;
+  padding: 8px 0;
   border: none;
+  border-radius: 0;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
+  white-space: normal;
   cursor: pointer;
 }
-.lk-feed-reply:hover {
-  background: var(--surface-hover);
+.lk-feed-reply:hover:not(:disabled) {
+  background: none;
 }
 .lk-feed-end {
   padding: 12px 0;
@@ -6716,6 +7002,9 @@ html[data-call-bar] body {
 }
 .lk-feed-item {
   position: relative;
+}
+.lk-feed-source-avatar {
+  grid-column: 1;
 }
 .lk-feed-item-more {
   position: absolute;
@@ -7637,6 +7926,310 @@ button.lk-folder-new {
 .lk-word-suggest > [role="option"]:hover,
 .lk-word-suggest > .active {
   background: var(--surface-hover);
+}
+/* Identity-recovery UX 17.5: the exclamation-mark badge on the Settings
+   destination and on the Devices row, and the highlighted pending row. */
+.lk-rail-icon {
+  position: relative;
+  display: inline-flex;
+}
+.lk-rail-icon .lk-attention-badge {
+  position: absolute;
+  top: -6px;
+  inset-inline-end: -8px;
+}
+.lk-attention-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--warning);
+  color: var(--accent-fg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+.lk-card-row.lk-device-new {
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* ------------------------------------------------------- info screens */
+
+/* `docs/ux/conversation-info.md` section 3 — a group's info, and Add members
+   over it, are screens in the conversation's column. They cover the
+   conversation, which stays laid out underneath (inert), so its scroll
+   position and draft are as they were left. */
+.lk-info-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-bg);
+}
+.lk-info-head {
+  gap: 8px;
+  padding-left: 12px;
+}
+@media (max-width: 720px) {
+  .lk-info-head {
+    padding-left: 4px;
+  }
+}
+.lk-info-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lk-info-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 24px 24px;
+}
+@media (max-width: 720px) {
+  .lk-info-scroll {
+    padding: 12px 16px 20px;
+  }
+}
+/* Keeps the info readable on a wide column instead of stretching it. */
+.lk-info-scroll > * {
+  width: 100%;
+  max-width: 640px;
+  align-self: center;
+}
+
+/* A member row's person, when it opens their contact screen. */
+.lk-member-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.lk-member-open:hover .lk-row-title {
+  text-decoration: underline;
+}
+.lk-member-open:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
+}
+
+/* Add members, the first row of the members list. */
+.lk-member-add {
+  width: 100%;
+  padding: 8px 10px;
+  gap: 10px;
+  min-height: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  justify-content: flex-start;
+  cursor: pointer;
+}
+.lk-member-add:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-member-add .lk-row-title {
+  color: var(--accent);
+}
+.lk-member-add-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Add members: the picked people, removable, between the field and the list. */
+.lk-pick-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lk-pick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 2px 2px 2px 4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--surface-fg);
+  font-size: 14px;
+}
+.lk-pick-chip .lk-icon-button {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+}
+
+/* docs/ux/reactions-and-emoji.md section 12 — the unseen-reactions button,
+   a round button with a heart and a count at the timeline's end. */
+.lk-unseen-reactions {
+  position: sticky;
+  bottom: 12px;
+  margin-left: auto;
+  margin-right: 8px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--accent);
+  box-shadow: var(--shadow-2);
+  float: right;
+}
+.lk-unseen-reactions-count {
+  font-size: 13px;
+  color: var(--surface-fg);
+}
+.lk-list-unseen-reactions {
+  display: inline-flex;
+  color: var(--accent);
+}
+/* docs/ux/reactions-and-emoji.md section 13 — the `:` suggestion strip. */
+.lk-colon-strip {
+  display: flex;
+  gap: 2px;
+  margin: 0 12px 4px;
+  padding: 4px 6px;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+  border-radius: 999px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-colon-strip button {
+  min-height: 0;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+}
+.lk-colon-strip button.active,
+.lk-colon-strip button:focus-visible {
+  background: var(--accent-soft);
+}
+/* ADR-0087 — the group info header (docs/ux/group-and-channel-privacy.md 4). */
+.lk-info-header {
+  align-items: center;
+}
+.lk-info-header-line {
+  margin: 0;
+  color: var(--surface-muted);
+  font-size: 14px;
+}
+.lk-info-header .lk-card-row {
+  width: 100%;
+}
+/* Uploading: a ring around the circle, the edit button disabled. */
+.lk-profile-avatar.uploading > .lk-avatar {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lk-profile-avatar.uploading > .lk-avatar {
+    animation: lk-upload-pulse 1.2s ease-in-out infinite;
+  }
+}
+@keyframes lk-upload-pulse {
+  50% {
+    outline-color: var(--accent-soft);
+  }
+}
+button.lk-card-row-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.lk-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-bg);
+}
+.lk-banner > span {
+  flex: 1;
+}
+.lk-radio-row {
+  cursor: pointer;
+}
+.lk-reactions-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lk-reactions-grid button {
+  min-height: 0;
+  padding: 4px 6px;
+  font-size: 22px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-elevated);
+}
+/* ADR-0087 section 10 — a group of one. */
+.lk-solo-group {
+  margin: 16px auto;
+  padding: 12px 16px;
+  max-width: 360px;
+  text-align: center;
+  color: var(--surface-muted);
+}
+.lk-solo-group .lk-actions {
+  justify-content: center;
 }
 
 /* ----- ADR-0082: translation and transcription -------------------------- */

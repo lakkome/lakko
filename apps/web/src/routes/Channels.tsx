@@ -28,6 +28,9 @@
  */
 
 import { anonTokenMessage } from "../tokens/token-copy";
+import { pollWhileVisible, samePosts } from "../channels/open-channel-poll";
+import { sessionAccountOf } from "../chat/persist-hooks";
+import { channelIdForHandle, forgetClaimedHandle } from "../channels/claimed-handles";
 import {
   createEffect,
   createMemo,
@@ -72,7 +75,8 @@ import { pollForCoPublishWelcome, requestToCoPublish } from "../channels/copubli
 import { LegacyChannelError } from "../channels/legacy-v1";
 import { coPublisherJoinFailure } from "../channels/copublisher-join-failure";
 import { JOIN_TRY_AGAIN } from "./join-group-failure";
-import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-discovery";
+import { DiscoveryHttpError, HandleWriteError, registerChannelHandle } from "../channels/channel-discovery";
+import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken, isRateLimited } from "../discovery/handle-check";
 import { channelTitle, displayHandle } from "../channels/channel-row";
 import { knownSubscriberCount } from "../channels/ui-cache";
 import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/conversation-info";
@@ -80,14 +84,14 @@ import { uiRules } from "../chat/ui-rules";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
 import { MembersPanel } from "../channels/MembersPanel";
-import { forgetUploadedCard } from "../channels/member-cards";
-import { leaveChannelOnServer } from "../channels/unsubscribe";
+import { useMembershipEnd, type MembershipEndApi } from "../chat/MembershipEndContext";
 import { useOwnMemberCard } from "../channels/own-member-card";
-import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
+import { PostCard } from "../channels/PostCard";
+import { isHiddenPostDecode, toPostDecode, type PostDecode } from "../channels/post-decode";
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
-import { DiscoveryClient } from "../discovery/client";
+import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 import { markChannelRead } from "../feed/feed-marks-store";
 import { useChats } from "../chat/ChatContext";
 import {
@@ -101,7 +105,7 @@ import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
-import { ModalLayer } from "../ui/ModalLayer";
+import { PushedScreen } from "../ui/PushedScreen";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { screenAnchor } from "../ui/screen-anchor";
@@ -133,9 +137,9 @@ function ChannelHead(props: {
       <button
         type="button"
         class="lk-icon-button lk-narrow-only"
-        title={t("nav.channels")}
-        aria-label={t("channels.back")}
-        onClick={(): void => navigate(paths.channels)}
+        title={t("nav.chats")}
+        aria-label={t("chat.header.back")}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={20} />
       </button>
@@ -372,17 +376,21 @@ function PostList(props: {
 }
 
 /**
- * Stop following a channel on this device: leave it on the server (ADR-0060
- * section 3 - the signed `DELETE` removes the subscriber row, its seed
- * envelopes and its member card), then forget the reader keypair and the
- * seeds it recovered, and drop the channel from the local list.
+ * Stop following a channel: the end of a membership (ADR-0087 section 9),
+ * carried out by `MembershipEndContext.tsx` on every device of the account.
+ * It leaves the channel on the server (ADR-0060 section 3 - the signed
+ * `DELETE` removes the subscriber row, its seed envelopes and its member
+ * card), then forgets the reader keypair, the seeds and the posts.
  *
  * The local half happens whatever the server said: a request that never
  * arrived or was refused is logged, and the row it leaves behind goes with
- * the 90-day subscriber prune. The copy says what the person sees: the
- * channel leaves the list and this device stops reading it.
+ * the 90-day subscriber prune.
  */
-async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
+async function confirmStopFollowing(
+  channelIdHex: string,
+  name: string,
+  membershipEnd: MembershipEndApi,
+): Promise<boolean> {
   const ok = await requestConfirm({
     title:
       name.trim().length > 0
@@ -394,20 +402,7 @@ async function confirmStopFollowing(channelIdHex: string, name: string): Promise
     tone: "danger",
   });
   if (!ok) return false;
-  const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
-  if (keys !== undefined) {
-    const outcome = await leaveChannelOnServer(channelIdHex, keys);
-    forgetUploadedCard(channelIdHex, keys);
-    if (outcome.kind !== "left") {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[channels] leaving on the server failed; dropped locally",
-        outcome.kind === "refused" ? `${outcome.status} ${outcome.code}` : outcome.kind,
-      );
-    }
-  }
-  channelsActions.clearSubscriberKeys(channelIdHex);
-  channelsActions.removeChannel(channelIdHex);
+  await membershipEnd.endChannel(channelIdHex, name);
   return true;
 }
 
@@ -488,6 +483,26 @@ const NewChannel: Component = () => {
   const [handle, setHandle] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
+  // A held `@name` reads "taken" once typing stops, asked as seldom as search
+  // asks (who-can-find-me 6.1): 500 ms after the last key, never twice for
+  // one name within 60 s; Create reuses the name's OPRF answer
+  // (`discovery/handle-check.ts`).
+  const [handleIsTaken, setHandleIsTaken] = createSignal(false);
+  let takenTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    const h = handle().trim().replace(/^@/, "");
+    setHandleIsTaken(false);
+    if (takenTimer !== null) clearTimeout(takenTimer);
+    if (h.length < 3 || !/^[a-z0-9_]{3,32}$/.test(h.toLowerCase())) return;
+    takenTimer = setTimeout(() => {
+      void handleTaken(h).then((taken) => {
+        if (handle().trim().replace(/^@/, "") === h && taken !== null) setHandleIsTaken(taken);
+      });
+    }, HANDLE_CHECK_DEBOUNCE_MS);
+  });
+  onCleanup(() => {
+    if (takenTimer !== null) clearTimeout(takenTimer);
+  });
 
   /** Generate a fresh 16-byte channel id locally — the server has no role in
    *  id allocation per ADR-0010 (the id is a pseudonym chosen by the
@@ -516,14 +531,19 @@ const NewChannel: Component = () => {
     // The channel exists and is recorded whether or not the person waits for
     // it; only opening it is addressed to this screen (`ui/screen-anchor.ts`).
     const here = screenAnchor(location);
-    const id = freshChannelIdHex();
+    // The handle's own id when an earlier attempt claimed it (D5).
+    const wantedHandle = handle().trim().replace(/^@/, "");
+    const account = sessionAccountOf(auth.state());
+    const id =
+      wantedHandle.length > 0 && account !== null
+        ? channelIdForHandle(account, wantedHandle, freshChannelIdHex())
+        : freshChannelIdHex();
     try {
       // ADR-0057, the second security pass (finding 3) - found the channel's
       // PublisherGroup and claim its journal FIRST: the claim must land before
       // the channel is announced (the handle registered, the channel created
       // on the service), else whoever claimed the id first would be its root.
-      // A failed claim aborts here with nothing announced; the next attempt
-      // uses a fresh channel id.
+      // A failed claim aborts here with nothing announced.
       //
       // Mint local publisher keys — the content-key seed comes from an MLS
       // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
@@ -544,24 +564,39 @@ const NewChannel: Component = () => {
         channelsState.keysByChannel().get(id)?.signingKeySeed,
       );
 
-      // G4-5: claim the optional `@handle` before the channel exists
-      // on the channels service so a first-come-first-served collision
-      // (409) aborts cleanly without leaving a half-created channel. An
-      // empty handle skips discovery entirely. The mapping is `@handle ->
-      // channel_id`; the OPRF hash is all the server ever sees.
-      const wantedHandle = handle().trim().replace(/^@/, "");
+      // ADR-0087 sections 1 to 4: claim the optional `@name` before the
+      // channel exists on the channels service, so a held name aborts
+      // cleanly without leaving a half-created channel. The handle key comes
+      // from the PublisherGroup's journal root (it names no account); the
+      // public record is sealed under the name and its words. The same id
+      // claims it again, so a create that failed below can be retried.
       if (wantedHandle.length > 0) {
         try {
-          await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
+          await registerChannelHandle(
+            wantedHandle,
+            id,
+            identity,
+            { name: name().trim(), description: description().trim() },
+            account,
+          );
         } catch (err) {
           const taken = `@${wantedHandle}`;
-          if (err instanceof DiscoveryHttpError && err.status === 409) {
+          if (
+            (err instanceof HandleWriteError && (err.status === 409 || err.code === "name-taken")) ||
+            (err instanceof DiscoveryHttpError && err.status === 409)
+          ) {
+            if (account !== null) forgetClaimedHandle(account, wantedHandle);
             setError(() => t("channels.new.error.handle_taken", { handle: taken }));
           } else if (anonTokenMessage(err, "") !== null) {
             // ADR-0054 S3: the lookup and the register each spend a token.
             setError(
               () => anonTokenMessage(err, t("channels.new.error.handle_offline")) ?? "",
             );
+          } else if (isRateLimited(err)) {
+            // Discovery refusing for the rate: say so, never "could not claim".
+            setError(() => t("common.error.too_many_attempts"));
+          } else if (err instanceof DiscoveryNetworkError) {
+            setError(() => t("channels.new.error.handle_offline"));
           } else {
             console.warn("[channels] handle claim failed", err);
             setError(() => t("channels.new.error.handle"));
@@ -574,6 +609,7 @@ const NewChannel: Component = () => {
       // The channel is registered under the owner key this account derives
       // for it (ADR-0059 section 1).
       await createChannel(id, identity);
+      if (wantedHandle.length > 0 && account !== null) forgetClaimedHandle(account, wantedHandle);
       channelsActions.addChannel({
         id,
         localName: name().trim(),
@@ -611,10 +647,10 @@ const NewChannel: Component = () => {
       <button
         type="button"
         class="ghost small lk-narrow-only lk-self-start"
-        onClick={(): void => navigate(paths.channels)}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={16} />
-        {t("nav.channels")}
+        {t("nav.chats")}
       </button>
       <div class="lk-page-head">
         <h1>{t("channels.new.title")}</h1>
@@ -661,7 +697,14 @@ const NewChannel: Component = () => {
               setHandle(e.currentTarget.value);
             }}
           />
-          <span class="lk-meta lk-block lk-mt-4">{t("channels.new.handle_hint")}</span>
+          <Show
+            when={handleIsTaken()}
+            fallback={<span class="lk-meta lk-block lk-mt-4">{t("channels.new.handle_hint")}</span>}
+          >
+            <span class="form-error lk-block lk-mt-4" role="status">
+              {t("group_handle.error.taken")}
+            </span>
+          </Show>
         </label>
         <Show when={error()}>
           {(msg) => (
@@ -674,7 +717,7 @@ const NewChannel: Component = () => {
           <button
             type="button"
             class="ghost"
-            onClick={(): void => navigate(paths.channels)}
+            onClick={(): void => navigate(paths.home)}
             disabled={busy()}
           >
             {t("common.cancel")}
@@ -804,10 +847,10 @@ const JoinCoPublisher: Component = () => {
       <button
         type="button"
         class="ghost small lk-narrow-only lk-self-start"
-        onClick={(): void => navigate(paths.channels)}
+        onClick={(): void => navigate(paths.home)}
       >
         <Icon name="back" size={16} />
-        {t("nav.channels")}
+        {t("nav.chats")}
       </button>
       <div class="lk-page-head">
         <h1>{t("channels.join.title")}</h1>
@@ -876,7 +919,7 @@ const JoinCoPublisher: Component = () => {
           <button
             type="button"
             class="ghost"
-            onClick={(): void => navigate(paths.channels)}
+            onClick={(): void => navigate(paths.home)}
             disabled={busy()}
           >
             {t("common.cancel")}
@@ -921,6 +964,7 @@ const ChannelView: Component = () => {
 };
 
 const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
+  const membershipEnd = useMembershipEnd();
   // Read once: constant for this instance (see `ChannelView`).
   const params = { id: untrack(() => props.id) } as const;
   const chats = useChats();
@@ -951,6 +995,10 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
       return { posts: postsPage.posts, epoch: epochView.epoch };
     },
   );
+
+  // A co-publisher's post reaches an open channel the same way a reader's
+  // does: nothing pushes it.
+  onCleanup(pollWhileVisible(async () => void (await refetch())));
 
   // Sync the cache as soon as a fetch completes so the list pane's time
   // stays fresh on back-nav.
@@ -1074,7 +1122,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
       fallback={<Navigate href={paths.channelSubscribe(params.id)} />}
     >
       <article class="lk-chat lk-channel">
-        <div class="lk-chat-body">
+        <div class="lk-chat-body" style={{ position: "relative" }}>
           <ChannelHead
             id={params.id}
             name={meta().name}
@@ -1099,16 +1147,16 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
               </Show>
             }
           />
-          {/* `docs/ux/conversation-info.md` — the channel's info, over the
-              channel rather than beside it. The owner's manage screen is
-              REACHED from here rather than moved into here: it stays mounted
-              behind this view so the fan-out, the rotation heartbeat and the
-              request poll keep running, and a layer that unmounts on close
-              would stop them. */}
-          <ModalLayer
+          {/* `docs/ux/conversation-info.md` sections 3 and 3.1 — the channel's
+              info, a screen over the channel with a back icon (it was a layer
+              until 2026-10-29). The owner's manage screen is REACHED from here
+              rather than moved into here: it stays mounted behind this screen
+              so the fan-out, the rotation heartbeat and the request poll keep
+              running, and a screen that unmounted the view would stop them. */}
+          <PushedScreen
             open={infoOpen()}
             title={infoHeading("channel")}
-            onClose={(): void => {
+            onBack={(): void => {
               setInfoOpen(false);
             }}
           >
@@ -1132,14 +1180,14 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                 // Leaving on the server is a round trip; the way back to the
                 // list is for a person still on this channel.
                 const here = screenAnchor(location);
-                void confirmStopFollowing(params.id, meta().name).then((done) => {
+                void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                   if (!done) return;
                   setInfoOpen(false);
-                  if (here()) navigate(paths.channels);
+                  if (here()) navigate(paths.home);
                 });
               }}
             />
-          </ModalLayer>
+          </PushedScreen>
           <Show
             when={isOwner()}
             fallback={
@@ -1153,7 +1201,9 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                     <button
                       type="button"
                       class="primary"
-                      onClick={(): void => navigate(paths.channelSubscribe(params.id))}
+                      onClick={(): void =>
+                        navigate(paths.channelSubscribe(params.id), { state: { subscribe: true } })
+                      }
                     >
                       {t("channels.subscribe.action")}
                     </button>
@@ -1173,7 +1223,7 @@ const ChannelViewFor: Component<{ readonly id: string }> = (props) => {
                     class="danger"
                     onClick={(): void => {
                       channelsActions.removeChannel(params.id);
-                      navigate(paths.channels);
+                      navigate(paths.home);
                     }}
                   >
                     {t("channels.keys_reset.remove")}
@@ -1229,13 +1279,14 @@ const ChannelSubscribe: Component = () => {
 };
 
 const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
+  const membershipEnd = useMembershipEnd();
   // Read once: constant for this instance (see `ChannelView`).
   const params = { id: untrack(() => props.id) } as const;
-  const location = useLocation<{ handle?: string }>();
+  const location = useLocation<{ handle?: string; subscribe?: boolean }>();
   const navigate = useNavigate();
   const [infoOpen, setInfoOpen] = createSignal(false);
   const [bootstrap, setBootstrap] = createSignal<
-    "idle" | "registering" | "polling" | "active" | "error"
+    "idle" | "offered" | "registering" | "polling" | "active" | "error"
   >("idle");
   const [bootstrapError, setBootstrapError] = createLiveText();
   const [posts, setPosts] = createSignal<ReadonlyArray<ChannelPostView>>([]);
@@ -1247,6 +1298,11 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
   const foundHandle = (): string | undefined => {
     const state = location.state;
     return typeof state?.handle === "string" ? state.handle.replace(/^@/, "") : undefined;
+  };
+  /** The name the channel's public record carried, when search passed one. */
+  const foundName = (): string | undefined => {
+    const state = location.state as { name?: unknown } | undefined;
+    return typeof state?.name === "string" && state.name.trim().length > 0 ? state.name.trim() : undefined;
   };
 
   // Persisted keypair lookup. If none exists on first mount, generate one
@@ -1276,10 +1332,13 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
    *  existing row (an owner's, a co-publisher's) keeps its metadata. */
   function rememberSubscribed(): void {
     if (channelsState.channels().some((c) => c.id === params.id)) return;
+    // ADR-0087 section 9 - a channel this account left comes back; its other
+    // devices are told, or their register would take it away again.
+    void membershipEnd.noteChannelJoined(params.id);
     const handle = foundHandle();
     channelsActions.addChannel({
       id: params.id,
-      localName: handle ?? "",
+      localName: foundName() ?? handle ?? "",
       localDescription: "",
       addedAtMs: Date.now(),
       ...(handle !== undefined ? { localHandle: handle } : {}),
@@ -1403,8 +1462,22 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     enabled: () => bootstrap() === "active",
   });
 
+  /** Opening a channel this account does not follow offers it; only pressing
+   *  Subscribe subscribes (`docs/ux/group-and-channel-privacy.md` section
+   *  5.1). A registration spends a token and shows on the owner's count, so a
+   *  search result, a pasted handle or a typed address must not reach it. */
+  const follows = (): boolean =>
+    channelsState.channels().some((c) => c.id === params.id) ||
+    channelsState.subscriberKeysByChannel().has(params.id);
+
+  async function open(): Promise<void> {
+    await awaitChannelsHydration();
+    if (follows() || location.state?.subscribe === true) await bootstrap_();
+    else setBootstrap("offered");
+  }
+
   // First-load: drive the bootstrap.
-  void bootstrap_();
+  void open();
 
   // Polling loop — runs while `bootstrap === "polling"`. 3-second cadence;
   // cancels itself once at least one epoch's seed is recovered.
@@ -1434,19 +1507,27 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     });
   });
 
-  // Posts loader — fetch the page once we go active.
+  // Posts loader — fetch the page once we go active, and keep fetching while
+  // the channel stands open and visible: nothing pushes a post to a reader.
+  async function loadPosts(): Promise<void> {
+    const page = await fetchPosts(params.id, 0);
+    const held = untrack(posts);
+    if (samePosts(held, page.posts)) return;
+    // A new post may be of a newer epoch, and the seed that opens it came
+    // with the rotation.
+    const kp = channelsState.subscriberKeysByChannel().get(params.id);
+    if (kp !== undefined && held.length > 0) await catchUpSeeds(bytesToHex(kp.public));
+    setPosts(page.posts);
+    channelsActions.setPosts(params.id, page.posts);
+  }
   createEffect(() => {
     if (bootstrap() !== "active") return;
-    void (async (): Promise<void> => {
-      try {
-        const page = await fetchPosts(params.id, 0);
-        setPosts(page.posts);
-        channelsActions.setPosts(params.id, page.posts);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("subscribe post-load error", err);
-      }
-    })();
+    void loadPosts().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error("subscribe post-load error", err);
+    });
+    const stop = pollWhileVisible(() => loadPosts());
+    onCleanup(stop);
   });
 
   let decodeSeq = 0;
@@ -1474,6 +1555,8 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
   const statusLine = (): string => {
     switch (bootstrap()) {
+      case "offered":
+        return t("channels.subscribe.status.not_subscribed");
       case "idle":
       case "registering":
         return t("channels.subscribe.status.subscribing");
@@ -1492,20 +1575,20 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
 
   return (
     <article class="lk-chat lk-channel">
-      <div class="lk-chat-body">
+      <div class="lk-chat-body" style={{ position: "relative" }}>
         <ChannelHead
           id={params.id}
-          name={meta().name}
+          name={follows() ? meta().name : channelTitle(undefined, foundName() ?? "", foundHandle())}
           sub={statusLine()}
           onOpenInfo={(): void => {
               setInfoOpen(true);
             }}
         />
         {/* The reader's view of the same info the publisher's view opens. */}
-        <ModalLayer
+        <PushedScreen
           open={infoOpen()}
           title={infoHeading("channel")}
-          onClose={(): void => {
+          onBack={(): void => {
               setInfoOpen(false);
             }}
         >
@@ -1525,14 +1608,14 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
             onManage={(): void => undefined}
             onUnsubscribe={(): void => {
               const here = screenAnchor(location);
-              void confirmStopFollowing(params.id, meta().name).then((done) => {
+              void confirmStopFollowing(params.id, meta().name, membershipEnd).then((done) => {
                 if (!done) return;
                 setInfoOpen(false);
-                if (here()) navigate(paths.channels);
+                if (here()) navigate(paths.home);
               });
             }}
           />
-        </ModalLayer>
+        </PushedScreen>
         <Switch>
           <Match when={bootstrap() === "polling"}>
             <div class="lk-alert info lk-channel-notice" role="status">
@@ -1550,13 +1633,33 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
             </div>
           </Match>
         </Switch>
-        <PostList
-          channelId={params.id}
-          posts={bootstrap() === "active" ? posts() : []}
-          decodedByCursor={decodedByCursor()}
-          loading={bootstrap() !== "active" && bootstrap() !== "error"}
-          emptyText={bootstrap() === "error" ? "" : t("channels.posts.empty")}
-        />
+        <Show
+          when={bootstrap() !== "offered" && !(bootstrap() === "error" && !follows())}
+          fallback={
+            <div class="lk-empty">
+              <Icon name="channels" size={40} strokeWidth={1.4} />
+              <strong>{t("channels.subscribe.prompt_title")}</strong>
+              <span>{t("channels.subscribe.prompt_body")}</span>
+              <button
+                type="button"
+                class="primary"
+                onClick={(): void => {
+                  void bootstrap_();
+                }}
+              >
+                {t("channels.subscribe.action")}
+              </button>
+            </div>
+          }
+        >
+          <PostList
+            channelId={params.id}
+            posts={bootstrap() === "active" ? posts() : []}
+            decodedByCursor={decodedByCursor()}
+            loading={bootstrap() !== "active" && bootstrap() !== "error"}
+            emptyText={bootstrap() === "error" ? "" : t("channels.posts.empty")}
+          />
+        </Show>
       </div>
     </article>
   );

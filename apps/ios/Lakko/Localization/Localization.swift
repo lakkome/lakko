@@ -102,8 +102,10 @@ final class Localization: ObservableObject {
 
     // MARK: - Environment
 
-    /// The locale the platform formatters use for dates, times and numbers.
-    var locale: Locale { Locale(identifier: language) }
+    /// The locale the platform formatters use for dates, times and numbers:
+    /// the interface language for words, the device for formats
+    /// (``FormatLocale``).
+    var locale: Locale { FormatLocale.make(language: language) }
 
     /// The layout direction the root view injects.
     var layoutDirection: LayoutDirection { isRightToLeft ? .rightToLeft : .leftToRight }
@@ -182,6 +184,9 @@ final class Localization: ObservableObject {
     }
 
     private func refreshFromSystem() {
+        // A region or clock change in Settings re-renders every formatted
+        // time and number (``FormatLocale``), whatever the language.
+        objectWillChange.send()
         guard selected == nil else { return }
         apply(systemLanguage)
     }
@@ -240,6 +245,13 @@ final class Localization: ObservableObject {
                     }
                 }
             }
+            // Reactions-and-emoji spec section 12 — the reaction line, with
+            // two markers the extension replaces with the name and the emoji.
+            if let line = built?.format(
+                key: "notification.reaction.body",
+                texts: ["name": ReactionNotificationMirror.nameMark, "emoji": ReactionNotificationMirror.emojiMark], counts: [:]) {
+                words["notification.reaction.body"] = line
+            }
             SharedStorage.setNotificationWords(words)
         }
     }
@@ -285,7 +297,7 @@ final class Localization: ObservableObject {
     /// The interface locale, readable from any thread (the one
     /// ``Localization/shared`` exposes as ``locale``).
     nonisolated static var currentLocale: Locale {
-        Locale(identifier: snapshot.languageCode)
+        FormatLocale.make(language: snapshot.languageCode)
     }
 
     /// A list of names joined pair by pair through `common.list_pair`, so
@@ -435,5 +447,33 @@ struct LocalizedRoot<Content: View>: View {
         content()
             .environment(\.locale, l10n.locale)
             .environment(\.layoutDirection, l10n.layoutDirection)
+    }
+}
+
+/// `docs/ux/localization.md` section 5, "The language decides words, the
+/// device decides formats" (maintainer, 2026-10-29).
+///
+/// The interface language supplies the words only (month and weekday names,
+/// relative words, the AM/PM marker when one is shown). The device's regional
+/// settings supply the formats, whatever the interface language: the 12- or
+/// 24-hour clock (Settings > General > Date & Time > 24-Hour Time is part of
+/// the system locale's hour cycle), the day/month/year order and the decimal
+/// and grouping separators (both follow the region), the first day of the
+/// week and the measurement system. Digit shapes stay the language's.
+///
+/// Every displayed date, time and number on iOS takes its locale from
+/// ``Localization/locale`` or ``Localization/currentLocale``, both built here.
+/// Fixed formats (wire timestamps, file names, safety numbers, phrase word
+/// positions) use `en_US_POSIX` or plain digits and are not affected.
+enum FormatLocale {
+    nonisolated static func make(language: String, system: Locale = .autoupdatingCurrent) -> Locale {
+        let words = Locale(identifier: language)
+        var components = Locale.Components(locale: words)
+        if let region = system.region { components.region = region }
+        components.hourCycle = system.hourCycle
+        components.firstDayOfWeek = system.firstDayOfWeek
+        components.measurementSystem = system.measurementSystem
+        components.numberingSystem = words.numberingSystem
+        return Locale(components: components)
     }
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 
 /**
  * Runs the automatic backup: watches for changes worth keeping, and flushes
@@ -26,8 +27,9 @@ import uniffi.lakko_ffi_uniffi.BackupContactRecord
  * first run after install a change, because nothing on this device can vouch
  * for what the server already holds.
  *
- * What goes up: contacts, the ADR-0058 synced state and the ids of the
- * account's conversations. No MLS provider state - a backup carries none
+ * What goes up: contacts, the ADR-0058 synced state, the ids of the account's
+ * conversations, the own name and photo and the visibility setting. No MLS
+ * provider state - a backup carries none
  * (see `BackupRestore.kt`).
  */
 public class AutoBackupDriver internal constructor(
@@ -60,6 +62,10 @@ public class AutoBackupDriver internal constructor(
         /** The held groups plus the restored ones not joined yet. */
         val knownGroupIdsHex: List<String>,
         val syncedState: ByteArray?,
+        /** ADR-0074 section 3.7 - the account's own predecessors. */
+        val ownPredecessors: List<BackupOwnPredecessor> = emptyList(),
+        /** The own name, photo and visibility setting. */
+        val personal: BackupPersonal = BackupPersonal.NONE,
     )
 
     /**
@@ -82,6 +88,13 @@ public class AutoBackupDriver internal constructor(
          *  runtime holds none; carried in the backup so a restore with no
          *  other device alive gets the folders and flags back. */
         val syncedState: () -> ByteArray? = { null },
+        /** ADR-0074 section 3.7 — the account's own predecessors, oldest
+         *  first, read at upload time. A read that throws fails the upload
+         *  rather than leaving them out of the backup. */
+        val ownPredecessors: (String) -> List<BackupOwnPredecessor> = { emptyList() },
+        /** The own name, photo and visibility setting, read at each tick: a
+         *  change of any of them gets a backup out. */
+        val personal: (String) -> BackupPersonal = { BackupPersonal.NONE },
     )
 
     public enum class Outcome { CLEAN, THROTTLED, NOT_READY, UPLOADED, FAILED }
@@ -124,6 +137,12 @@ public class AutoBackupDriver internal constructor(
         ) {
             AutoBackupStore.markDirty(applicationContext, accountIdB64, nowMs)
         }
+        val personal = inputs.personal(accountIdB64)
+        if (personal != BackupPersonal.NONE &&
+            AutoBackupStore.personalChanged(applicationContext, accountIdB64, personal.changeKey())
+        ) {
+            AutoBackupStore.markDirty(applicationContext, accountIdB64, nowMs)
+        }
 
         val state = AutoBackupStore.load(applicationContext, accountIdB64)
         when (AutoBackup.verdict(state, nowMs)) {
@@ -163,7 +182,9 @@ public class AutoBackupDriver internal constructor(
             )
         }
 
+        val predecessors = ArrayList<BackupOwnPredecessor>()
         val result = try {
+            predecessors += inputs.ownPredecessors(accountIdB64)
             uploader.upload(
                 UploadRequest(
                     context = applicationContext,
@@ -176,6 +197,8 @@ public class AutoBackupDriver internal constructor(
                     // upload always carries the set it was marked dirty for.
                     knownGroupIdsHex = groups,
                     syncedState = inputs.syncedState(),
+                    ownPredecessors = predecessors,
+                    personal = personal,
                 ),
             )
         } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -183,6 +206,8 @@ public class AutoBackupDriver internal constructor(
         } catch (cause: Throwable) {
             Log.w(TAG, "upload threw", cause)
             return Outcome.FAILED
+        } finally {
+            predecessors.forEach { it.seed.fill(0) }
         }
         if (result !is UploadResult.Uploaded) {
             // A cache miss is the ordinary state for a device that joined by
@@ -230,6 +255,8 @@ internal object CachedPhraseUploader : AutoBackupDriver.Uploader {
                 contacts = request.contacts,
                 knownGroupIdsHex = request.knownGroupIdsHex,
                 syncedState = request.syncedState,
+                ownPredecessors = request.ownPredecessors,
+                personal = request.personal,
             )
         } finally {
             client.close()

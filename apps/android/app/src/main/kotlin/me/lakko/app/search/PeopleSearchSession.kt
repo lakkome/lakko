@@ -13,15 +13,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import me.lakko.app.contacts.PendingContact
+import me.lakko.app.contacts.SentContactRequest
 import me.lakko.app.l10n.UiText
 
 /*
  * One search field (`docs/ux/who-can-find-me.md` section 6.1): when the field
  * asks the network, what it remembers, and what a result row offers. Nothing
- * to press: from a text the network can be asked with (3 characters, the core's
- * minimum), after 500 ms without typing, the field asks once; a text already
- * answered in this session is not asked again; what was shown stays until the
- * new answer arrives; a leading `@` is ignored.
+ * to press: from a text the network can be asked with
+ * ([NETWORK_SEARCH_MIN_CHARS]), after 500 ms without typing, the field asks
+ * once; an answer is reused for [SEARCH_ANSWER_KEPT_MS]; what was shown stays
+ * until the new answer arrives; a leading `@` is ignored.
+ *
+ * A row says what is true now. A kept-grant check holds for one text, a
+ * remembered answer ages, a refused or failed line lasts until the text
+ * changes, and **Request sent** comes from the outgoing list (Contacts > Sent).
  *
  * Pure Kotlin over coroutines, so the host JVM tests drive it on a test
  * dispatcher with a virtual clock.
@@ -30,6 +38,21 @@ import me.lakko.app.l10n.UiText
 /** How long the field waits after the last keystroke before it asks. Chosen,
  *  not measured (UX section 6.1). */
 public const val NETWORK_SEARCH_DEBOUNCE_MS: Long = 500
+
+/** Fewest characters (after a leading `@`) the network is asked with. Chosen,
+ *  not measured (UX section 6.1). Not the core's `nameSearchMinChars`, which is
+ *  2: a name word of two letters is searchable, but below this the People part
+ *  stays hidden and no token is spent. */
+public const val NETWORK_SEARCH_MIN_CHARS: Int = 3
+
+/** How long a network answer is reused for its text, a not-found included.
+ *  Past it the text is asked again: a person may have widened who can find
+ *  them. Chosen, not measured. */
+public const val SEARCH_ANSWER_KEPT_MS: Long = 60_000
+
+/** How many people's kept grants are checked at one time. The first letter
+ *  typed can match every member of every group. Chosen, not measured. */
+public const val KEPT_GRANT_CHECKS_AT_ONCE: Int = 4
 
 /** The text the network is asked with: trimmed, a leading `@` dropped. */
 public fun bareSearchText(query: String): String = query.trim().removePrefix("@").trim()
@@ -54,12 +77,83 @@ public enum class RowAction {
     /** **Add contact** while the request is going out (not pressable). */
     ADDING,
 
+    /** **Ask again**: a decline is silent, so a request can stand for good. */
+    ASK_AGAIN,
+
     /** Nothing to press. */
     NONE,
 }
 
 /** What a result row shows: its control and the line under it. */
 public data class PersonRowView(val action: RowAction, val note: UiText?)
+
+/** Who the outgoing list (Contacts > Sent) holds. */
+public data class OutgoingRequests(
+    val keysHex: Set<String>,
+    val accountIdsHex: Set<String>,
+    /** Those of them added through an invite link: the link is what they
+     *  answer, so there is nothing to ask again. */
+    val invitedAccountIdsHex: Set<String> = emptySet(),
+) {
+    /** Whether a request to this person is waiting. By account id too: their
+     *  key may have rotated since the request went out. */
+    public fun holds(person: PersonResult): Boolean =
+        person.keyHex in keysHex || person.accountIdHex?.let { it in accountIdsHex } == true
+
+    /** Whether the row of this person may offer **Ask again**. */
+    public fun canAskAgain(person: PersonResult): Boolean =
+        holds(person) && person.accountIdHex !in invitedAccountIdsHex
+
+    public companion object {
+        /** Nobody. */
+        public val NONE: OutgoingRequests = OutgoingRequests(emptySet(), emptySet())
+
+        /**
+         * The people in this Sent list, and [invited]: those added through
+         * their invite link who have not answered yet. The request went out
+         * when Add was pressed, so a row for them reads "Request sent" like
+         * any other and offers no second request. A value that is not base64
+         * names no one.
+         */
+        public fun of(sent: List<SentContactRequest>, invited: List<PendingContact> = emptyList()): OutgoingRequests =
+            OutgoingRequests(
+                keysHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientKeyB64) } +
+                    invited.mapNotNull { hexOfBase64(it.signaturePubkeyB64) },
+                accountIdsHex = sent.mapNotNullTo(HashSet()) { hexOfBase64(it.recipientAccountIdB64) } +
+                    invited.map { it.accountIdHex },
+                invitedAccountIdsHex = invited.mapTo(HashSet()) { it.accountIdHex },
+            )
+
+        private fun hexOfBase64(b64: String?): String? = try {
+            b64?.let { searchHex(java.util.Base64.getDecoder().decode(it)) }
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+}
+
+/**
+ * How a row's request stands: [RowSendState.SENT] exactly while the person is
+ * in the outgoing list. Declined and dismissed, or accepted, the row goes back
+ * to what the check says.
+ */
+public fun rowSendState(
+    person: PersonResult,
+    held: RowSendState?,
+    outgoing: OutgoingRequests,
+): RowSendState? = when {
+    outgoing.holds(person) -> RowSendState.SENT
+    held == RowSendState.SENT -> null
+    else -> held
+}
+
+/** What a finished check leaves. A check that could not be made learned
+ *  nothing, so it does not replace a verdict. */
+internal fun checkAfter(held: KeptGrantCheck?, answer: KeptGrantCheck): KeptGrantCheck = when {
+    answer !is KeptGrantCheck.Unreached -> answer
+    held == null || held is KeptGrantCheck.Unreached -> answer
+    else -> held
+}
 
 /** The line after a request went out. */
 public val REQUEST_SENT: UiText = UiText("search.people.request_sent")
@@ -68,9 +162,14 @@ public val REQUEST_SENT: UiText = UiText("search.people.request_sent")
 public val REQUEST_FAILED: UiText = UiText("search.people.request_failed")
 
 /** What a result row shows, from the person and how their request stands. */
-public fun personRowView(person: PersonResult, send: RowSendState?): PersonRowView = when {
+public fun personRowView(
+    person: PersonResult,
+    send: RowSendState?,
+    canAskAgain: Boolean = false,
+): PersonRowView = when {
     person.reach == PersonReach.CONTACT -> PersonRowView(RowAction.OPEN, null)
-    send == RowSendState.SENT -> PersonRowView(RowAction.NONE, REQUEST_SENT)
+    send == RowSendState.SENT ->
+        PersonRowView(if (canAskAgain && canAddContact(person)) RowAction.ASK_AGAIN else RowAction.NONE, REQUEST_SENT)
     send == RowSendState.REFUSED -> PersonRowView(RowAction.NONE, REQUEST_REFUSED)
     !canAddContact(person) -> PersonRowView(RowAction.NONE, null)
     send == RowSendState.SENDING -> PersonRowView(RowAction.ADDING, null)
@@ -79,27 +178,68 @@ public fun personRowView(person: PersonResult, send: RowSendState?): PersonRowVi
 }
 
 /**
- * What the field remembers for the whole session, shared by the Chats and the
- * Contacts field: the texts already answered and how each request sent from a
- * row stands (by account key hex). A failed search and a used-up allowance are
- * not remembered: typing the text again asks again.
+ * Ask the Delivery Service about a person's kept grants, in order, stopping at
+ * the first that passes. All refused is [KeptGrantCheck.Dead]; a check that
+ * could not be made is [KeptGrantCheck.Unreached], which is no verdict. No
+ * anonymous token is spent.
  */
-public class PeopleSearchMemory {
-    private val answered = ConcurrentHashMap<String, PeopleSearchOutcome>()
+public suspend fun checkGrantsInOrder(
+    wiresB64: List<String>,
+    check: suspend (wireB64: String) -> Boolean,
+): KeptGrantCheck {
+    for (wire in wiresB64) {
+        val passed = try {
+            check(wire)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            return KeptGrantCheck.Unreached(wire)
+        }
+        if (passed) return KeptGrantCheck.Live(wire)
+    }
+    return KeptGrantCheck.Dead
+}
+
+/**
+ * What the field remembers for the whole session, shared by the Chats and the
+ * Contacts field: the answers of the last [SEARCH_ANSWER_KEPT_MS] and how each
+ * request sent from a row stands (by account key hex). A failed search and a
+ * used-up allowance are not remembered: typing the text again asks again.
+ */
+public class PeopleSearchMemory(
+    /** A clock that never runs backwards, in milliseconds. */
+    private val nowMs: () -> Long = { System.nanoTime() / NANOS_PER_MS },
+) {
+    private class Kept(val outcome: PeopleSearchOutcome, val atMs: Long)
+
+    private val answered = ConcurrentHashMap<String, Kept>()
     private val sends = MutableStateFlow<Map<String, RowSendState>>(emptyMap())
 
     /** How each request sent from a row stands, by account key hex. */
     public val sendStates: StateFlow<Map<String, RowSendState>> = sends.asStateFlow()
 
-    internal fun answered(key: String): PeopleSearchOutcome? = answered[key]
+    /** The answer for [key], while it is young enough to reuse. */
+    internal fun answered(key: String): PeopleSearchOutcome? {
+        val kept = answered[key] ?: return null
+        if (nowMs() - kept.atMs < SEARCH_ANSWER_KEPT_MS) return kept.outcome
+        answered.remove(key, kept)
+        return null
+    }
 
     internal fun remember(key: String, outcome: PeopleSearchOutcome) {
         if (outcome.state == PeopleSearchState.FOUND || outcome.state == PeopleSearchState.NOT_FOUND) {
-            answered[key] = outcome
+            answered[key] = Kept(outcome, nowMs())
         }
     }
 
-    /** Claim a row for sending; `false` when it is already sending or sent. */
+    /** Forget every answer [stale] calls no longer true. */
+    internal fun forgetWhere(stale: (PeopleSearchOutcome) -> Boolean) {
+        for ((key, kept) in answered) {
+            if (stale(kept.outcome)) answered.remove(key, kept)
+        }
+    }
+
+    /** Claim a row for sending; `false` while its state says not to. */
     internal fun claimSend(keyHex: String): Boolean {
         var claimed = false
         sends.update { held ->
@@ -116,6 +256,28 @@ public class PeopleSearchMemory {
 
     internal fun setSend(keyHex: String, state: RowSendState) {
         sends.update { it + (keyHex to state) }
+    }
+
+    /** The text changed: a refused or failed line goes, so the row reflects
+     *  the new check. A request on its way stays claimed. */
+    internal fun clearRowLines() {
+        sends.update { held ->
+            held.filterValues { it != RowSendState.REFUSED && it != RowSendState.FAILED }
+        }
+    }
+
+    /** Forget how this row's request stood, so it can be sent again. */
+    internal fun forgetSend(keyHex: String) {
+        sends.update { it - keyHex }
+    }
+
+    /** Drop [RowSendState.SENT] for whoever the outgoing list no longer holds.
+     *  A row reads Request sent from the list itself ([rowSendState]); this
+     *  lets the person be asked again. */
+    internal fun dropSentExcept(outgoing: OutgoingRequests) {
+        sends.update { held ->
+            held.filterNot { (keyHex, state) -> state == RowSendState.SENT && keyHex !in outgoing.keysHex }
+        }
     }
 }
 
@@ -156,14 +318,18 @@ public data class PeopleNetworkView(
 public class PeopleSearchSession(
     private val scope: CoroutineScope,
     private val memory: PeopleSearchMemory,
-    /** Whether a bare text may be asked at all (the core's minimum and the
-     *  name-term / username rules). */
+    /** Whether a bare text of [NETWORK_SEARCH_MIN_CHARS] or more may be asked
+     *  at all (the name-term and username rules). */
     private val asks: (bare: String) -> Boolean,
     /** The network search over a bare text. Never throws but for cancellation. */
     private val search: suspend (bare: String) -> PeopleSearchOutcome,
     /** Send the contact request to a found person, with no introduction. */
     private val send: suspend (PersonResult) -> SendOutcome,
+    /** The DS reach check of a person (account key, base64) with one grant. */
+    private val reachCheck: suspend (keyB64: String, grantWireB64: String) -> Boolean = { _, _ -> false },
     private val debounceMs: Long = NETWORK_SEARCH_DEBOUNCE_MS,
+    /** Take the person out of the outgoing list (Contacts > Sent > Dismiss). */
+    private val dismissSent: (PersonResult) -> Unit = {},
 ) {
     private val mutable = MutableStateFlow(PeopleNetworkView.HIDDEN)
 
@@ -173,6 +339,17 @@ public class PeopleSearchSession(
     /** How each request sent from a row stands. */
     public val sendStates: StateFlow<Map<String, RowSendState>> get() = memory.sendStates
 
+    private val grantChecks = MutableStateFlow<Map<String, KeptGrantCheck>>(emptyMap())
+
+    /** What the Delivery Service last said about kept grants, by account key
+     *  hex, for as long as the field holds text. It stands until the next
+     *  answer arrives, so a row does not flicker on every keystroke. */
+    public val keptGrantChecks: StateFlow<Map<String, KeptGrantCheck>> = grantChecks.asStateFlow()
+
+    private val checking = HashSet<String>()
+    private val checkSlots = Semaphore(KEPT_GRANT_CHECKS_AT_ONCE)
+
+    private var lastText: String? = null
     private var currentKey: String? = null
     private var waiting: Job? = null
     private val inFlight = HashSet<String>()
@@ -181,9 +358,13 @@ public class PeopleSearchSession(
     public fun onQuery(query: String) {
         waiting?.cancel()
         waiting = null
+        val before = lastText
+        lastText = query
+        if (before != null && before != query) memory.clearRowLines()
         val bare = bareSearchText(query)
+        if (bare.isEmpty()) grantChecks.value = emptyMap()
         val may = try {
-            asks(bare)
+            bare.codePointCount(0, bare.length) >= NETWORK_SEARCH_MIN_CHARS && asks(bare)
         } catch (_: Throwable) {
             false
         }
@@ -206,6 +387,25 @@ public class PeopleSearchSession(
         }
     }
 
+    /**
+     * The contact list changed under the answers: one that calls someone a
+     * contact who is no longer one is false ([namesFormerContact]). It is
+     * forgotten, and the one on screen is asked again at once, since nothing
+     * else would ask while the text stands.
+     */
+    public fun onContacts(contactKeysB64: Set<String>) {
+        val stale = { outcome: PeopleSearchOutcome -> namesFormerContact(outcome.people, contactKeysB64) }
+        memory.forgetWhere(stale)
+        val shown = mutable.value.shown ?: return
+        val key = currentKey ?: return
+        val bare = bareSearchText(lastText.orEmpty())
+        if (!stale(shown)) return
+        waiting?.cancel()
+        waiting = null
+        mutable.update { it.copy(shown = null, searching = true) }
+        ask(key, bare)
+    }
+
     // The question itself is its own job: typing on after it went out must not
     // cancel it (the tokens are spent; the answer is remembered).
     private fun ask(key: String, bare: String) {
@@ -221,6 +421,44 @@ public class PeopleSearchSession(
                 mutable.value = PeopleNetworkView(asks = true, searching = false, shown = outcome)
             }
         }
+    }
+
+    /**
+     * Check the kept grants of these people ([keptGrantsToCheck]) now: no
+     * minimum length and no debounce, since this spends no token. One check
+     * per person at a time; typing on does not cancel it. The last answer
+     * stands until this one arrives.
+     */
+    public fun checkKeptGrants(candidates: List<LocalCandidate>) {
+        for (c in candidates) {
+            if (!checking.add(c.keyHex)) continue
+            scope.launch {
+                try {
+                    val answer = checkSlots.withPermit {
+                        checkGrantsInOrder(c.keptGrantWiresB64) { wire -> reachCheck(c.keyB64, wire) }
+                    }
+                    grantChecks.update { it + (c.keyHex to checkAfter(it[c.keyHex], answer)) }
+                } finally {
+                    checking.remove(c.keyHex)
+                }
+            }
+        }
+    }
+
+    /** The outgoing list changed. */
+    public fun onOutgoing(outgoing: OutgoingRequests) {
+        memory.dropSentExcept(outgoing)
+    }
+
+    /**
+     * **Ask again** on a row: what Contacts > Sent > Dismiss and then **Add
+     * contact** do, in one tap.
+     */
+    public fun askAgain(person: PersonResult) {
+        if (!canAddContact(person)) return
+        dismissSent(person)
+        memory.forgetSend(person.keyHex)
+        add(person)
     }
 
     /** **Add contact** on a row: the request goes out at once. */
@@ -241,9 +479,15 @@ public class PeopleSearchSession(
                 when (outcome) {
                     SendOutcome.Sent -> RowSendState.SENT
                     SendOutcome.Refused -> RowSendState.REFUSED
+                    SendOutcome.ReachRefused -> {
+                        grantChecks.update { it + (person.keyHex to KeptGrantCheck.Dead) }
+                        RowSendState.REFUSED
+                    }
                     is SendOutcome.Failed -> RowSendState.FAILED
                 },
             )
         }
     }
 }
+
+private const val NANOS_PER_MS = 1_000_000L

@@ -197,6 +197,94 @@ public fun recoveryPhraseRow(phraseSaved: Boolean, phraseOnDevice: Boolean): Rec
  */
 public fun threeWordsSurfaceOffered(phraseSaved: Boolean): Boolean = phraseSaved
 
+/** `GET /account/phrase` for the session's account (ADR-0075 section 3 as
+ *  amended 2026-11-01). */
+public data class AccountPhraseStatus(
+    /** The owner saved a recovery phrase. */
+    val saved: Boolean,
+    /** The current phrase was ever sealed in an email vault. */
+    val rotationNeeded: Boolean,
+)
+
+/** Which of the two ways "Save a recovery phrase" takes (UX 19.5). */
+public enum class PhraseSavePath {
+    /** Show the words the device holds; the keys stay. */
+    KeepKeys,
+
+    /** The ADR-0074 key rotation with `phrase_saved`, new words at the end. */
+    Rotate,
+}
+
+/**
+ * The way "Save a recovery phrase" goes, decided from the server's answer.
+ * The rotation unless the server says none is needed AND this device holds
+ * the phrase AND no rotation of this device may already have reached the
+ * server (the words it holds may be about to be replaced).
+ */
+public fun phraseSavePath(rotationNeeded: Boolean, holdsPhrase: Boolean, rotationInFlight: Boolean): PhraseSavePath =
+    if (!rotationNeeded && holdsPhrase && !rotationInFlight) PhraseSavePath.KeepKeys else PhraseSavePath.Rotate
+
+/** How `POST /account/phrase/saved` ended. */
+public sealed interface PhraseSavedOutcome {
+    /** The account is phrase-protected. */
+    public data object Saved : PhraseSavedOutcome
+
+    /** `409`: the phrase was in an email vault after all; the rotation path. */
+    public data object NeedsRotation : PhraseSavedOutcome
+
+    /** No live proof: the block appears, nothing was sent or nothing counted. */
+    public data object ProofRequired : PhraseSavedOutcome
+
+    /** Offline, or anything else: "We could not finish." with `Try again`. */
+    public data object Failed : PhraseSavedOutcome
+}
+
+/** The server's refusal of a phrase saved with no key change. */
+public const val PHRASE_SAVE_NEEDS_ROTATION: String = "phrase-save-needs-rotation"
+
+private const val HTTP_CONFLICT_STATUS: Int = 409
+
+/** Read a failed `POST /account/phrase/saved`. */
+public fun phraseSavedOutcomeOf(err: Throwable): PhraseSavedOutcome = when {
+    isFreshAuthRequired(err) -> PhraseSavedOutcome.ProofRequired
+    err is AuthHttpError && err.status == HTTP_CONFLICT_STATUS && err.code == PHRASE_SAVE_NEEDS_ROTATION ->
+        PhraseSavedOutcome.NeedsRotation
+    else -> PhraseSavedOutcome.Failed
+}
+
+/** What [savePhraseKeepingKeys] needs from the device and the server. */
+public interface PhraseKeptPorts {
+    /** The live fresh-auth grant, or `null`. */
+    public fun freshGrant(): String?
+
+    /** This device's own action: the notice it causes is not asked here. */
+    public fun markOwnAction()
+
+    /** `POST /account/phrase/saved`; throws what the client threw. */
+    public suspend fun markSaved(freshGrant: String)
+
+    /** The account is phrase-protected: keep the flag and tell the screens. */
+    public fun storeSaved()
+}
+
+/**
+ * The last step of "Save a recovery phrase" with the keys kept, after the
+ * three words passed. Nothing counts as saved before the server answered.
+ */
+public suspend fun savePhraseKeepingKeys(ports: PhraseKeptPorts): PhraseSavedOutcome {
+    val grant = ports.freshGrant() ?: return PhraseSavedOutcome.ProofRequired
+    ports.markOwnAction()
+    try {
+        ports.markSaved(grant)
+    } catch (cancel: kotlinx.coroutines.CancellationException) {
+        throw cancel
+    } catch (cause: Throwable) {
+        return phraseSavedOutcomeOf(cause)
+    }
+    ports.storeSaved()
+    return PhraseSavedOutcome.Saved
+}
+
 /**
  * The enrol sealing rule (ADR-0075 section 6): the vault is sealed and sent
  * with `enrol/finish` only while no phrase is saved. A phrase-protected

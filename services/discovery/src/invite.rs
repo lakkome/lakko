@@ -192,6 +192,9 @@ pub(crate) struct FetchResponse {
     /// Standard-alphabet base64 of the stored sealed blob. The client opens
     /// it with the link secret and verifies the capability inside.
     pub(crate) sealed: String,
+    /// No uses left. A page with no session reads the link as dead; a signed-in
+    /// client still reads it, and `consume` says whether this person used it.
+    pub(crate) used_up: bool,
 }
 
 /// `GET /discovery/invite/{blob_id}` — fetch by id.
@@ -207,20 +210,23 @@ pub(crate) async fn fetch(
 ) -> Result<Json<FetchResponse>, (StatusCode, String)> {
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
-    let row: Option<(Vec<u8>, u64)> =
-        sqlx::query_as("SELECT sealed_capability, expiry_ms FROM invites WHERE blob_id = ?")
-            .bind(&blob_id[..])
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "fetch invites");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
+    let row: Option<(Vec<u8>, u64, u32, u32)> = sqlx::query_as(
+        "SELECT sealed_capability, expiry_ms, max_uses, used_count \
+         FROM invites WHERE blob_id = ?",
+    )
+    .bind(&blob_id[..])
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "fetch invites");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
 
-    let (sealed, expiry_ms) = row.ok_or((StatusCode::NOT_FOUND, "invite not found".to_string()))?;
+    let (sealed, expiry_ms, max_uses, used_count) =
+        row.ok_or((StatusCode::NOT_FOUND, "invite not found".to_string()))?;
 
     // Server-side expiry filter — `expiry_ms == 0` is the
     // `NEVER_EXPIRES` sentinel (1.18a). For non-zero values we
@@ -235,6 +241,7 @@ pub(crate) async fn fetch(
 
     Ok(Json(FetchResponse {
         sealed: B64.encode(&sealed),
+        used_up: crate::ledger_id::link_used_up(max_uses, used_count),
     }))
 }
 

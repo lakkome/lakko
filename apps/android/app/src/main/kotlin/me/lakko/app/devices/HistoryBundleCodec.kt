@@ -12,6 +12,8 @@ import me.lakko.app.chat.PersistedAttachment
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
 import me.lakko.app.chat.PersistedThumb
+import me.lakko.app.chat.bundleFloor
+import me.lakko.app.chat.higherFloor
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
@@ -82,8 +84,13 @@ public object HistoryBundleCodec {
         for (hex in groupHexes) {
             val slot = log.groups[hex] ?: continue
             val groupIdBytes = hexToBytes(hex) ?: continue
-            val trimmed = slot.messages.takeLast(perGroupCap)
-            val capped = trimmed.size < slot.messages.size
+            // The MLS bookkeeping rows (a commit, an external-join request)
+            // are never carried: they name no people, and a receiver that
+            // draws a commit row as "Members changed" showed one per device
+            // commit. Same rule on web and iOS.
+            val carried = bundledMessages(slot.messages)
+            val trimmed = carried.takeLast(perGroupCap)
+            val capped = trimmed.size < carried.size
             val messages = mutableListOf<StructuredHistoryMessage>()
             for (m in trimmed) {
                 // G-6 step 2: encode the canonical cross-platform
@@ -152,57 +159,118 @@ public object HistoryBundleCodec {
         val existing = MessageLogStore.getLog(context, accountIdB64)
             ?: MessageLogPayload(version = 1, groups = emptyMap())
 
-        val nextGroups = existing.groups.toMutableMap()
-        var applied = 0
-
-        for (g in opened.groups) {
-            val hex = bytesToHex(g.groupId)
-            val slot = nextGroups[hex]
-                ?: PersistedGroup(cursor = 0L, messages = emptyList())
-            val existingIds = slot.messages.map { it.messageId }.toMutableSet()
-            val merged = slot.messages.toMutableList()
-            for (m in g.messages) {
+        val decoded = opened.groups.associate { g ->
+            bytesToHex(g.groupId) to g.messages.mapNotNull { m ->
                 // G-6 step 2: decode the canonical cross-platform
                 // placeholder via the shared Rust core. Bytes from
                 // a web or iOS scanner decode identically here.
-                val decoded = try {
+                try {
                     decodePlaceholder(m.payloadBytes)
                 } catch (cause: Throwable) {
                     Log.v(LOG_TAG, "decode placeholder failed", cause)
-                    continue
+                    null
                 }
-                if (decoded.messageId in existingIds) continue
-                merged.add(decoded)
-                existingIds.add(decoded.messageId)
-                applied += 1
             }
-            // Sort by HLC-derived numeric messageId so the
-            // timeline lands in order.
-            merged.sortWith(
-                Comparator { a, b ->
-                    a.messageId.compareTo(b.messageId).also { _ ->
-                        // Body intentionally trivial — kept as a
-                        // Comparator { } block for symmetry with
-                        // the sibling iOS implementation that
-                        // exposes the same shape.
-                    }
-                },
-            )
-            // `copy`, not a new slot: the feed's seen marks (ADR-0063
-            // section 5) ride the same slot and must survive the merge.
-            nextGroups[hex] = slot.copy(messages = merged)
         }
+        val merged = mergeBundle(existing.groups, decoded)
 
         MessageLogStore.putLog(
             context = context,
             accountIdB64 = accountIdB64,
             payload = MessageLogPayload(
                 version = existing.version,
-                groups = nextGroups,
+                groups = merged.groups,
             ),
         )
-        return applied
+        // A chat layer already running keeps the whole log in memory and
+        // rewrites it from there, so it has to be told what just landed.
+        liveLogSink?.invoke(accountIdB64, merged.opened)
+        return merged.applied
     }
+
+    /**
+     * Where a bundle goes when the chat layer of its account is running
+     * (a device pairing while signed in). `null`, or a chat layer on another
+     * account: the next bootstrap reads it off the log.
+     */
+    @Volatile
+    public var liveLogSink: ((accountIdB64: String, opened: Map<String, PersistedGroup>) -> Unit)? = null
+
+    /** What [mergeBundle] made of one bundle. */
+    internal class MergedBundle(
+        /** The whole log after the merge. */
+        val groups: Map<String, PersistedGroup>,
+        /** How many rows the merge added across all groups. */
+        val applied: Int,
+        /** Per group, the bundle's own rows and floor: what a running chat
+         *  layer takes in ([liveLogSink]). */
+        val opened: Map<String, PersistedGroup>,
+    )
+
+    /**
+     * Merge a bundle's [decoded] rows, group by group, into the log [held] on
+     * this device. `copy`, not a new slot: the feed's seen marks (ADR-0063
+     * section 5) ride the same slot and must survive the merge. Each group's
+     * floor moves up to the highest id the bundle carried for it, and never
+     * down ("History is not news", `docs/ux/second-device.md` section 2).
+     */
+    internal fun mergeBundle(
+        held: Map<String, PersistedGroup>,
+        decoded: Map<String, List<PersistedMessage>>,
+    ): MergedBundle {
+        val next = held.toMutableMap()
+        val opened = LinkedHashMap<String, PersistedGroup>()
+        var applied = 0
+        for ((hex, rows) in decoded) {
+            val slot = next[hex] ?: PersistedGroup(cursor = 0L, messages = emptyList())
+            val (merged, added) = mergeRows(slot.messages, rows)
+            applied += added
+            val floor = bundleFloor(rows)
+            next[hex] = slot.copy(
+                messages = merged,
+                syncedThroughMessageId = higherFloor(slot.syncedThroughMessageId, floor),
+            )
+            opened[hex] = PersistedGroup(
+                cursor = 0L,
+                messages = mergeRows(emptyList(), rows).first,
+                syncedThroughMessageId = floor,
+            )
+        }
+        return MergedBundle(next, applied, opened)
+    }
+
+    /**
+     * The rows of one group after a bundle's [incoming] rows are merged into
+     * the [held] ones, sorted by message id, and how many were added. A
+     * bookkeeping row from a sender that still carries them is dropped (it is
+     * nothing the person reads), and a message id already held is kept as
+     * held.
+     */
+    internal fun mergeRows(held: List<PersistedMessage>, incoming: List<PersistedMessage>): Pair<List<PersistedMessage>, Int> {
+        val ids = held.map { it.messageId }.toMutableSet()
+        val merged = held.toMutableList()
+        var added = 0
+        for (row in incoming) {
+            if (isBookkeepingSystemRow(row)) continue
+            if (!ids.add(row.messageId)) continue
+            merged += row
+            added += 1
+        }
+        merged.sortBy { it.messageId }
+        return merged to added
+    }
+
+    /** A system row the receive loop files for an MLS commit or an
+     *  external-join request (`[mls commit]`, `[mls external join]`, the same
+     *  `[mls <kind>]` text on every client). A call row is a system row too
+     *  and is not one of these. */
+    internal fun isBookkeepingSystemRow(m: PersistedMessage): Boolean =
+        m.direction == "system" && m.call == null && m.text.startsWith("[mls ") && m.text.endsWith("]")
+
+    /** The rows of a group a history bundle carries: every row but the
+     *  bookkeeping ones. */
+    internal fun bundledMessages(messages: List<PersistedMessage>): List<PersistedMessage> =
+        messages.filterNot(::isBookkeepingSystemRow)
 
     // ----------------------------------------------------------------
     // Placeholder codec (G-6 step 2)

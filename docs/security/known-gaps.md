@@ -76,6 +76,7 @@ entry's status line, not a mechanical fact.
 | [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Closed in code (2026-10-16) | a durable commit record on web, iOS and Android; host-tested, not walked |
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 | [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
+| [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
 
 ## MLS state machine
 
@@ -3194,3 +3195,19 @@ more residuals, both closed before merge:
 - *A PublisherGroup commit replayed after a restart.* The record now keeps
   the epoch-N access seed (`dsAccessSeed`, `DsProofSigner.forGroup`), so a
   replay proves the epoch the DS requires and always learns its answer.
+
+<a id="g-53"></a>
+### G-53: A re-added person can be left without a Welcome
+
+**Found 2026-10-31, while building ADR-0087 section 9; reported by all three
+client builds, not walked.** A person whose membership ends rotates their
+`group` and `member` reach keys (ADR-0078 section 9). A member who adds that
+person back, is not their contact and shares no other group with them holds
+only keys that no longer open the mailbox. The commit lands, the person sits in
+the roster, and the Welcome stays owed: the adder's device keeps trying and the
+person receives nothing, with no line on either side saying so. An adder with a
+`contact` grant, or adding a person just found by search, is not affected; both
+were walked.
+
+**Closing:** not a client fix. Either the rotation changes, or a grant reaches
+the adder some other way. Maintainer's decision.

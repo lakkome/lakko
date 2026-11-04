@@ -37,7 +37,7 @@ at line 115, was that "Calls has no history, only a create-link panel" - so
 the destination held nothing worth a tab. That was true of what existed. It
 was never an argument that call history should not exist, and the design
 system's own information architecture (`design-system.md` section 4) kept
-**Calls: recent calls, "Create call link", join by link** as destination 4
+**Calls: recent calls, "Create call link"** as destination 4
 throughout. The two documents disagreed and the code followed the wrong one.
 
 ## 1. Destinations
@@ -49,7 +49,7 @@ Five, in this order, identical on the three clients:
    person picks or writes, plus channel suggestions. Specified in
    [`feed.md`](feed.md) (added 2026-09-28; this list read "Four" before).
 3. **Contacts** - accepted contacts, incoming requests, add by username.
-4. **Calls** - recent calls, newest first. Create a call link, join by link.
+4. **Calls** - recent calls, newest first. Create a call link.
 5. **Settings** - unchanged.
 
 Gone as destinations: **Groups** and **Channels**. Both remain as *kinds* of
@@ -86,7 +86,14 @@ is - no badge, no label, no differing avatar shape.
 | right, bottom | unread badge, or the muted glyph |
 
 A conversation the person has left, or a channel they unsubscribed from, is
-not in the list.
+not in the list. **Amended 2026-10-31
+([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 9):** the same
+holds when the person was removed from a group, and the history goes with the row, on
+every device of the person.
+
+Search can also show a public group or channel the person is not in; that is a search
+result, not a row of this list. While the person has a request waiting, a `Requests
+sent` row stands above the list (same spec, section 6.2).
 
 **Per platform.** Opening a row is a click or a tap; the row's own menu is a
 right-click on the web and a long press on both natives. That is the whole
@@ -102,6 +109,9 @@ difference - the row itself is the same row.
 "Newest" is the last activity the person can see: a message, a post, a call
 row, a system row the timeline draws. A row that draws nothing does not move
 a conversation to the top.
+
+A group's creation counts as activity: its timeline draws a row, so a new group of
+one sorts to the top like any other new conversation (2026-10-31).
 
 This is the rule web and Android already apply (`pinned desc`, then
 `archived asc`, then activity); it carries unchanged, and what changes is
@@ -128,8 +138,9 @@ exactly three items, in this order:
 
 1. **New chat** - pick from contacts. A contact with no conversation yet
    starts one; a contact with one opens it.
-2. **Create group** - the existing new-group flow.
-3. **Create channel** - the existing new-channel flow.
+2. **Create group** - the new-group flow. Nobody has to be picked (2026-10-31).
+3. **Create channel** - the new-channel flow. Both ask for an `@name` and Public or
+   Private ([`group-and-channel-privacy.md`](group-and-channel-privacy.md) section 3).
 
 Each item is a row with a leading icon and a label. No descriptions; if an
 item needs a sentence to explain it, the label is wrong.
@@ -174,6 +185,15 @@ What is NOT open is the constraint any answer has to live with, because it
 is a property of the system rather than a design choice.
 
 ### 4.1 The network lookup can only ever be exact
+
+**Amended 2026-10-31
+([ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md)):** this section
+describes the username and handle lookup. Since ADR-0060 a name is also found by the
+start of a word, from 3 letters, for those who published their terms, and ADR-0087
+extends that to public groups and channels. An `@name` is still exact. People, groups and
+channels now share one set of names, so section 4.3's "two namespaces" is one, and search
+results are specified in [`group-and-channel-privacy.md`](group-and-channel-privacy.md)
+section 5.
 
 Lakko's discovery is a blinded lookup: the client normalises the username,
 blinds it, and the server evaluates without learning what was asked
@@ -256,8 +276,7 @@ and the hit areas must not overlap.
 - **Default** - the list.
 - **Empty**: "No calls yet" and the action below.
 - The screen carries ONE action, **New call**, which starts a group video
-  call and lands the person in it, plus **Join by link** for a link that did
-  not open by itself. [`call-links.md`](call-links.md) owns that decision and
+  call and lands the person in it. [`call-links.md`](call-links.md) owns that decision and
   the reasoning; what matters here is that the destination named after the
   act performs the act, which it did not when this section was first written
   - it offered only two ways to handle a LINK, so placing a call meant

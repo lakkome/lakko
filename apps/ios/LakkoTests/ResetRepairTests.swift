@@ -129,8 +129,20 @@ final class ResetRepairTests: XCTestCase {
         XCTAssertFalse(swap(before: ["me", "bob"], after: ["me"]).suppress)
         XCTAssertFalse(swap(before: ["me"], after: ["me", "new"]).suppress, "nobody was awaited")
         XCTAssertFalse(swap(before: ["me", "new"], after: ["me"]).suppress, "a current key left")
-        XCTAssertFalse(swap(before: ["me", "old"], after: ["me", "old"]).suppress, "no key changed")
         XCTAssertFalse(swap(before: nil, after: ["me"]).suppress)
+        XCTAssertFalse(swap(before: ["me"], after: nil).suppress)
+    }
+
+    /// A commit that only added or retired device leaves leaves the person
+    /// keys equal: no row, and the memory is kept as it was.
+    func testACommitThatChangesOnlyDevicesShowsNoRow() {
+        XCTAssertEqual(
+            swap(before: ["me", "bob"], after: ["bob", "me"]),
+            ResetRepair.SwapVerdict(suppress: true, awaited: [:]))
+        XCTAssertEqual(
+            swap(before: ["me", "old"], after: ["me", "old"], awaited: ["anna": 900]),
+            ResetRepair.SwapVerdict(suppress: true, awaited: ["anna": 900]),
+            "the awaited memory is unchanged")
     }
 
     func testAnAwaitedPersonIsForgottenPastTheWindow() {

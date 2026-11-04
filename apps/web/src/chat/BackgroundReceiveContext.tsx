@@ -50,6 +50,7 @@ import { conversationSeedOf, useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useCallHost } from "../calls/CallHostContext";
 import { isDsNetworkFailure } from "../ds/client";
+import { journalHex } from "../ds/access";
 import { JOURNAL_REPAIR_MAX_POLLS, journalRepair } from "../ds/journal-repair";
 import {
   createWakeLatch,
@@ -58,10 +59,10 @@ import {
   sleepCancellable,
 } from "../ds/long-poll-loop";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
-import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { intakeScopedEnvelope, noteIntroductionsAsk } from "../reach/scoped-intake";
 import { onReceivedGrantsChanged } from "../reach/reach-service";
 import { loadUnacked } from "./commit-outbox";
-import { groupsOwingWelcomes } from "./owed-welcomes";
+import { retryOwedWelcomes } from "./owed-welcomes";
 import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import {
@@ -84,6 +85,7 @@ import {
 } from "./background-log";
 import { planBackgroundEvents, type MessageOpEvent } from "./background-events";
 import { foldOpsIntoStored } from "./message-ops-store";
+import { markUnseenReaction } from "./unseen-reactions";
 import {
   BACKGROUND_CONCURRENCY,
   BACKGROUND_SWEEP_INTERVAL_MS,
@@ -97,6 +99,7 @@ import {
 } from "./background-receive-scheduler";
 import { onGroupCheckRequested, reportGroupCheck, resetFeedRefresh } from "../feed/feed-refresh-store";
 import { useChats, type ActiveGroup } from "./ChatContext";
+import { useMembershipEnd } from "./MembershipEndContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import {
   decideActingCommitter,
@@ -189,13 +192,18 @@ import { installDeadSessionGuard } from "./client";
 import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "./persisted-attachment";
 import {
   adminRestoreStep,
-  deviceSwapAcrossCommits,
   mayAddResetIdentity,
   repairPlan,
   resetCase,
   supersededSenderInert,
 } from "./reset-repair";
 import { conversationKindOf } from "./conversation-kind";
+import {
+  membershipChangeOfBatch,
+  sweepBatchWithOwnCommit,
+  withMembershipChange,
+  type MembershipChange,
+} from "./membership-rows";
 import type { ProposalRecordView } from "./pending-requests";
 import type { PushRotationRole } from "../push/group-routing";
 import { proposalKey, recordObservation } from "./pending-requests";
@@ -302,6 +310,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const callHost = useCallHost();
   const sync = useDeviceGroupSync();
   const lineageView = useLineage();
+  const membershipEnd = useMembershipEnd();
 
   const coordinator = new ReceiveCoordinator<IncomingChatEvent>();
   const backoff = new GroupBackoff();
@@ -446,6 +455,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // ADR-0045 UX §6.2.8 — a group this device is no longer in is never polled:
     // every row would be refused and logged, forever.
     if (entry === undefined || readIsActive(entry.group) === false) return true;
+    // ADR-0087 section 9 — and neither is a group whose end is under way, a
+    // heard one included: that handle is still active.
+    if (membershipEnd.isEnding(groupIdB64)) return true;
     // ADR-0073 R.5 — an older group of a conversation that moved: a
     // one-to-one's old journal is not read at all (its only other sender is
     // the superseded identity); a group's is read for the retention window,
@@ -502,7 +514,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       },
       signal,
     );
-    if (result.outcome === "cursor-moved") return { yieldedRows: false };
+    if (result.outcome === "cursor-moved") return { yieldedRows: false, cursorMoved: true };
     if (!current()) {
       // Signed out while the poll was out. Only the durable half.
       await settle(
@@ -538,11 +550,20 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // land, and before this a proposal in a chat nobody had open waited until
     // somebody opened it. Cheap when nothing is pending; never awaited by the
     // poll's own error path — a sweep failure is not a poll failure.
+    //
+    // ADR-0060 section 6 - last, a proposer's committer envelope for an Add
+    // still waiting, after the sweep so an Add this device just landed sends
+    // nothing. A failed sweep does not stop it.
     void rerequestSupersededFor(entry)
       .then(() => sweepGroup(entry))
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("background receive: tail sweep failed", err);
+      })
+      .then(() => (current() ? resendCommitterEnvelopesFor(entry) : undefined))
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: committer envelope re-send failed", err);
       });
     // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
     // chat; see `device-readmission.ts`.
@@ -1393,6 +1414,22 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   }
 
   /**
+   * ADR-0060 section 6 — the background half of the committer envelope
+   * re-send (`reach/committer-envelope.ts`); the chat view runs the same pass
+   * for the group it has open.
+   */
+  async function resendCommitterEnvelopesFor(entry: ActiveGroup): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return;
+    if (coordinator.isForeground(entry.groupIdB64)) return;
+    await contacts.resendCommitterEnvelopes(
+      secrets,
+      entry.group,
+      readIsActive(entry.group) === false,
+    );
+  }
+
+  /**
    * ADR-0050 section 2.4 — re-check the device lists of the accounts in
    * `entry` against its roster: propose an Add for a listed device with no
    * leaf (a restored phone, a pairing whose fan-out was cut short), and — for
@@ -1623,6 +1660,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const start = await startCursor(account, entry, current);
     if (!current()) return null;
     const before = memberSignatureKeys(entry.group);
+    // docs/ux/second-device.md section 4 — the people before the sweep's reads.
+    const peopleBefore = personKeysOrNull(entry);
     const swept: IncomingChatEvent[] = [];
     let outcome: SweepOutcome | null = null;
     let reached = start;
@@ -1646,14 +1685,21 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       );
     } finally {
       // Applied and cursor-advanced whether or not our commit won: the only
-      // question left is whether they reach the log and the view.
-      if (swept.length > 0) await settle(account, entry, swept, true, before, { current, reached });
+      // question left is whether they reach the log and the view. A merged
+      // own commit joins them as the batch's last commit row, so this device
+      // records the same named membership row as every other member
+      // (docs/ux/second-device.md section 4).
+      const batch = sweepBatchWithOwnCommit(swept, outcome, new Date().toISOString());
+      if (batch.length > 0) {
+        await settle(account, entry, batch, true, before, { current, reached }, peopleBefore);
+      }
     }
     if (!current()) return null;
     if (outcome?.kind === "committed") {
       // ADR-0043 — a removal this sweep committed owes the push-routing
       // rotation, as the chat view's sweep would.
       void rotateIfShrank(account, entry, before);
+      if (outcome.addedCount > 0) groupNames.addedHere(entry.groupIdB64);
     }
     return outcome;
   }
@@ -1824,6 +1870,10 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         return deviceKey === null ? null : loadMessageLog(account, deviceKey);
       },
     });
+    // ADR-0087 section 9 — the batch that ended this conversation: every row
+    // of it is being wiped, and nothing it carried (a pin, a name, a list a
+    // member shared) may land in a store behind the wipe.
+    if (membershipEnd.isEnding(groupIdB64)) return;
     // ADR-0073 R.8 — in a conversation that cannot be repaired in place for
     // a reset, or that already moved, nothing from the retired key acts:
     // its control and service envelopes are dropped with its rows.
@@ -1842,31 +1892,31 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         }),
       senderKeyOfLeaf: (leaf) => personKeyAtLeafB64(entry, leaf),
     });
-    // ADR-0073 R.7 case 2 / UX 16.5 — a batch that only swapped the devices
-    // of people who stay leaves no `Members changed` row, in the log or in
-    // the view.
-    let swapOnly = false;
+    // docs/ux/second-device.md section 4 — the people a batch of commits
+    // added and removed go on its last commit row, in the log and in the
+    // view. A batch that only swapped devices, or a reset person's keys
+    // (ADR-0073 R.7 case 2 / UX 16.5, across one batch or two), records
+    // nothing, and neither does a one-to-one or this device's own removal.
+    let membershipChange: MembershipChange | null = null;
     if (planned.sawCommit) {
-      const swap = deviceSwapAcrossCommits({
+      const judged = membershipChangeOfBatch({
         personKeysBefore: peopleBefore ?? null,
         personKeysAfter: personKeysOrNull(entry),
         accountOfKey: (k) => superseded.get(k) ?? accountIdB64OfKey(k),
         isSuperseded: (k) => superseded.has(k),
         awaited: awaitedSwaps(account, groupIdB64),
         nowMs: Date.now(),
+        ownPersonKeyB64: ownPersonKeyB64(chats.identity()) ?? null,
       });
-      swapOnly = swap.suppress;
-      setAwaitedSwaps(account, groupIdB64, swap.awaited);
+      setAwaitedSwaps(account, groupIdB64, judged.awaited);
+      if (readIsActive(entry.group) !== false) membershipChange = judged.change;
     }
-    const isCommitRow = (e: IncomingChatEvent): boolean =>
-      e.kind === "system" && e.systemKind === "commit";
-    const plan = swapOnly
-      ? {
-          ...planned,
-          timeline: planned.timeline.filter((e) => !isCommitRow(e)),
-          toView: planned.toView.filter((e) => !isCommitRow(e)),
-        }
-      : planned;
+    const kind = conversationKindOf(entry.group);
+    const plan = {
+      ...planned,
+      timeline: withMembershipChange(planned.timeline, membershipChange, kind),
+      toView: withMembershipChange(planned.toView, membershipChange, kind),
+    };
 
     if (!scope.current()) {
       // The session these rows were received for has ended. Everything below
@@ -1902,6 +1952,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         payload: e.payload,
         senderKeyB64: e.senderKey,
         oneToOne: isOneToOne(entry.group),
+        scopeHex: journalHex(base64Decode(groupIdB64)),
       });
     }
     // ADR-0048 §2 trigger 4 — another member asked this group to introduce
@@ -1916,6 +1967,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         if (r.senderKey === undefined) continue;
         if (own !== null && isOwnKeyB64(own, r.senderKey)) continue;
         profiles.requested(groupIdB64);
+        // ADR-0060 section 4 - the same request is how a device that missed
+        // this account's introductions asks for them again.
+        noteIntroductionsAsk(groupIdB64, r.senderKey);
         break;
       }
     }
@@ -1928,6 +1982,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       void groupNames.receive(entry, n).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("background receive: group name receive failed", err);
+      });
+    }
+    // ADR-0087 — the group photo, allowed reactions and handle, the same way.
+    for (const g of plan.groupSettings) {
+      void groupNames.receiveSetting(entry, g).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: group setting receive failed", err);
       });
     }
     // ADR-0073 R.6 — a successor claim, through the claim rule under the
@@ -2057,9 +2118,21 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // takes its pin records with it (section 4.1). Which deletes the
       // author gate accepted is read off the fold's result, not off the ops.
       const newlyDeleted: number[] = [];
+      // Reactions section 12 — others' reactions to this person's own
+      // messages, for the unseen-reactions button.
+      const unseen: number[] = [];
+      const ownKey = ownPersonKeyB64(chats.identity());
       await updateMessageLog(account, deviceKey, (current) => {
         const groups = current?.groups ?? {};
         const appended = appendToGroupSlot(groups[hex], messages, cursor);
+        unseen.length = 0;
+        if (ownKey !== null) {
+          for (const op of ops) {
+            if (op.op !== "reaction" || op.reactionAction === "remove" || op.senderKey === ownKey) continue;
+            const target = appended.messages.find((m) => Number(m.messageId) === op.target);
+            if (target?.authorKeyB64 === ownKey) unseen.push(op.target);
+          }
+        }
         const folded = foldOpsIntoStored(appended.messages, ops);
         newlyDeleted.length = 0;
         if (folded !== appended.messages) {
@@ -2080,6 +2153,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           },
         };
       });
+      for (const id of unseen) markUnseenReaction(account, entry.groupIdB64, id);
       // The pin store is the live session's.
       if (!scope.current()) return;
       for (const id of newlyDeleted) {
@@ -2146,6 +2220,42 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // under the MLS lock makes a race with the sweep or the call lane benign.
     await pollGroup(groupIdB64, 0, new AbortController().signal);
   }
+
+  // ADR-0045 amendment (C-88) - a Welcome refused because this device holds
+  // its group as active waits for that group's journal to be read to its
+  // head. A group whose view is open is long-polled by that view: asked to
+  // poll now, and answered `false`, since nothing here can say it got there.
+  onCleanup(
+    membershipEnd.registerJournalReader(async (groupIdB64) => {
+      if (chats.get(groupIdB64) === undefined) return true;
+      if (coordinator.isForeground(groupIdB64)) {
+        coordinator.requestPoll(groupIdB64);
+        return false;
+      }
+      try {
+        for (let i = 0; i < JOURNAL_REPAIR_MAX_POLLS; i++) {
+          const r = await pollGroup(groupIdB64, 0, new AbortController().signal);
+          // Another path took this batch and may be applying it still: that
+          // is not the head, and calling it the head would drop the Welcome.
+          if (r.cursorMoved === true) continue;
+          if (!r.yieldedRows) return true;
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("journal read for a held Welcome failed", err instanceof Error ? err.name : "");
+      }
+      return false;
+    }),
+  );
+  // The group is gone from this device, and with it its position in the
+  // journal: a person added back starts as a new member does.
+  onCleanup(
+    membershipEnd.onGroupWiped((groupIdB64) => {
+      coordinator.forget(groupIdB64);
+      logCursors = null;
+      backoff.succeeded(groupIdB64);
+    }),
+  );
 
   let unregisterGroupCheck: (() => void) | null = null;
 
@@ -2341,20 +2451,19 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   });
 
   // ADR-0050 section 2.5a item 7 - a Welcome kept owed because no grant
-  // reached its addressee's mailbox is retried when a grant arrives, not only
-  // at the next poll of its group: `sweepGroup` runs the sweep's owed-Welcome
-  // step (or asks an open chat view to poll, which does).
+  // reached its addressee's mailbox is retried when a grant or a proposer's
+  // re-sent committer envelope arrives, not only at the next poll of its
+  // group: `sweepGroup` runs the sweep's owed-Welcome step (or asks an open
+  // chat view to poll, which does).
   const unsubscribeGrants = onReceivedGrantsChanged(() => {
-    void (async () => {
-      const owing = await groupsOwingWelcomes(
-        chats.groups().map((g) => g.groupIdB64),
-        (g) => loadUnacked(g),
-      );
-      for (const groupIdB64 of owing) {
+    void retryOwedWelcomes(
+      chats.groups().map((g) => g.groupIdB64),
+      (g) => loadUnacked(g),
+      async (groupIdB64) => {
         const entry = chats.get(groupIdB64);
         if (entry !== undefined) await sweepGroup(entry);
-      }
-    })().catch((err: unknown) => {
+      },
+    ).catch((err: unknown) => {
       // eslint-disable-next-line no-console
       console.warn("background receive: owed Welcome retry failed", err);
     });

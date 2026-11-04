@@ -37,6 +37,7 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { publicOrigin } from "../platform";
 
 /** Poll cadence for the PublisherGroup DS journal — same 5 s trade-off as
  *  the subscriber fan-out. */
@@ -90,7 +91,7 @@ export function CoPublishersPanel(props: {
         await createCoPublisherLink(
           props.identity,
           props.publisherGroup,
-          window.location.origin,
+          publicOrigin(),
           discovery,
           secrets === null ? null : base64Encode(secrets.accountId),
         ),
@@ -161,15 +162,17 @@ export function CoPublishersPanel(props: {
   });
 
   const [copied, setCopied] = createSignal(false);
+  const [copyFailed, setCopyFailed] = createSignal(false);
   async function copyLink(): Promise<void> {
     const l = link();
     if (l === null) return;
+    setCopyFailed(false);
     try {
       await navigator.clipboard.writeText(l);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      /* the button is the only feedback surface */
+      setCopyFailed(true);
     }
   }
   return (
@@ -203,6 +206,16 @@ export function CoPublishersPanel(props: {
             </button>
           </div>
         )}
+      </Show>
+      <Show when={copied()}>
+        <p class="form-info" role="status">
+          {t("chat.invite_link.copied")}
+        </p>
+      </Show>
+      <Show when={copyFailed()}>
+        <p class="form-error" role="alert">
+          {t("chat.invite_link.copy_failed")}
+        </p>
       </Show>
       <Show when={pending().length > 0}>
         <div class="lk-section-label lk-flush">

@@ -29,7 +29,10 @@
  * its own module so swapping a route is a single import change.
  */
 import { FolderEditorHost } from "./chat/folders/FolderEditor";
-import type { Component } from "solid-js";
+import { Show, type Component } from "solid-js";
+import { isDesktop } from "./platform";
+import { DesktopBridge } from "./platform/DesktopBridge";
+import { OpenInApp } from "./platform/OpenInApp";
 import { MemoryRouter, type RouteSectionProps } from "@solidjs/router";
 import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
@@ -54,6 +57,7 @@ import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
 import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { AccountNotices } from "./auth/protect/AccountNotices";
 import { RenameResume } from "./auth/rename-runtime";
+import { GroupHandleRuntime } from "./chat/GroupHandleRuntime";
 import { BlobAccessRuntime } from "./storage/BlobAccessRuntime";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
@@ -62,6 +66,7 @@ import { PinProvider } from "./chat/PinContext";
 import { SharedChannelsProvider } from "./discover/SharedChannelsContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
+import { MembershipEndProvider } from "./chat/MembershipEndContext";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
@@ -91,6 +96,14 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
      * app existed and the call has not reached the slot yet.
      */}
     <CallActionListener />
+    {/*
+     * ADR-0085 section 4 - the desktop host's badge, quit question, Settings
+     * menu item and keyboard shortcuts. Inside the router (it navigates);
+     * the browser build never mounts it.
+     */}
+    <Show when={isDesktop()} fallback={<OpenInApp />}>
+      <DesktopBridge />
+    </Show>
     {props.children}
     <CallHostView />
   </>
@@ -162,6 +175,9 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     per-group watermark store both receive paths feed, so "Read" survives
  *     a reload and a receipt applied while the chat was closed is kept.
  *
+ *   <MembershipEndProvider> — ADR-0087 section 9: the end of a membership.
+ *     Below every per-group store it wipes, above what reports to it (the
+ *     mailbox's Welcomes, the call host, the background receive).
  *   <CallLogProvider> — docs/ux/calls.md section 6: the durable per-group
  *     record of the calls this device was in, so a finished call leaves a
  *     row in the conversation. ABOVE the call host, which writes to it: a
@@ -185,13 +201,15 @@ const App: Component = () => (
         <SharedChannelsProvider>
         <ReadWatermarkProvider>
         <CallLogProvider>
+        {/* ADR-0082 — on-device translation and transcription: one
+            controller per session, plus the pack dialog and the language
+            picker it can raise from any conversation. Above the membership
+            end, whose wipe of a conversation deletes its results too. */}
+        <TranslationProvider>
+        <MembershipEndProvider>
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
-        {/* ADR-0082 — on-device translation and transcription: one
-            controller per session, plus the pack dialog and the language
-            picker it can raise from any conversation. */}
-        <TranslationProvider>
           {/*
            * The address bar shows the origin only: the router's paths live in
            * `history.state` (`routes/origin-history.ts`), never in the URL.
@@ -239,6 +257,9 @@ const App: Component = () => (
           <RenameResume />
           {/* ADR-0065 - blob passes, owed deletes and the keep tick. */}
           <BlobAccessRuntime />
+          {/* ADR-0087 sections 3 to 5 - owed @name writes, lease renewal,
+              and the public record published again when the knock key moves. */}
+          <GroupHandleRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole
@@ -277,10 +298,11 @@ const App: Component = () => (
            */}
           <FolderEditorHost />
           <ConfirmDialog />
-        </TranslationProvider>
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>
+        </MembershipEndProvider>
+        </TranslationProvider>
         </CallLogProvider>
         </ReadWatermarkProvider>
         </SharedChannelsProvider>

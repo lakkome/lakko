@@ -109,12 +109,55 @@ public final class ContactsClient {
     ///
     /// - Parameter accountId: the peer's raw 16-byte account_id.
     /// - Parameter bundle: the fetched ``IdentityFetchResponse``.
+    /// ADR-0074 section 3.7 — once the gates passed, a conversation link on
+    /// the bundle is verified and recorded (``recordConversationLink(accountIdB64:bundle:)``).
+    ///
     /// - Throws: ``SupersessionRefused`` on a fail-closed supersession
     ///   branch, ``LogRollbackDetected`` on a transparency-log rollback.
     func verifyBundleAccountKey(
         accountId: Data,
         bundle: IdentityFetchResponse,
         heldKeyB64: String? = nil
+    ) async throws {
+        try await runIdentityGates(accountId: accountId, bundle: bundle, heldKeyB64: heldKeyB64)
+        recordConversationLink(accountIdB64: base64Encode(accountId), bundle: bundle)
+    }
+
+    /// ADR-0074 section 3.7 — the account's conversations are bound to an
+    /// older key than the one it publishes: the link says which, signed by
+    /// both. A contact first met after a rotation pinned only the published
+    /// key, so without this its re-admission check and the KeyPackage add
+    /// filter would not follow the person to the key the roster names.
+    ///
+    /// Runs after the gates, and only while the fetched key is what they left
+    /// trusted: the pin, or with no pin the verified binding. The link is
+    /// verified against that key, so a directory can strip it and cannot
+    /// attach a key of its choosing. A link that does not verify is ignored:
+    /// the identity stays what the gates made it, nothing is recorded and
+    /// nothing is refused. Never throws.
+    private func recordConversationLink(accountIdB64: String, bundle: IdentityFetchResponse) {
+        guard let raw = bundle.conversationLink, !raw.isEmpty else { return }
+        let trustedB64 = pinStore.readPin(accountIdB64: accountIdB64)?.pinnedSignaturePubkeyB64
+            ?? bindings.read(accountIdB64: accountIdB64)?.keyB64
+        guard trustedB64 == bundle.signaturePubkey, let trusted = base64Decode(bundle.signaturePubkey) else {
+            return
+        }
+        guard let link = base64Decode(raw),
+              let conversationKey = try? verifyConversationLink(link: link, trustedCurrentKey: trusted) else {
+            NSLog("ADR-0074: a conversation link did not verify and was ignored")
+            return
+        }
+        predecessors.record(
+            oldKeyB64: base64Encode(conversationKey),
+            newKeyB64: bundle.signaturePubkey,
+            evidence: .verifiedConversationLink)
+    }
+
+    /// The two layers of ``verifyBundleAccountKey(accountId:bundle:heldKeyB64:)``.
+    private func runIdentityGates(
+        accountId: Data,
+        bundle: IdentityFetchResponse,
+        heldKeyB64: String?
     ) async throws {
         // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
         // re-pins to the new key on a verified rotation (overwriting the
@@ -1094,11 +1137,13 @@ public final class ContactsClient {
             // device reach the recipient (a link grant, a search result's
             // grant, a co-member's); unsigned (a `mailbox-write` token) only
             // for an Everyone mailbox.
-            publish = try await ds.publishMailbox(
-                pseudonym: plan.target.address,
-                payload: row,
-                writeAuth: plan.auth
-            )
+            publish = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address,
+                    payload: row,
+                    writeAuth: auth
+                )
+            }
         } catch {
             if case .http(401, _, _)? = error as? DsClientError {
                 throw ContactsError.requestRefused
@@ -1158,11 +1203,13 @@ public final class ContactsClient {
         do {
             // ADR-0060 section 6 — written with the requester's `reply` grant.
             let row = try plan.target.seal(kind: .contactAck, body: wireBytes)
-            publish = try await ds.publishMailbox(
-                pseudonym: plan.target.address,
-                payload: row,
-                writeAuth: plan.auth
-            )
+            publish = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(
+                    pseudonym: plan.target.address,
+                    payload: row,
+                    writeAuth: auth
+                )
+            }
         } catch {
             throw ContactsError.wrap(error)
         }
@@ -1197,7 +1244,9 @@ public final class ContactsClient {
         }
         do {
             let row = try plan.target.seal(kind: .linkRefusal, body: wire)
-            _ = try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: plan.auth)
+            _ = try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: auth)
+            }
         } catch {
             throw ContactsError.wrap(error)
         }

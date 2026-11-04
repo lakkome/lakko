@@ -36,10 +36,11 @@ pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
-pub use error::{Error, Result};
+pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
-    MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
+    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
+    MAX_PENDING_JOIN_REQUESTS,
 };
 pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
@@ -215,6 +216,47 @@ pub mod fuzz_api {
         crate::group::decode_pending_external_joins(bytes, identity).is_ok()
     }
 
+    /// Hand `bytes` to [`crate::Group::retain_join_request`] on a fixed
+    /// group (ADR-0087 section 5). The bytes are what a sealed knock row
+    /// opened to, and anyone holding the group's public knock key can seal
+    /// any bytes, so they are attacker-chosen. Returns `true` when they were
+    /// taken as a KeyPackage.
+    ///
+    /// # Panics
+    ///
+    /// When the group's epoch or roster changes: a knock row must never
+    /// advance or alter the group, whatever it holds.
+    #[must_use]
+    pub fn retain_join_request(bytes: &[u8]) -> bool {
+        use std::cell::RefCell;
+        thread_local! {
+            static FIXTURE: RefCell<Option<(crate::Identity, crate::Group)>> =
+                RefCell::new(
+                    crate::Identity::from_seed(&[0x6Bu8; 64]).ok().and_then(|identity| {
+                        crate::Group::create(&identity, crate::GroupKind::Group)
+                            .ok()
+                            .map(|group| (identity, group))
+                    }),
+                );
+        }
+        FIXTURE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let Some((identity, group)) = slot.as_mut() else {
+                return false;
+            };
+            let epoch = group.epoch();
+            let members = group.member_count();
+            let taken = group.retain_join_request(identity, bytes).is_ok();
+            assert_eq!(group.epoch(), epoch, "a knock row never advances the epoch");
+            assert_eq!(
+                group.member_count(),
+                members,
+                "a knock row never changes the roster"
+            );
+            taken
+        })
+    }
+
     /// The fixed login handle [`decode_pairing_qr`] binds against: 32 bytes
     /// of `0x5A`, a value the fuzzer can reach by construction.
     pub const PAIRING_QR_EXPECTED_HANDLE: [u8; crate::pairing::LOGIN_HANDLE_LEN] =
@@ -223,7 +265,8 @@ pub mod fuzz_api {
     /// Try to decode a device-pairing payload (`pairing::decode`, v2 since
     /// ADR-0056). Returns `true` on a successful prost decode + the
     /// structural binding checks (version == 2 / login-handle length +
-    /// constant-time match / rendezvous-pseudonym length). The bytes are the
+    /// constant-time match / rendezvous-pseudonym length / device-card
+    /// length). The bytes are the
     /// MOST attacker-controllable input in the system — a victim physically
     /// scans a QR a malicious actor crafted, or a relay serves the posted
     /// payload — so this parser must stay panic-free on arbitrary input. The
@@ -234,9 +277,10 @@ pub mod fuzz_api {
     }
 
     /// The guard oracle for the `pairing_qr` target: `false` exactly when
-    /// [`decode_pairing_qr`] accepts a payload whose version is not 2 or
-    /// whose embedded handle is not [`PAIRING_QR_EXPECTED_HANDLE`]. The
-    /// harness asserts it; it never panics itself.
+    /// [`decode_pairing_qr`] accepts a payload whose version is not 2, whose
+    /// embedded handle is not [`PAIRING_QR_EXPECTED_HANDLE`], or whose device
+    /// card is longer than [`crate::pairing::PAIRING_DEVICE_CARD_MAX_LEN`].
+    /// The harness asserts it; it never panics itself.
     #[must_use]
     pub fn pairing_qr_acceptance_is_bound(bytes: &[u8]) -> bool {
         use prost::Message as _;
@@ -246,6 +290,7 @@ pub mod fuzz_api {
         lakko_proto::wire::device_pairing::v1::PairingQr::decode(bytes).is_ok_and(|p| {
             p.version == crate::pairing::PAIRING_VERSION
                 && p.login_handle.as_slice() == PAIRING_QR_EXPECTED_HANDLE.as_slice()
+                && p.device_card.len() <= crate::pairing::PAIRING_DEVICE_CARD_MAX_LEN
         })
     }
 

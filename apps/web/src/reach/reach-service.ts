@@ -460,10 +460,25 @@ export class ReachSession {
    * or channel the setting no longer allows stops holding a working key, and
    * the profile carrying the new grants is republished in every group. A
    * change received from another device arrives with that device's bumped
-   * counters and is not rotated again here.
+   * counters and is not rotated again here. `contactsNarrowed`: the change
+   * also took someone out of Contacts of my contacts, so `fof` moves with
+   * them ({@link rotateOnContactsNarrowed}).
    */
-  async rotateOnSettingChange(): Promise<void> {
-    this.book = this.restamp(rotateClasses(this.book, ["group", "channel"]));
+  async rotateOnSettingChange(contactsNarrowed = false): Promise<void> {
+    const classes: ReachClassName[] = contactsNarrowed ? ["group", "channel", "fof"] : ["group", "channel"];
+    this.book = this.restamp(rotateClasses(this.book, classes));
+    await this.persistBook();
+    this.versionsChanged(true);
+    await this.syncNow(false);
+  }
+
+  /**
+   * Contacts of my contacts narrowed (ADR-0060 section 4): new `fof` version,
+   * the same bump a removed contact causes. The old key goes at this sync, and
+   * a new record is built and offered to the contacts still allowed.
+   */
+  async rotateOnContactsNarrowed(): Promise<void> {
+    this.book = this.restamp(rotateClasses(this.book, ["fof"]));
     await this.persistBook();
     this.versionsChanged(true);
     await this.syncNow(false);

@@ -352,6 +352,9 @@ struct MessageMenuRequest: Identifiable {
     /// Whether the reaction row is offered at all.
     let canReact: Bool
 
+    /// Reactions-and-emoji spec section 5 — what the row holds.
+    var reactionRow: ReactionRowModel = .empty
+
     /// The production bubble, drawn again at its own position.
     let bubble: AnyView
 
@@ -535,6 +538,7 @@ struct MessageActionMenu: View {
         VStack(alignment: outgoing ? .trailing : .leading, spacing: MessageMenuLayout.gap) {
             if request.canReact {
                 MessageReactionRow(
+                    model: request.reactionRow,
                     onReact: { emoji in
                         dismiss()
                         request.onReact(emoji)
@@ -581,8 +585,8 @@ struct MessageActionMenu: View {
 /// section 2 exists to forbid the alternative of.
 struct MessageReactionRow: View {
 
-    /// ADR-0023's six. The trailing `+` reaches every other emoji through the
-    /// picker (ADR-0047 section 4), so this is a shortcut list and not a limit.
+    /// ADR-0023's six, the defaults the shared quick-row rule fills from. The
+    /// row itself is ``ReactionRowModel``.
     static let palette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
 
     /// Each emoji's tap target. Seven of these plus the padding is the row's
@@ -591,41 +595,73 @@ struct MessageReactionRow: View {
     /// room for the bubble's own inset.
     static let target: CGFloat = 36
 
+    /// Reactions-and-emoji spec section 5 — the row for this message.
+    var model: ReactionRowModel = ReactionRowModel(
+        emoji: MessageReactionRow.palette, own: [], capReached: false, showsExpand: true)
     let onReact: (String) -> Void
     let onMore: () -> Void
 
+    /// The emoji row's width: its targets plus the 4 pt gaps between them.
+    private var rowWidth: CGFloat {
+        let count = model.emoji.count + (model.showsExpand ? 1 : 0)
+        return CGFloat(count) * Self.target + CGFloat(max(0, count - 1)) * 4
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(Self.palette, id: \.self) { emoji in
-                Button {
-                    onReact(emoji)
-                } label: {
-                    Text(emoji)
-                        .font(.system(size: 22))
-                        .frame(width: Self.target, height: Self.target)
-                        .contentShape(Rectangle())
+        VStack(spacing: 4) {
+            HStack(spacing: 4) {
+                ForEach(model.emoji, id: \.self) { emoji in
+                    let held = model.own.contains(emoji)
+                    let dimmed = model.capReached && !held
+                    Button {
+                        onReact(emoji)
+                    } label: {
+                        Text(emoji)
+                            .font(.system(size: 22))
+                            .frame(width: Self.target, height: Self.target)
+                            .background(Circle().fill(held ? Color.lakkoAccentSoft : Color.clear))
+                            .opacity(dimmed ? 0.35 : 1)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(dimmed)
+                    .accessibilityLabel(Localization.text("chat.message.react_with", texts: ["emoji": emoji]))
+                    .accessibilityAddTraits(held ? .isSelected : [])
+                    // A stable handle for the UI tests, which must not depend on the
+                    // interface language the label is read in.
+                    .accessibilityIdentifier("message-reaction-\(emoji)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Localization.text("chat.message.react_with", texts: ["emoji": emoji]))
-                // A stable handle for the UI tests, which must not depend on the
-                // interface language the label is read in.
-                .accessibilityIdentifier("message-reaction-\(emoji)")
+                if model.showsExpand {
+                    Button(action: onMore) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .frame(width: Self.target, height: Self.target)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Localization.text("chat.message.more_reactions"))
+                    .accessibilityIdentifier("message-reaction-more")
+                }
             }
-            Button(action: onMore) {
-                Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .semibold))
+            if model.capReached {
+                // The panel sizes itself (`fixedSize` below), which gives a
+                // Text its one-line height: the second line spilled out under
+                // the panel. The line takes the emoji row's width and its own
+                // wrapped height, so the panel grows to hold it.
+                Text(Localization.text("chat.reaction.cap_reached"))
+                    .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
-                    .frame(width: Self.target, height: Self.target)
-                    .contentShape(Rectangle())
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: rowWidth)
+                    .padding(.bottom, 4)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Localization.text("chat.message.more_reactions"))
-            .accessibilityIdentifier("message-reaction-more")
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(Color.lakkoSurface, in: Capsule())
-        .overlay(Capsule().stroke(Color.lakkoBorder, lineWidth: 0.5))
+        .background(Color.lakkoSurface, in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.lakkoBorder, lineWidth: 0.5))
         // Its own size, never the space it is offered.
         .fixedSize()
     }

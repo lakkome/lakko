@@ -41,8 +41,10 @@
  * the MLS snapshot blob.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { publishMessageLogChanged } from "./message-log-events";
+import type { PersistedMembership } from "./membership-rows";
 
 const DB_NAME = "lakko-message-log";
 const DB_VERSION = 1;
@@ -205,6 +207,14 @@ export interface PersistedMessage {
    * draw `chat.message.unsupported`, in the language current when drawn.
    */
   readonly unsupportedVersion?: number;
+  /**
+   * `docs/ux/second-device.md` section 4 — on a system (commit) row only: the
+   * person keys a received batch added to and removed from a group, recorded
+   * on the batch's last commit row. Names are never stored; the row resolves
+   * them when drawn. Optional without a version bump: a row without it (every
+   * row written before this field) is a commit row that is not drawn.
+   */
+  readonly membership?: PersistedMembership;
 }
 
 /** ADR-0052 decision 2 — a persisted forward attribution. */
@@ -240,6 +250,13 @@ export interface PersistedReaction {
    */
   readonly reactorKeyB64: string;
   readonly emoji: string;
+  /**
+   * The journal position (DS message id, decimal) of the add that gave it,
+   * so a later op re-folds against the same order on every device. Absent on
+   * a row written before the fold (UX reactions-and-emoji section 10): read
+   * as 0.
+   */
+  readonly at?: string;
 }
 
 export interface PersistedGroup {
@@ -261,6 +278,15 @@ export interface PersistedGroup {
    * gaps. See `feed/feed-seen.ts`.
    */
   readonly feedSeen?: readonly string[];
+  /**
+   * docs/ux/second-device.md section 2, "History is not news": the highest DS
+   * id that came with a pairing history bundle (stringified), the higher of
+   * every bundle filed. A row at or below it is never unread on this device,
+   * whatever the read positions say. Local: it moves no read position of the
+   * account and sends no read receipt, and it is not `lastViewedMessageId`,
+   * which says what the person saw. See `background-log.ts`.
+   */
+  readonly syncedThroughMessageId?: string;
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
@@ -345,16 +371,12 @@ function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
 }
 
 async function encryptBlob(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: Uint8Array,
 ): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv.slice() },
-      deviceKey,
-      plaintext.slice(),
-    ),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -363,7 +385,7 @@ async function encryptBlob(
 }
 
 async function decryptBlob(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   blob: Uint8Array,
 ): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
@@ -372,7 +394,7 @@ async function decryptBlob(
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
   const pt = new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+    await deviceKey.decrypt(iv, ct),
   );
   return pt;
 }
@@ -389,10 +411,16 @@ async function decryptBlob(
  */
 export async function saveMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   payload: MessageLogPayload,
 ): Promise<void> {
-  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  // A wiped account takes no late write (ADR-0077), and its device key may
+  // already be gone (the desktop host releases it at the wipe), so ask
+  // before the key is used, and again before the write lands.
+  if (!accountStoresWritable(accountIdB64)) return;
+  const plaintext = new TextEncoder().encode(
+    JSON.stringify(withoutBlockedSlots(accountIdB64, payload)),
+  );
   const ciphertext = await encryptBlob(deviceKey, plaintext);
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
@@ -421,7 +449,7 @@ export async function saveMessageLog(
  */
 export async function loadMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<MessageLogPayload | null> {
   const db = await openDb();
   let row: PersistedRow | undefined;
@@ -450,6 +478,49 @@ export async function loadMessageLog(
   }
 }
 
+/**
+ * ADR-0087 section 9 — groups whose history is gone from this device, in this
+ * page. A chat view that was open keeps its rows in memory and writes them on
+ * its way out, and a poll that was in flight files what it decrypted: either
+ * would put a wiped conversation back. Every write goes through
+ * {@link saveMessageLog}, so that is where the slot is left out. Lifted when
+ * the person is added again ({@link allowGroupInMessageLog}), whose new rows
+ * belong here. In memory: after a reload no such writer exists.
+ */
+const blockedSlots = new Set<string>();
+
+function blockKey(accountIdB64: string, groupIdHex: string): string {
+  return `${accountIdB64}|${groupIdHex}`;
+}
+
+/** Refuse this group's rows from now on (the end of a membership). */
+export function blockGroupInMessageLog(accountIdB64: string, groupIdHex: string): void {
+  blockedSlots.add(blockKey(accountIdB64, groupIdHex));
+}
+
+/** Take this group's rows again (a Welcome brought the group back). */
+export function allowGroupInMessageLog(accountIdB64: string, groupIdHex: string): void {
+  blockedSlots.delete(blockKey(accountIdB64, groupIdHex));
+}
+
+/** The payload as it may be written: no blocked slot. Pure over the block
+ *  set; the same object when nothing is blocked. */
+export function withoutBlockedSlots(
+  accountIdB64: string,
+  payload: MessageLogPayload,
+): MessageLogPayload {
+  if (blockedSlots.size === 0) return payload;
+  const blocked = Object.keys(payload.groups).filter((hex) =>
+    blockedSlots.has(blockKey(accountIdB64, hex)),
+  );
+  if (blocked.length === 0) return payload;
+  const groups: { [k: string]: PersistedGroup } = {};
+  for (const [k, v] of Object.entries(payload.groups)) {
+    if (!blocked.includes(k)) groups[k] = v;
+  }
+  return carryHeld(payload, { version: payload.version, groups });
+}
+
 /** Per-account tail of the in-page write chain — see {@link updateMessageLog}. */
 const writeChains = new Map<string, Promise<unknown>>();
 
@@ -470,11 +541,13 @@ const writeChains = new Map<string, Promise<unknown>>();
  */
 export function updateMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   mutate: (current: MessageLogPayload | null) => MessageLogPayload | null,
 ): Promise<void> {
   const prev = writeChains.get(accountIdB64) ?? Promise.resolve();
   const run = prev.then(async () => {
+    // Nothing to read or write for a wiped account (ADR-0077).
+    if (!accountStoresWritable(accountIdB64)) return;
     const current = await loadMessageLog(accountIdB64, deviceKey);
     const next = mutate(current);
     // The held sends ride every writer's rewrite of the payload untouched.
@@ -546,7 +619,7 @@ export function withoutGroup(
  */
 export function setHeldInMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   held: readonly PersistedHeldSend[],
 ): Promise<void> {
   return updateMessageLog(accountIdB64, deviceKey, (current) => {
@@ -567,22 +640,21 @@ export function setHeldInMessageLog(
  * row, or no entry for this group), so the caller can tell "deleted" from
  * "there was nothing there" without a second read.
  *
- * **What this does NOT remove, stated because the confirmation copy is exact
- * rather than sweeping:** the inactive MLS group stays in the provider
- * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete` is
- * a real (small) core follow-up rather than something this rides free. The
- * remnant is inert in the strong sense — it cannot send, decrypt, export or
- * process — but it is not nothing.
+ * The MLS group goes separately, through `Group.deleteLocally`
+ * (`chat/membership-wipe.ts`).
  */
 export async function deleteGroupFromMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   groupIdHex: string,
 ): Promise<boolean> {
-  const payload = await loadMessageLog(accountIdB64, deviceKey);
-  if (payload === null) return false;
-  const next = withoutGroup(payload, groupIdHex);
-  if (next === null) return false;
-  await saveMessageLog(accountIdB64, deviceKey, next);
-  return true;
+  // Through the write chain: a row filed for another group while this ran
+  // must not be lost to a read of the blob from before it.
+  let dropped = false;
+  await updateMessageLog(accountIdB64, deviceKey, (current) => {
+    const next = current === null ? null : withoutGroup(current, groupIdHex);
+    dropped = next !== null;
+    return next;
+  });
+  return dropped;
 }

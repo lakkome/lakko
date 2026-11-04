@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resetAccountStoreGateForTests, sealAccountStoresForWipe } from "../auth/account-store-gate";
+import { WebDeviceCipher } from "../auth/device-cipher";
 import { FakeIndexedDb } from "../test/fake-storage";
 import { deleteTranslationRows, IdbResultBackend, TRANSLATIONS_DB_NAME } from "./result-idb";
 import { decodePrefs, decodeResult, ResultStore, rowId } from "./result-store";
@@ -35,7 +36,7 @@ afterEach(() => {
 });
 
 function store(): ResultStore {
-  return new ResultStore(new IdbResultBackend(() => Promise.resolve(key)));
+  return new ResultStore(new IdbResultBackend(() => Promise.resolve(new WebDeviceCipher(key))));
 }
 
 /** Every value in the translations database, as text. */

@@ -298,6 +298,15 @@ public data class PersistedGroup(
     /** ADR-0063 section 5 — the feed's contiguous-seen watermark, `null`
      *  when the feed has marked nothing contiguous yet. */
     val feedSeenThrough: Long? = null,
+    /**
+     * `docs/ux/second-device.md` section 2, "History is not news": the highest
+     * message id of this group the pairing history bundle carried. A row at
+     * or below it is never unread on this device, whatever read position the
+     * account's other devices hold. Local: it sends no read receipt and no
+     * read cursor. `null` when no bundle brought this group. Every writer of
+     * the log must carry it through.
+     */
+    val syncedThroughMessageId: Long? = null,
 )
 
 /**
@@ -349,8 +358,10 @@ public data class PersistedMessage(
     val edited: Boolean = false,
     /** ADR-0023 — `true` once a delete op tombstoned the row. */
     val deleted: Boolean = false,
-    /** ADR-0023 — accumulated reactions. */
+    /** ADR-0023 — accumulated reactions (held, after the fold). */
     val reactions: List<PersistedReaction> = emptyList(),
+    /** reactions-and-emoji section 10 — the ops the held set folds from. */
+    val reactionOps: List<PersistedReaction> = emptyList(),
     /**
      * `docs/ux/calls.md` section 6 — the finished call this row records, when it
      * records one.
@@ -386,6 +397,14 @@ public data class PersistedMessage(
     val unsupportedVersion: Long? = null,
     /** ADR-0082 — [ChatMessage.lastOpId]; absent on older rows (= 0). */
     val lastOpId: Long = 0,
+    /**
+     * `docs/ux/second-device.md` section 4 — the person keys a group's commit
+     * row records as joined / left. Empty with a default: every row written
+     * before this existed (and every commit that changed no people) reads
+     * back with none, and such a commit row is not drawn.
+     */
+    val membershipJoined: List<String> = emptyList(),
+    val membershipLeft: List<String> = emptyList(),
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -434,6 +453,10 @@ public data class PersistedReaction(
      */
     val reactorKeyB64: String? = null,
     val emoji: String,
+    /** The DS id of the add that gave it (held) or of the op (ops). */
+    val at: Long = 0L,
+    /** Ops only: add (`true`) or take off. */
+    val add: Boolean = true,
 )
 
 @Serializable
@@ -522,7 +545,10 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         edited = msg.edited,
         deleted = msg.deleted,
         reactions = msg.reactions.map {
-            PersistedReaction(reactorKeyB64 = it.reactor, emoji = it.emoji)
+            PersistedReaction(reactorKeyB64 = it.reactor, emoji = it.emoji, at = it.at)
+        },
+        reactionOps = msg.reactionOps.map {
+            PersistedReaction(reactorKeyB64 = it.person, emoji = it.emoji, at = it.at, add = it.add)
         },
         call = msg.call?.let {
             PersistedCall(
@@ -554,6 +580,8 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         },
         unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
         lastOpId = msg.lastOpId,
+        membershipJoined = msg.membershipJoined,
+        membershipLeft = msg.membershipLeft,
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -581,7 +609,10 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         edited = edited,
         deleted = deleted,
         reactions = reactions.mapNotNull { r ->
-            r.reactorKeyB64?.let { Reaction(reactor = it, emoji = r.emoji) }
+            r.reactorKeyB64?.let { Reaction(reactor = it, emoji = r.emoji, at = r.at) }
+        },
+        reactionOps = reactionOps.mapNotNull { r ->
+            r.reactorKeyB64?.let { ReactionOpRecord(person = it, emoji = r.emoji, add = r.add, at = r.at) }
         },
         // An outcome this build does not know reads back as `null`: the row
         // survives and renders as the plain system pill its stored text already
@@ -597,6 +628,8 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         },
         unsupportedVersion = unsupportedVersion,
         lastOpId = lastOpId,
+        membershipJoined = membershipJoined,
+        membershipLeft = membershipLeft,
     )
 }
 

@@ -19,17 +19,21 @@
 //! repeated, a known state, a removal carrying no value) are checked here
 //! in the same way.
 //!
+//! ADR-0087 section 9 adds the conversation-end register the same way
+//! (`conversation_ends`, field 7): a known state and a well-formed reference.
+//!
 //! No MLS state-machine change: these are two more bodies for the existing
 //! `create_devicegroup_message` / `parse_devicegroup_payload`.
 
 use lakko_proto::mls_app::devicegroup::v1 as pb;
 use lakko_sync::synced::{
-    blob_id_from_slice, folder_id_from_slice, BoundsError, ConversationEntry,
-    ConversationOrderEntry, ConversationRef, ConversationRefKind, DraftEntry, FlagsEntry,
-    FolderChanges, FolderMember, FolderMeta, FolderOrder, FolderPins, MemberState, ReadCursorEntry,
-    SavedMessage, SavedSnapshot, SavedValue, Stamped, StateSnapshot, FOLDER_CHANGES_MAX_REGISTERS,
-    SAVED_ATTACHMENT_KIND_MAX_BYTES, SAVED_AUTHOR_MAX_BYTES, SAVED_BLOB_IDS_MAX,
-    SAVED_EXCERPT_MAX_BYTES, SAVED_STATE_PRESENT, SAVED_STATE_REMOVED, SNAPSHOT_MAX_PARTS,
+    blob_id_from_slice, folder_id_from_slice, BoundsError, ConversationEnd, ConversationEndState,
+    ConversationEntry, ConversationOrderEntry, ConversationRef, ConversationRefKind, DraftEntry,
+    FlagsEntry, FolderChanges, FolderMember, FolderMeta, FolderOrder, FolderPins, MemberState,
+    ReadCursorEntry, SavedMessage, SavedSnapshot, SavedValue, Stamped, StateSnapshot,
+    FOLDER_CHANGES_MAX_REGISTERS, SAVED_ATTACHMENT_KIND_MAX_BYTES, SAVED_AUTHOR_MAX_BYTES,
+    SAVED_BLOB_IDS_MAX, SAVED_EXCERPT_MAX_BYTES, SAVED_STATE_PRESENT, SAVED_STATE_REMOVED,
+    SNAPSHOT_MAX_PARTS,
 };
 use prost::Message as _;
 
@@ -120,6 +124,16 @@ pub(crate) fn folder_changes_to_proto(c: &FolderChanges) -> pb::FolderChanges {
             folder_ids: s.value.folder_ids.iter().map(|f| f.to_vec()).collect(),
         }),
         saved: c.saved.iter().map(saved_to_proto).collect(),
+        conversation_ends: c
+            .conversation_ends
+            .iter()
+            .map(|s| pb::ConversationEnd {
+                hlc: s.hlc,
+                conversation: Some(ref_to_proto(&s.value.conversation)),
+                state: i32::from(s.value.state.to_wire()),
+                epoch: s.value.epoch,
+            })
+            .collect(),
     }
 }
 
@@ -254,7 +268,8 @@ pub(crate) fn folder_changes_from_proto(c: pb::FolderChanges) -> Result<FolderCh
         + c.pins.len()
         + c.removed.len()
         + usize::from(c.order.is_some())
-        + c.saved.len();
+        + c.saved.len()
+        + c.conversation_ends.len();
     if count > FOLDER_CHANGES_MAX_REGISTERS {
         return Err(bounds(BoundsError::TooManyRegisters));
     }
@@ -317,6 +332,16 @@ pub(crate) fn folder_changes_from_proto(c: pb::FolderChanges) -> Result<FolderCh
     }
     for m in c.saved {
         out.saved.push(saved_from_proto(m)?);
+    }
+    for e in c.conversation_ends {
+        out.conversation_ends.push(Stamped {
+            hlc: e.hlc,
+            value: ConversationEnd {
+                conversation: ref_from_proto(e.conversation)?,
+                state: ConversationEndState::from_wire(i64::from(e.state)).map_err(bounds)?,
+                epoch: e.epoch,
+            },
+        });
     }
     // Runs every per-register bound once more on the typed value, and the
     // one no length check above can see: a blob id named twice.
@@ -526,7 +551,8 @@ mod tests {
     use super::*;
     use crate::device_group::DeviceGroupBody;
     use lakko_sync::synced::{
-        SyncEntry, SyncedState, INCLUDE_GROUPS, SAVED_BLOB_ID_LEN, SAVED_MAX_PER_CHANGE_SET,
+        SyncEntry, SyncedState, CONVERSATION_ENDS_MAX_CLIENT, INCLUDE_GROUPS, SAVED_BLOB_ID_LEN,
+        SAVED_MAX_CLIENT, SAVED_MAX_PER_CHANGE_SET, SNAPSHOT_MAX_PARTS as MAX_PARTS,
         SNAPSHOT_MAX_PART_BYTES,
     };
 
@@ -698,6 +724,128 @@ mod tests {
         );
     }
 
+    fn end_ref(i: usize) -> ConversationRef {
+        ConversationRef {
+            kind: ConversationRefKind::Group,
+            id: u64::try_from(i).expect("fits").to_be_bytes().repeat(4),
+        }
+    }
+
+    fn ended(i: usize) -> SyncEntry {
+        SyncEntry::ConversationEnd(ConversationEnd {
+            conversation: end_ref(i),
+            state: ConversationEndState::Ended,
+            epoch: u64::MAX - i as u64,
+        })
+    }
+
+    /// `CONVERSATION_ENDS_MAX_CLIENT` is sized so a person at the limit, with
+    /// a full saved list beside it, can still hand a late device everything:
+    /// past 64 parts `split_state_snapshot` refuses and no catch-up goes out.
+    #[test]
+    fn a_state_at_the_client_limit_crosses_the_snapshot_split_and_the_wire_whole() {
+        let mut s = SyncedState::new();
+        for i in 0..CONVERSATION_ENDS_MAX_CLIENT {
+            s.apply(u64::MAX, ended(i)).expect("apply");
+        }
+        for i in 0..SAVED_MAX_CLIENT {
+            s.apply(3, SyncEntry::Saved(saved_present(i, 40, 2)))
+                .expect("apply");
+        }
+        let parts = split_state_snapshot(s.snapshot(), SNAPSHOT_MAX_PART_BYTES).expect("split");
+        assert!(parts.len() < MAX_PARTS as usize, "{} parts", parts.len());
+        let mut late = SyncedState::new();
+        for p in &parts {
+            let bytes = pb::DeviceGroupPayload {
+                hlc: 1,
+                sender_leaf: 0,
+                body: Some(DeviceGroupBody::StateSnapshot(p.clone()).into_proto()),
+            }
+            .encode_to_vec();
+            assert!(bytes.len() <= SNAPSHOT_MAX_PART_BYTES);
+            let parsed = crate::DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+            late.apply_all(parsed.stamped_entries());
+        }
+        assert_eq!(late, s);
+        assert_eq!(
+            late.ended_conversations().len(),
+            CONVERSATION_ENDS_MAX_CLIENT
+        );
+    }
+
+    #[test]
+    fn a_conversation_end_travels_as_a_change_set_with_its_own_stamp() {
+        let mut c = FolderChanges::default();
+        assert!(c.push(41, ended(1)));
+        assert!(c.push(
+            42,
+            SyncEntry::ConversationEnd(ConversationEnd {
+                conversation: end_ref(2),
+                state: ConversationEndState::Joined,
+                epoch: 9,
+            })
+        ));
+        let bytes = pb::DeviceGroupPayload {
+            hlc: 7,
+            sender_leaf: 3,
+            body: Some(DeviceGroupBody::FolderChanges(c.clone()).into_proto()),
+        }
+        .encode_to_vec();
+        let parsed = crate::DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+        assert_eq!(parsed.body, DeviceGroupBody::FolderChanges(c));
+        let stamps: Vec<u64> = parsed.stamped_entries().iter().map(|(h, _)| *h).collect();
+        assert_eq!(stamps, vec![41, 42]);
+        let mut s = SyncedState::new();
+        assert!(s.apply_all(parsed.stamped_entries()));
+        assert!(s.is_conversation_ended(&end_ref(1)));
+        assert!(!s.is_conversation_ended(&end_ref(2)));
+    }
+
+    #[test]
+    fn a_bad_conversation_end_refuses_the_whole_payload() {
+        let end = |state: i32, conversation: Option<pb::ConversationRef>| pb::ConversationEnd {
+            hlc: 12,
+            conversation,
+            state,
+            epoch: 3,
+        };
+        let cases: Vec<(pb::ConversationEnd, BoundsError)> = vec![
+            (
+                end(0, Some(good_ref())),
+                BoundsError::UnknownConversationEndState,
+            ),
+            (
+                end(3, Some(good_ref())),
+                BoundsError::UnknownConversationEndState,
+            ),
+            (
+                end(-1, Some(good_ref())),
+                BoundsError::UnknownConversationEndState,
+            ),
+            (end(1, None), BoundsError::Missing),
+            (
+                end(
+                    1,
+                    Some(pb::ConversationRef {
+                        kind: 2,
+                        id: vec![],
+                    }),
+                ),
+                BoundsError::RefIdLength,
+            ),
+        ];
+        for (bad, why) in cases {
+            let bytes = changes_with(|c| c.conversation_ends = vec![bad.clone()]);
+            assert_eq!(refused(&bytes), Some(why));
+        }
+        assert!(
+            crate::DeviceGroup::parse_devicegroup_payload(&changes_with(|c| {
+                c.conversation_ends = vec![end(2, Some(good_ref()))];
+            }))
+            .is_ok()
+        );
+    }
+
     #[test]
     fn a_live_save_and_remove_travel_as_a_change_set() {
         let mut c = FolderChanges::default();
@@ -842,6 +990,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            conversation_ends: Vec::new(),
         };
         f(&mut c);
         wire(pb::device_group_payload::Body::FolderChanges(c))

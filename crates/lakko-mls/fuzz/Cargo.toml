@@ -101,3 +101,10 @@ path = "fuzz_targets/self_removal_proof_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "join_request_retain"
+path = "fuzz_targets/join_request_retain.rs"
+test = false
+doc = false
+bench = false

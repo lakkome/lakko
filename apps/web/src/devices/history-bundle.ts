@@ -30,6 +30,7 @@
  * the chat envelope parser; for the MVP the opaque round-trip
  * is enough to prove the catch-up path.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import type { Wasm } from "../wasm";
 import type {
@@ -43,14 +44,31 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
+import { fileHistoryRows } from "../chat/background-log";
 import {
   loadMessageLog,
-  saveMessageLog,
-  type MessageLogPayload,
+  MESSAGE_LOG_VERSION,
+  updateMessageLog,
   type PersistedAttachment,
   type PersistedGroup,
   type PersistedMessage,
 } from "../chat/message-log-store";
+
+/**
+ * A bookkeeping system row: what a receive loop files for an MLS commit or
+ * an external-join request (`[mls commit]`, `[mls external-join-proposal]`
+ * on web, `[mls external join]` on iOS and Android: `[mls <kind>]` on every
+ * client). A history bundle neither carries nor applies them: the sending
+ * device never shows them as what they were (iOS and Android hide them, and
+ * web cannot tell a commit that changed people from one that only admitted
+ * or retired a device), and a joiner restores every such row as `Members
+ * changed`. A join request that is still waiting is shown from the group's
+ * own pending set, not from a row, so dropping it loses nothing. Call rows
+ * are system rows too and are not these. Pure.
+ */
+export function isBookkeepingSystemRow(m: Pick<PersistedMessage, "direction" | "text">): boolean {
+  return m.direction === "system" && m.text.startsWith("[mls ") && m.text.endsWith("]");
+}
 
 /** Hard cap on the total `HistoryMessage` count across every
  *  group in a single bundle. Must match
@@ -76,7 +94,7 @@ const MAX_BUNDLE_MESSAGES = 1000;
  */
 export async function buildHistoryBundleFromLog(args: {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly secret: Uint8Array;
 }): Promise<Uint8Array | null> {
   const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
@@ -103,8 +121,9 @@ export async function buildHistoryBundleFromLog(args: {
     if (slot === undefined) continue;
     const groupIdBytes = hexToBytes(hex);
     if (groupIdBytes === null) continue;
-    const trimmed = slot.messages.slice(-perGroupCap);
-    const capped = trimmed.length < slot.messages.length;
+    const carried = slot.messages.filter((m) => !isBookkeepingSystemRow(m));
+    const trimmed = carried.slice(-perGroupCap);
+    const capped = trimmed.length < carried.length;
     const messages: HistoryMessageInput[] = [];
     for (const m of trimmed) {
       // G-6 step 2: `payload_bytes` is now the canonical
@@ -149,14 +168,22 @@ export async function buildHistoryBundleFromLog(args: {
  *
  * Existing log rows survive: per-group inserts merge by
  * `messageId` (collisions take the on-disk value to avoid
- * stomping concurrent edits).
+ * stomping concurrent edits), and everything else the slot holds
+ * stays. The write is serialized with every other writer of the
+ * log: the background receive is running by now, and a bundle
+ * written over what it filed meanwhile would lose rows that can
+ * never be decrypted again.
+ *
+ * Each group's slot also gets its history floor, the highest id
+ * the bundle carried for it: what came with the history is not
+ * news (`fileHistoryRows`, docs/ux/second-device.md section 2).
  *
  * Returns the number of rows applied (across all groups), so
  * the orchestrator can surface a "+N messages" toast.
  */
 export async function applyHistoryBundleToLog(args: {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly secret: Uint8Array;
   readonly sealedBytes: Uint8Array;
 }): Promise<number> {
@@ -164,50 +191,37 @@ export async function applyHistoryBundleToLog(args: {
   const opened = wasm.openHistoryBundleStructured(args.secret, args.sealedBytes);
   const openedGroups = opened.groups() as unknown[];
 
-  // Read current log (may be null on a fresh joiner) +
-  // mutate per-group entries.
-  const existing =
-    (await loadMessageLog(args.accountIdB64, args.deviceKey)) ??
-    ({ version: 1, groups: {} } as MessageLogPayload);
-
-  // Mutable working copy.
-  const nextGroups: { [hex: string]: PersistedGroup } = { ...existing.groups };
-  let applied = 0;
-
+  const bundled: {
+    readonly hex: string;
+    readonly rows: readonly PersistedMessage[];
+    readonly newest: bigint | null;
+  }[] = [];
   for (const g of openedGroups) {
     const group = g as OpenedHistoryGroup;
-    const hex = bytesToHex(group.groupId);
-    const incomingMessages = group.messages() as unknown[];
-    const slot = nextGroups[hex] ?? ({ cursor: "0", messages: [] } as PersistedGroup);
-    const existingIds = new Set(slot.messages.map((m) => m.messageId));
-    const merged = [...slot.messages];
-    for (const m of incomingMessages) {
-      const msg = m as OpenedHistoryMessage;
-      const decoded = decodeMessagePlaceholder(wasm, msg);
+    const rows: PersistedMessage[] = [];
+    let newest: bigint | null = null;
+    for (const m of group.messages() as unknown[]) {
+      const decoded = decodeMessagePlaceholder(wasm, m as OpenedHistoryMessage);
       if (decoded === null) continue;
-      if (existingIds.has(decoded.messageId)) continue;
-      merged.push(decoded);
-      existingIds.add(decoded.messageId);
-      applied += 1;
+      const id = safeBigInt(decoded.messageId);
+      if (id !== null && (newest === null || id > newest)) newest = id;
+      // A sender older than this rule (or another client) may carry them.
+      if (isBookkeepingSystemRow(decoded)) continue;
+      rows.push(decoded);
     }
-    // Sort by parsed messageId so the timeline lands in order.
-    // Defensive on non-numeric strings — keep their relative
-    // order via a string compare fallback.
-    merged.sort((a, b) => {
-      const ai = safeBigInt(a.messageId);
-      const bi = safeBigInt(b.messageId);
-      if (ai !== null && bi !== null) return Number(ai - bi);
-      return a.messageId < b.messageId ? -1 : a.messageId > b.messageId ? 1 : 0;
-    });
-    nextGroups[hex] = {
-      cursor: slot.cursor,
-      messages: merged,
-    };
+    bundled.push({ hex: bytesToHex(group.groupId), rows, newest });
   }
 
-  await saveMessageLog(args.accountIdB64, args.deviceKey, {
-    version: existing.version,
-    groups: nextGroups,
+  let applied = 0;
+  await updateMessageLog(args.accountIdB64, args.deviceKey, (current) => {
+    const groups: { [hex: string]: PersistedGroup } = { ...(current?.groups ?? {}) };
+    applied = 0;
+    for (const { hex, rows, newest } of bundled) {
+      const filed = fileHistoryRows(groups[hex], rows, newest);
+      groups[hex] = filed.slot;
+      applied += filed.added;
+    }
+    return { version: current?.version ?? MESSAGE_LOG_VERSION, groups };
   });
   return applied;
 }

@@ -16,25 +16,42 @@ import Foundation
 ///   * only an incoming chat message counts — edits, reactions, typing, read
 ///     receipts, commits, call signaling and service envelopes do not;
 ///   * nothing counts while the chat is open, because it is being read;
-///   * opening the chat clears the count.
+///   * opening the chat clears the count;
+///   * a message that came with the pairing history never counts
+///     (`docs/ux/second-device.md` section 2, ``PairingHistory``).
+///
+/// The count holds the message ids, not a number: a row a pairing bundle turns
+/// out to carry leaves it by id.
 ///
 /// In memory only: a relaunch starts at zero.
 enum UnreadCounting {
 
-    /// The number of user-visible incoming messages in a batch.
-    static func incomingMessages(in events: [IncomingChatEvent]) -> Int {
-        events.reduce(0) { acc, event in
+    /// The ids of the user-visible incoming messages in a batch.
+    static func incomingMessageIds(in events: [IncomingChatEvent]) -> [Int64] {
+        events.compactMap { event in
             switch event {
-            case .application, .unsupported: return acc + 1
-            default: return acc
+            case .application(let messageId, _, _, _, _, _, _): return messageId
+            case .unsupported(let messageId, _, _, _): return messageId
+            default: return nil
             }
         }
     }
 
-    /// The count after a receive path applied `applied`.
-    static func next(current: Int, applied: [IncomingChatEvent], chatOpen: Bool) -> Int {
-        guard !chatOpen else { return 0 }
-        return current + incomingMessages(in: applied)
+    /// The number of user-visible incoming messages in a batch.
+    static func incomingMessages(in events: [IncomingChatEvent]) -> Int {
+        incomingMessageIds(in: events).count
+    }
+
+    /// The unread ids after a receive path applied `applied`. `syncedThrough`
+    /// is the group's pairing-history floor.
+    static func next(
+        current: Set<Int64>, applied: [IncomingChatEvent], chatOpen: Bool, syncedThrough: Int64? = nil
+    ) -> Set<Int64> {
+        guard !chatOpen else { return [] }
+        return current.union(
+            incomingMessageIds(in: applied).filter {
+                !PairingHistory.isHistory(messageId: $0, floor: syncedThrough)
+            })
     }
 
     /// What the chat list shows. A read cursor broadcast by any of this

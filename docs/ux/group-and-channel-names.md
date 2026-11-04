@@ -42,7 +42,8 @@ channel's name. Both were observed live on `test.lakko.me` on 2026-09-16.
    the group. A plain member sees the name read-only with no edit affordance.
 3. **A newcomer** cannot read messages from before their admission, so the
    owner and admins re-send the current name when the group grows (throttled;
-   the same rule the profile republish uses).
+   the same rule the profile republish uses). The device that made the add
+   sends it at once, so the newcomer sees the name, not a list of members.
 4. Everyone re-titles the chat list row, the chat header and the group info
    in place when a name arrives. There is no "X renamed the group" row in the
    transcript in this version.

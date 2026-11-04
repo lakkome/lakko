@@ -10,8 +10,10 @@
 //! that target. The plaintext is still attacker-authored in practice (the
 //! issuer of a link writes it, and whoever holds the link's secret opens
 //! it), so the version gate, the two one-byte length prefixes, UTF-8
-//! validation, the display-name character table, the member count and the
-//! trailing-bytes refusal are fed here directly through
+//! validation, the display-name character table, the member count, the
+//! trailing photo field of every kind (ADR-0087 section 18.4: a length byte
+//! admitting 0, 84 or 170 and the avatar bounds) and the trailing-bytes
+//! refusal are fed here directly through
 //! `lakko_contacts::fuzz_api`.
 //!
 //! Asserts: no panic, and anything the decoder accepts also passes the

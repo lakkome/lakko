@@ -5,10 +5,12 @@ package me.lakko.app.devices
 
 import java.io.IOException
 import java.util.Base64
+import me.lakko.app.auth.BindingVerdict
 import me.lakko.app.auth.OwnPredecessor
 import me.lakko.app.auth.OwnPredecessorStore
 import me.lakko.app.auth.SealedBlobStorage
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.auth.bindingVerdict
 import me.lakko.app.contacts.InMemoryProvenLinkStore
 import me.lakko.app.contacts.ProvenLink
 import me.lakko.app.contacts.currentKeyOf
@@ -96,6 +98,56 @@ class StateBundlePredecessorsTest {
         assertFalse(receipt.conversationKeyChanged)
         assertTrue(blobs.map.isEmpty())
         assertTrue(links.load(account).isEmpty())
+    }
+
+    private fun seeds(vararg tags: Int) = tags.map { StateBundle.OwnPredecessorSeed(seed(it), it * 1_000L) }
+
+    @Test
+    fun `a backup with predecessors re-mints the binding under the oldest`() {
+        // A device restored from the newest phrase: its first binding, if any,
+        // names the current key 3, and it is in no conversation.
+        val store = OwnPredecessorStore(MapBlobs())
+        val links = InMemoryProvenLinkStore()
+        val receipt = StateBundle.receiveOwnPredecessorSeeds(
+            store, links, account, seeds(1, 2), currentAccountKey = key(3), pubkeyOfSeed = pubkeyOf, nowMs = 9_000L,
+        )!!
+        assertTrue("a chat layer already loaded is rebuilt", receipt.conversationKeyChanged)
+        // The mint is under the oldest: the key every conversation leaf names.
+        assertArrayEquals(seed(1), store.conversationSeed(account))
+        assertEquals(
+            BindingVerdict.Remint,
+            bindingVerdict(key(3), key(3), listOf(key(1), key(2)), holdsConversations = false),
+        )
+        assertEquals(BindingVerdict.Mint, bindingVerdict(null, key(3), listOf(key(1), key(2)), holdsConversations = false))
+        // The person's own steps are followed from the first key to the current one.
+        assertEquals(listOf(keyB64(1), keyB64(2), keyB64(3)), keysOfPerson(keyB64(3), links.load(account)))
+    }
+
+    @Test
+    fun `a device that holds conversations keeps the binding its leaves carry`() {
+        assertEquals(
+            BindingVerdict.KeepUnderCurrentKey,
+            bindingVerdict(key(3), key(3), listOf(key(1), key(2)), holdsConversations = true),
+        )
+        // A binding under any of the account's own earlier keys stays.
+        assertEquals(BindingVerdict.Keep, bindingVerdict(key(1), key(3), listOf(key(1), key(2)), holdsConversations = false))
+        assertEquals(BindingVerdict.Keep, bindingVerdict(key(2), key(3), listOf(key(1), key(2)), holdsConversations = false))
+        // Never rotated: the current key is the conversation key.
+        assertEquals(BindingVerdict.Keep, bindingVerdict(key(3), key(3), emptyList(), holdsConversations = false))
+        // A key that is not this account's (a reset): minted again.
+        assertEquals(BindingVerdict.Mint, bindingVerdict(key(4), key(3), listOf(key(1)), holdsConversations = true))
+    }
+
+    @Test
+    fun `seeds of the wrong length store nothing`() {
+        val blobs = MapBlobs()
+        val bad = listOf(StateBundle.OwnPredecessorSeed(ByteArray(32), 1_000L))
+        assertNull(
+            StateBundle.receiveOwnPredecessorSeeds(
+                OwnPredecessorStore(blobs), InMemoryProvenLinkStore(), account, bad, key(3), pubkeyOf,
+            ),
+        )
+        assertTrue(blobs.map.isEmpty())
     }
 
     @Test

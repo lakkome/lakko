@@ -124,9 +124,9 @@ public data class NoticeSelection(
 /**
  * Choose what a landing shows from one fetched run of notices.
  *
- *   - A device with no cursor yet ([cursor] `null`) asked by time
- *     ([noticeQuery]: the last 30 days); what came back is shown like any
- *     other, minus its own actions, and the newest id becomes its cursor.
+ *   - A device with no cursor yet ([cursor] `null`) is new to the account:
+ *     it shows nothing that happened before it landed, and the newest id
+ *     becomes its cursor. Its own actions in that run still spend a marker.
  *   - A kind this build does not know is skipped; the cursor still passes it.
  *   - A notice of a kind this device itself just caused ([ownActions]: kind
  *     to the local time of the action) within [OWN_ACTION_WINDOW_MS] is not
@@ -150,6 +150,7 @@ public fun selectAccountNotices(
             spent += kind
             continue
         }
+        if (cursor == null) continue
         show += AccountNotice(id = row.id, kind = kind, atMs = row.atMs)
     }
     return NoticeSelection(show = show, cursor = newest, spentOwn = spent)

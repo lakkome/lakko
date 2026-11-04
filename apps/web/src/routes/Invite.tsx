@@ -96,6 +96,9 @@ interface DecodedInvite {
   capabilityBytes: Uint8Array;
   /** The 12-byte link secret from the fragment: the link answer's secret. */
   linkSecret: Uint8Array;
+  /** The ledger says no uses are left. Read only with no session: a signed-in
+   *  person may be the one who used it, and the consume tells them apart. */
+  usedUp: boolean;
 }
 
 const RATE_LIMITED = "rate-limited" as const;
@@ -129,12 +132,17 @@ export default function Invite(): JSX.Element {
       try {
         const wasm = await loadWasm();
         const widths = inviteLinkWidths(wasm);
+        let usedUp = false;
         const opened = await openInviteLinkFromUrl({
           slug,
           hash,
           widths,
           what: "invite",
-          fetchPointer: (blobId) => discovery.fetchInvite(blobId),
+          fetchPointer: async (blobId) => {
+            const row = await discovery.fetchInviteRow(blobId);
+            usedUp = row?.usedUp === true;
+            return row?.sealed ?? null;
+          },
           open: (sealed, secret) => wasm.InviteCapability.openLink(sealed, secret),
         });
         // A link whose id is unknown, revoked or expired reads as no longer
@@ -143,7 +151,7 @@ export default function Invite(): JSX.Element {
         const fragment = parseInviteLinkFragment(hash, widths);
         if (fragment.kind !== "secret") return DEAD;
         const cap = opened.capability;
-        return { cap, blobId: opened.blobId, capabilityBytes: cap.wire, linkSecret: fragment.secret };
+        return { cap, blobId: opened.blobId, capabilityBytes: cap.wire, linkSecret: fragment.secret, usedUp };
       } catch (err) {
         // A server error or the network says nothing about the link: it is
         // offered again (seen on a local stack 2026-10-23: a server error on
@@ -184,6 +192,7 @@ export default function Invite(): JSX.Element {
     if (d === RATE_LIMITED) return { kind: "rate-limited" };
     if (d === OPEN_FAILED) return { kind: "open-failed" };
     if (d === DEAD) return signedIn() ? { kind: "dead" } : { kind: "signed-out-dead" };
+    if (d.usedUp && !signedIn()) return { kind: "signed-out-dead" };
     const s = auth.state();
     const own =
       signedIn() && s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;

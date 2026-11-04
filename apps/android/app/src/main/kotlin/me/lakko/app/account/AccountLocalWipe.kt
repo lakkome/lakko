@@ -167,6 +167,7 @@ public object AccountLocalWipe {
         // ---- backup ---------------------------------------------------------
         Step("new-device-notice") { ctx, acct ->
             me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
+            me.lakko.app.devices.NewDeviceNotices.withdrawNotification(ctx, acct)
         },
         // ADR-0080: the cards of the account's devices, this device's own
         // card, its city answer and its "Show my city" switch.
@@ -211,6 +212,9 @@ public object AccountLocalWipe {
         Step("pending-requests") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsPendingRequestStore(ctx).clearForAccount(acct)
         },
+        Step("sent-committer-envelopes") { ctx, acct ->
+            me.lakko.app.chat.SharedPrefsSentCommitterEnvelopeStore(ctx).clearForAccount(acct)
+        },
         Step("unapplied-requests") { ctx, acct ->
             me.lakko.app.chat.SharedPrefsUnappliedRequestStore(ctx).clearForAccount(acct)
         },
@@ -218,10 +222,18 @@ public object AccountLocalWipe {
             me.lakko.app.chat.SharedPrefsLastObservedOwnerStore(ctx).clearForAccount(acct)
         },
         Step("leave-records") { ctx, acct -> me.lakko.app.chat.SharedPrefsLeaveRecordStore(ctx).clearForAccount(acct) },
+        // ADR-0087 section 9 - an end still owed or its notice, and a Welcome
+        // kept for a group this device still held.
+        Step("membership-ends") { ctx, acct -> me.lakko.app.chat.SharedPrefsMembershipEndStore(ctx).clearForAccount(acct) },
+        Step("held-welcomes") { ctx, acct -> me.lakko.app.chat.SharedPrefsHeldWelcomeStore(ctx).clearForAccount(acct) },
         Step("journal-ownership") { ctx, acct ->
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
+        Step("group-settings") { ctx, acct -> me.lakko.app.chat.GroupSettingsStore.deleteAccount(ctx, acct) },
+        Step("requests-sent") { ctx, acct -> me.lakko.app.chat.RequestsSentStore.deleteAccount(ctx, acct) },
+        Step("unseen-reactions") { ctx, acct -> me.lakko.app.chat.UnseenReactions.deleteAccount(ctx, acct) },
+        Step("conversation-joined") { ctx, acct -> me.lakko.app.chat.ConversationJoinedStore.deleteAccount(ctx, acct) },
         // ADR-0073 "Phase 2 revised" — what an accepted reset of a contact
         // left on this device: the reset ledger, the verified bindings, the
         // successor claims, the continuity facts and the lineage mirror.
@@ -231,6 +243,7 @@ public object AccountLocalWipe {
         Step("reset-continuity") { ctx, acct -> me.lakko.app.chat.SharedPrefsContinuityBackend.deleteAccount(ctx, acct) },
         Step("lineage-mirror") { ctx, acct -> me.lakko.app.chat.LineageMirror.deleteAccount(ctx, acct) },
         Step("held-sends") { ctx, acct -> me.lakko.app.chat.SealedHeldSendBackend.deleteAccount(ctx, acct) },
+        Step("held-copies") { ctx, acct -> me.lakko.app.chat.SealedHeldCopyBackend.deleteAccount(ctx, acct) },
         // ADR-0074 part 3 - a key rotation's sealed files (the prepared
         // entropy and proof, pending envelopes, this account's previous
         // identities), its owed record and the kept device's notice flag.
@@ -281,6 +294,7 @@ public object AccountLocalWipe {
             me.lakko.app.profile.ProfileRequestPrefsStore(ctx).deleteAccount(acct)
         },
         Step("reach") { ctx, acct -> me.lakko.app.reach.EncryptedReachDocStore(ctx).delete(acct) },
+        Step("channel-handle-claims") { ctx, acct -> me.lakko.app.channels.ChannelHandleClaims.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },

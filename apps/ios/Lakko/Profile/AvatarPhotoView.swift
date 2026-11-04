@@ -10,6 +10,33 @@ enum AvatarPhoto: Equatable {
     case person(Data)
     /// This account's own published photo.
     case own
+    /// ADR-0087 section 18 / UX 4.5.5 — a group's photo, by its group id
+    /// (lowercase hex), when this device holds it.
+    case group(String)
+    /// A photo named directly (a public group's or channel's record, found by
+    /// search), not yet held by any conversation on this device.
+    case avatar(ProfileAvatar)
+}
+
+/// ADR-0087 section 18 — the group photos the avatar component draws, for the
+/// signed-in account. The repository refreshes it whenever a group setting
+/// changes.
+@MainActor
+final class GroupPhotoDirectory: ObservableObject {
+    static let shared = GroupPhotoDirectory()
+
+    @Published private(set) var revision: UInt64 = 0
+    private var photos: [String: ProfileAvatar] = [:]
+
+    func avatar(groupIdHex: String) -> ProfileAvatar? { photos[groupIdHex.lowercased()] }
+
+    /// Replace the whole map (the store is small: one row per group).
+    func replace(_ next: [String: ProfileAvatar]) {
+        let lowered = Dictionary(next.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { a, _ in a })
+        guard lowered != photos else { return }
+        photos = lowered
+        revision &+= 1
+    }
 }
 
 /// The photo half of ``InitialsAvatar``: the person's still (or, in a large
@@ -24,12 +51,14 @@ struct AvatarPhotoView<Fallback: View>: View {
 
     @ObservedObject private var images = AvatarImages.shared
     @ObservedObject private var directory = ProfileDirectory.shared
+    @ObservedObject private var groupPhotos = GroupPhotoDirectory.shared
 
     var body: some View {
         // Reading both revisions subscribes this view to a new profile and to
         // a picture arriving.
         let _ = directory.revision
         let _ = images.revision
+        let _ = groupPhotos.revision
         if let avatar = resolvedAvatar {
             if playsVideo, let url = images.videoURL(avatar) {
                 LoopingVideoView(url: url)
@@ -55,6 +84,8 @@ struct AvatarPhotoView<Fallback: View>: View {
         switch photo {
         case .person(let key): return directory.avatar(signatureKey: key)
         case .own: return directory.ownProfile?.avatar
+        case .group(let groupIdHex): return groupPhotos.avatar(groupIdHex: groupIdHex)
+        case .avatar(let avatar): return avatar
         }
     }
 }

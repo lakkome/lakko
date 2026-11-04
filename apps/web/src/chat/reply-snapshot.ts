@@ -34,8 +34,10 @@ import { t } from "../l10n";
 /** What the strip shows and the envelope carries. */
 export interface ReplySnapshot {
   /** The quoted author, as the timeline names them ("You" for an own
-   *  message). */
-  readonly author: string;
+   *  message); absent when the device has no real name for them (never a
+   *  placeholder word or a fingerprint, since the snapshot goes on the
+   *  wire). */
+  readonly author?: string;
   /** The quoted message's text on one line, or the kind of its first
    *  attachment when it has no text. */
   readonly excerpt: string;
@@ -80,14 +82,15 @@ export function oneLine(text: string): string {
  */
 export function replySnapshotFor<A>(
   message: { readonly text: string; readonly attachments: readonly A[] },
-  authorLabel: string,
+  authorLabel: string | undefined,
   bubbleOf: (attachment: A) => MediaBubble,
 ): ReplySnapshot {
+  const who = authorLabel === undefined || authorLabel.trim().length === 0 ? {} : { author: authorLabel };
   const text = oneLine(message.text);
-  if (text.length > 0) return { author: authorLabel, excerpt: text };
+  if (text.length > 0) return { ...who, excerpt: text };
   const first = message.attachments[0];
-  if (first === undefined) return { author: authorLabel, excerpt: REPLY_EXCERPT_FALLBACK() };
-  return { author: authorLabel, excerpt: labelForBubble(bubbleOf(first)) };
+  if (first === undefined) return { ...who, excerpt: REPLY_EXCERPT_FALLBACK() };
+  return { ...who, excerpt: labelForBubble(bubbleOf(first)) };
 }
 
 /** The two lines the quote block draws: the name, then the excerpt. */

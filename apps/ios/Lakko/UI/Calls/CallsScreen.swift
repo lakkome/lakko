@@ -51,14 +51,6 @@ struct CallsScreen: View {
     let onOpenConversation: (_ groupIdHex: String, _ kind: CallHistoryKind) -> Void
     /// Call that conversation back, in the mode the row records.
     let onCallBack: (_ groupIdHex: String, _ kind: CallHistoryKind, _ video: Bool) -> Void
-    /// Hand a pasted or minted `/c/` link to the same intake a tapped link
-    /// uses, so joining by link and tapping a link are one path.
-    let onOpenLink: (URL) -> Void
-
-    @State private var joinByLinkPresented = false
-    @State private var moreMenuOpen = false
-    @State private var pastedLink = ""
-    @State private var joinError: UiText?
     /// A call is being started. Brief — the press founds the call locally —
     /// but long enough that a second press must not found a second one.
     @State private var starting = false
@@ -75,14 +67,6 @@ struct CallsScreen: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    // Demoted, not removed: a pasted link is a real case and a
-                    // rare one, so it sits behind the one menu this screen has
-                    // rather than beside the action it is not.
-                    Button { moreMenuOpen = true } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel(l10n.t("common.more_options"))
-
                     Button(action: startCall) {
                         if starting {
                             ProgressView()
@@ -95,12 +79,6 @@ struct CallsScreen: View {
                     .accessibilityLabel(l10n.t("call.history.new_call"))
                 }
             }
-            .lakkoActionSheet(isPresented: $moreMenuOpen) {
-                [.action(l10n.t("call.history.join_by_link"), systemImage: "link") {
-                    joinByLinkPresented = true
-                }]
-            }
-            .sheet(isPresented: $joinByLinkPresented) { joinByLinkSheet }
             .lakkoDialog(item: $startError) { message in
                 LakkoDialogContent(
                     title: l10n.t("call.alert.title"),
@@ -223,59 +201,5 @@ struct CallsScreen: View {
             starting = false
             startError = failure
         }
-    }
-
-    // MARK: - Join by link
-
-    private var joinByLinkSheet: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField(l10n.t("call.history.paste_label"), text: $pastedLink, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                } footer: {
-                    Text(l10n.t("call.history.paste_hint"))
-                }
-                if let joinError {
-                    Section {
-                        Text(joinError.text)
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoDanger)
-                    }
-                }
-            }
-            .navigationTitle(l10n.t("call.history.join_by_link"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(l10n.t("common.cancel")) { dismissJoinSheet() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(l10n.t("chat.call.join_short")) { join() }
-                        .disabled(pastedLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-        .presentationDetents([.medium])
-    }
-
-    private func join() {
-        let trimmed = pastedLink.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              InviteIntake.slug(from: url.path, prefix: CallInviteUrl.urlPrefix) != nil
-        else {
-            joinError = .key("call.history.join_invalid")
-            return
-        }
-        dismissJoinSheet()
-        onOpenLink(url)
-    }
-
-    private func dismissJoinSheet() {
-        joinByLinkPresented = false
-        pastedLink = ""
-        joinError = nil
     }
 }

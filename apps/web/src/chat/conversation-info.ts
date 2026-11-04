@@ -33,7 +33,7 @@
  *   - finding the contact record a one-to-one is about ({@link
  *     findPersonRecord}), which is this device's storage and nobody else's
  *     business;
- *   - whether the header opens a layer at all or goes to the contact's own
+ *   - whether the header opens the group's screen or goes to the contact's own
  *     page ({@link infoOpening}), which is this client's navigation - the
  *     spec says "the contact's own page on web", and a page is a route.
  *
@@ -69,6 +69,7 @@ const SECTION_NAMES = [
   "remove-contact",
   "add-contact",
   "delete-chat",
+  "their-contacts-can-find-me",
   /* A group (spec section 2.2). */
   "group-name",
   "rename-group",
@@ -85,6 +86,15 @@ const SECTION_NAMES = [
   "manage-channel",
   "unsubscribe",
   "channel-members",
+  /* ADR-0087 (group-and-channel-privacy.md section 18). */
+  "handle",
+  "group-type",
+  "delete-group",
+  "invite-people",
+  "subscribers",
+  "admins",
+  /* reactions-and-emoji.md section 9: group owner and admins, channel owner. */
+  "reactions",
 ] as const;
 
 /**
@@ -106,7 +116,7 @@ export type InfoSection = (typeof SECTION_NAMES)[number];
  * Rust, which is not on the wasm surface; this list is what the tests check
  * `personInfoSections` against, under every capability combination, so the
  * defect cannot come back. Its own drift is caught by the test asserting that
- * every entry is actually reachable from `groupInfoSections`.
+ * every entry is actually reachable from `conversationInfoSections`.
  */
 export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
   "group-name",
@@ -132,32 +142,10 @@ export interface PersonInfoCapabilities {
   readonly membershipEnded: boolean;
   /** The person is on this device's contact list. */
   readonly isContact: boolean;
-}
-
-/** What the viewer may do in a group, as the chat already knows it. */
-export interface GroupInfoCapabilities {
-  /** Owner or admin, and still a member (ADR-0022). */
-  readonly canManageMembers: boolean;
-  /** Owner or admin, and still a member (ADR-0051). */
-  readonly canRename: boolean;
-  /** Owner or admin, and still a member (ADR-0028). */
-  readonly canMintInvite: boolean;
-  /** The owner, and still a member (ADR-0045). */
-  readonly isOwner: boolean;
-  /**
-   * Whether this device can actually leave.
-   *
-   * ADR-0045's member exit is a `Leave` PROPOSAL, so a group carrying no
-   * ADR-0022 role table has no proposal path and there is nothing for the
-   * control to do; also false when this device cannot tell which leaf is its
-   * own. It is the same condition `ownership-transfer.ts` already hides the
-   * exit block on - which is why it is a field: the rule used to offer
-   * `leave-group` unconditionally and both this client and Android overrode
-   * it in their own view, which is a rule nobody was following.
-   */
-  readonly canLeave: boolean;
-  /** This device's membership is over (ADR-0045 UX 6.2): read-only. */
-  readonly membershipEnded: boolean;
+  /** Contacts of my contacts is on in "Who can find me", and this contact can
+   *  be named in the setting (`docs/ux/who-can-find-me.md` section 5.1). Left
+   *  out it reads off. */
+  readonly contactsOfContactsOn?: boolean;
 }
 
 /** What the viewer is to a channel. */
@@ -221,7 +209,7 @@ export function infoOpenLabel(target: InfoTarget): string {
   }
 }
 
-/** The heading the opened layer carries. Same words as the button. */
+/** The heading the opened screen carries. Same words as the button. */
 export function infoHeading(target: InfoTarget): string {
   return infoOpenLabel(target);
 }
@@ -247,7 +235,7 @@ export function personInfoSections(
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact),
+      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact, caps.contactsOfContactsOn ?? false),
     ),
   );
 }
@@ -262,63 +250,73 @@ export function personInfoSections(
  *   Until 2026-09-26 the chat rendered a second copy of the card as a layer
  *   with Message withheld, which needed an "origin" threaded through the
  *   shared rule and showed the same person twice.
- * - `layer`: a group's info, which has no screen of its own to reuse. The
- *   layer is the group's idiom and nobody else's.
+ * - `group-screen`: a group's info, a screen pushed from the conversation
+ *   with a way back (amended 2026-10-29; until then it was a layer over the
+ *   conversation, the one info that did not look like the others).
  * - `nothing`: the destination is not yet known (the shared rules have not
  *   loaded), or it is a person whose contact record cannot be found. The
- *   first: opening a layer now would show whatever branch the rules resolve
+ *   first: opening a screen now would show whatever branch the rules resolve
  *   to a moment later. The second: every one-to-one peer is a contact by
  *   construction (`contacts/adopt-one-to-one.ts`), so a missing record means
  *   a roster that cannot be read, and there is no "not a contact" card to
  *   draw in its place - the not-a-contact state was retired on 2026-09-26
  *   along with the layer that rendered it.
  */
-export type InfoOpening = "contact-page" | "layer" | "nothing";
+export type InfoOpening = "contact-page" | "group-screen" | "nothing";
 
 /**
  * The header's opening decision. `personRecord` is only consulted for a
- * person: a group carries a contact record for nobody and still opens the
- * layer.
+ * person: a group carries a contact record for nobody and still opens its
+ * screen.
  */
 export function infoOpening(
   target: InfoTarget | null,
   personRecord: PersonRecordLike | null,
 ): InfoOpening {
   if (target === "person") return personRecord === null ? "nothing" : "contact-page";
-  if (target === "group") return "layer";
+  if (target === "group") return "group-screen";
   return "nothing";
 }
 
+/** What the viewer is to a group or channel, for the ADR-0087 rule. */
+export interface ConversationInfoInput {
+  readonly kind: "group" | "channel";
+  readonly role: "owner" | "admin" | "member";
+  /** Only this person is in it (a group of one). */
+  readonly alone: boolean;
+  /** The owner can hand the group over (a role table, someone to take it). */
+  readonly canTransfer: boolean;
+  /** A member can leave (the proposal path, an own leaf read). */
+  readonly canLeave: boolean;
+  /** It holds an `@name`. */
+  readonly hasHandle: boolean;
+}
+
 /**
- * The blocks a group's info shows (spec section 2.2), decided by the shared
- * rule.
- *
- * Which of these this client actually GATES on, and which it only receives, is
- * worth stating so nobody deletes a branch expecting a control to disappear.
- * `rename-group`, `add-member` and `invite-link` are read by the view as the
- * condition for rendering. `transfer-ownership`, `leave-group` and
- * `delete-chat` are the exit block, whose live control is picked by ADR-0045's
- * own state machine (`exitBlockState` in the view) - the rule now agrees with
- * that machine on whether there is an exit at all (`canLeave`), where it used
- * to contradict it and be overridden.
+ * The blocks a group's or channel's info shows under ADR-0087
+ * (`group-and-channel-privacy.md` sections 4, 10, 11, 12.1, 15 and 18),
+ * decided by the shared rule (`conversationInfoSections`). An unknown name the
+ * core adds later is dropped, never guessed at.
  */
-export function groupInfoSections(
+export function conversationInfoSectionsFor(
   rules: UiRules | null,
-  caps: GroupInfoCapabilities,
+  input: ConversationInfoInput,
 ): readonly InfoSection[] {
   if (rules === null) return [];
-  return known(
-    rules.groupInfoSections(
-      new rules.GroupInfoCapabilities(
-        caps.canManageMembers,
-        caps.canRename,
-        caps.canMintInvite,
-        caps.isOwner,
-        caps.canLeave,
-        caps.membershipEnded,
+  try {
+    return known(
+      rules.conversationInfoSections(
+        input.kind,
+        input.role,
+        input.alone,
+        input.canTransfer,
+        input.canLeave,
+        input.hasHandle,
       ),
-    ),
-  );
+    );
+  } catch {
+    return [];
+  }
 }
 
 /** The blocks a channel's info shows (spec section 2.3), decided by the
@@ -339,7 +337,7 @@ export function channelInfoSections(
   );
 }
 
-/** A contact record as the info layer needs to find one. */
+/** A contact record as the info needs to find one. */
 export interface PersonRecordLike {
   readonly signaturePubkeyB64: string;
   readonly groupIdB64?: string;

@@ -5716,6 +5716,121 @@ DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
 
 
+## A key joins a person only with the consent of the key pinned for them (C-89)
+
+### C-89: a proven predecessor comes from an anchored proof or a link both keys signed
+
+A client records a key as a proven predecessor of a key it trusts only from a
+supersession proof anchored at a key it already pinned, or from a two-way
+conversation link signed by both keys (ADR-0074 section 3.7). A binding under a
+proven predecessor passes the KeyPackage add filter, so a predecessor a
+directory could choose would be a way into a person's conversations. A
+supersession proof is signed by the old key alone, which is why it never
+anchors a first observation: a malicious directory could mint one from a key of
+its own to anyone's published key.
+
+A link is verified after the identity gate has passed, against the key the gate
+left trusted. One that does not verify records nothing and refuses nothing: the
+directory can strip or spoil a link, which costs the person a returning chat
+and never trusts a key.
+
+**Enforced by:** `crates/lakko-transparency/src/conversation_link.rs`
+(`a_link_the_pinned_key_did_not_sign_is_refused`,
+`the_conversation_key_must_have_signed_too`, `a_link_for_another_person_is_refused`,
+fuzz `conversation_link_open`) and the identity gate of each client.
+
+## A Welcome replaces an ended group and nothing else (C-88)
+
+### C-88: a Welcome joins over a stored group only when that group is ended and is a conversation, a refused join leaves the storage as it found it, and a delete takes only an ended group
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md) "Amendment (2026-10-31)".
+
+**The rule.** A Welcome names a group id, and a device may already hold a group
+under it. Every check that can refuse (decode, signature, role table, kind,
+expected id, device bindings) runs on the staged Welcome first, and only a
+Welcome that passes them all reaches the stored group, on the id read from its
+verified `GroupContext`:
+
+| Stored under that id | Conversation (`Group`) | `PublisherGroup`, `DeviceGroup` |
+|---|---|---|
+| Nothing | Joins | Joins |
+| Active group | Refused with `GroupStillActive`, naming the group | Refused with `GroupStillActive`, naming the group |
+| Ended group | Its rows are deleted, then the join lands | Refused, plain `Error::Group` |
+
+A refused join leaves every provider row as it was, the KeyPackage that opened
+the Welcome included (every KeyPackage Lakko mints is a last-resort one, so
+OpenMLS keeps it). `Group::delete` follows the same line: it deletes only a
+group whose STORED state is ended, so an ended handle held across a rejoin
+cannot delete the group that replaced it.
+
+**The one delete of an active group (amended 2026-10-31,
+[ADR-0087](../adr/0087-group-and-channel-handles-and-privacy.md) section 9).**
+`Group::delete_after_ended_elsewhere(identity, ended_epoch)` is for a device that
+heard of an end from a `conversation_ended` register in its own account's synced
+state and so holds the group active, the commit still ahead of it in the journal,
+or gone past the 30-day retention. It deletes the stored group unless that group
+is active at an epoch above `ended_epoch`, which is refused with
+`GroupStillActive` and changes nothing: the device came back after that end, under
+the same id at a later epoch. A group that is not active goes at any epoch. The
+core cannot see the register, so the caller's obligation is the rule: call it
+holding the register, passing the register's epoch, and never on a refused
+Delivery Service read. The register reaches a device only over its own DeviceGroup,
+so whoever can trigger this is a device of the account, which already holds every
+key this deletes.
+
+**Why it is indexed.** A Welcome authenticates a group, not the group this
+device means: it proves that some group of that id invited this device, and
+anyone who knows the id can build one that passes every admission check. Before
+this rule OpenMLS refused any Welcome over any stored group, which protected a
+live chat and also made a removed person's return impossible
+(`WelcomeError::GroupAlreadyExists`, seen on the test stack and reproduced in
+`group_rejoin.rs`). Replacing a stored group is the fix, and if it were not tied
+to `is_active() == false` it would hand anyone holding a group id and a published
+KeyPackage a way to overwrite a live conversation.
+
+**Where it is enforced.** `crates/lakko-mls/src/group.rs`: `join_admitted` (the
+decision, last, after `admit_welcome`, the expected-id check and the binding
+check), `Group::delete`, `Group::delete_after_ended_elsewhere`, and
+`delete_stored_group`, which also removes what `MlsGroup::delete` leaves: the
+epoch key pairs an eviction keeps filed under the epoch before the one the group
+reports, the queued-proposal rows `openmls_memory_storage` 0.5.0 never removes,
+and the ADR-0027 retained-requests row. `RefusalReason::GroupStillActive`
+(disposition `DoNotRetry`) and `Error::GroupStillActive { group_id }`. FFI:
+`Group.deleteLocally` and `Group.deleteAfterEndedElsewhere` on UniFFI and wasm;
+`FfiError::MembershipGroupStillActive`
+appended last, whose message is exactly the group id in lower-case hex, because a
+`flat_error` carries no field; on wasm `err.refusalReason ===
+"groupStillActive"` and `err.refusalGroupId`, a `Uint8Array`. The NSE surface has
+no join and no delete, so it gains only an arm in its error mapping. Pinned by
+`crates/lakko-mls/tests/group_rejoin.rs`, by
+`a_forged_welcome_never_overwrites_a_live_chat` in `group.rs` (the forgery that
+passes every admission check), and by the entry-point tests in `device_group.rs`
+and `publisher_group.rs`. Host-tested 2026-10-31; no client calls
+`deleteLocally` or `deleteAfterEndedElsewhere` or handles the refusal yet, not
+walked live, not deployed.
+
+**What this does NOT do.**
+
+- It does not make a Welcome into an ended group authentic. A forger can still
+  replace an ENDED group, as a forger can land a Welcome under any id a device
+  holds nothing for. The result is a local group the DS will not serve (ADR-0053,
+  ADR-0057), and it is why deletion on removal is the client half: an ended group
+  that is gone cannot be replaced.
+- It does not bring back a person whose Welcome was already refused: the clients
+  read past it. That person has to be removed and added again.
+- It adds no way back for a co-publisher or a device. A `DeviceGroup` rejoin runs
+  on a fresh `Identity` (ADR-0081), so it never meets a stored group.
+- The KeyPackage bundle that opened the group's Welcome survives a delete. It is
+  a last-resort package, keyed by nothing that names a group, and it opens every
+  Welcome sealed to it, so deleting it would break a Welcome into another group
+  on its way. Its private keys live until the identity's storage is wiped: the
+  forward-secrecy cost ADR-0050 section 2.6 records. The signature key is the
+  identity's and stays.
+
+Invariants **#3** (a join condition and a new deletion path; external review under
+G-39) and **#4** (refuse, never fall back); **#2** and **#5** untouched.
+
+
 ## One screen share per call, named alike on every device (C-87)
 
 ### C-87: every device that received the same share states names the same current share, and a device whose share is superseded stops it

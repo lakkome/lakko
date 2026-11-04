@@ -50,6 +50,9 @@ public interface ReadWatermarkStore {
 
     /** Drop every group's watermarks for [accountIdB64] (forget device). */
     public fun deleteAccount(accountIdB64: String)
+
+    /** Drop one group's watermarks (ADR-0087 section 9). */
+    public fun deleteGroup(accountIdB64: String, groupIdHex: String)
 }
 
 /** The production store over [SharedPreferences]. The preferences handle is
@@ -95,6 +98,13 @@ public class SharedPreferencesReadWatermarkStore(context: Context) : ReadWaterma
                 merged
             }
         } ?: watermarks
+
+    override fun deleteGroup(accountIdB64: String, groupIdHex: String): Unit = synchronized(WRITE_LOCK) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs.edit().remove(key(accountIdB64, groupIdHex)).apply()
+        }
+        Unit
+    }
 
     override fun deleteAccount(accountIdB64: String): Unit = synchronized(WRITE_LOCK) {
         val prefix = accountPrefix(accountIdB64)
@@ -144,6 +154,11 @@ public class InMemoryReadWatermarkStore : ReadWatermarkStore {
         val merged = mergeReadWatermarks(decodeReadWatermarks(rows[k]), watermarks)
         rows[k] = encodeReadWatermarks(merged)
         merged
+    }
+
+    override fun deleteGroup(accountIdB64: String, groupIdHex: String): Unit = synchronized(this) {
+        rows.remove(key(accountIdB64, groupIdHex))
+        Unit
     }
 
     override fun deleteAccount(accountIdB64: String): Unit = synchronized(this) {

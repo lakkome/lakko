@@ -19,11 +19,29 @@
  *         row { accountId: <b64-uuidv7>, key: CryptoKey }
  * ```
  *
- * No tests in this file: IDB does not exist in Node, and the
- * browser-side smoke is the manual signup → reload flow. When
- * `wasm-bindgen-test` lands in 1.16f we add a real round-trip.
+ * The functions trade in {@link DeviceCipher}. On the web the record
+ * still holds the bare `CryptoKey` (the service worker,
+ * `public/sw-push-decrypt.js`, reads it straight from this store, so the
+ * format stays byte-identical); a {@link WebDeviceCipher} is wrapped around
+ * it on read. In the desktop build (ADR-0085 section 2) the key never
+ * enters the page: the store gate is asked here, then the Tauri host keeps
+ * the key under the operating system's key store. A
+ * {@link KeyStoreUnavailableError} from the host propagates; it is never
+ * read as "no key", which would re-derive or fall back.
+ *
+ * The IndexedDB path has no Node test (IDB does not exist there); the
+ * desktop path is tested in `key-store.test.ts` against a mocked host.
  */
 
+import { isDesktop } from "../platform";
+import {
+  type DeviceCipher,
+  HostDeviceCipher,
+  WebDeviceCipher,
+  hostDeleteDeviceKey,
+  hostGetDeviceKey,
+  hostPutDeviceKey,
+} from "./device-cipher";
 import {
   accountStoresWritable,
   accountStoresWritableSince,
@@ -81,16 +99,29 @@ function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
  *  mark was taken). */
 export async function putDeviceKey(
   accountIdB64: string,
-  key: CryptoKey,
+  cipher: DeviceCipher,
   wipes?: WipeMark,
 ): Promise<boolean> {
+  const writable = (): boolean =>
+    wipes === undefined
+      ? accountStoresWritable(accountIdB64)
+      : accountStoresWritableSince(wipes, accountIdB64);
+  if (isDesktop()) {
+    if (!(cipher instanceof HostDeviceCipher)) {
+      throw new Error("putDeviceKey: the desktop store takes a host cipher only");
+    }
+    if (!writable()) return false;
+    await hostPutDeviceKey(accountIdB64, cipher);
+    return true;
+  }
+  if (!(cipher instanceof WebDeviceCipher)) {
+    throw new Error("putDeviceKey: the web store takes a WebCrypto cipher only");
+  }
+  const key = cipher.cryptoKey;
   const db = await openDb();
   try {
-    const writable =
-      wipes === undefined
-        ? accountStoresWritable(accountIdB64)
-        : accountStoresWritableSince(wipes, accountIdB64);
-    if (!writable) return false;
+    // Asked after the open, immediately before the transaction (the gate rule).
+    if (!writable()) return false;
     const tx = db.transaction(STORE, "readwrite");
     const record: DeviceKeyRecord = { accountId: accountIdB64, key };
     tx.objectStore(STORE).put(record);
@@ -105,7 +136,8 @@ export async function putDeviceKey(
  *  no record exists. */
 export async function getDeviceKey(
   accountIdB64: string,
-): Promise<CryptoKey | null> {
+): Promise<DeviceCipher | null> {
+  if (isDesktop()) return hostGetDeviceKey(accountIdB64);
   const db = await openDb();
   try {
     const tx = db.transaction(STORE, "readonly");
@@ -118,7 +150,7 @@ export async function getDeviceKey(
           reject(get.error ?? new Error("idb get failed"));
       },
     );
-    return record?.key ?? null;
+    return record?.key ? new WebDeviceCipher(record.key) : null;
   } finally {
     db.close();
   }
@@ -127,6 +159,10 @@ export async function getDeviceKey(
 /** Erase the device root key for the given account. No-op if
  *  there was no record. */
 export async function deleteDeviceKey(accountIdB64: string): Promise<void> {
+  if (isDesktop()) {
+    await hostDeleteDeviceKey(accountIdB64);
+    return;
+  }
   const db = await openDb();
   try {
     const tx = db.transaction(STORE, "readwrite");

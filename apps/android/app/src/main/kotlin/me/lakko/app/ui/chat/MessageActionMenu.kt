@@ -15,6 +15,9 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
@@ -285,6 +288,16 @@ internal fun MessageActionMenuOverlay(
     onSave: () -> Unit = {},
     /** ADR-0082 — Translate / Show original was chosen. */
     onTranslate: () -> Unit = {},
+    /** reactions-and-emoji section 5 — the emoji this person already gave
+     *  this message (drawn pressed; pressing one takes it off). */
+    ownReactions: Set<String> = emptySet(),
+    /** Section 5 — this person holds 3 here: the others are dimmed. */
+    capReached: Boolean = false,
+    /** Section 5 — the trailing expand control (not with six or fewer
+     *  allowed). */
+    showExpand: Boolean = true,
+    /** Section 9 — `No reactions`: no row at all. */
+    showRow: Boolean = true,
 ) {
     // The chat window's own height, read OUTSIDE the popup. Inside it,
     // `constraints.maxHeight` is the popup window's height, which the system
@@ -367,11 +380,16 @@ internal fun MessageActionMenuOverlay(
                 // (the same translation the bubble got).
                 visibleBottom = (hostHeight - originNow.y).toInt(),
                 row = {
-                    MessageReactionRow(
-                        reactions = reactions,
-                        onReact = onReact,
-                        onOpenPicker = onOpenReactionPicker,
-                    )
+                    if (showRow) {
+                        MessageReactionRow(
+                            reactions = reactions,
+                            onReact = onReact,
+                            onOpenPicker = onOpenReactionPicker,
+                            own = ownReactions,
+                            capReached = capReached,
+                            showExpand = showExpand,
+                        )
+                    }
                 },
                 card = {
                     if (actions.any) {
@@ -407,6 +425,9 @@ internal fun MessageReactionRow(
     onReact: (String) -> Unit,
     onOpenPicker: () -> Unit,
     modifier: Modifier = Modifier,
+    own: Set<String> = emptySet(),
+    capReached: Boolean = false,
+    showExpand: Boolean = true,
 ) {
     Surface(
         modifier = modifier,
@@ -422,6 +443,7 @@ internal fun MessageReactionRow(
         val strings = LocalStrings.current
         val reactLabel = { emoji: String -> strings.format("chat.message.react_with", mapOf("emoji" to emoji)) }
         val moreReactions = strings[MORE_REACTIONS_LABEL]
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(
             // A narrow window (or a longer emoji set than the six defaults)
             // scrolls rather than clipping the picker control off the end: the
@@ -433,24 +455,50 @@ internal fun MessageReactionRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             for (emoji in reactions) {
+                val mine = emoji in own
+                // Section 5 — with 3 held, the emoji not given are dimmed and
+                // do nothing; the person's own 3 stay pressable.
+                val enabled = mine || !capReached
                 Box(
                     modifier = Modifier
                         .size(REACTION_TAP_SIZE)
-                        .clickable(onClickLabel = reactLabel(emoji)) { onReact(emoji) },
+                        .then(
+                            if (mine) {
+                                Modifier.background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .clickable(enabled = enabled, onClickLabel = reactLabel(emoji)) { onReact(emoji) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(text = emoji, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = emoji,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.alpha(if (enabled) 1f else 0.35f),
+                    )
                 }
             }
-            Box(
-                modifier = Modifier
-                    .size(REACTION_TAP_SIZE)
-                    .semantics { contentDescription = moreReactions }
-                    .clickable { onOpenPicker() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(text = "+", style = MaterialTheme.typography.titleMedium)
+            if (showExpand) {
+                Box(
+                    modifier = Modifier
+                        .size(REACTION_TAP_SIZE)
+                        .semantics { contentDescription = moreReactions }
+                        .clickable { onOpenPicker() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "+", style = MaterialTheme.typography.titleMedium)
+                }
             }
+        }
+        if (capReached) {
+            Text(
+                text = strings["chat.reaction.cap_reached"],
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
+            )
+        }
         }
     }
 }

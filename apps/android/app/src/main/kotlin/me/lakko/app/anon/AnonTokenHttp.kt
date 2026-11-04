@@ -319,6 +319,7 @@ public object AnonTokens {
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
                 store = installedStore,
                 forgottenAccounts = forgottenBeforePool.toSet(),
+                refillOnEmptyTake = me.lakko.app.BuildConfig.DEBUG,
             ).also {
                 poolRef = it
                 forgottenBeforePool.clear()

@@ -171,8 +171,10 @@ private fun SavedRowView(
     onRemove: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
-    val date = remember(row.dateMs) {
-        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(java.util.Date(row.dateMs))
+    val language = me.lakko.app.l10n.LocalStrings.current.language
+    val date = remember(row.dateMs, language) {
+        // Words from the language, order from the device (localization.md 5).
+        me.lakko.app.l10n.DeviceFormats.mediumDate(row.dateMs, language)
     }
     Box {
         Row(

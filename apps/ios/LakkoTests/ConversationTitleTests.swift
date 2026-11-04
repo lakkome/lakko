@@ -68,11 +68,15 @@ final class ConversationTitleTests: XCTestCase {
         XCTAssertEqual(ConversationTitle.memberCountLabel(4), "4 members")
     }
 
+    /// The avatar takes the shared rule; the circle's text is exactly it.
     func testInitials() {
-        XCTAssertEqual(InitialsAvatar.initials(of: "Anna Petrova"), "AP")
-        XCTAssertEqual(InitialsAvatar.initials(of: "anna"), "A")
-        XCTAssertEqual(InitialsAvatar.initials(of: "Anna, Ivan, Maria +2"), "AI")
-        XCTAssertEqual(InitialsAvatar.initials(of: "@alice"), "A")
-        XCTAssertEqual(InitialsAvatar.initials(of: "..."), "")
+        XCTAssertEqual(avatarInitials(name: "Anna Petrova"), "AP")
+        XCTAssertEqual(avatarInitials(name: "anna"), "AN")
+        XCTAssertEqual(avatarInitials(name: "VG3"), "VG")
+        XCTAssertEqual(avatarInitials(name: "@alice"), "AL")
+        XCTAssertEqual(avatarInitials(name: "..."), "")
+        XCTAssertEqual(
+            InitialsAvatar(name: "QA Phase A", identity: "x", size: 32).initials,
+            avatarInitials(name: "QA Phase A"))
     }
 }

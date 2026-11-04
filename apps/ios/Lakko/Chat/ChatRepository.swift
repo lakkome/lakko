@@ -87,7 +87,7 @@ public final class ChatRepository: ObservableObject {
     /// re-publish any commit that crashed mid-window. See
     /// ``persistCommitEntryThenSnapshotOrThrow(_:)`` +
     /// ``sweepPendingCommits(record:)``.
-    private let commitOutbox: CommitOutboxStore
+    let commitOutbox: CommitOutboxStore
 
     /// ADR-0042 — the opaque per-group push routing orchestrator. Owns the
     /// mint (owner-only) / receive / derive / subscribe-under-`push_gid`
@@ -125,6 +125,41 @@ public final class ChatRepository: ObservableObject {
     /// fallback string is true either way.
     private let leaveRequestStore: LeaveRequestStore
 
+    /// ADR-0087 section 9 — the owed ends, the notices not yet closed and the
+    /// held Welcomes (``ChatRepository+MembershipEnd``).
+    let membershipEndStore: MembershipEndStore
+    /// When this device created or joined each group (``GroupArrival``).
+    let groupArrivalStore: GroupArrivalStore
+    /// The owed ends of this account, the store's record in memory: consulted
+    /// on every poll and for every row.
+    var owedEnds: [String: OwedMembershipEnd] = [:]
+    /// UX 9.1 — what the banner at the top of Chats shows.
+    public let membershipEndNotices = MembershipEndNoticeCenter()
+    /// The account's synced state. Wired by the composition root; `nil` in a
+    /// test that does not exercise it, and then step 2 waits.
+    weak var conversationEndSync: ConversationEndSync?
+    /// The subscription that feeds ``applyHeardEnds()``.
+    var conversationEndsWatch: AnyCancellable?
+    /// Whether the end may run now. A VoIP wake only records it: the wipe
+    /// waits for the app to be in front. Tests inject their own.
+    var membershipEndMayRun: @MainActor () -> Bool = { CommitterEnvelopeForeground.isOnScreen() }
+    /// An end was recorded for a group. The composition root points it at the
+    /// group call host: a call in that group ends now. `left`: the person
+    /// asked for it.
+    var onMembershipEndRecorded: (@MainActor (_ groupIdHex: String, _ left: Bool) -> Void)?
+    /// A channel ended on another device of this account. Wired by the
+    /// signed-in shell, which owns the channel list.
+    var onChannelEndedElsewhere: (@MainActor (_ channelIdHex: String) -> Void)?
+    /// A held Welcome landed. Wired by ``ContactsRepository``, for what it
+    /// does after any Welcome.
+    var onHeldWelcomeJoined: (@MainActor (_ groupIdHex: String) -> Void)?
+    /// Groups whose end is being carried out now.
+    var endsRunning: Set<String> = []
+    /// One pass over the held Welcomes at a time.
+    var heldWelcomesRunning = false
+    /// A pass was asked for while one ran.
+    var heldWelcomesRerun = false
+
     /// ADR-0045 S4b — when this device last emitted its own liveness beacon, per
     /// group. This device's OWN local clock, which is legitimate here and
     /// nowhere else in the beacon design: it governs only this device's send
@@ -158,7 +193,7 @@ public final class ChatRepository: ObservableObject {
     /// carry. During Stage A that is the old key, everywhere; what derives
     /// from the seed OUTSIDE MLS (journal roots, the mailbox, the reach keys,
     /// channel owner keys) uses ``accountIdentity``.
-    private var conversationAccountIdentity: Identity? {
+    var conversationAccountIdentity: Identity? {
         predecessorAccountIdentity ?? accountIdentity
     }
 
@@ -283,6 +318,11 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0073 R.7 case 1 — where the pending row of each held message is
     /// drawn: queue entry id -> (group, the row's local id).
     var heldRows: [String: (groupIdHex: String, localId: Int64)] = [:]
+    /// Pairing state bundle v3 — the display-only copies of what another
+    /// device of this account wrote to a pending contact, by key, as last
+    /// read from ``PendingDisplayCopies``; `nil` until read (and after every
+    /// change). See `ChatRepository+PendingInvited.swift`.
+    var displayCopyCache: [String: [HeldSendQueue.Entry]]?
     /// When the roster identities of a group were last re-checked because a
     /// claim was kept pending, UNIX ms.
     var claimIdentityCheckedAtMs: [String: Int64] = [:]
@@ -350,6 +390,19 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 2.5a — groups whose superseded evaluation is running, so two
     /// triggers never re-request the same intent twice.
     private var supersededRunning: Set<String> = []
+
+    /// ADR-0060 section 6 — `group | person` of the committer envelopes on
+    /// their way out, so a poll's re-send check never doubles a send in flight.
+    private var committerEnvelopesInFlight: Set<String> = []
+    /// The reach state committer envelopes are composed from. Tests inject
+    /// their own.
+    var committerEnvelopeReach: @MainActor () -> ReachCenter = { .shared }
+    /// What a committer envelope's send time is read from. Tests inject their
+    /// own.
+    var committerEnvelopeClock: @MainActor () -> UInt64 = { ReachCenter.nowMs() }
+    /// Whether a poll's tail may re-send. A VoIP wake polls in the background,
+    /// where no re-send runs. Tests inject their own.
+    var committerEnvelopeForeground: @MainActor () -> Bool = { CommitterEnvelopeForeground.isActive() }
 
     /// ADR-0053 — per group journal, the newest access signer this device
     /// derived and the one before it (contract points 2 and 5).
@@ -480,6 +533,21 @@ public final class ChatRepository: ObservableObject {
     /// from ``groupNameStore`` on demand; this only says "read it again".
     @Published public internal(set) var groupNameRevision: Int = 0
 
+    /// ADR-0087 — the per-account, per-group photo, allowed reactions, @name
+    /// and knock seeds (``GroupSettingsStore``).
+    public let groupSettingsStore = GroupSettingsStore()
+
+    /// ADR-0087 — bumped on every accepted group photo or reactions setting,
+    /// so the list, the open chat and the info screen re-read them.
+    /// Reactions-and-emoji spec section 12 — own messages with unseen
+    /// reactions from others, per conversation, and its revision.
+    public let unseenReactionsStore = UnseenReactionsStore()
+    @Published public internal(set) var unseenReactionsRevision: Int = 0
+
+    @Published public internal(set) var groupSettingsRevision: Int = 0 {
+        didSet { refreshGroupPhotos() }
+    }
+
     /// ADR-0052 decision 3 — bumped on every accepted pin action (received or
     /// taken here, shared or personal), so the open chat rebuilds its pinned
     /// bar in place. The pins themselves are read from the two stores on
@@ -582,6 +650,63 @@ public final class ChatRepository: ObservableObject {
         )
     )
 
+    /// ADR-0087 section 18.1 — the growth re-send of the group photo, the
+    /// group-name publisher's throttle and jitter, the stored stamp verbatim.
+    lazy var groupPhotoPublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupPhotoEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
+    /// ADR-0087 section 11 — the growth re-send of the group's `@name`, the
+    /// same shape; any member may relay it.
+    lazy var groupHandlePublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupHandleEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
+    /// Reactions-and-emoji spec section 17.1 — the growth re-send of the
+    /// group's allowed reactions, the same shape.
+    lazy var groupReactionsPublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupReactionsEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
     /// ADR-0048 §2 — publishes this device's own profile into its groups on
     /// join, on change and on growth, through the same locked application send
     /// path the other service envelopes take.
@@ -670,13 +795,16 @@ public final class ChatRepository: ObservableObject {
         unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
+        membershipEndStore: MembershipEndStore = MembershipEndStore(),
         groupNameStore: GroupNameStore = GroupNameStore(),
         sharedPinStore: SharedPinStore = SharedPinStore(),
         personalPinStore: PersonalPinStore = PersonalPinStore(),
         readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore(),
         groupCallStore: GroupCallStore = GroupCallStore(),
-        registrarSeeds: RegistrarSeedStore = RegistrarSeedStore()
+        registrarSeeds: RegistrarSeedStore = RegistrarSeedStore(),
+        groupArrivalStore: GroupArrivalStore = GroupArrivalStore()
     ) {
+        self.groupArrivalStore = groupArrivalStore
         self.groupCallStore = groupCallStore
         self.registrarSeeds = registrarSeeds
         self.groupNameStore = groupNameStore
@@ -697,6 +825,7 @@ public final class ChatRepository: ObservableObject {
         self.unappliedRequestStore = unappliedRequestStore
         self.lastObservedOwnerStore = lastObservedOwnerStore
         self.leaveRequestStore = leaveRequestStore
+        self.membershipEndStore = membershipEndStore
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -740,15 +869,49 @@ public final class ChatRepository: ObservableObject {
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
         ) { [weak self] note in
             guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            let pendingAdded = note.userInfo?[StateBundle.pendingAddedKey] as? Bool == true
             Task { @MainActor in
                 // The own-key resolver reads the predecessor slot.
                 ReachCenter.shared.reloadKeyResolver()
                 self?.rebindAfterStateBundle(accountIdB64: accountIdB64)
+                // Bundle v3 — display copies of a pending contact's messages.
+                if pendingAdded, self?.currentAccountIdB64 == accountIdB64 {
+                    self?.invalidateDisplayCopies()
+                }
+            }
+        }
+        observeStateBundleNames()
+        historyBundleObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoHistoryBundleFiled, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let accountIdB64 = note.userInfo?[HistoryBundleCodec.accountUserInfoKey] as? String,
+                  let slots = note.userInfo?[HistoryBundleCodec.slotsUserInfoKey] as? [String: PersistedGroup]
+            else { return }
+            MainActor.assumeIsolated {
+                self?.adoptHistoryBundle(accountIdB64: accountIdB64, slots: slots)
             }
         }
     }
 
+    private var historyBundleObserver: NSObjectProtocol?
     private var stateBundleObserver: NSObjectProtocol?
+    private var stateBundleNamesObserver: NSObjectProtocol?
+
+    /// Pairing state bundle v3 — group names stored by the bundle re-title
+    /// the chat list and the open chat in place (profiles bump the profile
+    /// directory on their own); display copies of a pending contact's
+    /// messages are read again.
+    private func observeStateBundleNames() {
+        stateBundleNamesObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoStateBundleNamesApplied, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.currentAccountIdB64 == accountIdB64 else { return }
+                self.groupNameRevision &+= 1
+            }
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -830,6 +993,10 @@ public final class ChatRepository: ObservableObject {
         // Ongoing group calls this device observed before the relaunch; records
         // past the max age are dropped on load.
         groupCalls = groupCallStore.load(accountIdB64: newAccountIdB64, nowMs: Self.nowMs())
+        // ADR-0087 section 9 — read before anything consults it.
+        owedEnds = Dictionary(
+            uniqueKeysWithValues: membershipEndStore.owed(accountIdB64: newAccountIdB64)
+                .map { ($0.groupIdHex, $0) })
 
         // Eagerly rebuild `Group` handles for every previously-
         // known group id (1.14f5). `restoreStorage` laid down
@@ -884,8 +1051,12 @@ public final class ChatRepository: ObservableObject {
                     messages: messages,
                     cursor: persisted.cursor,
                     lastViewedMessageId: persisted.lastViewedMessageId,
-                    feedSeen: Set(persisted.feedSeen ?? []))
+                    feedSeen: Set(persisted.feedSeen ?? []),
+                    syncedThroughMessageId: persisted.syncedThroughMessageId)
             }
+            // `docs/ux/second-device.md` section 2 — the rest of the log (a
+            // history bundle lands before its Welcomes) waits for its join.
+            waitingLogSlots.fill(from: log.groups, held: Set(groups.keys))
         }
 
         state = ChatRepositoryState(
@@ -896,6 +1067,9 @@ public final class ChatRepository: ObservableObject {
         // trigger, the held messages a restart left on disk, and one
         // continuity pass.
         installContinuity()
+        // ADR-0087 section 9 — the ends a restart left owed, and the stored
+        // groups this account is no longer in.
+        sweepMembershipEnds()
     }
 
     /// Clear the in-memory state for the current session. Keeps
@@ -919,8 +1093,9 @@ public final class ChatRepository: ObservableObject {
         predecessorAccountIdentity = nil
         clearHeldSends()
         groups.removeAll()
+        waitingLogSlots.clear()
         groupCalls.removeAll()
-        unreadCounts.removeAll()
+        unreadMessageIds.removeAll()
         canonicalIdentity = nil
         // ADR-0024 — the mirror belongs to the account that loaded it.
         readWatermarksByGroup.removeAll()
@@ -949,6 +1124,12 @@ public final class ChatRepository: ObservableObject {
         attributionThrottle.reset()
         supersededTrigger = SupersededTrigger()
         supersededRunning.removeAll()
+        committerEnvelopesInFlight.removeAll()
+        owedEnds.removeAll()
+        endsRunning.removeAll()
+        heldWelcomesRunning = false
+        heldWelcomesRerun = false
+        membershipEndNotices.replace([])
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
@@ -958,6 +1139,10 @@ public final class ChatRepository: ObservableObject {
         profilePublisher.reset()
         // ADR-0051 — same for a scheduled group-name re-send.
         groupNamePublisher.reset()
+        // ADR-0087 — and for the photo and reactions re-sends.
+        groupPhotoPublisher.reset()
+        groupReactionsPublisher.reset()
+        groupHandlePublisher.reset()
         // ADR-0052 — and for a scheduled shared-pin re-send.
         pinPublisher.reset()
         // ADR-0059 — and the shared-channels row + its growth re-sends.
@@ -1138,6 +1323,9 @@ public final class ChatRepository: ObservableObject {
             scheduleRootTakeover(groupIdHex: groupIdHex)
             scheduled += 1
         }
+        // ADR-0087 section 5 rotation rule — the root moved, so every
+        // knock seed moved with it: bump each owned group's knock version.
+        bumpKnockVersionsAfterRotation(predecessorSeed: predecessorSeed)
         NSLog("ADR-0074: %d owned journal root transfer(s) scheduled", scheduled)
         return scheduled
     }
@@ -1191,6 +1379,48 @@ public final class ChatRepository: ObservableObject {
         kind: GroupKind,
         recipientPlan: MailboxWritePlan? = nil
     ) async throws -> String {
+        try await foundGroup(
+            recipientAccountId: recipientAccountId, recipientSignaturePubkey: recipientSignaturePubkey,
+            kind: kind, recipientPlan: recipientPlan, answeringRequest: nil
+        ).groupIdHex
+    }
+
+    /// Found the one-to-one that answers the contact request `requestMessageId`.
+    /// Its Welcome to the requester goes out under the request's reply grant,
+    /// then a contact grant, and nothing else (``deliverAnswerWelcome(welcome:toRequester:)``).
+    ///
+    /// Once the group is founded and its journal claimed the answer is owed,
+    /// durably, before any Welcome goes out: a Welcome that fails (the
+    /// requester's mailbox refused it, a connection failed) keeps the group,
+    /// is retried (``resolveAllOwedAnswers()``), and the answer is
+    /// ``AnswerFounding/welcomeOwed(groupIdHex:)``. Only a failure before that
+    /// (no way to answer, the claim refused) throws, with nothing standing.
+    ///
+    /// A request with a founding on record never founds a second group: the
+    /// accept carries on from it.
+    public func foundOneToOneAnswering(
+        requestMessageId: Int64, recipientAccountId: Data, recipientSignaturePubkey: Data
+    ) async throws -> AnswerFounding {
+        if let accountIdB64 = currentAccountIdB64,
+           let held = OwedAnswers.foundedGroupHex(
+               requestMessageId: requestMessageId,
+               rows: commitOutbox.loadUnacked(accountIdB64: accountIdB64)) {
+            await resolveOwedAnswers(groupIdHex: held)
+            // Whatever landed was acked by the resolver.
+            return .welcomeOwed(groupIdHex: held)
+        }
+        return try await foundGroup(
+            recipientAccountId: recipientAccountId, recipientSignaturePubkey: recipientSignaturePubkey,
+            kind: .oneToOne, recipientPlan: nil, answeringRequest: requestMessageId)
+    }
+
+    private func foundGroup(
+        recipientAccountId: Data,
+        recipientSignaturePubkey: Data,
+        kind: GroupKind,
+        recipientPlan: MailboxWritePlan?,
+        answeringRequest: Int64?
+    ) async throws -> AnswerFounding {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument(
                 "ChatRepository not bootstrapped — call bootstrap() first"
@@ -1208,8 +1438,12 @@ public final class ChatRepository: ObservableObject {
         // ADR-0078 — the Welcome goes to the recipient's VERIFIED mailbox (the
         // link's or a held grant's binding). With none known nothing is
         // created: there is no address to derive any more.
-        guard let recipientTarget = recipientPlan
-                ?? ReachCenter.shared.writePlan(toAccountKey: recipientSignaturePubkey) else {
+        let recipientTarget = recipientPlan
+            ?? ReachCenter.shared.writePlan(toAccountKey: recipientSignaturePubkey)
+        let reachable = answeringRequest == nil
+            ? recipientTarget != nil
+            : !ReachCenter.shared.answerPlans(toRequester: recipientSignaturePubkey).isEmpty
+        guard reachable else {
             NSLog("ADR-0078: no verified mailbox for the recipient; the chat was not created")
             throw ChatError.wrapped("no mailbox known for the recipient", underlying: MailboxUnknown())
         }
@@ -1305,11 +1539,45 @@ public final class ChatRepository: ObservableObject {
         // founder while its members joined it. A refused or failed persist
         // throws here, and nothing was published.
         let foundingAccount = try persistFoundingOrThrow(groupIdHex: groupIdHex)
+        // The founding of an accept is on record before any Welcome goes out,
+        // so whatever fails below, or a process death, leaves it owed and
+        // another Accept carries on from it. A refused write of the record
+        // means nothing was sent.
+        var owedAnswer: PendingCommitEntry?
+        if let answeringRequest {
+            do {
+                owedAnswer = try recordOwedAnswer(
+                    group: group, groupId: groupId, welcome: welcome,
+                    requesterKey: recipientSignaturePubkey, requestMessageId: answeringRequest,
+                    ownWelcomeOwed: targets.count > 1)
+            } catch {
+                knownGroupsStore.remove(accountIdB64: foundingAccount, groupIdHex: groupIdHex)
+                throw error
+            }
+        }
         var delivered = 0
+        var welcomeOwed = false
         do {
             for target in targets {
-                try await deliverWelcome(
-                    welcome: welcome, toAccountKey: target.accountKey, plan: target.plan)
+                if answeringRequest != nil {
+                    do {
+                        if target.accountKey == recipientSignaturePubkey {
+                            try await deliverAnswerWelcome(
+                                welcome: welcome, toRequester: recipientSignaturePubkey)
+                        } else {
+                            try await deliverWelcome(
+                                welcome: welcome, toAccountKey: target.accountKey, plan: target.plan)
+                            owedAnswer = noteOwnWelcomeLanded(owedAnswer)
+                        }
+                    } catch {
+                        NSLog("contact accept: the Welcome stays owed: %@", ContactAccept.reason(of: error))
+                        welcomeOwed = true
+                        break
+                    }
+                } else {
+                    try await deliverWelcome(
+                        welcome: welcome, toAccountKey: target.accountKey, plan: target.plan)
+                }
                 delivered += 1
                 try bound.require()
             }
@@ -1325,6 +1593,9 @@ public final class ChatRepository: ObservableObject {
             throw error
         }
 
+        if !welcomeOwed, let owedAnswer {
+            commitOutbox.deleteEntryBestEffort(accountIdB64: foundingAccount, id: owedAnswer.id)
+        }
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         // ADR-0073 R.5 — a group that continues a conversation is known to
         // the notification extension as that conversation.
@@ -1346,7 +1617,210 @@ public final class ChatRepository: ObservableObject {
         publishOwnProfileSoon(groupIdHex: groupIdHex)
         // ADR-0048 §2 trigger 4 — and this device has never heard theirs.
         requestProfilesAfterJoin(groupIdHex: groupIdHex)
+        return welcomeOwed ? .welcomeOwed(groupIdHex: groupIdHex) : .delivered(groupIdHex: groupIdHex)
+    }
+
+    /// Found a group with nobody else in it (`docs/ux/new-group.md`): this
+    /// account's own devices only, so people are added afterwards as in any
+    /// group. The founder claims the journal before anything else, as
+    /// ``foundGroup(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:answeringRequest:)``
+    /// does. A Welcome to this account's own mailbox that fails does not undo
+    /// the group: the re-admission check brings those devices in.
+    public func foundGroupWithNobodyElse(
+        /// ADR-0087 sections 3 and 10 — run with the new group's id BEFORE
+        /// anything about the group leaves this device (the @name claim): a
+        /// throw here creates nothing.
+        beforePublish: ((Data) async throws -> Void)? = nil
+    ) async throws -> String {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        let bound = binding.capture()
+        let ownDevices = await ownOtherDevices(identity: identity)
+        try bound.require()
+        let group: Group
+        let welcome: Data?
+        let joinSigner: DsProofSigner
+        do {
+            group = try Group.create(identity: identity, kind: .group)
+            welcome = ownDevices.isEmpty
+                ? nil
+                : try group.addMembersFromWire(
+                    identity: identity, keyPackages: ownDevices.map { $0.keyPackage }).welcome
+            joinSigner = try group.dsAccessSigner(identity: identity)
+        } catch {
+            throw ChatError.wrapped("the group was not created", underlying: error)
+        }
+        let groupId = try group.groupId()
+        let groupIdHex = DsClient.pseudonymHex(groupId)
+        if let beforePublish {
+            try await beforePublish(groupId)
+            try bound.require()
+        }
+        do {
+            try await JournalOwnership.claim(
+                root: try journalRootSigner(groupId: groupId),
+                journalId: groupId,
+                epoch: joinSigner.epoch(),
+                epochKey: joinSigner.verifyingKey(),
+                ds: dsClient)
+        } catch {
+            throw ChatError.wrapped("DS journal claim failed", underlying: error)
+        }
+        try bound.require()
+        if let accountIdB64 = currentAccountIdB64 {
+            registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+        _ = try persistFoundingOrThrow(groupIdHex: groupIdHex)
+        if let welcome, let own = ReachCenter.shared.ownAccountKey {
+            do {
+                try await deliverWelcome(
+                    welcome: welcome, toAccountKey: own, plan: ReachCenter.shared.writePlan(toAccountKey: own))
+            } catch {
+                NSLog("New group: the Welcome to this account's other devices did not land")
+            }
+            try bound.require()
+        }
+        groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
+        mirrorLineage()
+        dsSigners.observe(journal: groupIdHex, signer: joinSigner)
+        claimedGroupsThisSession.insert(groupIdHex)
+        persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+        subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
+        reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
         return groupIdHex
+    }
+
+    /// The founding of an accept, on record in the outbox every owed Welcome
+    /// lives in. A failed write throws: the accept then failed.
+    private func recordOwedAnswer(
+        group: Group, groupId: Data, welcome: Data, requesterKey: Data, requestMessageId: Int64,
+        ownWelcomeOwed: Bool
+    ) throws -> PendingCommitEntry {
+        guard let accountIdB64 = currentAccountIdB64 else {
+            throw ChatError.argument("no account — cannot record the owed Welcome")
+        }
+        var entry = PendingCommitEntry(
+            id: newOutboxEntryId(),
+            accountId: accountIdB64,
+            groupId: base64Encode(groupId),
+            targetEpoch: String((try? group.epoch()) ?? 0),
+            commitB64: "",
+            secondArtifactB64: base64Encode(welcome),
+            secondArtifactKind: .welcome,
+            sweepVerdictPending: true,
+            sweepWelcomesOwed: true,
+            answerRequesterKeyB64: base64Encode(requesterKey),
+            answerRequestMessageId: requestMessageId)
+        entry.answerOwnWelcomeOwed = ownWelcomeOwed
+        try commitOutbox.putEntryDurable(accountIdB64: accountIdB64, entry: entry)
+        return entry
+    }
+
+    /// This account's own mailbox holds the Welcome: a retry writes only the
+    /// requester's. Best effort: at worst the row is written twice.
+    private func noteOwnWelcomeLanded(_ entry: PendingCommitEntry?) -> PendingCommitEntry? {
+        guard var entry, let accountIdB64 = currentAccountIdB64 else { return entry }
+        entry.answerOwnWelcomeOwed = false
+        try? commitOutbox.putEntryDurable(accountIdB64: accountIdB64, entry: entry)
+        return entry
+    }
+
+    /// What ``resolveOwedAnswers(groupIdHex:)`` calls once a Welcome landed:
+    /// the accept is finished and its ack goes out. Set by
+    /// ``ContactsRepository``.
+    var owedAnswerAck: (@MainActor (_ requestMessageId: Int64, _ groupIdHex: String) async -> Void)?
+    /// The groups whose owed answers are being written, so two triggers never
+    /// write one Welcome twice at the same time.
+    private var owedAnswersRunning: Set<String> = []
+
+    /// Retry every accept whose Welcome is owed: at launch and at the tail of
+    /// each inbox poll. Nothing owed reads one directory.
+    func resolveAllOwedAnswers() async {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let owing = Set(commitOutbox.loadUnacked(accountIdB64: accountIdB64)
+            .filter { $0.answerRequesterKeyB64 != nil }
+            .compactMap { base64Decode($0.groupId) })
+        for groupId in owing {
+            await resolveOwedAnswers(groupIdHex: DsClient.pseudonymHex(groupId))
+        }
+    }
+
+    /// Retry the accepts of `groupIdHex` whose Welcome is owed: at the tail of
+    /// a poll, at launch, and when a key for someone arrived. A Welcome that
+    /// landed drops its entry and then the ack goes out.
+    func resolveOwedAnswers(groupIdHex: String) async {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex],
+              owedAnswersRunning.insert(groupIdHex).inserted else { return }
+        defer { owedAnswersRunning.remove(groupIdHex) }
+        let rows = commitOutbox.loadUnacked(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId)
+        ).filter { $0.answerRequesterKeyB64 != nil }
+        guard !rows.isEmpty else { return }
+        let bound = binding.capture()
+        await OwedAnswers.resolve(rows: rows, ports: OwedAnswers.Ports(
+            deliver: { [self] row in
+                guard let welcome = row.secondArtifactB64.flatMap(base64Decode),
+                      let key = row.answerRequesterKeyB64.flatMap(base64Decode) else {
+                    throw MailboxUnknown()
+                }
+                try bound.require()
+                // Own mailbox first (ADR-0079): whenever the requester holds
+                // the Welcome, every own device's mailbox holds it too.
+                if row.answerOwnWelcomeOwed == true, let own = ReachCenter.shared.ownAccountKey {
+                    try await deliverWelcome(
+                        welcome: welcome, toAccountKey: own,
+                        plan: ReachCenter.shared.writePlan(toAccountKey: own))
+                    try bound.require()
+                    _ = noteOwnWelcomeLanded(row)
+                }
+                try await deliverAnswerWelcome(welcome: welcome, toRequester: key)
+            },
+            landed: { [self] row in
+                commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: row.id)
+            },
+            ack: { [self] messageId in
+                guard bound.isCurrent else { return }
+                await owedAnswerAck?(messageId, groupIdHex)
+            }))
+    }
+
+    /// The Welcome of an accept, to the person who sent the request: under the
+    /// request's reply grant, then a contact grant, moving on at a `401`,
+    /// through ``ReachCenter/answerPlans(toRequester:)`` and nothing else. No
+    /// such grant: nothing is written, and it throws.
+    ///
+    /// ADR-0074 section 3.5a rule 6 — a refusal of all of them re-checks the
+    /// person's address once.
+    func deliverAnswerWelcome(welcome: Data, toRequester accountKey: Data) async throws {
+        do {
+            _ = try await RefusedMailboxWrite.write(
+                resolve: {
+                    let plans = ReachCenter.shared.answerPlans(toRequester: accountKey)
+                    guard !plans.isEmpty else {
+                        NSLog("ADR-0078: no grant answers a request; its Welcome was not written")
+                        throw MailboxUnknown()
+                    }
+                    return plans
+                },
+                recheck: { [self] in
+                    await PersonAddressRecheck.recheck(
+                        accountKey: accountKey, accountIdHint: memberAccountIdHints[accountKey])
+                },
+                publish: { [self] plans in
+                    try await RefusedMailboxWrite.tryingPlans(plans) { plan in
+                        let row = try plan.target.seal(kind: .welcome, body: welcome)
+                        return try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                            try await dsClient.publishMailbox(
+                                pseudonym: plan.target.address, payload: row, writeAuth: auth)
+                        }
+                    }
+                })
+        } catch {
+            throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
+        }
     }
 
     /// Write one Welcome to one account's mailbox, as a sealed `.welcome`
@@ -1370,7 +1844,7 @@ public final class ChatRepository: ObservableObject {
                         NSLog("ADR-0078: no verified mailbox for a Welcome; it was not written")
                         throw MailboxUnknown()
                     }
-                    return MailboxWriteAttempt(target: chosen.target, auth: chosen.auth)
+                    return chosen
                 },
                 recheck: { [self] in
                     rechecked = true
@@ -1378,12 +1852,12 @@ public final class ChatRepository: ObservableObject {
                         accountKey: accountKey,
                         accountIdHint: memberAccountIdHints[accountKey])
                 },
-                publish: { [self] attempt in
-                    try await dsClient.publishMailbox(
-                        pseudonym: attempt.target.address,
-                        payload: try attempt.target.seal(kind: .welcome, body: welcome),
-                        writeAuth: attempt.auth
-                    )
+                publish: { [self] plan in
+                    let row = try plan.target.seal(kind: .welcome, body: welcome)
+                    return try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                        try await dsClient.publishMailbox(
+                            pseudonym: plan.target.address, payload: row, writeAuth: auth)
+                    }
                 })
         } catch {
             throw ChatError.wrapped(
@@ -1398,14 +1872,18 @@ public final class ChatRepository: ObservableObject {
     /// Returns the joined group's hex id.
     ///
     /// Every attempt, success or failure, ends by requesting a KeyPackage
-    /// republish. Processing a Welcome deletes the private keys of the
-    /// KeyPackage it targets (OpenMLS keeps them only for a last-resort
-    /// KeyPackage, which Lakko never mints), and discovery holds one
-    /// KeyPackage per account — so without a fresh upload the directory
-    /// keeps handing out a KeyPackage this device can no longer open, and
-    /// the next person to add this user fails. A failed join republishes
-    /// too: whether the keys were consumed before the failure is not
-    /// observable from here, and a spare upload costs one bearer request.
+    /// republish: one published package is a last-resort package (ADR-0050
+    /// section 2.6) and a fresh one narrows how long it is used. Its private
+    /// keys survive a join, so a Welcome refused here can be tried again.
+    ///
+    /// ADR-0087 section 9, C-88 — a Welcome replaces an ended group under the
+    /// same id, and is refused with `MembershipGroupStillActive`, changing
+    /// nothing, for a group this device still holds as active. That refusal
+    /// is not a failure of the Welcome: the removal it answers may simply
+    /// still be in the journal, so the caller holds it
+    /// (``holdWelcomeForActiveGroup(groupIdHex:welcome:)``) instead of losing
+    /// it. When the replaced group's person was out, nothing of it carries;
+    /// when only this device's leaf was retired, the history does.
     public func joinGroupFromWelcome(welcomeBytes: Data) async throws -> String {
         defer { republishKeyPackage() }
         guard let identity = canonicalIdentity else {
@@ -1427,8 +1905,17 @@ public final class ChatRepository: ObservableObject {
         }
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
-        groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
+        let record = GroupRecord(group: group, groupId: groupId)
+        // ADR-0087 section 9 — what this Welcome replaced, if anything.
+        closeReplacedGroup(groupIdHex: groupIdHex, joined: record)
+        // What the log holds for this group goes in with it: the persist below
+        // writes the whole log, and a record registered empty would write this
+        // group's history bundle away.
+        if let waiting = waitingLogSlots.take(groupIdHex) { record.adoptHistory(waiting) }
+        groups[groupIdHex] = record
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        // A later join clears a held end (rule 3: a first join writes nothing).
+        publishJoinedSoon(groupIdHex: groupIdHex)
         // ADR-0060 section 6 — a `/g/` request of ours was answered: its
         // single-use `reply` key goes.
         ReachCenter.shared.retireReplies(purpose: ReplyPurpose.groupJoin(groupId))
@@ -1489,8 +1976,21 @@ public final class ChatRepository: ObservableObject {
     /// throttle, same jitter, so N members answering one request do not land
     /// N envelopes in the same second. A device with no own profile publishes
     /// nothing, exactly as it does on growth.
-    private func answerProfileRequest(groupIdHex: String) {
+    ///
+    /// ADR-0060 section 4, "A device that holds nothing asks" — the same
+    /// envelope from the other person of a one-to-one also means they may
+    /// hold nothing of this account's: that conversation is forgotten in the
+    /// sent records, at most once an hour, so the offer and the bundle go out
+    /// again. The profile answer above is unchanged and is what carries the
+    /// contact grant.
+    private func answerProfileRequest(groupIdHex: String, senderKey: MemberIdentity) {
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+        if ReachCenter.shared.noteIntroductionsAsked(
+            groupIdHex: groupIdHex,
+            isOneToOneWithAsker: isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey),
+            nowMs: UInt64(max(0, Self.nowMs()))) {
+            requestIntroductions()
+        }
     }
 
     /// ADR-0048 §2 trigger 4 — how many PEOPLE in `groupIdHex`, this account
@@ -1506,7 +2006,7 @@ public final class ChatRepository: ObservableObject {
         let own = AuthorIdentity.own(group: record.group)
         return people.filter { person in
             base64Encode(person.signaturePublicKey) != own
-                && ProfileDirectory.shared.resolve(signatureKey: person.signaturePublicKey).isPlaceholder
+                && ProfileDirectory.shared.countsAsUnnamed(signatureKey: person.signaturePublicKey)
         }.count
     }
 
@@ -1563,6 +2063,38 @@ public final class ChatRepository: ObservableObject {
                 name: conversationTitle(groupIdHex: groupIdHex)
             )
         }
+        // Reactions-and-emoji spec section 12 — the people in these
+        // conversations, by account key, for the reaction notification.
+        let names = Self.personNameMap(
+            rosters: groups.values.map { (try? $0.group.members()) ?? [] },
+            resolve: { key in
+                let resolved = ProfileDirectory.shared.resolve(signatureKey: key)
+                return resolved.source == .placeholder ? nil : resolved.name
+            })
+        PersonNameMirror.replace(accountIdB64: accountIdB64, names: names)
+    }
+
+    /// The names a notification may use, keyed by every key the extension
+    /// can be handed for a member: the PERSON key (the account key the core
+    /// resolves the sender to, else the leaf key) and each of the member's
+    /// leaf keys, all mapped to the one name the app shows for that person.
+    /// Every member of every loaded group, not only contacts: a group
+    /// member's profile arrived in the group and is stored under that same
+    /// person key. A member with no known name is left out; the extension
+    /// then says the chat's own word for an unnamed member.
+    nonisolated static func personNameMap(
+        rosters: [[GroupMember]], resolve: (Data) -> String?
+    ) -> [String: String] {
+        var names: [String: String] = [:]
+        for roster in rosters {
+            for member in roster {
+                let person = PersonKey.of(member)
+                guard let name = resolve(person) else { continue }
+                names[person.base64EncodedString()] = name
+                names[member.signaturePublicKey.base64EncodedString()] = name
+            }
+        }
+        return names
     }
 
     /// `docs/ux/calls.md` section 6 — write a finished call's row into the
@@ -1757,6 +2289,7 @@ public final class ChatRepository: ObservableObject {
             guard bound.isCurrent else { return }
             groupNamePublisher.notePublished(groupIdHex: groupIdHex)
             groupNameRevision &+= 1
+            notePublicRecordChanged(groupIdHex: groupIdHex)
         }
     }
 
@@ -1821,6 +2354,8 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 value: StoredGroupName(name: name, updatedAtMs: updatedAtMs))
             groupNameRevision &+= 1
+            // An admin's rename reaches the owner as this envelope.
+            notePublicRecordChanged(groupIdHex: groupIdHex)
         case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
             NSLog("ADR-0051 group name for \(groupIdHex) dropped: \(verdict)")
         }
@@ -2121,6 +2656,16 @@ public final class ChatRepository: ObservableObject {
         await retryOwedProfileResend()
     }
 
+    /// A backup restore owes the own profile to every conversation this
+    /// device holds, as any change of the name does. Marked here, sent by the
+    /// retry that runs after it (the session start, or the caller below).
+    public func republishProfileAfterRestore() async {
+        guard state.bootstrapped, let accountIdB64 = currentAccountIdB64,
+              RestoredDeviceStore.takeProfileRepublish(accountIdB64: accountIdB64) else { return }
+        markProfileResendOwed()
+        await retryOwedProfileResend()
+    }
+
     /// Retry an owed profile re-send (a session start). Best effort: what
     /// does not land stays owed.
     public func retryOwedProfileResend() async {
@@ -2136,7 +2681,8 @@ public final class ChatRepository: ObservableObject {
     /// roster gained a key it did not have before.
     private func noteProfileGrowthIfMembershipGrew(
         groupIdHex: String,
-        previousMemberKeys: [String]?
+        previousMemberKeys: [String]?,
+        ownAdd: Bool = false
     ) {
         guard let record = groups[groupIdHex] else { return }
         let current = PushGroupRouting.memberSignatureKeys(group: record.group)
@@ -2145,8 +2691,28 @@ public final class ChatRepository: ObservableObject {
         }
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0051 §3 — the newcomer cannot read the epoch the group name was
-        // sent in either; an owner / admin holding one re-sends it.
-        groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // sent in either; an owner / admin holding one re-sends it. The device
+        // that committed the add sends at once: the newcomer's list has no name
+        // until it does, and the schedule exists for the other members.
+        if ownAdd {
+            let publisher = groupNamePublisher
+            let photo = groupPhotoPublisher
+            let reactions = groupReactionsPublisher
+            let handle = groupHandlePublisher
+            Task {
+                await publisher.publishNow(groupIdHex: groupIdHex)
+                await photo.publishNow(groupIdHex: groupIdHex)
+                await reactions.publishNow(groupIdHex: groupIdHex)
+                await handle.publishNow(groupIdHex: groupIdHex)
+            }
+        } else {
+            groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+            // ADR-0087 section 18.1 — the photo and the allowed reactions
+            // travel the same way.
+            groupPhotoPublisher.noteGrowth(groupIdHex: groupIdHex)
+            groupReactionsPublisher.noteGrowth(groupIdHex: groupIdHex)
+            groupHandlePublisher.noteGrowth(groupIdHex: groupIdHex)
+        }
         // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0059 section 6 — nor the channels this device shares there.
@@ -2219,45 +2785,33 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("reply key registration failed", underlying: error)
         }
         try bound.require()
-        // ADR-0053 point 6 — the knock. A probe learns the epoch the group's
-        // access key is registered at (no journal read: a non-member cannot
-        // read a claimed journal, and paging one it is not in was the old
-        // shape), the proposal is built for that epoch, and a second knock
-        // carries the attribution and the proposal. Each knock spends one
-        // `ds-knock` anonymous token (ADR-0054 S3).
+        // ADR-0087 section 5 — the request is a fresh KeyPackage sealed to the
+        // group's knock key (named by the link) with the reply grant, a
+        // profile and the link's capability. It carries no epoch, so it waits
+        // through every commit. One knock, one `ds-knock` token (ADR-0054).
+        guard let knockKey = cap.knock() else {
+            throw ChatError.argument("group invite link names no knock key")
+        }
         let client = dsClient
         do {
-            try await DsKnockJoin(
-                knock: { payloads in
-                    try await client.knock(groupId: groupId, payloads: payloads).epoch
-                },
-                createProposal: { epoch in
-                    try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
-                },
-                // ADR-0028 OQ2 — which member's link this request arrived on.
-                // Advisory: the admin approval gate is the security boundary,
-                // so a failure to compose it does not block the join.
-                attribution: {
-                    try? composeGroupJoinAttribution(
-                        joinerSigningSeed: identity.ed25519Seed(),
-                        capabilityBytes: capabilityWire,
-                        replyGrant: replyGrant)
-                },
-                // The proposal's KeyPackage private key is the only thing that
-                // can open the Welcome the committer sends later. It is made
-                // durable BEFORE the proposal is published, fail closed: a
-                // request whose key is not on disk is never sent.
-                persistBeforeKnock: { @MainActor [weak self] in
-                    guard let self else { throw StaleBindingError() }
-                    try bound.require()
-                    try self.persistJoinRequestOrThrow(
-                        identity: identity, accountIdB64: joinerAccountIdB64)
-                }
-            ).run()
+            let keyPackage = try identity.createKeyPackage()
+            // The KeyPackage's private key is the only thing that can open the
+            // Welcome the sweep sends later: durable BEFORE the knock, fail
+            // closed. A request whose key is not on disk is never sent.
+            try bound.require()
+            try persistJoinRequestOrThrow(identity: identity, accountIdB64: joinerAccountIdB64)
+            let row = try sealKnockRow(
+                knockPublicKey: knockKey.publicKey,
+                version: knockKey.version,
+                keyPackage: keyPackage,
+                replyGrant: replyGrant,
+                profile: ProfileDirectory.shared.ownDeviceEnvelope() ?? Data(),
+                capability: capabilityWire)
+            _ = try await client.knock(groupId: groupId, payloads: [row])
         } catch let error as DsKnockJoinError {
             throw error
         } catch {
-            throw ChatError.wrapped("DS knock (external-join request) failed", underlying: error)
+            throw ChatError.wrapped("DS knock (request to join) failed", underlying: error)
         }
         try bound.require()
         // The key was made durable before the knock; this also writes the
@@ -2400,7 +2954,12 @@ public final class ChatRepository: ObservableObject {
     /// its pre-batch value in the turn that immediately follows a poll — which
     /// is exactly where the rotation fires.
     func membershipStateNow(groupIdHex: String) -> MembershipState {
-        membershipState(
+        // ADR-0087 section 9 — an owed end stops everything that consults
+        // this, whether or not the commit was applied here.
+        if isEnding(groupIdHex: groupIdHex) {
+            return .ended(left: leaveRequestedAt(groupIdHex: groupIdHex) != nil)
+        }
+        return membershipState(
             isActive: isActive(groupIdHex: groupIdHex),
             leaveRequestedAtMs: leaveRequestedAt(groupIdHex: groupIdHex))
     }
@@ -2420,31 +2979,10 @@ public final class ChatRepository: ObservableObject {
     /// layered-defence posture `leaveGroupAffordance` and `exitBlock` already
     /// keep between them.
     ///
-    /// **What it removes:** this group's entry in the per-account message log
-    /// (a read-modify-write on a store that already exists — the log is keyed
-    /// `{ groupIdHex -> PersistedGroup }` internally, so no new store is
-    /// needed), its pending-request observations, its durable leave record, and
-    /// its rows in the live group map and the known-groups registry.
-    ///
-    /// The last-observed-owner memory is deliberately LEFT: that store has only
-    /// an account-wide wipe, and calling it here would erase every OTHER
-    /// group's memory and greet the user with a spurious "{name} made you the
-    /// owner" notice in a group nothing happened in. A row for a group that no
-    /// longer exists is inert, and on the one path where it could ever be read
-    /// again — a rejoin under the same group id — it holds exactly the right
-    /// answer.
-    ///
-    /// **What it does NOT remove, which is why the confirmation body is exact
-    /// rather than sweeping:** the inactive MLS group stays in the provider
-    /// snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
-    /// is a real (small) core follow-up rather than something this rides free.
-    /// The remnant is inert in the strong sense — it cannot send, decrypt,
-    /// export or process anything — but it is not nothing.
-    ///
-    /// The push subscription is already gone by this point: the §6.2.8
-    /// teardown retires it at the moment of the eviction, not at the moment of
-    /// the delete, so a user who never presses this button still stops being
-    /// woken.
+    /// Since ADR-0087 section 9 a person who is out of a group has no such
+    /// control: the group goes by itself (``ChatRepository+MembershipEnd``).
+    /// What still reaches this is a one-to-one whose leaf was retired and a
+    /// group this device's leaf was retired from while the account stays.
     ///
     /// The REGISTRY rows go LAST, so a failure above leaves the chat reachable
     /// rather than orphaning a transcript behind a row the user can no longer
@@ -2472,27 +3010,105 @@ public final class ChatRepository: ObservableObject {
         return deleted
     }
 
+    /// How a group's MLS state goes (``removeGroupNow(groupIdHex:mls:)``).
+    enum MlsGroupDelete {
+        /// The commit that ended it was applied here. An active group is
+        /// refused: an older segment of a deleted chat stays inert.
+        case applied
+        /// ADR-0087 section 9 — this device heard of the end from its own
+        /// account's register at this epoch.
+        case endedElsewhere(epoch: UInt64)
+    }
+
     /// Remove ONE group and everything this device keeps for it. No gate:
-    /// the caller decided (``deleteChat(groupIdHex:)``).
+    /// the caller decided (``deleteChat(groupIdHex:)``). A provider that
+    /// refuses the delete leaves the row dropped all the same: the chat was
+    /// deleted, and the leftover state is inert.
     @discardableResult
     func removeGroupLocally(groupIdHex: String) -> Bool {
-        guard let accountIdB64 = currentAccountIdB64,
-              let record = groups[groupIdHex] else { return false }
-        let groupIdB64 = base64Encode(record.groupId)
-        // ADR-0073 R.6 — the claim state of a group that is gone from here.
-        groupClosedStore.drop(groupIdB64: groupIdB64)
+        guard groups[groupIdHex] != nil else { return false }
+        do {
+            try removeGroupNow(groupIdHex: groupIdHex, mls: .applied)
+        } catch {
+            NSLog("chat delete: the MLS group stays in the provider: \(error)")
+            dropRegistryRows(groupIdHex: groupIdHex)
+        }
+        return true
+    }
+
+    /// ADR-0087 section 9, step 4: wipe, then the MLS group, then the provider
+    /// snapshot, durably, and the registry rows LAST. Synchronous, so nothing
+    /// interleaves. Throws with the registry rows still there when the group
+    /// could not be deleted or persisted; the caller's owed record resumes it,
+    /// and every step here runs again harmlessly.
+    func removeGroupNow(groupIdHex: String, mls: MlsGroupDelete) throws {
+        guard let accountIdB64 = currentAccountIdB64 else { throw StaleBindingError() }
+        wipeGroupStores(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        if let record = groups[groupIdHex], let identity = canonicalIdentity {
+            switch mls {
+            case .applied:
+                do {
+                    try record.group.deleteLocally(identity: identity)
+                } catch FfiError.MembershipGroupStillActive {
+                    // An older segment of a conversation, still live.
+                }
+            case .endedElsewhere(let epoch):
+                try record.group.deleteAfterEndedElsewhere(identity: identity, endedEpoch: epoch)
+            }
+            try persistSnapshotDurableOrThrow()
+        }
+        dropRegistryRows(groupIdHex: groupIdHex)
+    }
+
+    /// LAST, and in this order: the registry is what a relaunch rehydrates
+    /// from, so dropping it after the live handle means a crash between the
+    /// two leaves the chat present rather than half-gone.
+    private func dropRegistryRows(groupIdHex: String) {
+        groups.removeValue(forKey: groupIdHex)
+        unreadMessageIds.removeValue(forKey: groupIdHex)
+        // Nothing can poll this journal once the registry row is gone, so any
+        // own-echo registration left for it is unconsumable. The poll gate
+        // above has usually dropped them already; this covers a delete that
+        // never polled after the eviction.
+        chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
+        if let accountIdB64 = currentAccountIdB64 {
+            knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+        // A deleted chat is not carried in this device's backups either.
+        dropRestoredKnownGroup(groupIdHex: groupIdHex)
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// Everything this device keeps for one group, except the MLS group and
+    /// the registry rows. Best-effort by construction, and repeatable: an
+    /// owed end runs it again after a crash, and a Welcome that replaced an
+    /// ended group runs it with the new group not yet registered.
+    func wipeGroupStores(accountIdB64: String, groupIdHex: String) {
+        let groupIdB64 = groups[groupIdHex].map { base64Encode($0.groupId) }
+            ?? Self.hexToBytes(groupIdHex).map(base64Encode)
         // The transcript first: it is the only thing here that is irreplaceable,
         // so if anything is going to fail it should fail before the row that
         // makes the chat reachable is gone.
+        groups[groupIdHex]?.forgetHistory()
         _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        // Local bookkeeping for a group that no longer exists here. All three
-        // are best-effort by construction and none can fail the delete.
-        pendingRequestStore.prune(
-            accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
-        unappliedRequestStore.clearForGroup(
-            accountIdB64: accountIdB64, groupIdB64: groupIdB64)
-        pendingRequestStore.clearIntents(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
-        leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        _ = waitingLogSlots.take(groupIdHex)
+        if let groupIdB64 {
+            // ADR-0073 R.6 — the claim state of a group that is gone from here.
+            groupClosedStore.drop(groupIdB64: groupIdB64)
+            pendingRequestStore.prune(
+                accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+            unappliedRequestStore.clearForGroup(
+                accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            pendingRequestStore.clearIntents(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            lastObservedOwnerStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+            beaconStore.prune(accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+            // ADR-0040 — a commit of a group this device is out of has nowhere
+            // to go; a staged sweep went with the MLS group.
+            for entry in commitOutbox.loadUnacked(accountIdB64: accountIdB64, groupIdB64: groupIdB64) {
+                commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: entry.id)
+            }
+        }
         readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         readWatermarksByGroup.removeValue(forKey: groupIdHex)
         // ADR-0052 decision 3 — the pins are wiped with the conversation, both
@@ -2500,26 +3116,58 @@ public final class ChatRepository: ObservableObject {
         // nothing.
         sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupArrivalStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0051 — the name; the notice holds its own copy.
+        groupNameStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupNameRevision &+= 1
+        // ADR-0087 section 9 step 4 — the photo, the reactions setting, the
+        // @name and the knock seeds go with it.
+        groupSettingsStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        groupSettingsRevision &+= 1
+        unseenReactionsStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        unseenReactionsRevision &+= 1
         // ADR-0059 section 6 — the lists members shared there and the switch.
         sharedChannels.forgetGroup(groupIdHex: groupIdHex)
         if groupCalls.removeValue(forKey: groupIdHex) != nil {
             groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
         }
-        // LAST, and in this order: the registry is what a relaunch rehydrates
-        // from, so dropping it after the live handle means a crash between the
-        // two leaves the chat present rather than half-gone.
-        groups.removeValue(forKey: groupIdHex)
-        unreadCounts.removeValue(forKey: groupIdHex)
-        // Nothing can poll this journal once the registry row is gone, so any
-        // own-echo registration left for it is unconsumable. The poll gate
-        // above has usually dropped them already; this covers a delete that
-        // never polled after the eviction.
-        chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
-        knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        // A deleted chat is not carried in this device's backups either.
-        dropRestoredKnownGroup(groupIdHex: groupIdHex)
-        state = state.with(threads: buildThreadList())
-        return true
+        CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
+        CallHistoryStore.shared.forget(conversationId: groupIdHex)
+        // ADR-0057 — this device's standing in the journal: a group it comes
+        // back to appoints it again.
+        registrarSeeds.forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0060 section 3 — the grants members gave here.
+        ReachCenter.shared.forgetHeld(scopeHex: groupIdHex)
+        // ADR-0050 — which leaves left this group: a person added back is not
+        // a device someone removed.
+        DeviceReadmissionMemory.forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        ProfileRequestStore().forgetGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        StateBundle.forgetKnownGroup(groupIdHex: groupIdHex, accountIdB64: accountIdB64)
+        // Decrypted media is cached by blob, not by group: all of it goes, and
+        // the rest is fetched again.
+        MediaSessionCache.shared.purge()
+        // ADR-0053 — the knock cursor.
+        UserDefaults.standard.removeObject(
+            forKey: "\(AccountLocalDataWipe.knockCursorPrefix)\(accountIdB64).\(groupIdHex)")
+        forgetGroupSessionState(groupIdHex: groupIdHex)
+    }
+
+    /// What this session keeps per group: a group this device comes back to
+    /// starts over, signers and claims included.
+    private func forgetGroupSessionState(groupIdHex: String) {
+        sweptGroupsThisSession.remove(groupIdHex)
+        claimedGroupsThisSession.remove(groupIdHex)
+        claimOnOpen.forget(journalIdHex: groupIdHex)
+        dsSigners.forget(journal: groupIdHex)
+        lastBeaconAtMs.removeValue(forKey: groupIdHex)
+        sweepRegistrationBackoff.removeValue(forKey: groupIdHex)
+        supersededTrigger.forget(groupIdHex: groupIdHex)
+        registrarSetsSent.removeValue(forKey: groupIdHex)
+        rootHandoverNotBefore.removeValue(forKey: groupIdHex)
+        rootHandoverLastSentAt.removeValue(forKey: groupIdHex)
+        rootTakeoverNotBefore.removeValue(forKey: groupIdHex)
+        rootProbeNotBefore.removeValue(forKey: groupIdHex)
+        claimIdentityCheckedAtMs.removeValue(forKey: groupIdHex)
     }
 
     /// ADR-0045 UX §6.2.3 — record that this device asked to leave.
@@ -2534,6 +3182,8 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64,
             groupIdB64: base64Encode(record.groupId),
             atMs: Self.nowMs())
+        // UX 9.4 — the row now says it is waiting.
+        state = state.with(threads: buildThreadList())
     }
 
     /// Roster of the live MLS group for `groupIdHex` — `(leafIndex,
@@ -2847,10 +3497,17 @@ public final class ChatRepository: ObservableObject {
     /// group journal so existing members advance their epoch, and marked as
     /// own so the poll loop suppresses the echo — re-applying our own commit
     /// would fork the MLS epoch. Returns the commit's DS message id.
+    ///
+    /// `openMailbox` is the verified mailbox of a person found in Everyone
+    /// (ADR-0060 section 6, "An add of a person found by search"): recorded
+    /// for this device's own sweep before the proposal, and named in a
+    /// committer-delegation envelope with no delegation after it, unless a
+    /// grant held for the person signs real delegations.
     public func addMemberToGroup(
         groupIdHex: String,
         recipientAccountId: Data,
-        recipientSignaturePubkey: Data
+        recipientSignaturePubkey: Data,
+        openMailbox: MailboxTarget? = nil
     ) async throws -> MembershipOutcome {
         // Fast-fail pre-checks, kept OUTSIDE the lock so an obviously-invalid
         // call reports the same error it always did without queueing. They are
@@ -2886,6 +3543,16 @@ public final class ChatRepository: ObservableObject {
         // ADR-0060 — remember whose leaves these are, so the Welcome of the
         // commit that adds them goes to the person's account mailbox.
         noteAddedLeafAccounts(keyPackages: devices.map(\.keyPackage))
+        // ADR-0060 section 6 — a person found in Everyone: this device's own
+        // sweep may write their Welcome to the open mailbox. Recorded before
+        // the proposal, so a sweep that runs right after it finds it.
+        let reach = committerEnvelopeReach()
+        let open = Self.openMailboxFor(
+            openMailbox, addedAccountKey: recipientSignaturePubkey,
+            current: { reach.currentAccountKey(of: $0) })
+        if let open {
+            reach.recordOpenAdd(groupIdHex: groupIdHex, target: open)
+        }
 
         // ADR-0050 — one proposal / one commit per device of the person. The
         // outcome reported is the last device's; every earlier one either
@@ -2917,9 +3584,19 @@ public final class ChatRepository: ObservableObject {
         // device's grant for the person, in the group beside the proposal.
         if case .proposed = outcome {
             await sendCommitterDelegations(
-                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey)
+                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey, openMailbox: open)
         }
         return outcome
+    }
+
+    /// The Everyone mailbox an add may name for the person `addedAccountKey`:
+    /// `candidate` when its binding verified under that person's key (the
+    /// same person under `current`), else `nil`.
+    nonisolated static func openMailboxFor(
+        _ candidate: MailboxTarget?, addedAccountKey: Data, current: (Data) -> Data
+    ) -> MailboxTarget? {
+        guard let candidate, current(candidate.accountKey) == current(addedAccountKey) else { return nil }
+        return candidate
     }
 
     /// The proven-predecessor map the add-member key check reads. Injectable
@@ -3097,7 +3774,13 @@ public final class ChatRepository: ObservableObject {
     /// handle for the id).
     public func pendingExternalJoins(groupIdHex: String) -> [Data] {
         guard let record = groups[groupIdHex] else { return [] }
-        return (try? record.group.pendingExternalJoins()) ?? []
+        let all = (try? record.group.pendingExternalJoins()) ?? []
+        // A request rejected here whose reject did not reach the snapshot is
+        // not shown again (UX section 8).
+        guard let accountIdB64 = currentAccountIdB64 else { return all }
+        let rejected = groupSettingsStore.rejected(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        guard !rejected.isEmpty else { return all }
+        return all.filter { rejected[base64Encode($0)] == nil }
     }
 
     /// ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
@@ -3309,12 +3992,27 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // UX section 8 — the reject is remembered durably before the core
+        // drops the request, so neither the knock row (it stays on the DS)
+        // nor a snapshot that missed the reject brings it back after a
+        // restart; the joiner's reply grant goes with it.
+        let joinerB64 = base64Encode(proposalRef)
+        let accountKey = try? record.group.pendingExternalJoinAccountKey(joinerSignatureKey: proposalRef)
+        if let accountIdB64 = currentAccountIdB64 {
+            let meta = groupSettingsStore.requestMeta(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[joinerB64]
+            groupSettingsStore.noteRejected(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, joinerKeyB64: joinerB64,
+                throughRowId: max(meta?.knockRowId ?? 0, record.knockCursor))
+        }
         do {
             try record.group.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
         } catch {
             throw ChatError.wrapped("rejectExternalJoin failed", underlying: error)
         }
         persistSnapshotBestEffort()
+        if let accountKey = accountKey ?? nil {
+            ReachCenter.shared.withdrawReplyGrants(ofAccountKeyB64: base64Encode(accountKey))
+        }
     }
 
     /// ADR-0028 (G-3) — mint a group invite-link (owner/admin side). Signs a
@@ -3347,6 +4045,11 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // ADR-0087 section 5 — a link carries the group's knock key, so the
+        // request it brings is a row only an owner or admin can open.
+        guard let knock = knockKey(groupIdHex: groupIdHex) else {
+            throw ChatError.argument("no knock key for \(groupIdHex) on this device")
+        }
         let mint: InviteLinkMint
         do {
             mint = try composeGroupInviteCapabilityWithPreview(
@@ -3355,7 +4058,10 @@ public final class ChatRepository: ObservableObject {
                 expiryMs: 0,
                 groupName: groupName(groupIdHex: groupIdHex),
                 inviterName: ProfileDirectory.shared.ownProfile?.displayName,
-                memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0)
+                memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0),
+                knockPublicKey: knock.publicKey,
+                knockVersion: knock.version,
+                avatar: groupPhoto(groupIdHex: groupIdHex)?.ffi
             )
         } catch {
             throw ChatError.wrapped(
@@ -3773,43 +4479,61 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0023 — react to message `target` with `emoji`.
-    /// Composes the reaction op envelope, publishes it, and
-    /// toggles our own `(ownLeaf, emoji)` pair locally. Any
-    /// member may react (no author gate); re-reacting with the
-    /// same emoji removes it.
+    /// ADR-0023 as amended — add or remove `emoji` on message `target`.
+    ///
+    /// The op is explicit (reactions-and-emoji spec section 17.3): the caller
+    /// decides add or remove from ``reactionTapVerdict``, which also refuses a
+    /// 4th reaction or a kind the conversation does not take, so this method
+    /// never sends what the fold would ignore. `targetAuthor` is the target
+    /// message's author account key, carried so a receiver's background reader
+    /// can tell a reaction to one of its own messages. A reaction publishes
+    /// with a message wake (section 12: a reaction to someone's message
+    /// notifies them).
     public func reactToMessage(
         groupIdHex: String,
         target: Int64,
-        emoji: String
+        emoji: String,
+        add: Bool,
+        targetAuthorB64: MemberIdentity?
     ) async throws {
         let envelopeBytes: Data
         do {
             envelopeBytes = try AttachmentBridge.composeReactionBytes(
                 target: target,
-                emoji: emoji
+                emoji: emoji,
+                add: add,
+                targetAuthor: targetAuthorB64.flatMap { Data(base64Encoded: $0) }
+                    .flatMap { $0.count == 32 ? $0 : nil }
             )
         } catch {
             throw ChatError.wrapped("reaction envelope compose failed", underlying: error)
         }
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
-            envelopeBytes: envelopeBytes
-        ) { record, _ in
+            envelopeBytes: envelopeBytes,
+            wake: add ? .message : nil
+        ) { [weak self] record, publishedId in
             // Read off the RE-READ record, for the same reason the record is
             // re-read at all — a predecessor's persist-abort replaces it.
             //
-            // Our own identity, not our own leaf: the chip's "mine" test and
+            // Our own person key, not our own leaf: the chip's "mine" test and
             // the peers' fold have to agree on one value that survives a
-            // renumber. A torn roster read falls back to the sentinel, which
-            // still toggles and still counts locally and — being outside the
-            // base64 alphabet — can never collide with a real member.
+            // renumber and a second device of the same person.
             record.applyLocalReaction(
                 target: target,
                 emoji: emoji,
-                reactor: AuthorIdentity.own(group: record.group)
-                    ?? AuthorIdentity.ownReactionSentinel)
+                reactor: self?.ownReactorKey(record: record) ?? AuthorIdentity.ownReactionSentinel,
+                add: add,
+                at: publishedId ?? 0)
         }
+    }
+
+    /// The key this device files its own reactions under: the person key the
+    /// roster resolves this device's leaf to, else the conversation account
+    /// key itself (both are the ADR-0050 account key on a bound leaf).
+    func ownReactorKey(record: GroupRecord) -> MemberIdentity? {
+        if let own = AuthorIdentity.own(group: record.group) { return own }
+        return conversationAccountIdentity.map { base64Encode($0.signaturePublicKey()) }
     }
 
     /// The serialized body the three ADR-0023 message ops share: seal + persist
@@ -3843,6 +4567,7 @@ public final class ChatRepository: ObservableObject {
     private func publishMessageOpLocked(
         groupIdHex: String,
         envelopeBytes: Data,
+        wake: DsWake.Kind? = nil,
         applyLocally: @escaping @MainActor (GroupRecord, _ opMessageId: Int64?) -> Void
     ) async throws {
         // ADR-0073 R.7 case 1 — an op on a message of a dead one-to-one is
@@ -3858,7 +4583,8 @@ public final class ChatRepository: ObservableObject {
             if !localOnly {
                 opMessageId = try await sealAndPublishLocked(
                     groupIdHex: groupIdHex,
-                    plaintextBytes: envelopeBytes
+                    plaintextBytes: envelopeBytes,
+                    wake: wake
                 ).messageId
             }
             guard let record = groups[groupIdHex] else { return }
@@ -4246,6 +4972,9 @@ public final class ChatRepository: ObservableObject {
             // one `group` and `member` key: the registration sees the group
             // gone and rotates both, republishing in every remaining group.
             ReachCenter.shared.sync()
+            // ADR-0087 section 9 — the one seam: every applied commit comes
+            // through here (the poll's apply half and the sweep's tail).
+            endMembershipIfOut(groupIdHex: groupIdHex)
         }
         // ADR-0060 section 3 — a departed member held this account's `group`
         // and `member` keys for this group: rotate both (whatever this
@@ -4560,6 +5289,11 @@ public final class ChatRepository: ObservableObject {
         // just above) may have dropped an own request. Only schedules; does
         // nothing unless the epoch moved since the last evaluation.
         scheduleSupersededReRequest(groupIdHex: groupIdHex)
+        // ADR-0060 section 6 — an own Add still waiting may need a fresh
+        // committer envelope. Only schedules; does nothing while none is due.
+        Task { @MainActor [weak self] in
+            await self?.resendCommitterEnvelopesIfDue(groupIdHex: groupIdHex)
+        }
         // ADR-0057 S2 finding 1 — a root handover this account still owes (the
         // new owner's key did not resolve yet, a send failed, or it is owed
         // from an earlier session) is retried from the poll tail, no sooner
@@ -4593,6 +5327,8 @@ public final class ChatRepository: ObservableObject {
     ) {
         guard let identity = canonicalIdentity else { return }
         guard let record = groups[groupIdHex] else { return }
+        // ADR-0087 section 9 — a batch fetched before an end was heard.
+        guard !isEnding(groupIdHex: groupIdHex) else { return }
         // G-38 — the cursor-moved guard. Another poll of this group applied a
         // batch while this one was parked on the network, so the rows in hand
         // start behind the live cursor. Drop them WITHOUT applying and WITHOUT
@@ -4613,6 +5349,10 @@ public final class ChatRepository: ObservableObject {
         // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
         let leafKeysBeforePoll = Self.leafKeysB64(group: record.group)
+        // Membership rows — the people before the batch, and where the rows it
+        // files start.
+        let personKeysBeforeBatch = Self.personKeysB64(of: record.group)
+        let firstNewRow = record.messages.count
         // ADR-0057 — the epoch BEFORE the batch, so a batch that moved it
         // (a membership or role change) re-checks the journal's registrars.
         let epochBeforeBatch = try? record.group.epoch()
@@ -4637,6 +5377,7 @@ public final class ChatRepository: ObservableObject {
             result.events, resendOrigins: result.resendOrigins,
             eventSenders: result.eventSenders, groupIdHex: groupIdHex)
         noteAppliedForUnread(events, groupIdHex: groupIdHex)
+        matchDisplayCopies(events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
         record.consumeEvents(
             events,
             ownAuthorKey: AuthorIdentity.own(group: record.group),
@@ -4690,8 +5431,8 @@ public final class ChatRepository: ObservableObject {
             },
             // ADR-0048 §2 trigger 4 — only SCHEDULES a throttled republish, so
             // the lock held here is never awaited against itself.
-            profileRequestSink: { [weak self] in
-                self?.answerProfileRequest(groupIdHex: groupIdHex)
+            profileRequestSink: { [weak self] senderKey in
+                self?.answerProfileRequest(groupIdHex: groupIdHex, senderKey: senderKey)
             },
             // ADR-0052 decision 3 — standing check against the live group, the
             // per-message order, store. Fire-and-forget (it only spawns a
@@ -4723,8 +5464,20 @@ public final class ChatRepository: ObservableObject {
                 self?.receiveGroupClosed(
                     groupIdHex: groupIdHex, messageId: messageId,
                     successorGroupId: successorGroupId, senderLeaf: senderLeaf)
+            },
+            // ADR-0087 — fire-and-forget (it only spawns a `Task`), so the
+            // name chain it takes is never awaited under the commit chain.
+            groupSettingSink: { [weak self] setting, senderLeaf in
+                self?.receiveGroupSetting(groupIdHex: groupIdHex, setting: setting, senderLeaf: senderLeaf)
+            },
+            reactionToOwnSink: { [weak self] messageId in
+                self?.noteUnseenReaction(groupIdHex: groupIdHex, messageId: messageId)
             }
         )
+        // Membership rows — before the log is written below.
+        noteMembershipChange(
+            groupIdHex: groupIdHex, record: record, events: events,
+            personKeysBefore: personKeysBeforeBatch, firstNewRow: firstNewRow)
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
         // the cursor when the write does not land. See `Chat/DurableCursor.swift`
         // for why the cursor may lag the durable MLS state but must never lead
@@ -4763,6 +5516,9 @@ public final class ChatRepository: ObservableObject {
         if let epochBeforeBatch, let epochAfter = try? record.group.epoch(),
            epochAfter != epochBeforeBatch {
             reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+            // The roster may have changed: the notification extension's
+            // person-name mirror follows it (it writes only on a change).
+            mirrorCallPeerNames()
         }
         // ADR-0052 decision 3 — a delete that landed in this batch takes its
         // shared pin record with it. Only spawns a `Task` on the pin chain.
@@ -4934,12 +5690,31 @@ public final class ChatRepository: ObservableObject {
             }
         }
         if let receivedEnd { groupCallEndSink?(receivedEnd) }
-        if route.forwardToOneToOne {
+        if route.forwardToOneToOne, case .offer = body,
+            Self.isOwnAccountSender(
+                senderKey: senderKey,
+                ownKey: groups[groupIdHex].flatMap { AuthorIdentity.own(group: $0.group) }) {
+            // ADR-0050 — this account's other device placed this call from
+            // its own leaf in the one-to-one. It is that device's outgoing
+            // call, never an incoming one here: ringing it rang the caller's
+            // own second phone.
+            NSLog("call offer from this account's other device: not rung")
+        } else if route.forwardToOneToOne {
             callSignalingSink?(
                 InboundCallRow(
                     groupIdHex: groupIdHex, messageId: messageId, createdAt: createdAt, body: body,
                     verifiedScreenShare: verifiedScreenShare))
         }
+    }
+
+    /// Did this account send the row? Only when both keys are known: an
+    /// unresolved sender or own key counts as someone else, so a resolution
+    /// failure never silences a real incoming call.
+    nonisolated static func isOwnAccountSender(
+        senderKey: MemberIdentity?, ownKey: MemberIdentity?
+    ) -> Bool {
+        guard let senderKey, let ownKey else { return false }
+        return senderKey == ownKey
     }
 
     /// `verifyCallScreenShare` for a one-to-one call (ADR-0083 section 4): the
@@ -5062,8 +5837,14 @@ public final class ChatRepository: ObservableObject {
     /// it, and what it applies is being read, so it does not count as unread.
     var openChats: [String: Int] = [:]
 
-    /// See ``ChatThread/unread``.
-    var unreadCounts: [String: Int] = [:]
+    /// The log's slots for groups not in ``groups``: a pairing history bundle
+    /// lands before the Welcomes do. ``persistMessageLogBestEffort()`` writes
+    /// them back, and a join takes its slot
+    /// (``joinGroupFromWelcome(welcomeBytes:)``).
+    var waitingLogSlots = WaitingLogSlots()
+
+    /// The ids behind ``ChatThread/unread``, per group (``UnreadCounting``).
+    var unreadMessageIds: [String: Set<Int64>] = [:]
 
     /// A chat screen started showing (and long-polling) `groupIdHex`. Clears
     /// the group's unread count.
@@ -5071,7 +5852,7 @@ public final class ChatRepository: ObservableObject {
         openChats[groupIdHex, default: 0] += 1
         let viewed = groups[groupIdHex]?.markAllViewed() ?? false
         if viewed { persistMessageLogBestEffort() }
-        if unreadCounts.removeValue(forKey: groupIdHex) != nil || viewed {
+        if unreadMessageIds.removeValue(forKey: groupIdHex) != nil || viewed {
             state = state.with(threads: buildThreadList())
         }
     }
@@ -5080,7 +5861,7 @@ public final class ChatRepository: ObservableObject {
     /// same local effect opening the chat has on the badge, without opening
     /// it. The cross-device half is the read cursor the caller broadcasts.
     func clearUnread(groupIdHex: String) {
-        if unreadCounts.removeValue(forKey: groupIdHex) != nil {
+        if unreadMessageIds.removeValue(forKey: groupIdHex) != nil {
             state = state.with(threads: buildThreadList())
         }
     }
@@ -5123,7 +5904,6 @@ public final class ChatRepository: ObservableObject {
     func recordFeedSeen(groupIdHex: String, ids: [Int64], cursorThrough: Int64?) -> Int64? {
         guard let record = groups[groupIdHex] else { return nil }
         let through = [record.lastViewedMessageId, cursorThrough].compactMap { $0 }.max()
-        let before = record.feedSeen
         let result = FeedSeen.markSeen(
             rows: record.seenRows,
             through: through,
@@ -5133,14 +5913,10 @@ public final class ChatRepository: ObservableObject {
         record.lastViewedMessageId = result.lastViewedMessageId
         record.feedSeen = result.feedSeen
         // The local unread count (used before any read cursor exists) drops
-        // by the incoming messages newly seen.
-        let newlySeen = Set(ids).subtracting(before).filter { id in
-            record.messages.contains { $0.messageId == id && $0.direction == .incoming }
-                && through.map { id > $0 } ?? true
-        }.count
-        if let count = unreadCounts[groupIdHex], newlySeen > 0 {
-            let next = max(0, count - newlySeen)
-            if next == 0 { unreadCounts.removeValue(forKey: groupIdHex) } else { unreadCounts[groupIdHex] = next }
+        // the messages newly seen.
+        if var unread = unreadMessageIds[groupIdHex] {
+            unread.subtract(ids)
+            unreadMessageIds[groupIdHex] = unread.isEmpty ? nil : unread
         }
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
@@ -5164,18 +5940,32 @@ public final class ChatRepository: ObservableObject {
     /// Count what a receive path just applied towards the chat list's unread
     /// badge — unless the chat is open, in which case it is being read.
     private func noteAppliedForUnread(_ events: [IncomingChatEvent], groupIdHex: String) {
-        unreadCounts[groupIdHex] = UnreadCounting.next(
-            current: unreadCounts[groupIdHex] ?? 0,
-            applied: events,
-            chatOpen: isChatOpen(groupIdHex: groupIdHex)
+        // A row the timeline already holds is not new: a journal read again
+        // after a relaunch (the cursor may lag the durable state) re-applies
+        // rows that were read before it, and counted them as unread.
+        let held = Set(groups[groupIdHex]?.messages.map(\.messageId) ?? [])
+        let fresh = held.isEmpty ? events : events.filter { event in
+            switch event {
+            case .application(let messageId, _, _, _, _, _, _), .unsupported(let messageId, _, _, _):
+                return !held.contains(messageId)
+            default:
+                return true
+            }
+        }
+        let next = UnreadCounting.next(
+            current: unreadMessageIds[groupIdHex] ?? [],
+            applied: fresh,
+            chatOpen: isChatOpen(groupIdHex: groupIdHex),
+            syncedThrough: groups[groupIdHex]?.syncedThroughMessageId
         )
-        if unreadCounts[groupIdHex] == 0 { unreadCounts.removeValue(forKey: groupIdHex) }
+        unreadMessageIds[groupIdHex] = next.isEmpty ? nil : next
     }
 
     /// Pull new messages for every active group. Per-group
     /// failures are swallowed so one bad apple doesn't block the
     /// others.
     public func pollAllGroups(waitSecs: Int = 0) async {
+        resumeOwedEnds()
         let groupIds = Array(groups.keys)
         for groupIdHex in groupIds {
             do {
@@ -5192,6 +5982,7 @@ public final class ChatRepository: ObservableObject {
     /// how many groups it polled and how many answered, for the feed's
     /// "Couldn't check for new messages." rule (``FeedRefreshState``).
     func pollAllGroupsReporting() async -> FeedCheckTally {
+        resumeOwedEnds()
         let groupIds = Array(groups.keys)
         var tally = FeedCheckTally()
         for groupIdHex in groupIds {
@@ -5782,6 +6573,10 @@ public final class ChatRepository: ObservableObject {
     func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // Section 10 of the UX spec: arriving counts as activity. A launch
+        // reloads groups without coming here, so this time survives it.
+        groupArrivalStore.remember(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: Self.nowMs())
         // The device holds the group itself now, so it no longer needs to be
         // carried as "a conversation a restored backup named".
         dropRestoredKnownGroup(groupIdHex: groupIdHex)
@@ -5794,7 +6589,7 @@ public final class ChatRepository: ObservableObject {
     /// (``RestoredKnownGroupsStore``): this device joined the group, the user
     /// deleted the chat, or the local group ended. No-op when the id is not
     /// in the set.
-    private func dropRestoredKnownGroup(groupIdHex: String) {
+    func dropRestoredKnownGroup(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         RestoredKnownGroupsStore.remove(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: restoredGroupsDefaults)
@@ -6083,6 +6878,8 @@ public final class ChatRepository: ObservableObject {
     /// it would make the verdict wrong.
     @discardableResult
     public func sweepIfCommitter(groupIdHex: String) async -> SweepOutcome {
+        // An accept's owed Welcome owes no commit and no rank.
+        await resolveOwedAnswers(groupIdHex: groupIdHex)
         // A group with no role table has no committer to be. Short-circuit
         // before taking the lock, so the poll tail costs nothing at all there.
         // (Its staged direct commits went with the ADR-0081 amendment of
@@ -6158,7 +6955,8 @@ public final class ChatRepository: ObservableObject {
         // none.
         if addedCount > 0 { redistributePushRoutingSecret(groupIdHex: groupIdHex) }
         // ADR-0048 §2 — a swept Add is growth too.
-        noteProfileGrowthIfMembershipGrew(groupIdHex: groupIdHex, previousMemberKeys: before)
+        noteProfileGrowthIfMembershipGrew(
+            groupIdHex: groupIdHex, previousMemberKeys: before, ownAdd: addedCount > 0)
         return outcome
     }
 
@@ -6225,7 +7023,15 @@ public final class ChatRepository: ObservableObject {
                     guard bound.isCurrent, let identity = self?.canonicalIdentity else {
                         throw ChatError.argument("ChatRepository not bootstrapped — cannot merge")
                     }
+                    // Membership rows — this device never receives its own
+                    // commit back, so it writes the row itself (the roster
+                    // before the merge against the roster after it).
+                    let personKeysBeforeMerge = Self.personKeysB64(of: record.group)
                     _ = try record.group.mergeStagedSweep(identity: identity)
+                    self?.noteOwnCommitMembershipChange(
+                        groupIdHex: groupIdHex, record: record,
+                        personKeysBefore: personKeysBeforeMerge,
+                        commitMessageId: record.ownPublishedCommitMessageId)
                 },
                 abandonStagedSweep: { [weak self] in
                     guard bound.isCurrent, let identity = self?.canonicalIdentity else {
@@ -6248,6 +7054,9 @@ public final class ChatRepository: ObservableObject {
                     // deliberately OUTSIDE the surfacing below: a throw here must
                     // reach `adjudicate`, which skips the row exactly as the poll
                     // loop does, and a skipped row must surface nothing.
+                    // Membership rows — the people before this row's apply.
+                    let personKeysBeforeRow = Self.personKeysB64(of: record.group)
+                    let firstNewRow = record.messages.count
                     let processed = try record.group.processIncomingVerifyingRoles(
                         identity: identity, bytes: row.payload)
                     let event = ChatClient.toEvent(
@@ -6275,6 +7084,8 @@ public final class ChatRepository: ObservableObject {
                         eventSenders: [ChatClient.applicationSender(of: processed, group: record.group)],
                         groupIdHex: groupIdHex)
                     self.noteAppliedForUnread(events, groupIdHex: groupIdHex)
+                    self.matchDisplayCopies(
+                        events, groupIdHex: groupIdHex, ownAuthorKey: AuthorIdentity.own(group: record.group))
                     record.consumeEvents(
                         events,
                         ownAuthorKey: AuthorIdentity.own(group: record.group),
@@ -6316,8 +7127,8 @@ public final class ChatRepository: ObservableObject {
                                 groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
                                 senderLeaf: senderLeaf)
                         },
-                        profileRequestSink: { [weak self] in
-                            self?.answerProfileRequest(groupIdHex: groupIdHex)
+                        profileRequestSink: { [weak self] senderKey in
+                            self?.answerProfileRequest(groupIdHex: groupIdHex, senderKey: senderKey)
                         },
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
@@ -6340,8 +7151,19 @@ public final class ChatRepository: ObservableObject {
                             self?.receiveGroupClosed(
                                 groupIdHex: groupIdHex, messageId: messageId,
                                 successorGroupId: successorGroupId, senderLeaf: senderLeaf)
+                        },
+                        groupSettingSink: { [weak self] setting, senderLeaf in
+                            self?.receiveGroupSetting(
+                                groupIdHex: groupIdHex, setting: setting, senderLeaf: senderLeaf)
+                        },
+                        reactionToOwnSink: { [weak self] messageId in
+                            self?.noteUnseenReaction(groupIdHex: groupIdHex, messageId: messageId)
                         }
                     )
+                    // Membership rows — the same rule as the poll, per row.
+                    self.noteMembershipChange(
+                        groupIdHex: groupIdHex, record: record, events: events,
+                        personKeysBefore: personKeysBeforeRow, firstNewRow: firstNewRow)
                     // Per row, and deliberately not deferred to the end of the
                     // sweep: this is what republishes `record.messages` into the
                     // observable state the chat screen reads, and it must happen on
@@ -6497,7 +7319,7 @@ public final class ChatRepository: ObservableObject {
                     guard let self, bound.isCurrent, let accountIdB64 = self.currentAccountIdB64 else { return [] }
                     return self.commitOutbox.loadUnacked(
                         accountIdB64: accountIdB64, groupIdB64: groupIdB64
-                    ).filter { $0.sweepWelcomesOwed == true }.map { row in
+                    ).filter { $0.sweepWelcomesOwed == true && $0.answerRequesterKeyB64 == nil }.map { row in
                         SweepDurableEntry(
                             id: row.id,
                             commitB64: row.commitB64,
@@ -6558,6 +7380,7 @@ public final class ChatRepository: ObservableObject {
             wrapWelcome: { welcome in welcome },
             markOwnPublished: { [weak self] id in
                 guard bound.isCurrent else { return }
+                record.ownPublishedCommitMessageId = id
                 self?.chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: id)
             },
             persist: { [weak self] in
@@ -6806,6 +7629,24 @@ public final class ChatRepository: ObservableObject {
         pendingRequestStore.prune(
             accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: liveKeys)
         return requests
+    }
+
+    /// `docs/ux/conversation-info.md` section 2.4 — the people (account keys)
+    /// with an add waiting for the sweep, so the Add members screen does not
+    /// list them again: this device's own add requests whose device proposals
+    /// are still pending, and any pending add whose leaf key is the person's.
+    public func pendingAddPersonKeys(groupIdHex: String) -> Set<Data> {
+        guard let record = groups[groupIdHex],
+              let pending = try? record.group.pendingProposals() else { return [] }
+        let leafKeys: Set<String> = Set(pending.compactMap {
+            guard $0.stored, case .add(let key) = $0.kind else { return nil }
+            return base64Encode(key)
+        })
+        guard !leafKeys.isEmpty else { return [] }
+        let intents = currentAccountIdB64.map {
+            pendingRequestStore.intents(accountIdB64: $0, groupIdB64: base64Encode(record.groupId))
+        } ?? []
+        return AddMembersRules.pendingAddPersonKeys(pendingAddLeafKeysB64: leafKeys, intents: intents)
     }
 
     /// ADR-0045 S7 residual 1 / ADR-0050 2.5a — the `Not applied` rows the
@@ -7503,6 +8344,7 @@ public final class ChatRepository: ObservableObject {
                 guard bound.isCurrent else { return }
                 self.registrarReconcileRerun.remove(groupIdHex)
                 await self.reconcileJournalRegistrars(groupIdHex: groupIdHex)
+                await self.reconcileKnockSeeds(groupIdHex: groupIdHex)
             } while bound.isCurrent && self.registrarReconcileRerun.contains(groupIdHex)
             if bound.isCurrent { self.registrarReconcileInflight.remove(groupIdHex) }
         }
@@ -7619,7 +8461,7 @@ public final class ChatRepository: ObservableObject {
     /// the bundle is accepted only when it names the same account signature
     /// key the roster does — so a wrong claim finds no key rather than a
     /// stranger's. Cached per session.
-    private func memberX25519PublicKey(accountKey: Data) async -> Data? {
+    func memberX25519PublicKey(accountKey: Data) async -> Data? {
         if let cached = memberX25519Cache[accountKey] { return cached }
         let keyB64 = accountKey.base64EncodedString()
         var accountId: Data? = memberAccountIdHints[accountKey]
@@ -7968,22 +8810,177 @@ public final class ChatRepository: ObservableObject {
     /// candidate (the owner, then the admins), signed with the grant this
     /// device holds for them. Best effort; with no grant held there is nothing
     /// to delegate and the committer must hold its own.
-    func sendCommitterDelegations(groupIdHex: String, addedAccountKey: Data) async {
+    ///
+    /// ADR-0060 section 6 — with no grant held and `openMailbox` given (a
+    /// person found in Everyone), the envelope carries NO delegation and
+    /// names that mailbox, so whichever candidate commits may write the
+    /// Welcome there without a proof.
+    ///
+    /// A published envelope is noted on the Add's intent
+    /// (``MembershipIntent/lastEnvelope``), which is what
+    /// ``resendCommitterEnvelopesIfDue(groupIdHex:)`` reads. One at a time per
+    /// (group, person).
+    func sendCommitterDelegations(
+        groupIdHex: String, addedAccountKey: Data, openMailbox: MailboxTarget? = nil
+    ) async {
+        let personKeyB64 = base64Encode(addedAccountKey)
+        let inFlightKey = groupIdHex + "|" + personKeyB64
         guard let record = groups[groupIdHex],
-              let table = try? record.group.groupRoles() else { return }
-        let candidates = [table.owner] + table.admins
-        guard let envelope = ReachCenter.shared.composeDelegations(
+              let candidates = committerCandidates(record: record),
+              committerEnvelopesInFlight.insert(inFlightKey).inserted else { return }
+        let bound = binding.capture()
+        defer { if bound.isCurrent { committerEnvelopesInFlight.remove(inFlightKey) } }
+        let reach = committerEnvelopeReach()
+        let signed = reach.composeDelegationEnvelope(
             addedAccountKey: addedAccountKey, candidateAccountKeys: candidates,
-            groupIdHex: groupIdHex) else { return }
+            groupIdHex: groupIdHex)
+        guard let envelope = CommitterDelegationChoice.envelope(
+            signed: signed?.wire,
+            open: openMailbox.flatMap { reach.composeOpenEnvelope(target: $0) })
+        else { return }
         do {
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
         } catch {
             NSLog("ADR-0060: committer delegations not sent: \(error)")
+            return
+        }
+        guard bound.isCurrent, let accountIdB64 = currentAccountIdB64 else { return }
+        pendingRequestStore.recordCommitterEnvelope(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId),
+            personKeyB64: personKeyB64,
+            SentCommitterEnvelope(
+                sentAtMs: committerEnvelopeClock(), signed: signed != nil,
+                coveredB64: (signed?.covered ?? candidates).map(base64Encode)))
+    }
+
+    /// The committer candidates of a group as an envelope names them: the
+    /// owner, then the admins. `nil` for a group with no role table. The one
+    /// list the first send, a re-send and the due rule all read.
+    private func committerCandidates(record: GroupRecord) -> [Data]? {
+        guard let table = try? record.group.groupRoles() else { return nil }
+        return committerEnvelopeReach().delegationCandidates([table.owner] + table.admins)
+    }
+
+    /// ADR-0060 section 6, "An add a contact proposed" — a delegation lives
+    /// less than a day and a proposal has no deadline, so the proposing device
+    /// re-sends its committer envelope while its Add waits: at the tail of a
+    /// foreground poll, for each Add this device proposed that is still
+    /// pending (``ownAddStillWaiting(_:_:)``), when the core's rule says one
+    /// is due. Fresh delegations signed with the grant held for the person,
+    /// or the recorded open binding with no delegation, composed by the same
+    /// function as the first send. With neither, nothing is signed and
+    /// nothing goes out: all a poll costs then is the two lookups that found
+    /// nothing.
+    ///
+    /// Who stops it is the intent: when the Add lands or is dropped the
+    /// superseded evaluation forgets or replaces it, and the record with it.
+    func resendCommitterEnvelopesIfDue(groupIdHex: String) async {
+        guard committerEnvelopeForeground(),
+              let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        let intents = pendingRequestStore.intents(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId))
+        let bound = binding.capture()
+        for intent in intents {
+            guard case .add(let personB64, _, _) = intent.request,
+                  let person = base64Decode(personB64) else { continue }
+            // Re-read per intent: the send before this one was a wait.
+            guard bound.isCurrent,
+                  let current = groups[groupIdHex],
+                  let snapshot = supersededSnapshot(groupIdHex: groupIdHex),
+                  let candidates = committerCandidates(record: current) else { return }
+            guard ownAddStillWaiting(intent, snapshot),
+                  committerEnvelopeIsDue(
+                      intent.lastEnvelope, candidates: candidates, nowMs: committerEnvelopeClock())
+            else { continue }
+            await sendCommitterDelegations(
+                groupIdHex: groupIdHex, addedAccountKey: person,
+                openMailbox: committerEnvelopeReach().openWelcomeTarget(
+                    ofPerson: person, groupIdHex: groupIdHex))
         }
     }
 
     /// Keep the `reply` grant of a `/g/` join attribution for this group,
     /// filed under the joiner's account key (its pending KeyPackage's binding).
+    /// What one sealed knock row came to.
+    enum SealedKnockStep: Equatable { case keep, drop, stop }
+
+    /// ADR-0087 section 5 — open one sealed knock row and keep its KeyPackage
+    /// as a request to join; the joiner's reply grant is kept for its account
+    /// so the sweep can write the Welcome into its mailbox.
+    private func openSealedKnock(
+        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data, createdAt: String,
+        rowId: Int64 = 0
+    ) -> SealedKnockStep {
+        guard let version = knockRowVersion(row: row),
+              var seed = knockSeed(record: record, groupIdHex: groupIdHex, version: version) else { return .drop }
+        defer { RootHandover.wipe(&seed) }
+        guard let request = try? openKnockRow(knockSeed: seed, row: row) else { return .drop }
+        let linkCap: GroupInviteCapability? = {
+            guard let capability = request.capability,
+                  let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability),
+                  cap.groupId() == record.groupId else { return nil }
+            return cap
+        }()
+        let byLink = linkCap != nil
+        // A public group (ADR-0087 section 1) also takes a row with no link;
+        // a private one only a row carrying a capability of this group.
+        guard byLink || groupHandle(groupIdHex: groupIdHex)?.isPublic == true else { return .drop }
+        // UX section 8 — a request rejected here is not read back: the knock
+        // row stays on the DS after a Reject.
+        if rowId > 0, let accountIdB64 = currentAccountIdB64,
+           let joiner = try? keyPackageSignatureKey(keyPackage: request.keyPackage),
+           let through = groupSettingsStore.rejected(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[
+               base64Encode(joiner)],
+           rowId <= through {
+            return .drop
+        }
+        guard let kept = try? record.group.retainJoinRequest(identity: identity, keyPackage: request.keyPackage)
+        else { return .drop }
+        switch kept.outcome {
+        case .retained, .alreadyPending:
+            // UX section 8 — `Asked 2 hours ago`, or from a link `Invited by
+            // Anna · 2 hours ago`: when the request reached the Delivery
+            // Service and whose link it carried.
+            if let accountIdB64 = currentAccountIdB64 {
+                groupSettingsStore.keepRequestMeta(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                    joinerKeyB64: base64Encode(kept.joinerSignatureKey),
+                    askedAtMs: Self.parseDsTimestampMs(createdAt) ?? Self.nowMs(),
+                    inviterKey: linkCap?.issuerSignaturePubkey(),
+                    knockRowId: rowId > 0 ? rowId : nil)
+            }
+            // UX section 8 — the name the request carries, shown unverified.
+            if let accountIdB64 = currentAccountIdB64,
+               let name = request.profile?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                groupSettingsStore.keepRequestName(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                    joinerKeyB64: base64Encode(kept.joinerSignatureKey), name: name)
+            }
+            let account = ((try? keyPackageAccountKey(keyPackage: request.keyPackage)) ?? nil)
+                ?? kept.joinerSignatureKey
+            ReachCenter.shared.keep(
+                request.replyGrant, carrier: .request,
+                fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+            return .keep
+        case .queueFull:
+            return .stop
+        case .alreadyMember, .notAdmissible:
+            return .drop
+        }
+    }
+
+    /// The knock seed of `version` for this group: derived from the journal
+    /// root on the owner's devices, else the one the owner handed this admin.
+    private func knockSeed(record: GroupRecord, groupIdHex: String, version: UInt16) -> Data? {
+        if ownsGroup(groupIdHex: groupIdHex) {
+            return knockSeedForOwner(groupIdHex: groupIdHex, groupId: record.groupId, version: version)
+        }
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return groupSettingsStore.knockSeeds(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[version]
+    }
+
     private func keepJoinAttributionGrant(record: GroupRecord, payload: Data) {
         guard let attr = try? parseGroupJoinAttribution(bytes: payload),
               attr.groupId == record.groupId,
@@ -8014,7 +9011,8 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0060 — a "who can find me" service envelope received in a
-    /// conversation. A committer delegation is kept for the sweep; an
+    /// conversation. A committer delegation is kept for the sweep, from any
+    /// member; an
     /// introduction offer / bundle is kept only from the other participant of
     /// a one-to-one conversation (``IntroductionBook``); a setting or a reach
     /// state belongs on the owner's DeviceGroup and is dropped here.
@@ -8024,7 +9022,12 @@ public final class ChatRepository: ObservableObject {
         guard let senderKey else { return }
         switch envelope {
         case .committerDelegation(let delegation):
-            ReachCenter.shared.keepDelegation(delegation, fromAccountKeyB64: senderKey)
+            // Whoever sent it, this account included: a device never receives
+            // its own group messages, so one from this account came from
+            // another of its devices, which proposed the Add this device may
+            // sweep and may be the only way to the added person it has.
+            committerEnvelopeReach().keepDelegation(
+                delegation, fromAccountKeyB64: senderKey, groupIdHex: groupIdHex)
         case .introductionOffer(let record):
             guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
             // A new or changed offer is relayed to this account's other
@@ -8091,9 +9094,16 @@ public final class ChatRepository: ObservableObject {
             let plan = memberAccountKey.flatMap {
                 ReachCenter.shared.writePlan(toAccountKey: $0, groupIdHex: groupIdHex)
             } ?? ReachCenter.shared.writePlan(toMailbox: target, groupIdHex: groupIdHex)
+            // ADR-0060 section 6 — a person found in Everyone, named by a
+            // kept no-delegation envelope or this device's own record, is
+            // written to without a proof, and only when the signed order
+            // above offers nothing.
+            let open = memberAccountKey.flatMap {
+                ReachCenter.shared.openWelcomeTarget(ofPerson: $0, groupIdHex: groupIdHex)
+            } ?? ReachCenter.shared.openWelcomeTarget(forMailbox: target, groupIdHex: groupIdHex)
             // ADR-0078 — no verified mailbox, no write: the Welcome stays
             // owed (``SweepWelcomeUndeliverable`` with no key tried).
-            return SweepWelcomeAttempt(target: plan?.target, candidates: plan?.candidates ?? [])
+            return SweepWelcomeAttempt.decide(plan: plan, open: open)
         }
         let digest = base64Encode(Data(SHA256.hash(data: bytes)))
         let dedupe = digest + "|" + base64Encode(try resolve().mailbox ?? target)
@@ -8122,13 +9132,27 @@ public final class ChatRepository: ObservableObject {
                         throw SweepWelcomeUndeliverable(triedKeys: 0)
                     }
                     let row = try mailboxTarget.seal(kind: .welcome, body: bytes)
-                    let id = try await deliverSweepWelcome(
-                        candidates: attempt.candidates,
-                        publish: { auth in
+                    let id: Int64
+                    if attempt.openUnsigned {
+                        // ADR-0060 section 6 — one proofless write, spending a
+                        // `mailbox-write` token, as a contact request to a
+                        // person in Everyone is written.
+                        id = try await deliverOpenSweepWelcome {
                             try await client.publishMailbox(
-                                pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
+                                pseudonym: mailboxTarget.address, payload: row, writeAuth: nil
                             ).id
-                        })
+                        }
+                        ReachCenter.shared.dropOpenAdd(
+                            groupIdHex: groupIdHex, person: mailboxTarget.accountKey)
+                    } else {
+                        id = try await deliverSweepWelcome(
+                            candidates: attempt.candidates,
+                            publish: { auth in
+                                try await client.publishMailbox(
+                                    pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
+                                ).id
+                            })
+                    }
                     delivered = mailboxTarget.address
                     return id
                 })
@@ -8154,23 +9178,24 @@ public final class ChatRepository: ObservableObject {
         // whoever it names (their current one); `payload` is the raw Welcome,
         // sealed here as a `.welcome` row. No mailbox known: nothing is
         // written and the entry stays un-acked.
-        func resolve() throws -> MailboxWriteAttempt {
+        func resolve() throws -> MailboxWritePlan {
             guard let plan = ReachCenter.shared.writePlan(toMailbox: recorded, groupIdHex: groupIdHex) else {
                 NSLog("ADR-0078: no verified mailbox for a recorded Welcome; it stays owed")
                 throw MailboxUnknown()
             }
-            return MailboxWriteAttempt(target: plan.target, auth: plan.auth)
+            return plan
         }
         return try await RefusedMailboxWrite.write(
             resolve: resolve,
             recheck: {
-                await PersonAddressRecheck.recheck(mailbox: (try? resolve().mailbox) ?? recorded)
+                await PersonAddressRecheck.recheck(mailbox: (try? resolve().target.address) ?? recorded)
             },
-            publish: { attempt in
-                try await client.publishMailbox(
-                    pseudonym: attempt.target.address,
-                    payload: try attempt.target.seal(kind: .welcome, body: payload),
-                    writeAuth: attempt.auth)
+            publish: { plan in
+                let row = try plan.target.seal(kind: .welcome, body: payload)
+                return try await RefusedMailboxWrite.tryingCandidates(plan.candidates) { auth in
+                    try await client.publishMailbox(
+                        pseudonym: plan.target.address, payload: row, writeAuth: auth)
+                }
             })
     }
 
@@ -8188,10 +9213,19 @@ public final class ChatRepository: ObservableObject {
             ).contains { $0.sweepWelcomesOwed == true }
             guard owes else { continue }
             Task { @MainActor [weak self] in
-                await self?.sweepIfCommitter(groupIdHex: groupIdHex)
+                guard let self else { return }
+                if let owedWelcomeRetry = self.owedWelcomeRetry {
+                    await owedWelcomeRetry(groupIdHex)
+                } else {
+                    await self.sweepIfCommitter(groupIdHex: groupIdHex)
+                }
             }
         }
     }
+
+    /// Stands in for the sweep ``retryOwedWelcomes()`` runs. Injectable for
+    /// tests.
+    var owedWelcomeRetry: (@MainActor (String) async -> Void)?
 
     /// ADR-0053 point 2 / ADR-0078 — claim the account's ONE mailbox (contact
     /// requests, acks and every Welcome), under the mailbox key derived from
@@ -8275,7 +9309,27 @@ public final class ChatRepository: ObservableObject {
                   (memberCount(groupIdHex: groupIdHex) ?? 0) == 2,
                   !membershipEnded(membershipStateNow(groupIdHex: groupIdHex))
             else { continue }
+            // An offer and a bundle go out once per conversation, so a device
+            // that missed them asks, and the answer sends them again.
+            let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+            if let peer {
+                let held = ReachCenter.shared.heldIntroductions(
+                    fromAccountKeyB64: peer.base64EncodedString())
+                if ReachRules.asksForIntroductions(
+                    isOneToOne: isOneToOne(groupIdHex: groupIdHex), held: held) {
+                    await profileRequester.noteIntroductionsMissing(
+                        groupIdHex: groupIdHex, holdsContactGrant: held.contactGrant)
+                    guard bound.isCurrent else { return }
+                }
+            }
+            // The offer goes only to the contacts the setting allows; the
+            // answer to an ask comes through here too. The relay below is
+            // unchanged.
             if let offer, let offerKey,
+               ReachRules.offersRecord(
+                   to: peer.flatMap { ReachCenter.shared.contactAccountId(ofKey: $0) },
+                   setting: ReachCenter.shared.setting,
+                   allows: { allowsContact(setting: $0, accountId: $1) }),
                ReachCenter.shared.offerNeedsSending(groupIdHex: groupIdHex, key: offerKey) {
                 do {
                     try await publishApplicationMessage(
@@ -8417,22 +9471,21 @@ public final class ChatRepository: ObservableObject {
         try? await withCommitLock(groupIdHex: groupIdHex) { [self] in
             guard let identity = canonicalIdentity, let record = groups[groupIdHex],
                   record.knockCursor == after else { return }
+            // ADR-0087 section 5 — a knock row is a KeyPackage sealed to the
+            // group's knock key: opened with the seed of the row's own version
+            // and kept through `retainJoinRequest`. A private group takes a
+            // row only with a capability of this group. A full pending set
+            // stops the cursor BEFORE the row, so the backlog stays on the DS
+            // instead of being lost.
             for row in raw.messages {
-                record.knockCursor = max(record.knockCursor, row.id)
-                guard let processed = try? record.group.processKnock(
-                    identity: identity, bytes: row.payload) else { continue }
-                if case .externalJoinProposal(_, let retained) = processed,
-                   case .informational = externalJoinAffordance(retained: retained) {
+                let step = openSealedKnock(
+                    record: record, groupIdHex: groupIdHex, identity: identity, row: row.payload,
+                    createdAt: row.createdAt, rowId: row.id)
+                if step == .stop {
                     record.sawUnkeptExternalJoin = true
+                    break
                 }
-            }
-            // ADR-0060 section 6 — a joiner's attribution carries its `reply`
-            // grant: the Welcome of the sweep that admits it is written with
-            // it. Filed under the joiner's ACCOUNT key, resolved through its
-            // retained KeyPackage's device binding, so only after the
-            // proposals of this batch were retained.
-            for row in raw.messages {
-                keepJoinAttributionGrant(record: record, payload: row.payload)
+                record.knockCursor = max(record.knockCursor, row.id)
             }
             // An accepted proposal enters the retained request set, which lives
             // in the MLS storage snapshot, so the cursor may move past these rows
@@ -8771,11 +9824,36 @@ public final class ChatRepository: ObservableObject {
                 // unbuilt.
                 messages: PersistedMessage.persistable(record.messages),
                 lastViewedMessageId: record.lastViewedMessageId,
-                feedSeen: record.feedSeen.isEmpty ? nil : record.feedSeen.sorted()
+                feedSeen: record.feedSeen.isEmpty ? nil : record.feedSeen.sorted(),
+                syncedThroughMessageId: record.syncedThroughMessageId
             )
         }
-        let payload = MessageLogPayload(groups: slots)
+        let payload = MessageLogPayload(groups: waitingLogSlots.composed(with: slots))
         messageLogStore.putLog(accountIdB64: accountIdB64, payload: payload)
+    }
+
+    /// A history bundle reached the log while this account's repository runs
+    /// (a device pairing while signed in, or one whose Welcomes came first):
+    /// the rows go to the record of a group this device holds, else they wait
+    /// for its join. `slots` are the bundle's own rows, so a persist that ran
+    /// since the bundle reached the disk cost nothing.
+    func adoptHistoryBundle(accountIdB64: String, slots: [String: PersistedGroup]) {
+        guard currentAccountIdB64 == accountIdB64 else { return }
+        for (groupIdHex, slot) in slots {
+            guard let record = groups[groupIdHex] else {
+                waitingLogSlots.add(groupIdHex, slot)
+                continue
+            }
+            record.adoptHistory(slot)
+            // A row counted before the bundle came, that the bundle also
+            // carried, is no longer news.
+            if let floor = slot.syncedThroughMessageId, var unread = unreadMessageIds[groupIdHex] {
+                unread = unread.filter { !PairingHistory.isHistory(messageId: $0, floor: floor) }
+                unreadMessageIds[groupIdHex] = unread.isEmpty ? nil : unread
+            }
+        }
+        persistMessageLogBestEffort()
+        state = state.with(threads: buildThreadList())
     }
 
     /// ADR-0073 R.5 — one thread per CONVERSATION. The groups this device
@@ -8783,26 +9861,41 @@ public final class ChatRepository: ObservableObject {
     /// group (the head), with the rows of the older segments it still holds
     /// in front, under history ids.
     func buildThreadList() -> [ChatThread] {
-        conversationPlans().compactMap { plan -> ChatThread? in
+        let arrivals = currentAccountIdB64.map { groupArrivalStore.load(accountIdB64: $0) } ?? [:]
+        return conversationPlans().compactMap { plan -> ChatThread? in
             guard let head = groups[plan.headHex] else { return nil }
+            // ADR-0087 section 9 — the row leaves the moment the end is known,
+            // whatever step the end is at.
+            guard !plan.heldSegments.contains(where: { isEnding(groupIdHex: $0) }) else { return nil }
             let headAt = plan.heldSegments.firstIndex(of: plan.headHex) ?? 0
             let older = Array(plan.heldSegments.prefix(headAt))
             var history: [ChatMessage] = []
-            var unread = unreadCounts[plan.headHex] ?? 0
+            var unread = unreadMessageIds[plan.headHex]?.count ?? 0
             for (index, hex) in older.enumerated() {
                 guard let record = groups[hex] else { continue }
                 let distance = older.count - index
-                unread += unreadCounts[hex] ?? 0
+                unread += unreadMessageIds[hex]?.count ?? 0
                 for message in record.messages where message.messageId > 0 && message.ack == .sent {
                     history.append(message.asHistoryRow(distanceFromHead: distance))
                 }
             }
-            return head.toThread(
+            let thread = head.toThread(
                 unread: unread,
                 conversationIdHex: plan.conversationHex,
                 history: history,
                 historyGroupIdHexes: older,
-                segmentIndex: conversationLineage.segmentIndexOf(plan.headHex))
+                segmentIndex: conversationLineage.segmentIndexOf(plan.headHex),
+                leaveRequested: leaveRequestedAt(groupIdHex: plan.headHex) != nil,
+                // The conversation's own arrival first: moving into a
+                // successor group is not a new conversation (ADR-0073 R.5).
+                arrivedAtMs: arrivals[plan.conversationHex] ?? arrivals[plan.headHex])
+            // Bundle v3 — what another device of this account wrote to the
+            // person before this one-to-one existed, drawn as own waiting
+            // rows until the real messages arrive. Display only: not in the
+            // record, so no send, retry or log write ever sees them.
+            let copies = displayCopyRows(
+                conversationHex: plan.conversationHex, ownKey: AuthorIdentity.own(group: head.group))
+            return copies.isEmpty ? thread : thread.appending(copies)
         }
         .sorted { $0.conversationIdHex < $1.conversationIdHex }
     }
@@ -8894,6 +9987,10 @@ public struct ChatThread: Equatable {
     public let feedSeen: Set<Int64>
     /// ADR-0063 section 5 — this device's read watermark for the group.
     public let lastViewedMessageId: Int64?
+    /// `docs/ux/second-device.md` section 2 — the pairing-history floor of
+    /// ``groupIdHex``: a row at or below it is never unread on this device.
+    /// Local, never sent.
+    public let syncedThroughMessageId: Int64?
     /// ADR-0073 R.5 — the CONVERSATION this thread is: the hex of the
     /// lineage's first group. The key of everything a person attaches to a
     /// conversation (pin / mute / archive, folders, the draft, the read
@@ -8910,6 +10007,12 @@ public struct ChatThread: Equatable {
     /// segments: what the cross-device read position carries past the first
     /// segment.
     public let segmentIndex: Int
+    /// UX 9.4 — this device asked to leave and the request has not landed.
+    /// The row stays and says `Waiting to leave.`
+    public let leaveRequested: Bool
+    /// When this device created or joined the conversation, for a list row
+    /// with no message yet (``GroupArrival``). `nil` when it is not known.
+    public let arrivedAtMs: Int64?
 
     public init(
         groupIdHex: String,
@@ -8921,8 +10024,14 @@ public struct ChatThread: Equatable {
         membershipEnded: Bool = false,
         conversationIdHex: String? = nil,
         historyGroupIdHexes: [String] = [],
-        segmentIndex: Int = 0
+        segmentIndex: Int = 0,
+        syncedThroughMessageId: Int64? = nil,
+        leaveRequested: Bool = false,
+        arrivedAtMs: Int64? = nil
     ) {
+        self.arrivedAtMs = arrivedAtMs
+        self.leaveRequested = leaveRequested
+        self.syncedThroughMessageId = syncedThroughMessageId
         self.conversationIdHex = conversationIdHex ?? groupIdHex
         self.historyGroupIdHexes = historyGroupIdHexes
         self.segmentIndex = segmentIndex
@@ -8933,6 +10042,26 @@ public struct ChatThread: Equatable {
         self.feedSeen = feedSeen
         self.lastViewedMessageId = lastViewedMessageId
         self.membershipEnded = membershipEnded
+    }
+}
+
+extension ChatThread {
+    /// The same thread with `rows` after its messages (display-only rows).
+    func appending(_ rows: [ChatMessage]) -> ChatThread {
+        ChatThread(
+            groupIdHex: groupIdHex,
+            messages: messages + rows,
+            cursor: cursor,
+            unread: unread,
+            feedSeen: feedSeen,
+            lastViewedMessageId: lastViewedMessageId,
+            membershipEnded: membershipEnded,
+            conversationIdHex: conversationIdHex,
+            historyGroupIdHexes: historyGroupIdHexes,
+            segmentIndex: segmentIndex,
+            syncedThroughMessageId: syncedThroughMessageId,
+            leaveRequested: leaveRequested,
+            arrivedAtMs: arrivedAtMs)
     }
 }
 
@@ -9137,7 +10266,7 @@ public struct ChatMessage: Equatable, Identifiable {
         var order: [String] = []
         var counts: [String: Int] = [:]
         var mine: Set<String> = []
-        for r in reactions {
+        for r in heldReactions {
             if counts[r.emoji] == nil { order.append(r.emoji) }
             counts[r.emoji, default: 0] += 1
             if r.reactor == mineKey { mine.insert(r.emoji) }
@@ -9149,6 +10278,27 @@ public struct ChatMessage: Equatable, Identifiable {
                 reactedByMe: mine.contains($0)
             )
         }
+    }
+
+    /// Reactions-and-emoji spec section 10 — what the reaction op log comes
+    /// to: per person (account key) at most 3, in journal order, a 4th
+    /// ignored for good. Decided by the one Rust fold (`foldReactions`) every
+    /// member runs. An op whose reactor is not a 32-byte key (the own
+    /// sentinel of a torn roster read) is kept aside and applied after, in
+    /// order, with the same rules, so this device still shows its own tap.
+    public var heldReactions: [Reaction] { ReactionFold.held(ops: reactions) }
+
+    /// The emoji `reactor` holds on this message, in the order the fold kept.
+    public func heldEmoji(of reactor: MemberIdentity?) -> [String] {
+        guard let reactor else { return [] }
+        return heldReactions.filter { $0.reactor == reactor }.map(\.emoji)
+    }
+
+    /// The distinct emoji held on this message by anyone.
+    public var heldKinds: [String] {
+        var seen: [String] = []
+        for r in heldReactions where !seen.contains(r.emoji) { seen.append(r.emoji) }
+        return seen
     }
 }
 
@@ -9216,10 +10366,19 @@ public struct ForwardRef: Equatable, Codable {
 public struct Reaction: Equatable {
     public let reactor: MemberIdentity
     public let emoji: String
+    /// Reactions-and-emoji spec section 17.3 — an explicit add or remove.
+    /// `ChatMessage.reactions` is the op log; ``ChatMessage/heldReactions``
+    /// is what the Rust fold keeps of it.
+    public let add: Bool
+    /// The op's DS message id: ops fold in ascending order (0 for an op
+    /// whose id is not known, which sorts first).
+    public let at: Int64
 
-    public init(reactor: MemberIdentity, emoji: String) {
+    public init(reactor: MemberIdentity, emoji: String, add: Bool = true, at: Int64 = 0) {
         self.reactor = reactor
         self.emoji = emoji
+        self.add = add
+        self.at = at
     }
 }
 
@@ -9274,6 +10433,10 @@ final class GroupRecord {
     /// after a restart (an owed verdict re-registers nothing; the owner's
     /// reconcile dismisses the departed registrars afterwards).
     var stagedEvictedAccountKeys: [Data] = []
+    /// The DS message id of this device's own staged commit, set when the
+    /// commit route answered it; the membership row of the merge is filed
+    /// under it (``ChatRepository/noteOwnCommitMembershipChange``).
+    var ownPublishedCommitMessageId: Int64?
     /// ADR-0053 point 7 — how far this device has read the group's knocks. Its
     /// own id space, never mixed with ``cursor``. Seeded from, and written back
     /// to, a per-account `UserDefaults` key by the knock poll.
@@ -9295,12 +10458,35 @@ final class GroupRecord {
         messages: [ChatMessage],
         cursor: Int64,
         lastViewedMessageId: Int64? = nil,
-        feedSeen: Set<Int64> = []
+        feedSeen: Set<Int64> = [],
+        syncedThroughMessageId: Int64? = nil
     ) {
         self.messages = messages
         self.cursor = cursor
         self.lastViewedMessageId = lastViewedMessageId
         self.feedSeen = feedSeen
+        self.syncedThroughMessageId = syncedThroughMessageId
+    }
+
+    /// `docs/ux/second-device.md` section 2 — the highest id a pairing bundle
+    /// carried for this group; `nil` when none did. Moves up only.
+    private(set) var syncedThroughMessageId: Int64?
+
+    /// Take in what the log held for this group: the rows of a history bundle
+    /// and its floor. The journal cursor stays this record's own.
+    func adoptHistory(_ slot: PersistedGroup) {
+        syncedThroughMessageId = PairingHistory.higherFloor(
+            syncedThroughMessageId, slot.syncedThroughMessageId)
+        messages = PairingHistory.mergeLiveRows(
+            held: messages, bundle: slot.messages.compactMap { $0.toChatMessage() })
+        lastViewedMessageId = PairingHistory.higherFloor(lastViewedMessageId, slot.lastViewedMessageId)
+        feedSeen.formUnion(slot.feedSeen ?? [])
+    }
+
+    /// A polled row the history bundle already brought: it stays as it is.
+    private func heldFromBundle(_ messageId: Int64) -> Bool {
+        PairingHistory.heldFromBundle(
+            floor: syncedThroughMessageId, messageId: messageId, rows: messages)
     }
 
     /// ADR-0063 section 5 — this device's read watermark for the group and
@@ -9488,8 +10674,10 @@ final class GroupRecord {
     }
 
     /// ADR-0023 — toggle our own reaction locally on `target`.
-    func applyLocalReaction(target: Int64, emoji: String, reactor: MemberIdentity) {
-        toggleReaction(target: target, reactor: reactor, emoji: emoji)
+    func applyLocalReaction(
+        target: Int64, emoji: String, reactor: MemberIdentity, add: Bool, at: Int64
+    ) {
+        recordReaction(target: target, reactor: reactor, emoji: emoji, add: add, at: at)
     }
 
     /// Consume a batch of receive-path events — the ONE place a decoded event
@@ -9527,12 +10715,14 @@ final class GroupRecord {
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
-        profileRequestSink: (() -> Void)? = nil,
+        profileRequestSink: ((MemberIdentity) -> Void)? = nil,
         pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
         registrarSeedSink: ((Data, UInt32?) -> Void)? = nil,
         scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil,
         sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil,
-        groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil
+        groupClosedSink: ((Int64, Data?, UInt32?) -> Void)? = nil,
+        groupSettingSink: ((GroupSettingEnvelope, UInt32?) -> Void)? = nil,
+        reactionToOwnSink: ((Int64) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -9543,6 +10733,7 @@ final class GroupRecord {
                 // arrives as an incoming row (another leaf sealed it) but is
                 // ours: same side, no sender name.
                 let fromOwnDevice = senderKey != nil && senderKey == ownAuthorKey
+                if heldFromBundle(messageId) { continue }
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
@@ -9560,6 +10751,7 @@ final class GroupRecord {
                 // row in the timeline (it is a real message the person was
                 // sent), drawn from the version at display time.
                 let fromOwnDevice = senderKey != nil && senderKey == ownAuthorKey
+                if heldFromBundle(messageId) { continue }
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
@@ -9608,10 +10800,17 @@ final class GroupRecord {
                         text: text,
                         emoji: emoji,
                         senderKey: senderKey,
-                        opMessageId: opMessageId
+                        at: opMessageId
                     )
+                    // Reactions-and-emoji spec section 12 — someone else added
+                    // a reaction to one of this person's own messages.
+                    if case .reaction(true, _) = op, let senderKey, senderKey != ownAuthorKey,
+                       messages.contains(where: { $0.messageId == target && $0.direction == .outgoing }) {
+                        reactionToOwnSink?(target)
+                    }
                 }
             case .system(let messageId, let systemKind, let createdAt):
+                if heldFromBundle(messageId) { continue }
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
@@ -9690,6 +10889,11 @@ final class GroupRecord {
                 // owner / admins can set it; the stamp so the strictly-newer
                 // order can refuse a stale re-send.
                 groupNameSink?(name, updatedAtMs, senderLeaf)
+            case .groupSetting(_, let setting, let senderLeaf, _):
+                // ADR-0087 — the group's photo, allowed reactions, @name or a
+                // knock seed. Not a timeline row: routed out to the
+                // repository, which gates it against the live group.
+                groupSettingSink?(setting, senderLeaf)
             case .groupClosed(let messageId, _, let successorGroupId, let senderLeaf, _):
                 // ADR-0073 R.6 — a successor claim. Never a timeline row and
                 // never anything a person sees: routed out to the repository,
@@ -9704,7 +10908,7 @@ final class GroupRecord {
                 // applies; and a request with no resolvable sender is dropped,
                 // never answered — the fail-closed side, as for the beacon.
                 guard let senderKey, senderKey != ownAuthorKey else { continue }
-                profileRequestSink?()
+                profileRequestSink?(senderKey)
             case .pin(_, let op, let senderLeaf, _):
                 // ADR-0052 decision 3 — a shared pin / unpin of one message.
                 // Not a timeline row: routed out to the repository, which owns
@@ -9761,7 +10965,7 @@ final class GroupRecord {
         text: String,
         emoji: String?,
         senderKey: MemberIdentity?,
-        opMessageId: Int64? = nil
+        at: Int64
     ) {
         guard let senderKey = senderKey else { return }
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
@@ -9772,16 +10976,16 @@ final class GroupRecord {
             guard !messages[idx].deleted else { return }
             messages[idx].text = text
             messages[idx].edited = true
-            messages[idx].noteOp(opMessageId)
+            messages[idx].noteOp(at)
         case .delete:
             guard AuthorIdentity.editDeleteAuthorized(
                 author: messages[idx].authorKeyB64, opSender: senderKey) else { return }
             messages[idx].deleted = true
-            messages[idx].noteOp(opMessageId)
+            messages[idx].noteOp(at)
             MessageTranslationPurge.messageDeleted(groupId: groupId, messageId: target)
-        case .reaction:
+        case .reaction(let add, _):
             guard let emoji = emoji, !emoji.isEmpty else { return }
-            toggleReaction(target: target, reactor: senderKey, emoji: emoji)
+            recordReaction(target: target, reactor: senderKey, emoji: emoji, add: add, at: at)
         case .typing, .readReceipt:
             // ADR-0024 — typing / read-receipt ops are routed out of
             // the timeline fold in `consumeEvents` (they render no
@@ -9791,24 +10995,24 @@ final class GroupRecord {
         }
     }
 
-    /// Toggle a `(reactor, emoji)` pair on `target`: present
-    /// → remove, else add. Shared by the incoming-op fold + the
+    /// Append one reaction op to `target`'s op log. The fold
+    /// (``ChatMessage/heldReactions``) decides what it comes to: an add of an
+    /// emoji the person holds and a remove of one they do not are no-ops, and
+    /// a 4th add is ignored for good. Shared by the incoming-op fold and the
     /// local own-reaction path.
     ///
-    /// `reactor` is a signature key: keyed on the leaf, a newcomer at a
-    /// vacated leaf matched the departed member's entry and REMOVED it, so
-    /// their reaction did not add — it destroyed one.
-    private func toggleReaction(target: Int64, reactor: MemberIdentity, emoji: String) {
+    /// `reactor` is the account key the sender leaf resolved to at receipt:
+    /// keyed on the leaf, a newcomer at a vacated leaf would act on the
+    /// departed member's reactions.
+    private func recordReaction(
+        target: Int64, reactor: MemberIdentity, emoji: String, add: Bool, at: Int64
+    ) {
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
-        if let existing = messages[idx].reactions.firstIndex(
-            where: { $0.reactor == reactor && $0.emoji == emoji }
-        ) {
-            messages[idx].reactions.remove(at: existing)
-        } else {
-            messages[idx].reactions.append(
-                Reaction(reactor: reactor, emoji: emoji)
-            )
-        }
+        // The same op seen twice (a re-poll of a row already applied) is one op.
+        if at > 0, messages[idx].reactions.contains(where: {
+            $0.at == at && $0.reactor == reactor && $0.emoji == emoji
+        }) { return }
+        messages[idx].reactions.append(Reaction(reactor: reactor, emoji: emoji, add: add, at: at))
     }
 
     func toThread(
@@ -9816,7 +11020,9 @@ final class GroupRecord {
         conversationIdHex: String? = nil,
         history: [ChatMessage] = [],
         historyGroupIdHexes: [String] = [],
-        segmentIndex: Int = 0
+        segmentIndex: Int = 0,
+        leaveRequested: Bool = false,
+        arrivedAtMs: Int64? = nil
     ) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
@@ -9831,13 +11037,49 @@ final class GroupRecord {
             membershipEnded: readIsActive { try group.isActive() } == false,
             conversationIdHex: conversationIdHex,
             historyGroupIdHexes: historyGroupIdHexes,
-            segmentIndex: segmentIndex
+            segmentIndex: segmentIndex,
+            syncedThroughMessageId: syncedThroughMessageId,
+            leaveRequested: leaveRequested,
+            arrivedAtMs: arrivedAtMs
         )
+    }
+
+    /// Nothing of this record's history survives: it is about to be written
+    /// away, and a persist of the log must not bring it back.
+    func forgetHistory() {
+        messages = []
+        lastViewedMessageId = nil
+        feedSeen = []
+        syncedThroughMessageId = nil
+    }
+
+    /// ADR-0050 — this device's leaf was retired and it was re-admitted: the
+    /// Welcome replaced the group, and the history and the journal position
+    /// of the old record carry.
+    func adoptRetiredRecord(_ old: GroupRecord) {
+        messages = old.messages
+        lastViewedMessageId = old.lastViewedMessageId
+        feedSeen = old.feedSeen
+        syncedThroughMessageId = old.syncedThroughMessageId
+        advanceCursor(to: old.cursor)
+    }
+
+    /// `docs/ux/second-device.md` section 4, "Membership rows" — write `row`
+    /// on the LAST plain commit row at or after `fromIndex` (the rows one
+    /// batch appended). `false` when the batch filed no commit row.
+    @discardableResult
+    func recordMembershipChange(_ row: MembershipRow, fromIndex: Int) -> Bool {
+        guard let index = messages.indices.last(where: {
+            $0 >= fromIndex && messages[$0].direction == .system
+                && messages[$0].text == MembershipRow.plainCommitText
+        }) else { return false }
+        messages[index].text = row.marker
+        return true
     }
 
     private static func systemRowText(_ kind: SystemKind) -> String {
         switch kind {
-        case .commit: return "[mls commit]"
+        case .commit: return MembershipRow.plainCommitText
         case .externalJoinProposal: return "[mls external join]"
         }
     }
@@ -9849,8 +11091,56 @@ final class GroupRecord {
 enum FoundingRollback {
     /// `true` when no Welcome went out: nobody else holds the group, and the
     /// row goes again. Once one did, the group has a member and the row
-    /// stays.
+    /// stays. An accept never reaches this: its founding is on record and
+    /// stays owed.
     static func forgetsRow(welcomesDelivered: Int) -> Bool {
         welcomesDelivered == 0
+    }
+}
+
+/// How founding the one-to-one of an accept ended.
+public enum AnswerFounding: Equatable {
+    /// The requester's Welcome was written.
+    case delivered(groupIdHex: String)
+    /// The group stands and the requester's Welcome is owed.
+    case welcomeOwed(groupIdHex: String)
+
+    public var groupIdHex: String {
+        switch self {
+        case .delivered(let id), .welcomeOwed(let id): return id
+        }
+    }
+}
+
+/// The retry of an accept's owed Welcome, over injected steps. An entry goes
+/// only after its Welcome landed, the ack only after that; a failure leaves
+/// the entry for the next retry and sends no ack.
+enum OwedAnswers {
+    /// The group founded for request `requestMessageId`, when `rows` hold its
+    /// record: another Accept carries on from it and founds nothing.
+    static func foundedGroupHex(requestMessageId: Int64, rows: [PendingCommitEntry]) -> String? {
+        rows.first { $0.answerRequestMessageId == requestMessageId }
+            .flatMap { base64Decode($0.groupId) }
+            .map { DsClient.pseudonymHex($0) }
+    }
+
+    struct Ports {
+        var deliver: @MainActor (PendingCommitEntry) async throws -> Void
+        var landed: @MainActor (PendingCommitEntry) -> Void
+        var ack: @MainActor (Int64) async -> Void
+    }
+
+    @MainActor
+    static func resolve(rows: [PendingCommitEntry], ports: Ports) async {
+        for row in rows {
+            do {
+                try await ports.deliver(row)
+            } catch {
+                NSLog("contact accept: an owed Welcome was not delivered: %@", ContactAccept.reason(of: error))
+                continue
+            }
+            ports.landed(row)
+            if let messageId = row.answerRequestMessageId { await ports.ack(messageId) }
+        }
     }
 }

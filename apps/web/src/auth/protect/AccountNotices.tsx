@@ -14,7 +14,8 @@
  * asks nothing else for ten minutes), `Remove` (behind the proof block),
  * and, when no phrase is saved, `Save a recovery phrase`. A device is not
  * told about its own action (one notice per marker, within ten minutes). A
- * device with no cursor yet asks for the last thirty days.
+ * device with no cursor yet is new: it starts at the newest notice and shows
+ * nothing older.
  *
  * It also runs the automatic re-seal of the email vault (`reseal.ts`): a
  * device that holds the address puts the vault back by itself after the
@@ -31,7 +32,7 @@ import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "soli
 import { useAuth } from "../AuthContext";
 import { NewPasswordForm } from "../NewPasswordForm";
 import { PasswordChangeGate } from "../PasswordChangeGate";
-import { currentLanguage, t } from "../../l10n";
+import { t } from "../../l10n";
 import { ModalLayer } from "../../ui/ModalLayer";
 import {
   consumeSelfMarks,
@@ -57,12 +58,16 @@ import { answerOf, RecoveryEmailClient } from "./recovery-email-client";
 import { RESEAL_SALT_LEN, resealAttemptKey, resealNeeded, runReseal } from "./reseal";
 import { RemoveRecoveryEmail } from "./RemoveRecoveryEmail";
 import { SavePhrasePanel } from "./SavePhrasePanel";
+import { displayLocale } from "../../l10n/display-locale";
 
 /** At most this many pages are read in one landing. */
 const MAX_PAGES = 5;
+/** A new device reads to the newest notice: stopping short would leave older
+ *  notices for its next landing to show. */
+const MAX_PAGES_FIRST_LANDING = 200;
 
 function mediumDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(currentLanguage(), { dateStyle: "medium" });
+  return new Date(ms).toLocaleDateString(displayLocale(), { dateStyle: "medium" });
 }
 
 export function AccountNotices(): JSX.Element {
@@ -99,11 +104,11 @@ export function AccountNotices(): JSX.Element {
     const client = new RecoveryEmailClient();
     const cursor = readNoticeCursor(plainStore(), accountIdB64);
     const all: AccountNotice[] = [];
-    // From the cursor; a device that has none asks for the last 30 days.
-    let query = firstNoticeQuery(noticeCursorKnown(plainStore(), accountIdB64), cursor, Date.now());
+    const firstLanding = !noticeCursorKnown(plainStore(), accountIdB64);
+    let query = firstNoticeQuery(cursor);
     let nextAfter = cursor;
     try {
-      for (let page = 0; page < MAX_PAGES; page += 1) {
+      for (let page = 0; page < (firstLanding ? MAX_PAGES_FIRST_LANDING : MAX_PAGES); page += 1) {
         const got = await client.notices(token, query);
         all.push(...got.notices);
         const advanced = got.nextAfter > nextAfter;
@@ -120,6 +125,7 @@ export function AccountNotices(): JSX.Element {
       notices: all,
       nextAfter,
       marks: readSelfMarks(plainStore(), accountIdB64),
+      firstLanding,
     });
     // The device keeps a cursor from its first answered read on.
     startNoticeCursor(plainStore(), accountIdB64, plan.cursor);

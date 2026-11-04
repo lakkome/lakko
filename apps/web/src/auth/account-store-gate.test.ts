@@ -7,6 +7,7 @@
  * data back, in this tab or another; the durable MLS writes throw instead of
  * skipping; a plain sign-out closes the session-token row only.
  */
+import { type DeviceCipher, WebDeviceCipher } from "./device-cipher";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,11 +75,11 @@ afterEach(() => {
   resetAccountStoreGateForTests();
 });
 
-function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 }
 
 /** A second tab: its own memory, the same `localStorage`. */
@@ -265,8 +266,8 @@ describe("localStorage and sessionStorage", () => {
 describe("a write in flight when Forget device wipes the account", () => {
   it("the MLS snapshot is not put back, and the write throws", async () => {
     const key = await deviceKey();
-    await saveMlsSnapshot(A, key, new Uint8Array([1, 2, 3]), ["g"]);
-    expect(await loadMlsSnapshot(A, key)).not.toBeNull();
+    await saveMlsSnapshot(A, key, new Uint8Array([1, 2, 3]), ["g"], undefined, { g: 42 });
+    expect((await loadMlsSnapshot(A, key))?.joinedAtMs).toEqual({ g: 42 });
     // Started before the wipe, suspended on its encrypt while the wipe runs.
     const late = saveMlsSnapshot(A, key, new Uint8Array([4, 5, 6]), ["g"]);
     const outcome = late.then(

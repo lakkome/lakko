@@ -45,6 +45,7 @@
  * of the session rather than acquiring + releasing per call,
  * because the poll loop needs a long-lived handle.
  */
+import type { DeviceCipher } from "../../auth/device-cipher";
 import {
   createContext,
   createEffect,
@@ -134,10 +135,12 @@ import {
   publishHeldAddress,
 } from "../../auth/protect/address-register";
 import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
+import { installQuickReactionRegister, publishQuickReaction } from "../../chat/quick-reaction-register";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
   noteDeviceAction,
+  noteDeviceForeground,
   pruneOwnDeviceCards,
   scheduleOwnCardResend,
   unbindDeviceCards,
@@ -151,6 +154,7 @@ import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port
 import {
   flushServiceEnvelopes,
   registerServiceEnvelopeSender,
+  retryDirtyServiceEnvelopes,
 } from "../../reach/service-envelope-outbox";
 import {
   groupIdHex,
@@ -164,6 +168,7 @@ import {
   mergeRestoredFold,
   openPersistedFold,
   projectSyncedState,
+  type EndedConversation,
   type SavedEntry,
 } from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
@@ -184,6 +189,7 @@ import {
 import {
   bytesToHex,
   stampEdits,
+  type ConversationRef,
   type FolderModel,
   type RegisterEdit,
 } from "../../chat/folders/folder-model";
@@ -244,6 +250,9 @@ export interface DeviceGroupSyncApi {
   readonly saved: Accessor<readonly SavedEntry[]>;
   /** Reactive: every blob id a saved message names (lower-case hex). */
   readonly savedBlobIdsHex: Accessor<readonly string[]>;
+  /** ADR-0087 section 9 — reactive: the conversations whose register says
+   *  this account is out of them, from every device. */
+  readonly endedConversations: Accessor<readonly EndedConversation[]>;
   /** Reactive: the conversation lineage registers (ADR-0073 R.5): which
    *  group continues which conversation. Read through `chat/lineage.ts`. */
   readonly lineage: Accessor<readonly LineageEntry[]>;
@@ -257,6 +266,16 @@ export interface DeviceGroupSyncApi {
    *  them, or `null` while the handle is not loaded. Feeds the "A device
    *  was added to your account" notice (`devices/added-notice.ts`). */
   readonly deviceRoster: Accessor<DeviceRoster | null>;
+  /** Reactive: the account's devices whose "a device was added" warning
+   *  was seen on some device of the account (the synced `lakko-sync`
+   *  device-acknowledgement register, identity-recovery 17.5 / 17.6), as
+   *  lower-case hex signature keys. */
+  readonly acknowledgedDevices: Accessor<readonly string[]>;
+  /** Write the acknowledgement for each device (hex signature keys), fold it
+   *  here at once and send it to the account's other devices. Write-once per
+   *  key; a send that does not go out is owed and re-sent at the next start.
+   *  Never throws. */
+  acknowledgeDevices(keysHex: readonly string[]): Promise<void>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -307,6 +326,21 @@ export interface DeviceGroupSyncApi {
    * error, it waits in the outbox.
    */
   applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
+
+  /**
+   * ADR-0087 section 9 — this account's membership of a conversation ended,
+   * or it joined one again, at MLS `epoch` (`0n` for a channel). Fold the
+   * register, keep it on disk and send it to the account's other devices.
+   * `false` when there is nothing to tell them (the core's compose returned
+   * nothing), which never stops the wipe. Rejects while the synced state is
+   * not loaded, or when the row could not be written; a send failure is not
+   * an error, the register waits in the outbox.
+   */
+  writeConversationEnd(
+    ref: ConversationRef,
+    state: "ended" | "joined",
+    epoch: bigint,
+  ): Promise<boolean>;
 
   /**
    * ADR-0073 R.5 — record that `successorGroupId` continues the conversation
@@ -423,12 +457,14 @@ export function DeviceGroupSyncProvider(props: {
   const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
   const [saved, setSaved] = createSignal<readonly SavedEntry[]>([]);
   const [savedBlobIdsHex, setSavedBlobIdsHex] = createSignal<readonly string[]>([]);
+  const [endedConversations, setEndedConversations] = createSignal<readonly EndedConversation[]>([]);
   const [linkRecords, setLinkRecords] = createSignal<readonly LinkRecordModel[]>([]);
   const [linkClaimsVersion, setLinkClaimsVersion] = createSignal(0);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
   const [deviceRoster, setDeviceRoster] = createSignal<DeviceRoster | null>(null);
+  const [acknowledgedDevices, setAcknowledgedDevices] = createSignal<readonly string[]>([]);
   /** Publish the roster of the held handle. `localChange`: the handle was
    *  just reloaded after a change made on this device, so what is new in it
    *  was let in here. A read that fails publishes nothing. */
@@ -481,6 +517,7 @@ export function DeviceGroupSyncProvider(props: {
   let wasmSync: Awaited<ReturnType<typeof loadWasm>> | null = null;
   let uninstallAddressRegister: (() => void) | null = null;
   let uninstallUsernameRegister: (() => void) | null = null;
+  let uninstallQuickReactionRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -544,7 +581,7 @@ export function DeviceGroupSyncProvider(props: {
   function writeHandleSnapshot(
     id: WasmIdentity,
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     cursor: number | undefined,
     stillThisHandle: () => boolean,
   ): Promise<number> {
@@ -640,6 +677,8 @@ export function DeviceGroupSyncProvider(props: {
     setLineageEntries(p.lineage);
     setSaved(p.saved);
     setSavedBlobIdsHex(p.savedBlobIdsHex);
+    setEndedConversations(p.endedConversations);
+    setAcknowledgedDevices(readAcknowledgedDevices(synced, untrack(acknowledgedDevices)));
     if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
@@ -647,6 +686,8 @@ export function DeviceGroupSyncProvider(props: {
       publishHeldAddress(activeAccountIdB64, synced.recoveryEmail() ?? null);
       // ADR-0076: the account's username as its devices agree on it.
       publishRegisterUsername(activeAccountIdB64, synced.ownUsername() ?? null);
+      // Reactions D3: the account's quick reaction.
+      publishQuickReaction(activeAccountIdB64, synced.quickReaction() ?? null);
     }
     setStateVersion((v) => v + 1);
   }
@@ -685,11 +726,18 @@ export function DeviceGroupSyncProvider(props: {
   // ignored inside `noteDeviceAction`.
   if (typeof document !== "undefined") {
     const onAction = (): void => noteDeviceAction();
+    // A growth re-send that fell due while the page was hidden goes at the
+    // next foreground (it is not an action: no fresh card is decided here).
+    const onVisible = (): void => {
+      if (document.visibilityState === "visible") noteDeviceForeground();
+    };
     document.addEventListener("pointerdown", onAction, { capture: true, passive: true });
     document.addEventListener("keydown", onAction, { capture: true });
+    document.addEventListener("visibilitychange", onVisible);
     onCleanup(() => {
       document.removeEventListener("pointerdown", onAction, { capture: true });
       document.removeEventListener("keydown", onAction, { capture: true });
+      document.removeEventListener("visibilitychange", onVisible);
     });
   }
 
@@ -868,12 +916,16 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister?.();
     uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
     void flushUnsentOwnUsername();
+    void flushUnsentDeviceAcks();
     void flushUnsentLinkRecords();
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
+    void flushUnsentQuickReaction();
+    uninstallQuickReactionRegister?.();
+    uninstallQuickReactionRegister = installQuickReactionRegister({ accountIdB64, set: setQuickReactionImpl });
   }
 
-  function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
+  function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
     if (group === null || identity === null || deviceRemoved()) return;
     pollAbort = new AbortController();
     pollDone = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
@@ -967,6 +1019,26 @@ export function DeviceGroupSyncProvider(props: {
     // ADR-0060 section 7 - an envelope marked while the handle was being
     // replaced (a pairing hands its setting over this way) goes now.
     void flushServiceEnvelopes();
+    // The other sends that wait on a handle go too: they keep their change
+    // unsent when a publish fails, and nothing else would retry before the
+    // next change.
+    void flushUnsentLineage();
+    void flushUnsentRecoveryEmail();
+    void flushUnsentOwnUsername();
+    void flushUnsentQuickReaction();
+    void flushUnsentDeviceAcks();
+    void flushUnsentLinkRecords();
+  }
+
+  /** One reload for a handle found behind the disk, however many sends and
+   *  polls found it. Not awaited by a sender: the reload waits for the poll,
+   *  and a send can run inside it. */
+  let behindHandleReload: Promise<void> | null = null;
+  function reloadBehindHandle(): Promise<void> {
+    behindHandleReload ??= reloadHandle().finally(() => {
+      behindHandleReload = null;
+    });
+    return behindHandleReload;
   }
 
   function teardown(): void {
@@ -1024,6 +1096,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister = null;
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = null;
+    uninstallQuickReactionRegister?.();
+    uninstallQuickReactionRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1041,6 +1115,7 @@ export function DeviceGroupSyncProvider(props: {
     setLineageEntries([]);
     setSaved([]);
     setSavedBlobIdsHex([]);
+    setEndedConversations([]);
     setLinkRecords([]);
     setOutbox([]);
   }
@@ -1145,6 +1220,9 @@ export function DeviceGroupSyncProvider(props: {
       // ADR-0076 - and the own-username register, the same way.
       const ownUsername = synced.ownUsernameEnvelope();
       if (ownUsername !== undefined) await sendLineageEnvelopes([ownUsername]);
+      // Reactions D3 - and the quick-reaction register, the same way.
+      const quick = synced.quickReactionEnvelope();
+      if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
     } catch (err) {
@@ -1283,6 +1361,124 @@ export function DeviceGroupSyncProvider(props: {
       /* storage unavailable: the send below is the only attempt */
     }
     await sendOwnUsernameRegister(account);
+  }
+
+  // ----- Reactions D3: the quick-reaction register --------------
+
+  const quickReactionUnsentKey = (account: string): string => `lakko.quick-reaction.unsent.v1.${account}`;
+
+  async function sendQuickReactionRegister(account: string): Promise<void> {
+    if (synced === null) return;
+    try {
+      const envelope = synced.quickReactionEnvelope();
+      if (envelope !== undefined) await sendLineageEnvelopes([envelope]);
+      localStorage.removeItem(quickReactionUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "quick-reaction register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentQuickReaction(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(quickReactionUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    await sendQuickReactionRegister(account);
+  }
+
+  /** Write the register, fold it here at once and send it to the account's
+   *  other devices. Never throws. */
+  async function setQuickReactionImpl(emoji: string): Promise<void> {
+    if (synced === null) return;
+    let written: boolean;
+    try {
+      written = synced.setQuickReaction(mintHlc(), emoji);
+    } catch {
+      // Not one emoji: nothing is kept.
+      return;
+    }
+    if (!written) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(quickReactionUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendQuickReactionRegister(account);
+  }
+
+  // ----- Identity-recovery 17.5: the device-acknowledgement register -----
+
+  /** `localStorage` marker: an acknowledgement written here has not been
+   *  confirmed sent. Re-sending every held acknowledgement is idempotent
+   *  (write-once per device key). */
+  const deviceAckUnsentKey = (account: string): string => `lakko.device-ack.unsent.v1.${account}`;
+
+  async function sendDeviceAckEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(deviceAckUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "device acknowledgement send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentDeviceAcks(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(deviceAckUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.deviceAckEnvelopes();
+    } catch {
+      return;
+    }
+    await sendDeviceAckEnvelopes(account, envelopes);
+  }
+
+  async function acknowledgeDevicesImpl(keysHex: readonly string[]): Promise<void> {
+    if (synced === null || keysHex.length === 0) return;
+    const flat = new Uint8Array(keysHex.length * 32);
+    let n = 0;
+    for (const hex of keysHex) {
+      if (!/^[0-9a-f]{64}$/.test(hex)) continue;
+      for (let i = 0; i < 32; i++) flat[n * 32 + i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      n += 1;
+    }
+    if (n === 0) return;
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.acknowledgeDevices(mintHlc(), flat.subarray(0, n * 32), BigInt(Date.now()));
+    } catch {
+      return;
+    }
+    if (envelopes.length === 0) return;
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    try {
+      localStorage.setItem(deviceAckUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    await sendDeviceAckEnvelopes(account, envelopes);
   }
 
   // ----- ADR-0079: the link-record register -----------------------
@@ -1570,7 +1766,7 @@ export function DeviceGroupSyncProvider(props: {
     g: WasmDeviceGroup,
     id: WasmIdentity,
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     signal: AbortSignal,
   ): Promise<void> {
     const ds = new DsClient();
@@ -1634,6 +1830,9 @@ export function DeviceGroupSyncProvider(props: {
 
       // The journal answered, so this device is online: send what waited.
       if (outbox().length > 0) void drainFolderOutbox();
+      // A service envelope whose publish failed (the own device card, the
+      // setting, the own name) is sent again on every pass until it goes.
+      void retryDirtyServiceEnvelopes();
 
       // ADR-0081 decision 2, step 6 - a DeviceGroup commit of this device
       // that did not finish (the DS could not be reached, a write failed, a
@@ -1916,7 +2115,7 @@ export function DeviceGroupSyncProvider(props: {
           // hold the cursor forever. Reload from disk; the poll restarts
           // from the stored cursor.
           if (err instanceof DeviceGroupSnapshotChangedError && group === g) {
-            void reloadHandle();
+            void reloadBehindHandle();
           }
         },
       });
@@ -2030,7 +2229,7 @@ export function DeviceGroupSyncProvider(props: {
     return (listed ?? []).every((row) => bytesToHex(row.deviceId) === ownKeyHex);
   }
 
-  async function loadAdmissions(account: string, deviceKey: CryptoKey): Promise<void> {
+  async function loadAdmissions(account: string, deviceKey: DeviceCipher): Promise<void> {
     let record: AdmissionRecord | null = null;
     try {
       const bytes = await getDeviceGroupPending(account, "admissions", deviceKey);
@@ -2041,7 +2240,7 @@ export function DeviceGroupSyncProvider(props: {
     admissions = record ?? newAdmissionRecord(Date.now());
   }
 
-  async function saveAdmissions(account: string, deviceKey: CryptoKey): Promise<void> {
+  async function saveAdmissions(account: string, deviceKey: DeviceCipher): Promise<void> {
     if (admissions === null || activeAccountIdB64 !== account) return;
     try {
       await putDeviceGroupPending(account, "admissions", encodeAdmissionRecord(admissions), deviceKey);
@@ -2065,7 +2264,7 @@ export function DeviceGroupSyncProvider(props: {
     g: WasmDeviceGroup,
     id: WasmIdentity,
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     signal: AbortSignal,
   ): Promise<void> {
     const accountBytes = accountIdBytesActive;
@@ -2187,7 +2386,7 @@ export function DeviceGroupSyncProvider(props: {
   async function ownDirectory(
     accountIdBytes: Uint8Array,
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
   ): Promise<Map<string, Uint8Array>> {
     const wasm = await loadWasm();
     const out = new Map<string, Uint8Array>();
@@ -2258,7 +2457,7 @@ export function DeviceGroupSyncProvider(props: {
   function startRejoin(
     account: string,
     accountBytes: Uint8Array,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     current: () => boolean,
     dropState = true,
   ): void {
@@ -2291,7 +2490,7 @@ export function DeviceGroupSyncProvider(props: {
   function rejoinPorts(
     account: string,
     accountBytes: Uint8Array,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     signal: AbortSignal,
   ): RejoinPorts {
     return {
@@ -2411,6 +2610,31 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
+      // Identity-recovery 17.5 - the device-acknowledgement register, the
+      // same way.
+      if (wasmSync !== null && wasmSync.isDeviceAckEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyDeviceAckEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // Reactions D3 - the quick-reaction register, the same way.
+      if (wasmSync !== null && wasmSync.isQuickReactionEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyQuickReactionEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
       // ADR-0076 - the own-username register, the same way.
       if (wasmSync !== null && wasmSync.isOwnUsernameEnvelope(parsed.serviceEnvelope)) {
         try {
@@ -2489,7 +2713,16 @@ export function DeviceGroupSyncProvider(props: {
     if (deviceKey !== null && identity === id) {
       // Fail-closed and conditional on the row this handle read (ADR-0081
       // decision 3).
-      await writeHandleSnapshot(id, account, deviceKey, undefined, () => identity === id);
+      try {
+        await writeHandleSnapshot(id, account, deviceKey, undefined, () => identity === id);
+      } catch (err) {
+        // Another handle wrote the group since this one read it, so what this
+        // one sealed may be unreadable. The error keeps the send owed, and
+        // the reload sends it again from the state on disk; without that the
+        // handle stays behind and every later send fails the same way.
+        if (err instanceof DeviceGroupSnapshotChangedError) void reloadBehindHandle();
+        throw err;
+      }
       if (!current()) throw new StaleBindingError();
     }
     return published.id;
@@ -2653,6 +2886,39 @@ export function DeviceGroupSyncProvider(props: {
     void drainFolderOutbox();
   }
 
+  // ----- The end of a membership (ADR-0087 section 9) ----------------
+
+  async function writeConversationEndImpl(
+    ref: ConversationRef,
+    state: "ended" | "joined",
+    epoch: bigint,
+  ): Promise<boolean> {
+    const { s } = requireReady();
+    const wasm = await loadWasm();
+    if (synced !== s) throw new Error("DeviceGroupSyncProvider is not ready");
+    const hlc = mintHlc();
+    const register =
+      state === "ended"
+        ? s.composeConversationEnded(hlc, ref.kind, ref.id, epoch)
+        : s.composeConversationJoined(hlc, ref.kind, ref.id, epoch);
+    if (register === undefined) return false;
+    const cs = new wasm.FolderChangeSet();
+    try {
+      cs.addConversationEnd(register);
+      s.applyFolderChanges(cs);
+    } finally {
+      cs.free();
+      register.free();
+    }
+    setOutbox((q) => [...q, stampEdits([{ t: "conversation-end", ref }], mintHlc)]);
+    refresh();
+    // On disk before the caller goes on: what comes next deletes what this
+    // register is the only remaining record of.
+    if (!(await persistSyncedNow())) throw new Error("synced state not written");
+    void drainFolderOutbox();
+    return true;
+  }
+
   function scheduleOutboxRetry(): void {
     if (outboxTimer !== null || deviceRemoved()) return;
     outboxTimer = setTimeout(() => {
@@ -2683,8 +2949,13 @@ export function DeviceGroupSyncProvider(props: {
           // Not `StaleBindingError`: a failed batch only stops the drain, and
           // the stale result is dropped below.
           if (!current() || group === null || identity === null) throw new Error("not ready");
-          const cs = buildFolderChangeSet(wasm, batch);
+          const cs = buildFolderChangeSet(wasm, batch, (ref) =>
+            synced?.conversationEnd(ref.kind, ref.id),
+          );
           try {
+            // A conversation-end edit whose register is no longer held sends
+            // nothing, and takes its place in the queue with it.
+            if (cs.registerCount === 0) return;
             const bytes = group.createDeviceGroupFolderChangesMessage(identity, cs, mintHlc());
             await publishGroupMessage(bytes);
           } finally {
@@ -2721,6 +2992,8 @@ export function DeviceGroupSyncProvider(props: {
     pendingFolderSync: () => outbox().length > 0,
     saved,
     savedBlobIdsHex,
+    endedConversations,
+    writeConversationEnd: writeConversationEndImpl,
     lineage,
     setLineage: setLineageImpl,
     linkRecords,
@@ -2736,6 +3009,8 @@ export function DeviceGroupSyncProvider(props: {
     linkClaimsVersion,
     deviceRemoved,
     deviceRoster,
+    acknowledgedDevices,
+    acknowledgeDevices: acknowledgeDevicesImpl,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },
@@ -2773,6 +3048,24 @@ export function useDeviceGroupSync(): DeviceGroupSyncApi {
 }
 
 // ----- Helpers -----------------------------------------------------
+
+/** The acknowledged set as hex keys; `held` when it did not change (so the
+ *  signal does not re-run every reader on each refresh) or cannot be read. */
+function readAcknowledgedDevices(
+  s: { acknowledgedDevices(): Uint8Array },
+  held: readonly string[],
+): readonly string[] {
+  let flat: Uint8Array;
+  try {
+    flat = s.acknowledgedDevices();
+  } catch {
+    return held;
+  }
+  const keys: string[] = [];
+  for (let off = 0; off + 32 <= flat.length; off += 32) keys.push(bytesToHex(flat.subarray(off, off + 32)));
+  if (keys.length === held.length && keys.every((k, i) => k === held[i])) return held;
+  return keys;
+}
 
 /** The DeviceGroup's current epoch, or `null` when it cannot be read. The
  *  wasm DeviceGroup exposes no `epoch()` accessor; the DS access signer is

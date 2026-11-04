@@ -215,6 +215,12 @@ public final class DeviceLinkClient: DeviceLinkRelay {
 /// (a chosen limit, not a measured one), persisted per device. Over it the
 /// modal says so and the request is declined, so a stream of requests cannot
 /// keep putting a code in front of the person.
+///
+/// An answer is given back (``refund(_:)``) when the code was RIGHT and the
+/// device was then not added for a reason on this side (the result did not
+/// land, the pairing failed, the keys were not handed over): a right code is
+/// not a guess, and the person must not run out of tries because of our own
+/// failure. A wrong code is never given back.
 public final class DeviceLinkAnswerLimit {
     public static let maxAnswers = 5
     public static let window: TimeInterval = 24 * 60 * 60
@@ -222,14 +228,33 @@ public final class DeviceLinkAnswerLimit {
 
     private let defaults: UserDefaults
     private let key: String
+    /// `false` turns the limit off: every answer is allowed. Off in debug
+    /// builds only (``enforcedInThisBuild``), so testing sign-ins on one phone
+    /// does not run out of answers (maintainer, 2026-10-29); a release build
+    /// keeps the limit.
+    private let enforced: Bool
+
+    /// Whether the app's own limit is on in this build.
+    public static var enforcedInThisBuild: Bool {
+        #if DEBUG
+        return false
+        #else
+        return true
+        #endif
+    }
 
     /// Where the answers are kept: device-wide, and removed with the account
     /// by ``AccountLocalDataWipe``.
     public static let defaultKey = "me.lakko.device-link.answers.v1"
 
-    public init(defaults: UserDefaults = .standard, key: String = DeviceLinkAnswerLimit.defaultKey) {
+    public init(
+        defaults: UserDefaults = .standard,
+        key: String = DeviceLinkAnswerLimit.defaultKey,
+        enforced: Bool = true
+    ) {
         self.defaults = defaults
         self.key = key
+        self.enforced = enforced
     }
 
     private func recent(now: Date) -> [Double] {
@@ -239,14 +264,25 @@ public final class DeviceLinkAnswerLimit {
 
     /// Whether one more answer is allowed at `now`.
     public func canAnswer(now: Date = Date()) -> Bool {
-        recent(now: now).count < Self.maxAnswers
+        !enforced || recent(now: now).count < Self.maxAnswers
     }
 
-    /// Record one answer.
-    public func record(now: Date = Date()) {
+    /// Record one answer; returns its time, for ``refund(_:)``.
+    @discardableResult
+    public func record(now: Date = Date()) -> Double {
         var list = recent(now: now)
-        list.append(now.timeIntervalSince1970)
+        let at = now.timeIntervalSince1970
+        list.append(at)
         defaults.set(list, forKey: key)
+        return at
+    }
+
+    /// Give back the answer recorded at `at` (one entry, if still kept).
+    public func refund(_ at: Double) {
+        var all = defaults.array(forKey: key) as? [Double] ?? []
+        guard let index = all.firstIndex(of: at) else { return }
+        all.remove(at: index)
+        defaults.set(all, forKey: key)
     }
 }
 
@@ -314,17 +350,27 @@ public final class DeviceLinkJoin: ObservableObject {
 
     private let ports: Ports
     private let handle: Data
-    /// The pairing payload the QR would carry (`buildPairingQr`).
-    private let pairingPayload: Data
+    /// The pairing payload the QR would carry (`buildPairingQr`), asked for
+    /// when the code is typed: the payload is sealed then, so a card built
+    /// at that moment carries a city that has arrived since the screen
+    /// opened (UX section 2.1).
+    private let pairingPayload: () async -> Data
     private var requestIdB64: String?
     private var initiator: DeviceLinkInitiatorProtocol?
     private var pakeB: Data?
     private var startedAt: Date?
+    /// Continue was pressed and the payload is being built: a second press
+    /// does nothing.
+    private var sealing = false
 
-    public init(ports: Ports, handle: Data, pairingPayload: Data) {
+    public convenience init(ports: Ports, handle: Data, pairingPayload: Data) {
+        self.init(ports: ports, handle: handle, pairingPayloadAtSeal: { pairingPayload })
+    }
+
+    public init(ports: Ports, handle: Data, pairingPayloadAtSeal: @escaping () async -> Data) {
         self.ports = ports
         self.handle = handle
-        self.pairingPayload = pairingPayload
+        self.pairingPayload = pairingPayloadAtSeal
     }
 
     /// Post a request and wait for the other device's answer.
@@ -368,7 +414,12 @@ public final class DeviceLinkJoin: ObservableObject {
     /// the one condition under which the caller may trust the Welcome.
     @discardableResult
     public func submit(code typed: String) async -> Bool {
-        guard phase == .enterCode, let initiator, let pakeB, let requestIdB64 else { return false }
+        guard phase == .enterCode, !sealing, let initiator, let pakeB, let requestIdB64 else { return false }
+        sealing = true
+        let pairingPayload = await pairingPayload()
+        sealing = false
+        // A decline or the expiry may have landed while the payload was built.
+        guard phase == .enterCode else { return false }
         let sealed: DeviceLinkSealed
         do {
             sealed = try initiator.finish(pakeB: pakeB, typedCode: typed, pairingPayload: pairingPayload)
@@ -470,6 +521,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         case confirm
         /// Showing the code (`47 19 03`); the request is answered.
         case code(String)
+        /// Adding the device. When it was added and given the keys the
+        /// prompt simply closes (`modal` goes back to `nil`): there is no
+        /// result line (UX section 2.1, decided 2026-10-29).
         case adding
         /// The new device was added, but this device could not hand over
         /// the keys (it holds no recovery phrase, or the hand-over failed):
@@ -541,7 +595,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             },
             checkPayload: @escaping (Data, Data) throws -> Void,
             runPairing: @escaping @MainActor (Data) async throws -> Bool,
-            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(),
+            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(enforced: DeviceLinkAnswerLimit.enforcedInThisBuild),
             proof: ProofPorts
         ) {
             self.proof = proof
@@ -571,7 +625,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
     /// The new device's payload verified and the decision is made, but the
     /// result could not be posted for the proof (it ran out). Kept so the
     /// one-use responder's outcome is not lost while the person proves again.
-    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?)?
+    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?, answeredAt: Double?)?
+    /// When the answer to ``requestIdB64`` was counted (``DeviceLinkAnswerLimit/refund(_:)``).
+    private var answeredAt: Double?
 
     public init(ports: Ports) {
         self.ports = ports
@@ -657,7 +713,8 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         } catch {
             accepted = nil
         }
-        owedResult = (id, accepted)
+        owedResult = (id, accepted, answeredAt)
+        answeredAt = nil
         await finishOwedResult(token: token)
     }
 
@@ -682,7 +739,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
                 modal = .proofNeeded
                 return
             }
+            NSLog("[device-link] result not recorded: %@", String(describing: error))
             owedResult = nil
+            if owed.accepted != nil { giveBack(owed.answeredAt) }
             modal = owed.accepted == nil ? .wrongCode : .failed
             return
         }
@@ -693,10 +752,27 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         }
         do {
             let keysSent = try await ports.runPairing(accepted.pairingPayload)
-            modal = keysSent ? nil : .keysNotSent
+            if keysSent {
+                // UX section 2.1 (decided 2026-10-29) — no result line: the
+                // prompt simply closes; the new device's row on the Devices
+                // screen already carries its name from the payload card.
+                ports.proof.closed()
+                modal = nil
+            } else {
+                giveBack(owed.answeredAt)
+                modal = .keysNotSent
+            }
         } catch {
+            NSLog("[device-link] adding the device failed: %@", String(describing: error))
+            giveBack(owed.answeredAt)
             modal = .failed
         }
+    }
+
+    /// A right code that ended without the device added for a reason on
+    /// this side: not a guess, so the answer is given back.
+    private func giveBack(_ at: Double?) {
+        if let at { ports.limit.refund(at) }
     }
 
     /// The proof block of ``Modal/proofNeeded`` was answered: prove, then
@@ -759,7 +835,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         ports.proof.closed()
         switch result {
         case .answered:
-            ports.limit.record(now: now)
+            answeredAt = ports.limit.record(now: now)
             responder = fresh
             requestIdB64 = id
             let code = fresh.code()

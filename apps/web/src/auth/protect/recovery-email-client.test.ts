@@ -168,9 +168,6 @@ describe("the recovery-email routes", () => {
     const page = await c.client.notices("tok", { kind: "after", after: 7 });
     expect(page.notices).toEqual([{ id: 8, kind: "recovery-email-added", atMs: 5 }]);
     expect(c.calls[0]?.url).toBe("/api/auth/account/notices?after=7");
-    // A device with no cursor asks by time instead.
-    await c.client.notices("tok", { kind: "since", sinceMs: 1_700_000_000_000 });
-    expect(c.calls[1]?.url).toBe("/api/auth/account/notices?since_ms=1700000000000");
   });
 });
 

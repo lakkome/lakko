@@ -785,6 +785,10 @@ final class MultiJoinerCall {
         case .linkFounded:
             // ADR-0079 (order of 2026-10-17) — a link-founded note, the same.
             break
+        case .conversationHandle, .knockSeed, .admissionSeed, .groupPhoto, .groupReactions:
+            // ADR-0087 — group and channel settings ride the conversation's
+            // journal, never the SFU signal-relay. Out of place here — drop.
+            break
         }
     }
 

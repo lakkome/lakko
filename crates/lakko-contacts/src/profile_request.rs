@@ -267,6 +267,7 @@ mod tests {
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::shared_channels::SHARED_CHANNELS_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,

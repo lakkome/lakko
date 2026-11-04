@@ -34,8 +34,8 @@ extension ChatRepository {
         }
         memberAccountIdHints[recipientSignaturePubkey] = recipientAccountId
         let bound = binding.capture()
-        // ADR-0078 — no verified mailbox for the requester: nothing is made.
-        guard ReachCenter.shared.writePlan(toAccountKey: recipientSignaturePubkey) != nil else {
+        // ADR-0078 — no grant that answers the requester: nothing is made.
+        guard !ReachCenter.shared.answerPlans(toRequester: recipientSignaturePubkey).isEmpty else {
             throw ChatError.wrapped("no mailbox known for the recipient", underlying: MailboxUnknown())
         }
         let recipientDevices = try await expectedPersonDevices(
@@ -137,9 +137,13 @@ extension ChatRepository {
         }
         for target in founded.targets {
             guard let key = base64Decode(target.accountKeyB64) else { continue }
-            try await deliverWelcome(
-                welcome: welcome, toAccountKey: key,
-                plan: ReachCenter.shared.writePlan(toAccountKey: key))
+            if key == ReachCenter.shared.ownAccountKey {
+                try await deliverWelcome(
+                    welcome: welcome, toAccountKey: key,
+                    plan: ReachCenter.shared.writePlan(toAccountKey: key))
+            } else {
+                try await deliverAnswerWelcome(welcome: welcome, toRequester: key)
+            }
         }
     }
 
@@ -152,9 +156,7 @@ extension ChatRepository {
         guard let welcome = base64Decode(note.welcomeB64), let groupId = base64Decode(note.groupIdB64) else {
             throw ChatError.argument("the note is malformed")
         }
-        try await deliverWelcome(
-            welcome: welcome, toAccountKey: requesterKey,
-            plan: ReachCenter.shared.writePlan(toAccountKey: requesterKey))
+        try await deliverAnswerWelcome(welcome: welcome, toRequester: requesterKey)
         let groupIdHex = DsClient.pseudonymHex(groupId)
         return groups[groupIdHex] != nil ? groupIdHex : nil
     }

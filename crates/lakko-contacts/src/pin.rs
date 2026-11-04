@@ -338,6 +338,7 @@ mod tests {
             crate::shared_channels::SHARED_CHANNELS_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
@@ -349,6 +350,7 @@ mod tests {
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,
             crate::call_invite::CALL_INVITE_REVOKE_DOMAIN_V1,
             crate::group_invite::GROUP_INVITE_REVOKE_DOMAIN_V1,
+            crate::group_reactions::GROUP_REACTIONS_ENVELOPE_DOMAIN_V1,
             b"lakko/group-join-attribution/v1",
         ];
         for d in other_domains {

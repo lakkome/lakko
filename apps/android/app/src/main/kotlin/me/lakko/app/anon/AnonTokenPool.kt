@@ -36,7 +36,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * seconds from the anonymous spend it refilled for and the issuer and the
  * spending service could pair them by time. An action that finds its context
  * empty waits only for a refill the schedule already has running, else fails
- * until the next scheduled refill.
+ * until the next scheduled refill. A test build is the one exception
+ * ([AnonTokenPool] `refillOnEmptyTake`): limits have their own tests, and a walk
+ * must never stop on one.
  *
  * Issuance and spending do not share a connection: the issuer runs on its own
  * Ktor client ([KtorAnonTokenIssuer], its own OkHttp connection pool), and
@@ -69,6 +71,7 @@ public enum class AnonTokenContext(public val wire: String) {
     BLOB_READ("blob-read"),
     MAILBOX_WRITE("mailbox-write"),
     CALL_JOIN("call-join"),
+    CIRCLE_CLAIM("circle-claim"),
 }
 
 /**
@@ -89,6 +92,7 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     AnonTokenContext.BLOB_UPLOAD -> 4
     AnonTokenContext.BLOB_READ -> 4
     AnonTokenContext.MAILBOX_WRITE -> 4
+    AnonTokenContext.CIRCLE_CLAIM -> 2
     // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
     // one-to-one call. Chosen, not measured.
     AnonTokenContext.CALL_JOIN -> 4
@@ -304,6 +308,10 @@ public class AnonTokenPool(
     private val sleep: suspend (Long) -> Unit = { delay(it) },
     /** Uniform in `[0, 1)`: where in its window each refill falls. */
     private val random: () -> Double = { Random.nextDouble() },
+    /** A test build only: a take that finds the context empty starts the
+     *  issuance and waits for it, as it waits for a scheduled refill. Off, the
+     *  release rule (ADR-0078 section 8): a take never starts an issuance. */
+    private val refillOnEmptyTake: Boolean = false,
 ) : AnonTokenSource {
 
     override val headerName: String get() = core.headerName
@@ -384,7 +392,8 @@ public class AnonTokenPool(
             // ADR-0078 section 8: a take never starts an issuance. It may
             // wait for a refill the schedule runs (in flight, or this
             // session's first).
-            val waitFor: Deferred<*>? = refills[context]?.result ?: initials[context]
+            val scheduled: Deferred<*>? = refills[context]?.result ?: initials[context]
+            val waitFor = scheduled ?: if (t == null && refillOnEmptyTake) ensureRefillLocked(context, s) else null
             t to waitFor
         }
         if (token != null) return token
@@ -396,11 +405,13 @@ public class AnonTokenPool(
         if (pending == null) {
             throw failureFor(context, synchronized(lock) { lastFailure[context] }, timedOut = false, empty = true)
         }
-        val finished = withTimeoutOrNull(waitMs) { pending.await() } != null
+        val answer = withTimeoutOrNull(waitMs) { pending.await() }
         synchronized(lock) {
             if (owner == s.accountKey) popLiveLocked(context)?.let { return it }
         }
-        throw failureFor(context, synchronized(lock) { lastFailure[context] }, timedOut = !finished, empty = false)
+        // An issuance this take started leaves no scheduled failure behind.
+        val failure = synchronized(lock) { lastFailure[context] } ?: answer as? RefillResult
+        throw failureFor(context, failure, timedOut = answer == null, empty = false)
     }
 
     /** Run one scheduled top-up of every context now, awaited (what the

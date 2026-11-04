@@ -30,6 +30,7 @@
  * hydration restores it before re-opening any publisher keys.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { createSignal, untrack, type Accessor } from "solid-js";
 import {
   forgetOrphanedByReset,
@@ -208,7 +209,7 @@ export const channelsState: ChannelsStateInternal = {
  *  the account identity's provider snapshot at flush time. */
 interface PersistSink {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** `Identity.snapshotStorage()` of the account identity, or `null`
    *  when it is not available (logged out mid-flush). */
   readonly snapshotProvider: () => Uint8Array | null;
@@ -356,7 +357,7 @@ function settleHydration(): void {
 
 export interface HydrateChannelsArgs {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** The session-long ACCOUNT identity the PublisherGroups live in.
    *  Its provider is restored from the blob and re-snapshotted on every
    *  flush; it must be the same instance the channel routes use. */

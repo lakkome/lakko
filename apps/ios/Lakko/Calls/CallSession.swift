@@ -75,8 +75,15 @@ public final class CallSession: ObservableObject {
     @Published public private(set) var state: WebCallState = .idle
     @Published public private(set) var endReason: WebCallEndReason?
 
-    private let onOutboundSignaling: (Data) -> Void
+    /// Hands a composed frame to the publisher, with whether that frame asks
+    /// for a call push wake (``CallSignalingWake``). The session decides,
+    /// because only it knows whether an offer is the dial or a renegotiation
+    /// and whether the call ever connected; the bytes alone say neither.
+    private let onOutboundSignaling: (_ bytes: Data, _ wake: Bool) -> Void
     private var isOfferer = false
+    /// The call reached `.connected` on this device at least once. An `end`
+    /// sent after that asks for no wake: everyone it concerns is in the call.
+    private var everConnected = false
 
     /// Perfect-negotiation state (mid-call 1×1 add-track, piece
     /// B2b — the web `call-session.ts` mirror). The OFFERER
@@ -309,7 +316,7 @@ public final class CallSession: ObservableObject {
         self.turnClient = client
     }
 
-    public init(callId: Data, onOutboundSignaling: @escaping (Data) -> Void) {
+    public init(callId: Data, onOutboundSignaling: @escaping (_ bytes: Data, _ wake: Bool) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
     }
@@ -538,7 +545,9 @@ public final class CallSession: ObservableObject {
                     media: FfiCallMediaFlags(audio: audio, video: video)
                 )
             )
-            onOutboundSignaling(bytes)
+            // The dial: the one offer that rings the other person.
+            onOutboundSignaling(
+                bytes, CallSignalingWake.sessionAsks(.dialOffer, everConnected: everConnected))
         } catch {
             // A build that failed because the call ended meanwhile is not an
             // error of the call.
@@ -846,7 +855,8 @@ public final class CallSession: ObservableObject {
                     sdp: answerSdp
                 )
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(
+                bytes, CallSignalingWake.sessionAsks(.answer, everConnected: everConnected))
             // Arm the mid-call renegotiation drive (B2b): the initial
             // answer is sent + our local description is set, so the
             // initial negotiation is applied on the answerer side.
@@ -1024,7 +1034,12 @@ public final class CallSession: ObservableObject {
                     reason: Self.toFfiEndReason(reason)
                 )
             )
-            onOutboundSignaling(bytes)
+            // An end stops a ring: the caller cancelling, the callee declining
+            // or missing it. Once the call has connected nobody is ringing, and
+            // a wake would ring the other person's phone for a call that is
+            // over.
+            onOutboundSignaling(
+                bytes, CallSignalingWake.sessionAsks(.end, everConnected: everConnected))
         } catch {
             NSLog("endLocal composeCallSignaling failed: %@", error.localizedDescription)
         }
@@ -1076,7 +1091,12 @@ public final class CallSession: ObservableObject {
                     media: FfiCallMediaFlags(audio: dialAudio, video: video)
                 )
             )
-            onOutboundSignaling(bytes)
+            // A renegotiation (camera on or off, the peer's screen share) is an
+            // offer for a call both sides are already in: no wake, or the
+            // other phone rings a second, phantom call.
+            onOutboundSignaling(
+                bytes,
+                CallSignalingWake.sessionAsks(.renegotiationOffer, everConnected: everConnected))
         } catch {
             NSLog(
                 "driveRenegotiationOffer failed: %@",
@@ -1117,7 +1137,8 @@ public final class CallSession: ObservableObject {
             let bytes = try composeCallSignaling(
                 body: .answer(callId: callId, sdp: answerSdp)
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(
+                bytes, CallSignalingWake.sessionAsks(.answer, everConnected: everConnected))
         } catch {
             NSLog(
                 "applyRenegotiationOffer failed: %@",
@@ -1525,7 +1546,8 @@ public final class CallSession: ObservableObject {
                     sdpMLineIndex: wireIndex
                 )
             )
-            onOutboundSignaling(bytes)
+            onOutboundSignaling(
+                bytes, CallSignalingWake.sessionAsks(.candidate, everConnected: everConnected))
         } catch {
             NSLog(
                 "shipLocalCandidate composeCallSignaling failed: %@",
@@ -1548,6 +1570,7 @@ public final class CallSession: ObservableObject {
             // through here, which is what cancels the grace.
             cancelIceGrace()
             if state == .connecting || state == .outgoing {
+                everConnected = true
                 state = .connected
             }
             // G3-1-conn-quality — begin polling connection stats

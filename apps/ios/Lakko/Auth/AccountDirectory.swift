@@ -60,13 +60,17 @@ protocol AccountDirectory {
     /// discovery verifies against the key its row holds) AND the key-reset
     /// attestation. `supersessionProof` is `nil` for the fallback (the row no
     /// longer holds the key the proof was signed by); `keyResetAttest` is
-    /// `nil` only when the rotation's answer was lost.
+    /// `nil` only when the rotation's answer was lost. `conversationLink` is
+    /// the ADR-0074 section 3.7 link naming the key the conversations are
+    /// bound to, on the fallback too: the upload changes the key, and a key
+    /// change that carries no link clears the stored one.
     func publishRotatedIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
+        conversationLink: Data?,
         sessionToken: String
     ) async throws
 }
@@ -79,6 +83,7 @@ extension AccountDirectory {
         x25519Pubkey: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
+        conversationLink: Data?,
         sessionToken: String
     ) async throws {
         throw DiscoveryClientError.argument("this directory cannot publish a rotated identity")
@@ -131,6 +136,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
         x25519Pubkey: Data,
         supersessionProof: Data?,
         keyResetAttest: Data?,
+        conversationLink: Data?,
         sessionToken: String
     ) async throws {
         // No `leaf_auth`: discovery stores and forwards the proof as the log
@@ -142,7 +148,8 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             supersessionProofB64: supersessionProof.map { base64Encode($0) },
             leafAuth: nil,
             genesisAttest: nil,
-            keyResetAttest: keyResetAttest
+            keyResetAttest: keyResetAttest,
+            conversationLink: conversationLink
         )
     }
 }

@@ -22,7 +22,7 @@
  * acknowledged transaction (scan happens, ack happens, done).
  */
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
-import { loadWasm, type Wasm } from "../wasm";
+import { loadWasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -45,6 +45,7 @@ import {
   parsePairingQrPayload,
 } from "./pairing";
 import { encodeJournalEntry } from "./journal-envelope";
+import type { DeviceCipher } from "../auth/device-cipher";
 import { persistDeviceGroupSnapshot, type EnsuredDeviceGroup } from "./lifecycle";
 import { commitDeviceGroupChange } from "./device-group-commit-runtime";
 import { t } from "../l10n";
@@ -66,9 +67,11 @@ import {
   pollForRecoveryPayload,
   publishRecoveryPayload,
 } from "./recovery-payload";
+import { applyCarriedExtras, collectCarriedExtras } from "./carried-state-io";
 import {
   STATE_EXPORTER_KEY_LENGTH,
   STATE_EXPORTER_LABEL,
+  accountKeyHexOfSeed,
   applyOwnPredecessors,
   applyStateBundle,
   buildStateBundle,
@@ -78,9 +81,59 @@ import {
   pollForStateBundle,
   publishStateBundle,
   type CarriedOwnPredecessor,
-  type StateBundleV2,
+  type StateBundleV3,
 } from "./state-bundle";
 import { loadMlsSnapshot } from "../chat/mls-store";
+import {
+  adoptPairedDeviceCard,
+  composePairingCardEnvelope,
+  pairingCardEnvelopeNow,
+  sendOwnCardAfterJoin,
+  startPairingLocate,
+  type PairingPlace,
+} from "./device-card-runtime";
+import type { StoredDeviceCard } from "./device-cards";
+
+/**
+ * docs/ux/second-device.md section 2.1, "The place in the payload card": the
+ * QR payload waits for the city at most the bound from the screen opening
+ * and is never rebuilt once shown. The code route seals the payload after the
+ * code is typed, so `atSeal` rebuilds it with the same key package and
+ * rendezvous when the answer arrived after the QR payload was built, and
+ * otherwise returns the QR payload itself.
+ */
+async function buildPairingPayloads(
+  loginHandle: Uint8Array,
+  keyPackage: Uint8Array,
+  rendezvous: Uint8Array,
+  place: PairingPlace,
+): Promise<{ qrPayload: Uint8Array; atSeal: () => Promise<Uint8Array> }> {
+  // This device's own card rides the payload so the signed-in device can
+  // name it; none is no failure.
+  const qrPayload = await buildPairingQrPayload(
+    loginHandle,
+    keyPackage,
+    rendezvous,
+    await composePairingCardEnvelope(place),
+  );
+  const builtWithPlace = place.current() !== null;
+  return {
+    qrPayload,
+    atSeal: async () => {
+      if (builtWithPlace || place.current() === null) return qrPayload;
+      try {
+        return await buildPairingQrPayload(
+          loginHandle,
+          keyPackage,
+          rendezvous,
+          await pairingCardEnvelopeNow(place),
+        );
+      } catch {
+        return qrPayload;
+      }
+    },
+  };
+}
 
 // ---- Joining side ------------------------------------------------
 
@@ -141,6 +194,10 @@ export interface JoinSession {
   /** Wire-format pairing QR bytes ready to encode as a visual
    *  QR via the `qrcode` library. */
   readonly qrPayload: Uint8Array;
+  /** The payload the code route seals after the code is typed: the QR
+   *  payload, or the same payload carrying the city when its answer
+   *  arrived only after the QR payload was built. Never throws. */
+  pairingPayloadAtSeal(): Promise<Uint8Array>;
   /** 32-byte rendezvous pseudonym the scanner PUTs the
    *  Welcome to. Surface in the UI as a "rendezvous code" if
    *  the user wants to debug. */
@@ -191,7 +248,7 @@ export interface JoinSession {
 export async function prepareJoinFlow(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** ADR-0056 — the 32-byte login handle of this account's username; the
    *  payload names the account by it, never by the id. */
   readonly loginHandle: Uint8Array;
@@ -200,6 +257,9 @@ export async function prepareJoinFlow(args: {
    *  applied. The session re-mints its conversation binding there
    *  (`AuthApi.rebindAfterStateBundle`). Must not throw. */
   readonly onOwnPredecessorsStored?: () => Promise<unknown>;
+  /** The city of this pairing, started when the screen opened
+   *  (`startPairingLocate`); one is started here when absent. */
+  readonly place?: PairingPlace;
 }): Promise<JoinSession> {
   const wasm = await loadWasm();
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -209,16 +269,18 @@ export async function prepareJoinFlow(args: {
 
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
-  const qrPayload = await buildPairingQrPayload(
+  const { qrPayload, atSeal } = await buildPairingPayloads(
     args.loginHandle,
     keyPackage,
     rendezvous,
+    args.place ?? startPairingLocate(),
   );
 
   let group: WasmDeviceGroup | null = null;
 
   return {
     qrPayload,
+    pairingPayloadAtSeal: atSeal,
     rendezvous,
     async awaitWelcome(signal): Promise<WelcomeOutcome> {
       // `exactOptionalPropertyTypes` rejects `signal:
@@ -248,6 +310,9 @@ export async function prepareJoinFlow(args: {
         args.accountIdB64,
         args.deviceKey,
       );
+      // docs/ux/second-device.md section 3: a device that has just joined
+      // sends its own card at once.
+      void sendOwnCardAfterJoin(args.accountIdB64);
       let recovery: JoinRecoveryOutcome | null = null;
       if (opts !== undefined && group !== null) {
         // Phase 2a3d8-ui — poll past the Welcome cursor for the
@@ -308,8 +373,14 @@ export async function prepareJoinFlow(args: {
                 await args.onOwnPredecessorsStored();
               }
               const applied = applyStateBundle(bundle, args.accountIdB64);
+              // v3: group names, profiles, pending contacts.
+              const extras = await applyCarriedExtras(bundle, args.accountIdB64, await loadWasm());
               // eslint-disable-next-line no-console
-              console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+              console.info(
+                `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
+                  `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
+                  `${extras.pendingContacts} pending contacts`,
+              );
             }
           } catch (err) {
             // eslint-disable-next-line no-console
@@ -344,25 +415,13 @@ export async function prepareJoinFlow(args: {
   };
 }
 
-/** The lower-case hex account signature key of a 64-byte account seed. */
-function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
-  const identity = wasm.Identity.fromSeed(seed);
-  try {
-    let out = "";
-    for (const byte of identity.signaturePublicKey) out += byte.toString(16).padStart(2, "0");
-    return out;
-  } finally {
-    identity.free();
-  }
-}
-
 /** ADR-0074 — store a bundle's own predecessors under the device key. Best
  *  effort and never throws: a failure leaves the device as one that knows
  *  only the current key (logged without any key material). */
 async function storeOwnPredecessors(
-  bundle: StateBundleV2,
+  bundle: StateBundleV3,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   if (bundle.ownPredecessors.length === 0) return;
   try {
@@ -389,7 +448,7 @@ async function receiveStateBundle(
   identity: WasmIdentity,
   rendezvous: Uint8Array,
   welcomeCursor: number,
-): Promise<StateBundleV2 | null> {
+): Promise<StateBundleV3 | null> {
   const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
   if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
@@ -523,6 +582,8 @@ export async function runJoinerRecovery(args: {
 export interface AnonymousJoinSession {
   /** Wire-format pairing QR bytes. */
   readonly qrPayload: Uint8Array;
+  /** See [`JoinSession.pairingPayloadAtSeal`]. */
+  pairingPayloadAtSeal(): Promise<Uint8Array>;
   /** 32-byte rendezvous pseudonym for this pairing session. */
   readonly rendezvous: Uint8Array;
   /** Long-poll the rendezvous mailbox for the Welcome bytes. */
@@ -537,7 +598,7 @@ export interface AnonymousJoinSession {
    *  recovered seed: persist the in-memory DeviceIdentity seed +
    *  the post-join DeviceGroup snapshot under it, then zeroize the
    *  in-memory seed copy. Call once, after a successful `accept`. */
-  persistTo(deviceKey: CryptoKey): Promise<void>;
+  persistTo(deviceKey: DeviceCipher): Promise<void>;
   /** Release the wasm handles + zeroize the in-memory
    *  DeviceIdentity seed. Idempotent. */
   dispose(): void;
@@ -578,6 +639,9 @@ export async function prepareAnonymousJoinFlow(args: {
   /** The account, when this device already knows it (a signed-in device
    *  parked without its identity). Absent on the no-password entry. */
   readonly known?: { readonly accountIdBytes: Uint8Array; readonly accountIdB64: string };
+  /** The city of this pairing, started when the screen opened
+   *  (`startPairingLocate`); one is started here when absent. */
+  readonly place?: PairingPlace;
 }): Promise<AnonymousJoinSession> {
   const wasm = await loadWasm();
   // Fresh random per-device seed, held in memory until `persistTo`.
@@ -590,10 +654,11 @@ export async function prepareAnonymousJoinFlow(args: {
 
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
-  const qrPayload = await buildPairingQrPayload(
+  const { qrPayload, atSeal } = await buildPairingPayloads(
     args.loginHandle,
     keyPackage,
     rendezvous,
+    args.place ?? startPairingLocate(),
   );
 
   let group: WasmDeviceGroup | null = null;
@@ -605,10 +670,11 @@ export async function prepareAnonymousJoinFlow(args: {
   // scanner published was never read on this route, and a confirmed device
   // opened every chat empty.
   let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
-  let pendingState: StateBundleV2 | null = null;
+  let pendingState: StateBundleV3 | null = null;
 
   return {
     qrPayload,
+    pairingPayloadAtSeal: atSeal,
     rendezvous,
     async awaitWelcome(signal): Promise<WelcomeOutcome> {
       return pollForWelcome(
@@ -650,6 +716,9 @@ export async function prepareAnonymousJoinFlow(args: {
           bytes: accountIdBytes,
           b64: args.known?.accountIdB64 ?? base64Encode(accountIdBytes),
         };
+        // docs/ux/second-device.md section 3: the card goes as soon as the
+        // session this route lands binds the card runtime.
+        void sendOwnCardAfterJoin(account.b64);
       } finally {
         joined.free();
       }
@@ -729,10 +798,18 @@ export async function prepareAnonymousJoinFlow(args: {
         // identities (the caller's next step), so the conversation identity
         // is minted under the account key the sending device's leaves use.
         await storeOwnPredecessors(pendingState, account.b64, deviceKey);
-        const applied = applyStateBundle(pendingState, account.b64);
+        const state = pendingState;
         pendingState = null;
+        const applied = applyStateBundle(state, account.b64);
+        // v3: group names, profiles, pending contacts. The names wait for the
+        // session stores of this account, which bind when the session lands.
+        const extras = await applyCarriedExtras(state, account.b64, await loadWasm());
         // eslint-disable-next-line no-console
-        console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+        console.info(
+          `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
+            `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
+            `${extras.pendingContacts} pending contacts`,
+        );
       }
     },
     dispose(): void {
@@ -771,6 +848,9 @@ export interface ScanResult {
    *  then added to the account's devices but still has to restore its keys
    *  another way, and the screen says so. */
   readonly recoveryPublished: boolean;
+  /** docs/ux/second-device.md section 2.1: the card the new device put in
+   *  its payload (display only), or `null`. Already kept for its leaf. */
+  readonly newDeviceCard: StoredDeviceCard | null;
 }
 
 /**
@@ -800,7 +880,11 @@ export async function runScanFlow(args: {
   readonly loginHandle: Uint8Array;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
+  /** This account's own keys (standard base64: the account key, its
+   *  predecessor, this device's key). The state bundle never carries a
+   *  profile filed under one of them. */
+  readonly ownKeysB64?: readonly string[];
   /** ADR-0018 factor (a) — when present, the scanner also mints a
    *  device-authorization grant and publishes the sealed
    *  `grant ‖ phrase_entropy` recovery row (v2) after the Welcome, so
@@ -963,11 +1047,17 @@ async function finishScan(
           err instanceof Error ? err.name : "unknown",
         );
       }
-      const bundle = buildStateBundle(
-        snapshot?.knownGroupIds ?? [],
-        args.accountIdB64,
-        ownPredecessors,
-      );
+      const knownGroupIds = snapshot?.knownGroupIds ?? [];
+      // v3: the names and pending contacts this device holds. Best-effort
+      // per part, inside `collectCarriedExtras`.
+      const extras = await collectCarriedExtras({
+        wasm,
+        accountIdB64: args.accountIdB64,
+        deviceKey: args.deviceKey,
+        knownGroupIdsB64: knownGroupIds,
+        ownKeysB64: args.ownKeysB64 ?? [],
+      });
+      const bundle = buildStateBundle(knownGroupIds, args.accountIdB64, ownPredecessors, extras);
       key = ensured.group.exportSecret(
         ensured.identity,
         STATE_EXPORTER_LABEL,
@@ -985,9 +1075,20 @@ async function finishScan(
   }
 
   const wasm = await loadWasm();
+  const newDeviceKey = wasm.keyPackageSignatureKey(decoded.keyPackage);
+  // docs/ux/second-device.md section 2.1: the new device's row has its name
+  // at once, from the payload's card, until its own card arrives.
+  if (decoded.deviceCard !== null) adoptPairedDeviceCard(hexOf(newDeviceKey), decoded.deviceCard);
   return {
     memberCount: ensured.group.devices().length,
-    newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
+    newDeviceKey,
     recoveryPublished,
+    newDeviceCard: decoded.deviceCard,
   };
+}
+
+function hexOf(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
 }

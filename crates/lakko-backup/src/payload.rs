@@ -15,12 +15,13 @@
 //! One version is recognised on decode: the current one. Lakko has no
 //! deployment and no stored backups, so every other payload version is
 //! refused rather than migrated. v6 dropped the two MLS snapshot fields v5
-//! carried (see "Not stored" below); a v5 payload is refused like any other.
+//! carried (see "Not stored" below); v7 added the own predecessors; v8 adds
+//! the received profiles. Every older payload is refused like any other.
 //!
-//! ### v6
+//! ### v8
 //!
 //! ```text
-//! u8           payload version (= 6)
+//! u8           payload version (= 8)
 //! [16 bytes]   account_id (UUIDv7 raw)
 //! u64be        created_at_ms (the wall-clock at upload time)
 //! [32 bytes]   ed25519_seed (the identity signing seed)
@@ -31,9 +32,23 @@
 //! u32be        synced_state_length
 //! [..]         synced_state_length bytes: `lakko_sync::SyncedState::to_bytes`
 //!              (empty = no synced state held)
+//! u8           own_predecessors_count (<= MAX_OWN_PREDECESSORS)
+//! [..]         own_predecessors_count × { [64 bytes] seed, u64be adopted_at_ms }
+//! u32be        own_profile_length (<= MAX_OWN_ENVELOPE_LEN)
+//! [..]         own_profile_length bytes: the account's own profile envelope
+//! u32be        visibility_length (<= MAX_OWN_ENVELOPE_LEN)
+//! [..]         visibility_length bytes: its "who can find me" envelope
+//! u32be        received_profiles_count (<= MAX_RECEIVED_PROFILES)
+//! [..]         received_profiles_count × {
+//!                [32 bytes] person_key (strictly increasing across entries),
+//!                u16be      envelope_length (1..=PROFILE_ENVELOPE_MAX_LEN),
+//!                [..]       envelope bytes
+//!              }
 //! ```
 //!
-//! Nothing may follow the synced state: trailing bytes are refused.
+//! The received-profile entries together take at most
+//! `MAX_RECEIVED_PROFILES_BYTES` (key, length prefix and envelope counted).
+//! Nothing may follow them: trailing bytes are refused.
 //!
 //! Each [`AcceptedContactRecord`]:
 //!
@@ -66,6 +81,18 @@
 //!     conversation order), so a restore with no other device alive seeds
 //!     the fold from it. Validated on encode and decode through
 //!     `lakko_sync::SyncedState::from_bytes`, fail closed.
+//!   - `own_profile`, `visibility` — the person's own name and photo
+//!     references, and who can find them, as the envelopes
+//!     `lakko_contacts` defines. A restored device with no other device
+//!     alive has nowhere else to learn them. Opaque here and bounded by
+//!     length; the client decodes them fail closed.
+//!   - `received_profiles` — the newest profile envelope this device holds
+//!     from each other person (ADR-0048), keyed on that person's account
+//!     signature key. A device restored with no other device alive otherwise
+//!     shows every sender without a name until each republishes. Opaque here
+//!     and bounded; on restore the client feeds each envelope back through
+//!     its ordinary profile receive gate (strictly newer stamp per key), so a
+//!     stale backup never replaces a newer name.
 //!
 //! Not stored (intentional):
 //!   - MLS state is not stored: no OpenMLS provider snapshot, whole or
@@ -90,12 +117,128 @@ use crate::error::{BackupError, Result};
 
 /// The payload schema version: the only one emitted and the only one
 /// accepted. v6 carries no MLS state: it is v5 without the per-group and
-/// whole-storage snapshot fields.
-pub const PAYLOAD_VERSION: u8 = 6;
+/// whole-storage snapshot fields. v7 adds the own predecessors (ADR-0074
+/// section 3.7). v8 adds the received profiles (ADR-0048).
+pub const PAYLOAD_VERSION: u8 = 8;
 
 /// Account-id length (UUIDv7 raw, mirrors
 /// `lakko_contacts::ACCOUNT_ID_LEN`).
 const ACCOUNT_ID_LEN: usize = 16;
+
+/// Length of an own predecessor's phrase seed.
+pub const PREDECESSOR_SEED_LEN: usize = 64;
+
+/// Most own predecessors a backup carries: the pairing state bundle's bound.
+pub const MAX_OWN_PREDECESSORS: usize = 8;
+
+/// Hard cap on the own profile and visibility envelopes. A visibility setting
+/// names up to 1024 scopes and 4096 contacts, so this sits above the largest
+/// one `lakko_contacts` composes.
+pub const MAX_OWN_ENVELOPE_LEN: usize = 256 * 1024;
+
+/// Length of the key a received profile is stored under: the person's
+/// account signature key (Ed25519), as resolved at receipt.
+pub const RECEIVED_PROFILE_KEY_LEN: usize = 32;
+
+/// Longest received profile envelope a backup carries: the profile codec's
+/// own bound, so anything longer is not a profile.
+pub const MAX_RECEIVED_PROFILE_LEN: usize = lakko_contacts::PROFILE_ENVELOPE_MAX_LEN;
+
+// The envelope length rides a `u16`.
+const _: () = assert!(MAX_RECEIVED_PROFILE_LEN <= u16::MAX as usize);
+
+/// Most received profiles a backup carries. Chosen, not measured: well above
+/// the people one person meets across contacts and groups, and with
+/// [`MAX_RECEIVED_PROFILES_BYTES`] it keeps the list inside the storage
+/// service's 4 MiB backup ceiling with room for the rest of the payload.
+pub const MAX_RECEIVED_PROFILES: usize = 4096;
+
+/// Most bytes the received-profile entries take together (key, length prefix
+/// and envelope of every entry). Chosen, not measured: half the storage
+/// service's 4 MiB backup ceiling.
+pub const MAX_RECEIVED_PROFILES_BYTES: usize = 2 * 1024 * 1024;
+
+/// Bytes an entry takes on the wire besides its envelope.
+const RECEIVED_PROFILE_OVERHEAD: usize = RECEIVED_PROFILE_KEY_LEN + 2;
+
+/// The newest profile envelope this device holds from one other person
+/// (ADR-0048).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceivedProfile {
+    /// The person's account signature key, the key the receiving client
+    /// stored the profile under (C-68).
+    pub person_key: [u8; RECEIVED_PROFILE_KEY_LEN],
+    /// The profile envelope as received (`lakko_contacts::profile`), 1 to
+    /// [`MAX_RECEIVED_PROFILE_LEN`] bytes. Opaque here: the client decodes it
+    /// through its profile receive gate on restore.
+    pub envelope: Vec<u8>,
+}
+
+impl ReceivedProfile {
+    /// Bytes this entry takes on the wire.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        RECEIVED_PROFILE_OVERHEAD + self.envelope.len()
+    }
+}
+
+/// Choose, from `candidates` in priority order (most wanted first), the
+/// received profiles a backup can carry, sorted by key as the codec requires.
+///
+/// The first candidate for a key wins and later ones for it are dropped; an
+/// empty envelope or one over [`MAX_RECEIVED_PROFILE_LEN`] is dropped (it
+/// cannot be a profile); candidates stop being taken once
+/// [`MAX_RECEIVED_PROFILES`] are kept, and one that would take the list past
+/// [`MAX_RECEIVED_PROFILES_BYTES`] is skipped. The result always encodes.
+#[must_use]
+pub fn fit_received_profiles(candidates: Vec<ReceivedProfile>) -> Vec<ReceivedProfile> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for candidate in candidates {
+        if kept.len() == MAX_RECEIVED_PROFILES {
+            break;
+        }
+        if candidate.envelope.is_empty() || candidate.envelope.len() > MAX_RECEIVED_PROFILE_LEN {
+            continue;
+        }
+        if seen.contains(&candidate.person_key) {
+            continue;
+        }
+        let len = candidate.wire_len();
+        if bytes + len > MAX_RECEIVED_PROFILES_BYTES {
+            continue;
+        }
+        bytes += len;
+        seen.insert(candidate.person_key);
+        kept.push(candidate);
+    }
+    kept.sort_by_key(|p| p.person_key);
+    kept
+}
+
+/// One key the account rotated away from (ADR-0074 section 3.7).
+///
+/// `seed` opens the conversations: Stage A keeps every conversation leaf
+/// under the oldest key, so a device restored from the newest phrase needs
+/// this to mint a binding any conversation knows. The record lives inside the
+/// backup, sealed under that phrase, whose holder already outranks it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnPredecessor {
+    /// The predecessor's 64-byte phrase seed.
+    pub seed: [u8; PREDECESSOR_SEED_LEN],
+    /// When this account adopted the key that replaced it, unix millis.
+    pub adopted_at_ms: u64,
+}
+
+impl core::fmt::Debug for OwnPredecessor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnPredecessor")
+            .field("seed", &"<redacted>")
+            .field("adopted_at_ms", &self.adopted_at_ms)
+            .finish()
+    }
+}
 
 /// Identity signing-seed length (Ed25519 seed, mirrors
 /// `lakko_crypto::signing::SECRET_KEY_LEN`).
@@ -169,6 +312,26 @@ pub struct BackupPayload {
     /// `SyncedState::from_bytes` over it, so a payload carrying a state the
     /// fold would refuse is refused whole.
     pub synced_state: Vec<u8>,
+    /// The account's own predecessors, oldest first, at most
+    /// [`MAX_OWN_PREDECESSORS`]. Empty for an account that never rotated.
+    pub own_predecessors: Vec<OwnPredecessor>,
+    /// The account's own profile envelope (`lakko_contacts::profile`). Empty
+    /// when the person set no name. Opaque here, at most
+    /// [`MAX_OWN_ENVELOPE_LEN`] bytes.
+    pub own_profile: Vec<u8>,
+    /// The account's own "who can find me" envelope
+    /// (`lakko_contacts::visibility`). Empty when none was chosen. Opaque
+    /// here, at most [`MAX_OWN_ENVELOPE_LEN`] bytes.
+    pub visibility: Vec<u8>,
+    /// The newest profile envelope this device holds from each other person,
+    /// sorted by `person_key` with no key twice, at most
+    /// [`MAX_RECEIVED_PROFILES`] entries and [`MAX_RECEIVED_PROFILES_BYTES`]
+    /// in all. [`fit_received_profiles`] builds a list that satisfies this.
+    ///
+    /// On restore the client feeds each envelope through its ordinary profile
+    /// receive gate under `person_key`, so a newer name it already holds or
+    /// later receives always wins over the backed-up one.
+    pub received_profiles: Vec<ReceivedProfile>,
 }
 
 impl BackupPayload {
@@ -195,7 +358,19 @@ impl BackupPayload {
                 + 4
                 + (self.known_group_ids.len() * 36)
                 + 4
-                + self.synced_state.len(),
+                + self.synced_state.len()
+                + 1
+                + self.own_predecessors.len() * (PREDECESSOR_SEED_LEN + 8)
+                + 4
+                + self.own_profile.len()
+                + 4
+                + self.visibility.len()
+                + 4
+                + self
+                    .received_profiles
+                    .iter()
+                    .map(ReceivedProfile::wire_len)
+                    .sum::<usize>(),
         );
 
         out.push(PAYLOAD_VERSION);
@@ -246,6 +421,26 @@ impl BackupPayload {
         })?;
         out.extend_from_slice(&state_len.to_be_bytes());
         out.extend_from_slice(&self.synced_state);
+
+        // ADR-0074 section 3.7: the keys the conversations still name.
+        let predecessor_count = u8::try_from(self.own_predecessors.len())
+            .ok()
+            .filter(|count| usize::from(*count) <= MAX_OWN_PREDECESSORS)
+            .ok_or_else(|| {
+                BackupError::InvalidPayload(format!(
+                    "own_predecessors count {} exceeds {MAX_OWN_PREDECESSORS}",
+                    self.own_predecessors.len(),
+                ))
+            })?;
+        out.push(predecessor_count);
+        for predecessor in &self.own_predecessors {
+            out.extend_from_slice(&predecessor.seed);
+            out.extend_from_slice(&predecessor.adopted_at_ms.to_be_bytes());
+        }
+
+        put_own_envelope(&mut out, "own_profile", &self.own_profile)?;
+        put_own_envelope(&mut out, "visibility", &self.visibility)?;
+        put_received_profiles(&mut out, &self.received_profiles)?;
 
         Ok(out)
     }
@@ -322,6 +517,31 @@ impl BackupPayload {
         let synced_state = take_n(&mut cur, state_len)?.to_vec();
         check_synced_state(&synced_state)?;
 
+        let predecessor_count = usize::from(take_u8(&mut cur)?);
+        if predecessor_count > MAX_OWN_PREDECESSORS {
+            return Err(BackupError::InvalidPayload(format!(
+                "own_predecessors count {predecessor_count} exceeds {MAX_OWN_PREDECESSORS}",
+            )));
+        }
+        let mut own_predecessors = Vec::with_capacity(predecessor_count);
+        for _ in 0..predecessor_count {
+            let mut seed = [0u8; PREDECESSOR_SEED_LEN];
+            seed.copy_from_slice(take_n(&mut cur, PREDECESSOR_SEED_LEN)?);
+            let adopted_at_ms = u64::from_be_bytes(
+                take_n(&mut cur, 8)?
+                    .try_into()
+                    .expect("take_n(8) length pinned"),
+            );
+            own_predecessors.push(OwnPredecessor {
+                seed,
+                adopted_at_ms,
+            });
+        }
+
+        let own_profile = take_own_envelope(&mut cur, "own_profile")?;
+        let visibility = take_own_envelope(&mut cur, "visibility")?;
+        let received_profiles = take_received_profiles(&mut cur)?;
+
         if !cur.is_empty() {
             return Err(BackupError::InvalidPayload(format!(
                 "{} trailing bytes after payload tail",
@@ -336,8 +556,128 @@ impl BackupPayload {
             accepted_contacts,
             known_group_ids,
             synced_state,
+            own_predecessors,
+            own_profile,
+            visibility,
+            received_profiles,
         })
     }
+}
+
+/// Write one length-prefixed own envelope, refusing one over its cap.
+fn put_own_envelope(out: &mut Vec<u8>, field: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_OWN_ENVELOPE_LEN {
+        return Err(BackupError::InvalidPayload(format!(
+            "{field} length {} exceeds {MAX_OWN_ENVELOPE_LEN}",
+            bytes.len(),
+        )));
+    }
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| BackupError::InvalidPayload(format!("{field} length overflows u32")))?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Read one length-prefixed own envelope, checking the cap before the read.
+fn take_own_envelope(cur: &mut &[u8], field: &str) -> Result<Vec<u8>> {
+    let len =
+        u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("take_n(4) length pinned")) as usize;
+    if len > MAX_OWN_ENVELOPE_LEN {
+        return Err(BackupError::InvalidPayload(format!(
+            "{field} length {len} exceeds {MAX_OWN_ENVELOPE_LEN}",
+        )));
+    }
+    Ok(take_n(cur, len)?.to_vec())
+}
+
+/// Write the received-profile list, refusing one the decoder would refuse.
+fn put_received_profiles(out: &mut Vec<u8>, profiles: &[ReceivedProfile]) -> Result<()> {
+    if profiles.len() > MAX_RECEIVED_PROFILES {
+        return Err(BackupError::InvalidPayload(format!(
+            "received_profiles count {} exceeds {MAX_RECEIVED_PROFILES}",
+            profiles.len(),
+        )));
+    }
+    let mut bytes = 0usize;
+    let mut previous: Option<&[u8; RECEIVED_PROFILE_KEY_LEN]> = None;
+    for profile in profiles {
+        check_received_envelope_len(profile.envelope.len())?;
+        if previous.is_some_and(|p| p >= &profile.person_key) {
+            return Err(BackupError::InvalidPayload(
+                "received_profiles keys not strictly increasing".to_string(),
+            ));
+        }
+        previous = Some(&profile.person_key);
+        bytes += profile.wire_len();
+        if bytes > MAX_RECEIVED_PROFILES_BYTES {
+            return Err(BackupError::InvalidPayload(format!(
+                "received_profiles exceed {MAX_RECEIVED_PROFILES_BYTES} bytes",
+            )));
+        }
+    }
+    let count = u32::try_from(profiles.len())
+        .map_err(|_| BackupError::InvalidPayload("received_profiles count overflows".into()))?;
+    out.extend_from_slice(&count.to_be_bytes());
+    for profile in profiles {
+        out.extend_from_slice(&profile.person_key);
+        let len = u16::try_from(profile.envelope.len())
+            .map_err(|_| BackupError::InvalidPayload("received profile overflows u16".into()))?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&profile.envelope);
+    }
+    Ok(())
+}
+
+/// Read the received-profile list: count bound before any entry, length and
+/// running-size bounds before each read, keys strictly increasing.
+fn take_received_profiles(cur: &mut &[u8]) -> Result<Vec<ReceivedProfile>> {
+    let count =
+        u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("take_n(4) length pinned")) as usize;
+    if count > MAX_RECEIVED_PROFILES {
+        return Err(BackupError::InvalidPayload(format!(
+            "received_profiles count {count} exceeds {MAX_RECEIVED_PROFILES}",
+        )));
+    }
+    // Grown rather than pre-sized, like the group ids: the count is off the
+    // wire.
+    let mut profiles: Vec<ReceivedProfile> = Vec::new();
+    let mut bytes = 0usize;
+    for _ in 0..count {
+        let mut person_key = [0u8; RECEIVED_PROFILE_KEY_LEN];
+        person_key.copy_from_slice(take_n(cur, RECEIVED_PROFILE_KEY_LEN)?);
+        if profiles.last().is_some_and(|p| p.person_key >= person_key) {
+            return Err(BackupError::InvalidPayload(
+                "received_profiles keys not strictly increasing".to_string(),
+            ));
+        }
+        let len = usize::from(u16::from_be_bytes(
+            take_n(cur, 2)?.try_into().expect("take_n(2) length pinned"),
+        ));
+        check_received_envelope_len(len)?;
+        bytes += RECEIVED_PROFILE_OVERHEAD + len;
+        if bytes > MAX_RECEIVED_PROFILES_BYTES {
+            return Err(BackupError::InvalidPayload(format!(
+                "received_profiles exceed {MAX_RECEIVED_PROFILES_BYTES} bytes",
+            )));
+        }
+        let envelope = take_n(cur, len)?.to_vec();
+        profiles.push(ReceivedProfile {
+            person_key,
+            envelope,
+        });
+    }
+    Ok(profiles)
+}
+
+/// A received profile envelope is 1 to [`MAX_RECEIVED_PROFILE_LEN`] bytes.
+fn check_received_envelope_len(len: usize) -> Result<()> {
+    if len == 0 || len > MAX_RECEIVED_PROFILE_LEN {
+        return Err(BackupError::InvalidPayload(format!(
+            "received profile length {len} outside 1..={MAX_RECEIVED_PROFILE_LEN}",
+        )));
+    }
+    Ok(())
 }
 
 /// Refuse synced-state bytes the fold would refuse. Empty is "none held".
@@ -474,6 +814,10 @@ mod tests {
             ],
             known_group_ids: vec![vec![7u8; 32], vec![9u8; 32]],
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
+            received_profiles: Vec::new(),
         }
     }
 
@@ -537,16 +881,112 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_version_is_six() {
-        assert_eq!(PAYLOAD_VERSION, 6);
-        assert_eq!(sample_payload().encode().unwrap()[0], 6);
+    fn the_own_predecessors_round_trip_oldest_first() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![
+            OwnPredecessor {
+                seed: [1; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 10,
+            },
+            OwnPredecessor {
+                seed: [2; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 20,
+            },
+        ];
+        let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(decoded.own_predecessors, payload.own_predecessors);
     }
 
     #[test]
-    fn the_v6_wire_layout_is_pinned() {
+    fn a_predecessor_seed_never_reaches_a_debug_line() {
+        let predecessor = OwnPredecessor {
+            seed: [0xAB; PREDECESSOR_SEED_LEN],
+            adopted_at_ms: 10,
+        };
+        assert!(!format!("{predecessor:?}").contains("171"));
+    }
+
+    #[test]
+    fn more_predecessors_than_the_bound_are_refused_both_ways() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![
+            OwnPredecessor {
+                seed: [1; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 0,
+            };
+            MAX_OWN_PREDECESSORS + 1
+        ];
+        assert!(payload.encode().is_err());
+
+        payload.own_predecessors.truncate(MAX_OWN_PREDECESSORS);
+        let mut wire = payload.encode().unwrap();
+        let count_at = wire.len() - 12 - MAX_OWN_PREDECESSORS * (PREDECESSOR_SEED_LEN + 8) - 1;
+        wire[count_at] = u8::try_from(MAX_OWN_PREDECESSORS + 1).unwrap();
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn a_truncated_predecessor_is_refused() {
+        let mut payload = sample_payload();
+        payload.own_predecessors = vec![OwnPredecessor {
+            seed: [1; PREDECESSOR_SEED_LEN],
+            adopted_at_ms: 0,
+        }];
+        let mut wire = payload.encode().unwrap();
+        // Drop the two empty envelopes and the empty received list, then one
+        // byte of the predecessor.
+        wire.truncate(wire.len() - 12);
+        assert!(BackupPayload::decode(&wire[..wire.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn the_own_name_and_visibility_round_trip() {
+        let mut payload = sample_payload();
+        payload.own_profile = vec![1, 2, 3];
+        payload.visibility = vec![4, 5];
+        let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(decoded.own_profile, payload.own_profile);
+        assert_eq!(decoded.visibility, payload.visibility);
+    }
+
+    #[test]
+    fn an_own_envelope_over_its_cap_is_refused_both_ways() {
+        let mut payload = sample_payload();
+        payload.visibility = vec![0; MAX_OWN_ENVELOPE_LEN + 1];
+        assert!(payload.encode().is_err());
+
+        payload.visibility = Vec::new();
+        let mut wire = payload.encode().unwrap();
+        // The visibility length sits before the empty received list.
+        let at = wire.len() - 8;
+        let too_long = u32::try_from(MAX_OWN_ENVELOPE_LEN + 1).unwrap();
+        wire[at..at + 4].copy_from_slice(&too_long.to_be_bytes());
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn a_length_past_the_end_of_an_own_envelope_is_refused() {
+        let payload = sample_payload();
+        let mut wire = payload.encode().unwrap();
+        // Drop the received list so the visibility is the tail, then claim
+        // one byte of it.
+        wire.truncate(wire.len() - 4);
+        let tail = wire.len() - 4;
+        wire[tail..].copy_from_slice(&[0, 0, 0, 1]);
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn the_payload_version_is_eight() {
+        assert_eq!(PAYLOAD_VERSION, 8);
+        assert_eq!(sample_payload().encode().unwrap()[0], 8);
+    }
+
+    #[test]
+    fn the_v8_wire_layout_is_pinned() {
         // One contact with an account id, one 3-byte group id, no synced
-        // state: every field of the layout appears once, in order, and
-        // nothing sits between the contacts and the group ids.
+        // state, one predecessor: every field of the layout appears once, in
+        // order, and nothing sits between the contacts and the group ids.
         let payload = BackupPayload {
             account_id: [0xA1; ACCOUNT_ID_LEN],
             created_at_ms: 0x0102_0304_0506_0708,
@@ -559,8 +999,18 @@ mod tests {
             }],
             known_group_ids: vec![vec![7, 8, 9]],
             synced_state: Vec::new(),
+            own_predecessors: vec![OwnPredecessor {
+                seed: [0x77; PREDECESSOR_SEED_LEN],
+                adopted_at_ms: 0x1112_1314_1516_1718,
+            }],
+            own_profile: vec![0xAA, 0xAB],
+            visibility: vec![0xBB],
+            received_profiles: vec![ReceivedProfile {
+                person_key: [0x55; RECEIVED_PROFILE_KEY_LEN],
+                envelope: vec![0xC1, 0xC2, 0xC3],
+            }],
         };
-        let mut expected = vec![6u8];
+        let mut expected = vec![8u8];
         expected.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
         expected.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         expected.extend_from_slice(&[0x42; SEED_LEN]);
@@ -575,6 +1025,14 @@ mod tests {
         expected.extend_from_slice(&[0, 0, 0, 3]);
         expected.extend_from_slice(&[7, 8, 9]);
         expected.extend_from_slice(&[0, 0, 0, 0]);
+        expected.push(1);
+        expected.extend_from_slice(&[0x77; PREDECESSOR_SEED_LEN]);
+        expected.extend_from_slice(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+        expected.extend_from_slice(&[0, 0, 0, 2, 0xAA, 0xAB]);
+        expected.extend_from_slice(&[0, 0, 0, 1, 0xBB]);
+        expected.extend_from_slice(&[0, 0, 0, 1]);
+        expected.extend_from_slice(&[0x55; RECEIVED_PROFILE_KEY_LEN]);
+        expected.extend_from_slice(&[0, 3, 0xC1, 0xC2, 0xC3]);
         assert_eq!(payload.encode().unwrap(), expected);
         assert_eq!(BackupPayload::decode(&expected).unwrap(), payload);
     }
@@ -685,9 +1143,12 @@ mod tests {
         let mut good = sample_payload();
         good.synced_state = Vec::new();
         let mut wire = good.encode().unwrap();
-        wire.truncate(wire.len() - 4);
+        // The state's length, the predecessor count, two empty envelopes,
+        // the empty received list.
+        wire.truncate(wire.len() - 17);
         wire.extend_from_slice(&3u32.to_be_bytes());
         wire.extend_from_slice(&[9, 9, 9]);
+        wire.extend_from_slice(&[0; 13]);
         assert!(BackupPayload::decode(&wire).is_err());
     }
 
@@ -742,6 +1203,10 @@ mod tests {
             accepted_contacts: vec![],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
+            received_profiles: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
@@ -785,6 +1250,10 @@ mod tests {
             }],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
+            received_profiles: Vec::new(),
         };
         let err = payload.encode().unwrap_err();
         assert!(matches!(err, BackupError::InvalidPayload(_)));
@@ -804,6 +1273,10 @@ mod tests {
             }],
             known_group_ids: Vec::new(),
             synced_state: Vec::new(),
+            own_predecessors: Vec::new(),
+            own_profile: Vec::new(),
+            visibility: Vec::new(),
+            received_profiles: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
@@ -823,5 +1296,255 @@ mod tests {
         let opened = crate::envelope::open(phrase, &wire).unwrap();
         let decoded = BackupPayload::decode(&opened).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    fn received(key: u8, envelope: &[u8]) -> ReceivedProfile {
+        ReceivedProfile {
+            person_key: [key; RECEIVED_PROFILE_KEY_LEN],
+            envelope: envelope.to_vec(),
+        }
+    }
+
+    /// The wire of `payload` with its received list replaced by `entries`
+    /// written raw (key, u16 length, bytes), so the decoder sees what the
+    /// encoder refuses to write.
+    fn with_raw_received(payload: &BackupPayload, count: u32, entries: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut base = payload.clone();
+        base.received_profiles = Vec::new();
+        let mut wire = base.encode().unwrap();
+        wire.truncate(wire.len() - 4);
+        wire.extend_from_slice(&count.to_be_bytes());
+        for (key, envelope) in entries {
+            wire.extend_from_slice(&[*key; RECEIVED_PROFILE_KEY_LEN]);
+            wire.extend_from_slice(&u16::try_from(envelope.len()).unwrap().to_be_bytes());
+            wire.extend_from_slice(envelope);
+        }
+        wire
+    }
+
+    #[test]
+    fn the_received_profiles_round_trip() {
+        let mut payload = sample_payload();
+        payload.received_profiles = vec![received(1, b"one"), received(2, b"two")];
+        let wire = payload.encode().unwrap();
+        assert_eq!(BackupPayload::decode(&wire).unwrap(), payload);
+    }
+
+    #[test]
+    fn the_bound_is_the_profile_codecs_own() {
+        assert_eq!(
+            MAX_RECEIVED_PROFILE_LEN,
+            lakko_contacts::PROFILE_ENVELOPE_MAX_LEN
+        );
+    }
+
+    #[test]
+    fn a_v7_payload_is_refused() {
+        // A v7 body is a v8 body without the received list.
+        let mut wire = sample_payload().encode().unwrap();
+        wire.truncate(wire.len() - 4);
+        assert!(
+            BackupPayload::decode(&wire).is_err(),
+            "a v7 body stamped v8 decoded"
+        );
+        wire[0] = 7;
+        let err = BackupPayload::decode(&wire).unwrap_err();
+        assert!(
+            matches!(&err, BackupError::InvalidPayload(m) if m.contains("version 7")),
+            "a v7 payload was not refused on its version: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_envelope_out_of_its_bounds_is_refused_both_ways() {
+        let max = vec![0xE0; MAX_RECEIVED_PROFILE_LEN];
+        let over = vec![0xE0; MAX_RECEIVED_PROFILE_LEN + 1];
+        let mut payload = sample_payload();
+        payload.received_profiles = vec![received(1, &max)];
+        assert!(payload.encode().is_ok());
+        for bad in [&[][..], &over[..]] {
+            payload.received_profiles = vec![received(1, bad)];
+            assert!(payload.encode().is_err());
+            assert!(BackupPayload::decode(&with_raw_received(&payload, 1, &[(1, bad)])).is_err());
+        }
+    }
+
+    #[test]
+    fn keys_out_of_order_or_twice_are_refused_both_ways() {
+        let mut payload = sample_payload();
+        for keys in [[2u8, 1], [1, 1]] {
+            payload.received_profiles = vec![received(keys[0], b"a"), received(keys[1], b"b")];
+            assert!(payload.encode().is_err(), "{keys:?} encoded");
+            let wire = with_raw_received(&payload, 2, &[(keys[0], b"a"), (keys[1], b"b")]);
+            assert!(BackupPayload::decode(&wire).is_err(), "{keys:?} decoded");
+        }
+    }
+
+    #[test]
+    fn a_count_over_the_bound_is_refused_before_any_entry() {
+        let payload = sample_payload();
+        let count = u32::try_from(MAX_RECEIVED_PROFILES + 1).unwrap();
+        // No entries follow: the count alone must be refused.
+        let err = BackupPayload::decode(&with_raw_received(&payload, count, &[])).unwrap_err();
+        assert!(matches!(&err, BackupError::InvalidPayload(m) if m.contains("count")));
+        let mut too_many = sample_payload();
+        too_many.received_profiles = (0..=MAX_RECEIVED_PROFILES)
+            .map(|i| ReceivedProfile {
+                person_key: key_of(i),
+                envelope: vec![1],
+            })
+            .collect();
+        assert!(too_many.encode().is_err());
+    }
+
+    fn key_of(i: usize) -> [u8; RECEIVED_PROFILE_KEY_LEN] {
+        let mut key = [0u8; RECEIVED_PROFILE_KEY_LEN];
+        key[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        key
+    }
+
+    #[test]
+    fn a_list_over_the_byte_bound_is_refused_both_ways() {
+        let per = MAX_RECEIVED_PROFILE_LEN;
+        let fits = MAX_RECEIVED_PROFILES_BYTES / (RECEIVED_PROFILE_OVERHEAD + per);
+        assert!(
+            fits < MAX_RECEIVED_PROFILES,
+            "the byte bound must be the one that bites"
+        );
+        let list: Vec<ReceivedProfile> = (0..=fits)
+            .map(|i| ReceivedProfile {
+                person_key: key_of(i),
+                envelope: vec![0xE1; per],
+            })
+            .collect();
+        let mut payload = sample_payload();
+        payload.received_profiles = list[..fits].to_vec();
+        let wire = payload.encode().unwrap();
+        assert_eq!(BackupPayload::decode(&wire).unwrap(), payload);
+
+        payload.received_profiles = list.clone();
+        assert!(payload.encode().is_err());
+        // Hand-built: the same list, written raw.
+        let mut raw = sample_payload();
+        raw.received_profiles = Vec::new();
+        let mut wire = raw.encode().unwrap();
+        wire.truncate(wire.len() - 4);
+        wire.extend_from_slice(&u32::try_from(list.len()).unwrap().to_be_bytes());
+        for entry in &list {
+            wire.extend_from_slice(&entry.person_key);
+            wire.extend_from_slice(&u16::try_from(per).unwrap().to_be_bytes());
+            wire.extend_from_slice(&entry.envelope);
+        }
+        assert!(BackupPayload::decode(&wire).is_err());
+    }
+
+    #[test]
+    fn a_truncated_received_entry_is_refused() {
+        let mut payload = sample_payload();
+        payload.received_profiles = vec![received(1, b"abc")];
+        let wire = payload.encode().unwrap();
+        for cut in 1..=(RECEIVED_PROFILE_OVERHEAD + 3) {
+            assert!(
+                BackupPayload::decode(&wire[..wire.len() - cut]).is_err(),
+                "cut {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_keeps_the_first_per_key_drops_unusable_and_sorts() {
+        let fitted = fit_received_profiles(vec![
+            received(3, b"three"),
+            received(1, b"one"),
+            received(3, b"older three"),
+            received(2, b""),
+            received(4, &vec![0; MAX_RECEIVED_PROFILE_LEN + 1]),
+        ]);
+        assert_eq!(fitted, vec![received(1, b"one"), received(3, b"three")]);
+    }
+
+    #[test]
+    fn fitting_stops_at_the_count_bound_in_priority_order() {
+        let candidates: Vec<ReceivedProfile> = (0..MAX_RECEIVED_PROFILES + 10)
+            .rev()
+            .map(|i| ReceivedProfile {
+                person_key: key_of(i),
+                envelope: vec![1],
+            })
+            .collect();
+        let fitted = fit_received_profiles(candidates);
+        assert_eq!(fitted.len(), MAX_RECEIVED_PROFILES);
+        // The first candidates were the highest keys; the lowest ten lost.
+        assert_eq!(fitted[0].person_key, key_of(10));
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn candidate() -> impl Strategy<Value = ReceivedProfile> {
+            (
+                any::<[u8; 4]>(),
+                prop::collection::vec(any::<u8>(), 0..=MAX_RECEIVED_PROFILE_LEN + 2),
+            )
+                .prop_map(|(prefix, envelope)| {
+                    let mut person_key = [0u8; RECEIVED_PROFILE_KEY_LEN];
+                    person_key[..4].copy_from_slice(&prefix);
+                    ReceivedProfile {
+                        person_key,
+                        envelope,
+                    }
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Whatever a client hands in, the fitted list encodes, decodes to
+            /// itself, re-encodes to the same bytes, and keeps the bounds.
+            #[test]
+            fn a_fitted_list_round_trips_and_keeps_the_bounds(
+                candidates in prop::collection::vec(candidate(), 0..64),
+            ) {
+                let mut payload = sample_payload();
+                payload.received_profiles = fit_received_profiles(candidates.clone());
+                let wire = payload.encode().unwrap();
+                let decoded = BackupPayload::decode(&wire).unwrap();
+                prop_assert_eq!(&decoded, &payload);
+                prop_assert_eq!(decoded.encode().unwrap(), wire);
+                let list = &decoded.received_profiles;
+                prop_assert!(list.len() <= MAX_RECEIVED_PROFILES);
+                prop_assert!(
+                    list.iter().map(ReceivedProfile::wire_len).sum::<usize>()
+                        <= MAX_RECEIVED_PROFILES_BYTES
+                );
+                prop_assert!(list.windows(2).all(|w| w[0].person_key < w[1].person_key));
+                for kept in list {
+                    // The kept envelope is the first candidate for its key.
+                    let first = candidates.iter().find(|c| {
+                        c.person_key == kept.person_key
+                            && !c.envelope.is_empty()
+                            && c.envelope.len() <= MAX_RECEIVED_PROFILE_LEN
+                    });
+                    prop_assert_eq!(first.map(|c| &c.envelope), Some(&kept.envelope));
+                }
+            }
+
+            /// Arbitrary bytes after the visibility never panic the decoder,
+            /// and whatever it accepts re-encodes to the same bytes.
+            #[test]
+            fn an_arbitrary_received_tail_never_panics(
+                tail in prop::collection::vec(any::<u8>(), 0..512),
+            ) {
+                let mut base = sample_payload();
+                base.received_profiles = Vec::new();
+                let mut wire = base.encode().unwrap();
+                wire.truncate(wire.len() - 4);
+                wire.extend_from_slice(&tail);
+                if let Ok(decoded) = BackupPayload::decode(&wire) {
+                    prop_assert_eq!(decoded.encode().unwrap(), wire);
+                }
+            }
+        }
     }
 }

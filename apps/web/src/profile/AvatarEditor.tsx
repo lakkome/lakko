@@ -551,10 +551,12 @@ export function UnsavedChangesDialog(props: {
   readonly onSave: () => void;
   readonly onDiscard: () => void;
   readonly onCancel: () => void;
+  /** The body line, when another screen than the profile asks. */
+  readonly body?: string;
 }): JSX.Element {
   return (
     <ModalLayer open={props.open} title={t("profile.unsaved.title")} onClose={() => props.onCancel()}>
-      <p>{t("profile.unsaved.body")}</p>
+      <p>{props.body ?? t("profile.unsaved.body")}</p>
       <div class="lk-actions">
         <button type="button" class="primary" disabled={props.busy} onClick={() => props.onSave()}>
           {props.busy ? t("profile.save.saving") : t("profile.unsaved.save")}

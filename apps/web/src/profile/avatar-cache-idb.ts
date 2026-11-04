@@ -18,6 +18,7 @@
 
 import { accountStoresWritable } from "../auth/account-store-gate";
 import type { AvatarCacheBackend } from "./avatar-cache";
+import type { DeviceCipher } from "../auth/device-cipher";
 
 const DB_NAME = "lakko-avatars";
 const DB_VERSION = 1;
@@ -27,6 +28,8 @@ const IV_LEN = 12;
 interface PersistedRow {
   id: string;
   ciphertext: Uint8Array;
+  /** When the photo was last drawn, unix ms (absent on an older row: 0). */
+  drawnAt?: number;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -56,7 +59,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 export class IdbAvatarBackend implements AvatarCacheBackend {
   constructor(
     private readonly accountId: string,
-    private readonly deviceKey: () => Promise<CryptoKey | null>,
+    private readonly deviceKey: () => Promise<DeviceCipher | null>,
   ) {}
 
   private rowId(blobIdB64: string): string {
@@ -82,11 +85,7 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     if (row === undefined || row.ciphertext.length < IV_LEN + 16) return null;
     try {
       return new Uint8Array(
-        await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-          key,
-          row.ciphertext.slice(IV_LEN),
-        ),
+        await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
       );
     } catch {
       return null;
@@ -97,7 +96,7 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     const key = await this.deviceKey();
     if (key === null) return;
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, key, bytes.slice()));
+    const ct = new Uint8Array(await key.encrypt(iv.slice(), bytes.slice()));
     const ciphertext = new Uint8Array(IV_LEN + ct.length);
     ciphertext.set(iv, 0);
     ciphertext.set(ct, IV_LEN);
@@ -105,7 +104,51 @@ export class IdbAvatarBackend implements AvatarCacheBackend {
     try {
       if (!accountStoresWritable(this.accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put({ id: this.rowId(blobIdB64), ciphertext } satisfies PersistedRow);
+      tx.objectStore(STORE).put({ id: this.rowId(blobIdB64), ciphertext, drawnAt: Date.now() } satisfies PersistedRow);
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** The photo was drawn now: its row moves to the back of the eviction
+   *  order. */
+  async touch(blobIdB64: string): Promise<void> {
+    const db = await openDb();
+    try {
+      if (!accountStoresWritable(this.accountId)) return;
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const req = store.get(this.rowId(blobIdB64));
+      req.onsuccess = (): void => {
+        const row = req.result as PersistedRow | undefined;
+        if (row !== undefined) store.put({ ...row, drawnAt: Date.now() });
+      };
+      await awaitTx(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Drop this account's least recently drawn rows past `maxBytes`. */
+  async trim(maxBytes: number): Promise<void> {
+    const db = await openDb();
+    try {
+      if (!accountStoresWritable(this.accountId)) return;
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const req = store.getAll();
+      req.onsuccess = (): void => {
+        const rows = (req.result as PersistedRow[]).filter((r) => r.id.startsWith(`${this.accountId}|`));
+        let total = rows.reduce((n, r) => n + r.ciphertext.length, 0);
+        if (total <= maxBytes) return;
+        rows.sort((a, b) => (a.drawnAt ?? 0) - (b.drawnAt ?? 0));
+        for (const r of rows) {
+          if (total <= maxBytes) break;
+          store.delete(r.id);
+          total -= r.ciphertext.length;
+        }
+      };
       await awaitTx(tx);
     } finally {
       db.close();

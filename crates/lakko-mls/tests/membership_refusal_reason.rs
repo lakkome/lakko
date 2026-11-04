@@ -430,6 +430,7 @@ fn the_three_dispositions_partition_the_reasons_exactly_like_this() {
             RefusalReason::SweepAlreadyStaged,
             RefusalReason::DeviceLimitReached,
             RefusalReason::GroupKindChanged,
+            RefusalReason::GroupStillActive,
         ],
         "a refusal about the request's own state is never retryable, however \
          much the group's pending work drains",

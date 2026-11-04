@@ -19,6 +19,7 @@
  * `AuthContext.tsx` needs a Solid runtime this suite does not have, so that
  * both phrase routes reach this function is pinned on its source.
  */
+import { type DeviceCipher } from "../auth/device-cipher";
 import { beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,7 @@ import { MemoryStorage } from "../test/fake-storage";
 import type { AcceptedContact } from "../contacts/local-store";
 import type { RestoreGateContext, RestoreResult } from "./client";
 import {
+  prefetchAccountBackup,
   restoreAccountBackup,
   restoreOwedAccountBackup,
   type AccountBackupRestoreDeps,
@@ -46,7 +48,7 @@ import {
 
 const ACCOUNT_BYTES = new Uint8Array(16).fill(0x42);
 const ACCOUNT = "QkJCQkJCQkJCQkJCQkJCQg==";
-const DEVICE_KEY = { fake: "device-key" } as unknown as CryptoKey;
+const DEVICE_KEY = { fake: "device-key" } as unknown as DeviceCipher;
 const PHRASE = "abandon ability able about above absent absorb abstract";
 const G1 = "ZzEtZ3JvdXAtaWQ=";
 const G2 = "ZzItZ3JvdXAtaWQ=";
@@ -68,6 +70,9 @@ function restored(overrides: Partial<Extract<RestoreResult, { kind: "restored" }
     acceptedContacts: [CONTACT],
     knownGroupIds: [G1, G2],
     syncedState: SYNCED,
+    ownPredecessors: [],
+    ownProfile: new Uint8Array(0),
+    visibility: new Uint8Array(0),
     ...overrides,
   };
 }
@@ -87,6 +92,7 @@ interface Harness {
   readonly fetched: { phrase: string; token: string; gate: RestoreGateContext }[];
   readonly contacts: AcceptedContact[];
   readonly synced: Uint8Array[];
+  readonly ownState: { ownProfile: Uint8Array; visibility: Uint8Array }[];
   alerts: number;
 }
 
@@ -101,6 +107,7 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
     fetched: [],
     contacts: [],
     synced: [],
+    ownState: [],
     alerts: 0,
     deps: {
       fetch: async (phraseBytes, sessionToken, gate) => {
@@ -119,6 +126,16 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
       rememberKnownGroups: (accountIdB64, ids) => {
         h.calls.push(`rememberKnownGroups ${accountIdB64}`);
         addRestoredKnownGroups(accountIdB64, ids, storage);
+      },
+      applyOwnState: async (accountIdB64, own) => {
+        h.calls.push(`applyOwnState ${accountIdB64}`);
+        h.ownState.push(own);
+      },
+      applyOwnPredecessors: async (accountIdB64) => {
+        h.calls.push(`applyOwnPredecessors ${accountIdB64}`);
+      },
+      markRestored: (accountIdB64, conversations) => {
+        h.calls.push(`markRestored ${accountIdB64} ${conversations}`);
       },
       markOwed: (accountIdB64) => markBackupRestoreOwed(accountIdB64, storage),
       clearOwed: (accountIdB64) => {
@@ -152,6 +169,108 @@ async function quietly<T>(run: () => Promise<T>): Promise<{ value: T; logged: st
   }
 }
 
+const OWN_PREDECESSORS = [
+  { seedB64: "b2xkZXN0", adoptedAtMs: 10 },
+  { seedB64: "bmV3ZXI=", adoptedAtMs: 20 },
+];
+
+describe("the own predecessors in a restore (ADR-0074 section 3.7)", () => {
+  it("are stored first, and the session rebinds before anything else is applied", async () => {
+    const h = harness(async () => restored({ ownPredecessors: OWN_PREDECESSORS }));
+    const held: (readonly unknown[])[] = [];
+    await restoreAccountBackup(
+      { ...INPUTS, onOwnPredecessorsStored: async () => h.calls.push("rebind") },
+      {
+        ...h.deps,
+        applyOwnPredecessors: async (accountIdB64, deviceKey, own) => {
+          h.calls.push(`applyOwnPredecessors ${accountIdB64}`);
+          held.push(own);
+          expect(deviceKey).toBe(DEVICE_KEY);
+        },
+      },
+    );
+    expect(held).toEqual([OWN_PREDECESSORS]);
+    expect(h.calls.slice(0, 4)).toEqual([
+      "fetch",
+      `applyOwnPredecessors ${ACCOUNT}`,
+      "rebind",
+      `applyContacts ${ACCOUNT}`,
+    ]);
+  });
+
+  it("a backup with none neither stores nor rebinds", async () => {
+    const h = harness(async () => restored());
+    await restoreAccountBackup(
+      { ...INPUTS, onOwnPredecessorsStored: async () => h.calls.push("rebind") },
+      h.deps,
+    );
+    expect(h.calls).not.toContain("rebind");
+    expect(h.calls).not.toContain(`applyOwnPredecessors ${ACCOUNT}`);
+  });
+
+  it("a failed store does not rebind and does not lose the rest of the restore", async () => {
+    const h = harness(async () => restored({ ownPredecessors: OWN_PREDECESSORS }));
+    const { value } = await quietly(() =>
+      restoreAccountBackup(
+        { ...INPUTS, onOwnPredecessorsStored: async () => h.calls.push("rebind") },
+        {
+          ...h.deps,
+          applyOwnPredecessors: async () => {
+            throw new Error("no store");
+          },
+        },
+      ),
+    );
+    expect(value.kind).toBe("applied");
+    expect(h.calls).not.toContain("rebind");
+  });
+
+  it("the landing that holds the phrase fetches once, ahead of the install", async () => {
+    const h = harness(async () => restored({ ownPredecessors: OWN_PREDECESSORS }));
+    await prefetchAccountBackup(INPUTS, h.deps);
+    // Stored before anything is bound; nothing else is applied yet.
+    expect(h.calls).toEqual(["fetch", `applyOwnPredecessors ${ACCOUNT}`]);
+    const outcome = await restoreAccountBackup(INPUTS, h.deps);
+    expect(outcome.kind).toBe("applied");
+    expect(h.calls.filter((c) => c === "fetch")).toHaveLength(1);
+    expect(h.contacts).toEqual([CONTACT]);
+  });
+
+  it("a fetch ahead of the landing that failed leaves the restore its own fetch", async () => {
+    let attempts = 0;
+    const h = harness(async () => {
+      attempts += 1;
+      return attempts === 1 ? { kind: "transport-failed", cause: new Error("offline") } : restored();
+    });
+    await prefetchAccountBackup(INPUTS, h.deps);
+    expect(h.calls).toEqual(["fetch"]);
+    const outcome = await restoreAccountBackup(INPUTS, h.deps);
+    expect(outcome.kind).toBe("applied");
+    expect(h.calls.filter((c) => c === "fetch")).toHaveLength(2);
+  });
+
+  it("a landing with nothing in hand passes the rebind on to the restore", async () => {
+    const h = harness(async () => restored({ ownPredecessors: OWN_PREDECESSORS }));
+    markBackupRestoreOwed(ACCOUNT, h.storage);
+    await restoreOwedAccountBackup(
+      {
+        accountIdBytes: ACCOUNT_BYTES,
+        accountIdB64: ACCOUNT,
+        sessionToken: INPUTS.sessionToken,
+        deviceKey: async () => DEVICE_KEY,
+        onOwnPredecessorsStored: async () => h.calls.push("rebind"),
+      },
+      {
+        isOwed: () => true,
+        clearOwed: () => undefined,
+        cachedPhrase: async () => PHRASE,
+        restore: (inputs) => restoreAccountBackup(inputs, h.deps),
+      },
+    );
+    expect(h.calls).toContain("rebind");
+  });
+});
+
 describe("restoreAccountBackup", () => {
   it("applies the contacts, the synced state and the known conversations", async () => {
     const h = harness(async () => restored());
@@ -167,8 +286,31 @@ describe("restoreAccountBackup", () => {
       `applyContacts ${ACCOUNT}`,
       `applySyncedState ${ACCOUNT} true`,
       `rememberKnownGroups ${ACCOUNT}`,
+      `applyOwnState ${ACCOUNT}`,
       "clearOwed",
+      `markRestored ${ACCOUNT} 2`,
     ]);
+    expect(isBackupRestoreOwed(ACCOUNT, h.storage)).toBe(false);
+  });
+
+  it("hands over the own profile and the setting, before the owed flag goes", async () => {
+    const ownProfile = new Uint8Array([1, 2]);
+    const visibility = new Uint8Array([3]);
+    const h = harness(async () => restored({ ownProfile, visibility }));
+    await restoreAccountBackup(INPUTS, h.deps);
+    expect(h.ownState).toEqual([{ ownProfile, visibility }]);
+  });
+
+  it("a failure of the own state costs the rest of the restore nothing", async () => {
+    const h = harness(async () => restored());
+    const deps = {
+      ...h.deps,
+      applyOwnState: async () => {
+        throw new Error("no");
+      },
+    };
+    const { value } = await quietly(() => restoreAccountBackup(INPUTS, deps));
+    expect(value).toEqual({ kind: "applied", contacts: 1, knownGroups: 2 });
     expect(isBackupRestoreOwed(ACCOUNT, h.storage)).toBe(false);
   });
 
@@ -192,10 +334,13 @@ describe("restoreAccountBackup", () => {
     expect(Object.keys(h.deps).sort()).toEqual([
       "alertRollbackRefused",
       "applyContacts",
+      "applyOwnPredecessors",
+      "applyOwnState",
       "applySyncedState",
       "clearOwed",
       "fetch",
       "markOwed",
+      "markRestored",
       "rememberKnownGroups",
     ]);
     expect(Object.keys(restored()).sort()).toEqual([
@@ -205,7 +350,10 @@ describe("restoreAccountBackup", () => {
       "ed25519Seed",
       "kind",
       "knownGroupIds",
+      "ownPredecessors",
+      "ownProfile",
       "syncedState",
+      "visibility",
     ]);
   });
 

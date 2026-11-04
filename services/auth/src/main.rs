@@ -168,6 +168,8 @@
 //! - `DELETE /recovery-email/vault`  — the account becomes phrase-protected: delete the vault,
 //!   mark the account, write the notice (bearer-auth + `fresh_grant`)
 //! - `GET  /account/notices?after=`  — what happened to the account, for its own devices
+//! - `GET  /account/phrase`           — `{saved, rotation_needed}`: whether saving a phrase takes a key rotation
+//! - `POST /account/phrase/saved`     — the owner saved a phrase that was never in a vault (fresh-auth grant)
 //!   (ADR-0075 section 9, bearer-auth; kept 60 days)
 //! - `POST /recovery-email/recover/start` — mail a code if the handle and address belong
 //!   together; one answer for a match and a miss (ADR-0075 section 7, anonymous)
@@ -211,6 +213,7 @@ mod login_handle;
 mod mail;
 mod opaque;
 mod passkey_vault;
+mod phrase_saved;
 mod pow;
 mod recall;
 #[cfg(test)]
@@ -779,6 +782,10 @@ fn build_app(state: AppState) -> Router {
             put(recovery_email::put_vault).delete(recovery_email::remove_vault),
         )
         .route("/account/notices", get(account_notices::list))
+        // ADR-0075 section 3, amended 2026-11-01 - saving a phrase that was
+        // never sealed in an email vault changes no key.
+        .route("/account/phrase", get(phrase_saved::status))
+        .route("/account/phrase/saved", post(phrase_saved::mark))
         .route("/auth/session/logout", post(session::logout))
         .route("/auth/session/bind-device", post(session::bind_device))
         .route("/account/devices/revoke", post(devices::revoke))

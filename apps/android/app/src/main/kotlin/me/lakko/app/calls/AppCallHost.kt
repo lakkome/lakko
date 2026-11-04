@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import android.content.Context
+import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.peerProfileOf
 import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
@@ -85,6 +86,7 @@ public object AppCallHost {
             },
             onSlotChanged = { occupied -> instance.setOtherCallActive(GROUP_SLOT_KEY, occupied) },
             notifyEndedForEveryone = { name -> endedForEveryone.show(name) },
+            notifyNoLongerInGroup = { endedForEveryone.showLine(UiText("call.ended.no_longer_in_group")) },
         )
     }
 
@@ -127,6 +129,9 @@ public object AppCallHost {
 
     private var idleSubscription: (() -> Unit)? = null
 
+    /** Dropped when another repository attaches. */
+    private var membershipEndSubscription: (() -> Unit)? = null
+
     /**
      * Install the platform effects for the current activity's repository. An
      * activity recreate builds a new repository, so this runs each time and
@@ -157,6 +162,11 @@ public object AppCallHost {
         // G-18 / ADR-0029 — the hosted group call rekeys whenever its group's
         // MLS work settles, whichever receive path applied it.
         idleSubscription = repository.addGroupMlsIdleListener { groupIdHex -> group.onGroupSettled(groupIdHex) }
+        // ADR-0087 UX 9.1 - this account is out of the group a call is in.
+        membershipEndSubscription?.invoke()
+        membershipEndSubscription = repository.addMembershipEndListener { groupIdHex ->
+            group.onMembershipEnded(groupIdHex)
+        }
     }
 
     /**
@@ -288,7 +298,7 @@ public class ChatRepositoryCallPort(
     override fun createSession(
         groupIdHex: String,
         callId: ByteArray,
-        outbound: (ByteArray) -> Unit,
+        outbound: (ByteArray, CallSignalingWake) -> Unit,
     ): CallSession = CallSession(
         applicationContext = applicationContext,
         callId = callId,
@@ -319,14 +329,16 @@ public class ChatRepositoryCallPort(
      * ICE candidate, end — drained by [OneToOneCallHost]'s outbound queue.
      *
      * The push wake that makes a closed callee ring (`docs/ux/calls.md` §2.1)
-     * is fired inside [ChatRepository.publishApplicationMessage], decided from
-     * these very bytes by [shouldWakeForCallSignaling], not chosen here: this
-     * sink sees all four 1x1 frames and only two of them may wake anyone, so
-     * asking it to pass a flag would put the rule in a place that has no way to
-     * tell them apart without re-reading the bytes anyway.
+     * is fired inside [ChatRepository.publishApplicationMessage]: the session
+     * says which frames ring someone or stop a ring ([OneToOneCallWakes]: the
+     * dial offer, the End of a call that never connected), and
+     * [shouldWakeForCallSignaling] still refuses a wake for any frame that is
+     * not an offer or an end. The bytes alone cannot decide: a renegotiation
+     * offer and the End of a connected call carry the same tags, and a wake on
+     * either rang the peer's iPhone.
      */
-    override suspend fun publish(groupIdHex: String, bytes: ByteArray) {
-        repository.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+    override suspend fun publish(groupIdHex: String, bytes: ByteArray, wake: CallSignalingWake) {
+        repository.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes, wake = wake)
     }
 
     override fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray? =

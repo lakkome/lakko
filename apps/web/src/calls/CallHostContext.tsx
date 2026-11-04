@@ -90,6 +90,7 @@ import {
 } from "solid-js";
 import { A } from "@solidjs/router";
 
+import { captureGate } from "../platform/capture-gate";
 import { cameraStartFailure } from "./capture-fallback";
 import { composeAndUploadCallInvite } from "./composer";
 import { rememberMintedLink } from "../contacts/minted-links";
@@ -138,7 +139,11 @@ import {
 } from "./quiet-call-offer";
 import { ChatClient } from "../chat/client";
 import { sealedWakeForGroup } from "../push/group-routing";
-import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
+import {
+  makeCallSignalingPublisher,
+  makeGroupCallControlPublisher,
+} from "../chat/call-signaling-publish";
+import type { CallSignalingWake } from "./call-signaling-wake";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
@@ -190,6 +195,7 @@ import { decideInboundSignaling } from "./call-host-routing";
 import { CallSoundController } from "./CallSoundController";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { CallJwtClient, turnProviderForCall } from "./call-jwt-client";
 import { groupPeerAnnouncer } from "./call-relay";
 import {
@@ -277,6 +283,8 @@ export interface CallHostApi {
    * boundary around an attacker-influenceable input.
    */
   readonly ringingCallIdHex: Accessor<string | null>;
+  /** The ringing call was offered with video. */
+  readonly ringingOfferedVideo: Accessor<boolean>;
   /**
    * The muted conversation's call, offered quietly
    * (`docs/ux/calls.md` section 2.1.1), or `null`.
@@ -497,6 +505,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const ownTileName = (): string =>
     profiles.ownProfile().displayName?.trim() || t("call.participant.you");
   const callLog = useCallLog();
+  const membershipEnd = useMembershipEnd();
   const groupNames = useGroupNames();
 
   // Seals and publishes signaling through the locked, fail-closed-persisting
@@ -523,7 +532,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [endedForEveryoneNotice, setEndedForEveryoneNotice] = createSignal<string | null>(null);
   let endedForEveryoneTimer: ReturnType<typeof setTimeout> | null = null;
   function showEndedForEveryone(starterName: string | null): void {
-    setEndedForEveryoneNotice(endedForEveryoneLine(starterName));
+    showCallEndedLine(endedForEveryoneLine(starterName));
+  }
+  function showCallEndedLine(line: string): void {
+    setEndedForEveryoneNotice(line);
     if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
     endedForEveryoneTimer = setTimeout(() => {
       endedForEveryoneTimer = null;
@@ -681,6 +693,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     readonly startedAtMs: number;
     /** When media first flowed, or `null` if it never did. */
     connectedAtMs: number | null;
+    /** This device pressed Accept: a call that then never connected failed,
+     *  it was not missed. */
+    accepted: boolean;
     /** The reason the recorded row was written from, so a second terminal
      *  report that carries no reason cannot overwrite one that did. */
     recordedWithReason: boolean;
@@ -703,7 +718,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const connected = j.connectedAtMs !== null;
     const entry: CallLogEntry = {
       id: j.callIdHex,
-      outcome: classifyCallOutcome({ incoming: j.incoming, connected, reason }),
+      outcome: classifyCallOutcome({ incoming: j.incoming, connected, accepted: j.accepted, reason }),
       video: j.video,
       // `null`, not zero: a call that never connected has no duration, and
       // `Outgoing call, 0:00` would report a conversation that did not happen.
@@ -730,6 +745,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       video,
       startedAtMs: Date.now(),
       connectedAtMs: null,
+      accepted: false,
       recordedWithReason: false,
     };
   }
@@ -800,7 +816,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     return memberKeysOf(entry.group).find((k) => k !== ownKeyB64) ?? null;
   }
 
-  function publisherFor(groupIdB64: string): (bytes: Uint8Array) => Promise<void> {
+  function publisherFor(
+    groupIdB64: string,
+  ): (bytes: Uint8Array, wake: CallSignalingWake) => Promise<void> {
     return makeCallSignalingPublisher({
       chat,
       identity: () => auth.identitySecrets(),
@@ -880,7 +898,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
               detachScreenShare: () => session.detachScreenShare(),
             },
             publish: (signal) => {
-              void publisherFor(groupIdB64)(signal);
+              // Screen-share state belongs to a connected call: never a wake.
+              void publisherFor(groupIdB64)(signal, "none");
             },
             nameOf: (personKeyB64) => callNameOfPerson(personKeyB64) ?? "",
             notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
@@ -1038,12 +1057,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (s === "connected") startOneToOneShare(session, groupIdB64, callId);
         if (s === "done") {
           endOneToOneShare(session);
-          if (callJournal?.session === session) recordOneToOneCall(reason);
+          if (callJournal?.session === session && !session.neverPlaced()) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
           setSilentRing(false);
           setQuietOffer(null);
-          if (reason !== undefined) setLastEnded({ groupIdB64, reason });
+          if (reason !== undefined && !session.neverPlaced()) setLastEnded({ groupIdB64, reason });
           setRemoteStream(null);
           setLocalStream(null);
           setVideoCall(false);
@@ -1222,7 +1241,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           return;
         case "busy":
           endedCallIds.add(hex);
-          await publisherFor(item.groupIdB64)(wasm.composeCallEndSignaling(parsed.callId, "busy"));
+          // An End for a call this device never took: it stops the ring the
+          // caller started, so it keeps its wake like any unanswered call's End.
+          await publisherFor(item.groupIdB64)(
+            wasm.composeCallEndSignaling(parsed.callId, "busy"),
+            "call",
+          );
           return;
         case "ring":
         case "silent": {
@@ -1349,9 +1373,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  async function dial(askedGroupIdB64: string, withVideo: boolean): Promise<void> {
+  async function dial(askedGroupIdB64: string, askedVideo: boolean): Promise<void> {
     if (currentOccupant() !== null) return;
     if (groupEntry(askedGroupIdB64) === undefined) return;
+    // The refusal screen of the desktop; the gate can sit there for as long
+    // as the person takes, so the slot is read again after it.
+    const permits = await captureGate({ audio: true, video: askedVideo });
+    if (!permits.microphone || currentOccupant() !== null) return;
+    const withVideo = askedVideo && permits.camera;
     // ADR-0073 R.12 — never signal into a dead session: the call is placed
     // in the conversation's successor when this device holds one, and
     // otherwise does not start (the caller shows its ordinary
@@ -1392,6 +1421,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // A later call has the slot: this one was already over, and neither its
       // failure nor its video flag belongs to the call that replaced it.
       if (slotSession !== session) return;
+      // A call that never rang anywhere leaves no trace: no row in the
+      // conversation and no "last call ended" line beside the one sentence
+      // the caller shows for this failure.
+      if (callJournal?.session === session) callJournal = null;
+      setLastEnded(null);
       // `dial` drives the session to `done` on a capture / setup failure; make
       // sure the slot is free even if it threw before reporting a state.
       if (activeCall === session) {
@@ -1404,10 +1438,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  async function accept(withVideo: boolean): Promise<void> {
+  async function accept(askedVideo: boolean): Promise<void> {
     const call = activeCall;
     if (call === null) return;
+    const permits = await captureGate({ audio: true, video: askedVideo });
+    // Refused with the ring still on: the person can still decline, or come
+    // back to Accept. It may also have stopped ringing while the screen was up.
+    if (!permits.microphone || activeCall !== call || call.getState() !== "ringing") return;
+    const withVideo = askedVideo && permits.camera;
     if (withVideo) setVideoCall(true);
+    if (callJournal?.session === call) callJournal.accepted = true;
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
     // caller uses (see the camera effect below). Only for the call that was
@@ -1604,7 +1644,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       try {
         const wasm = await loadWasm();
         const bytes = compose(wasm);
-        await makeCallSignalingPublisher({
+        // No group-call frame wakes anyone, an End included: a group call
+        // never rings a closed device, so there is no ring to stop.
+        await makeGroupCallControlPublisher({
           chat,
           identity: () => auth.identitySecrets(),
           group: () => {
@@ -1643,6 +1685,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * (see `onGroupSessionState`); leaving is `leaveGroupCall`.
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
+    // Before the latch below: a group call goes on whatever the answer is,
+    // since a person with no microphone can still listen and watch
+    // (`capture-fallback.ts`).
+    await captureGate({ audio: true, video: opts.withVideo });
     {
       // The slot is the latch: it is written below with no await in between,
       // so a double tap finds it taken.
@@ -2235,6 +2281,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       case "end-locally":
         // Nothing can be published to a group this device has left.
         releaseGroupSlot();
+        // ADR-0087 section 9 - the person is out of the group, not only this
+        // device: the same batch is ending the conversation.
+        if (membershipEnd.isEnding(groupIdB64)) showCallEndedLine(t("call.ended.no_longer_in_group"));
         return;
       case "rekey": {
         const id = chats.identity();
@@ -2251,6 +2300,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
   onCleanup(onGroupMlsIdle(onGroupMlsSettled));
+  // ADR-0087 section 9 - an end heard from the account's other devices: this
+  // group's handle may still be active, so no lock drain ends the call.
+  onCleanup(
+    membershipEnd.registerCallStop((groupIdB64) => {
+      if (groupSlot()?.groupIdB64 !== groupIdB64) return;
+      releaseGroupSlot();
+      showCallEndedLine(t("call.ended.no_longer_in_group"));
+    }),
+  );
   onCleanup(() => {
     if (activeGroupCall !== null) stopGroupHeartbeat(activeGroupCall);
   });
@@ -2916,6 +2974,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       queue = newQueue();
       endedCallIds.clear();
       clearGroupCallStore();
+      // The shared call screen follows the session's state, and a session
+      // ended here may never report `done` (its End cannot be published
+      // without a session), so the screen would stay on `Calling...` and keep
+      // looping the outgoing tone on the sign-in page (seen live 2026-10-29,
+      // stopped only by a reload). Nothing of a call survives a sign-out.
+      callActions.reset();
     });
   });
 
@@ -2949,6 +3013,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // time this reads `"ringing"` the call is there.
     ringingCallIdHex: () =>
       state() === "ringing" && activeCall !== null ? callIdHex(activeCall.callId) : null,
+    ringingOfferedVideo: remoteWantsVideo,
     // The clock is read here rather than kept in a signal: the sweep above is
     // what makes the surfaces disappear, and this is the guard that stops a
     // tick that has not landed yet from leaving a dead Accept on screen.

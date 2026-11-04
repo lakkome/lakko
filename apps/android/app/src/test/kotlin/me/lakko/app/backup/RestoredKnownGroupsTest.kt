@@ -162,6 +162,8 @@ class RestoredKnownGroupsTest {
     private fun driver(
         scope: kotlinx.coroutines.CoroutineScope,
         uploader: AutoBackupDriver.Uploader,
+        ownPredecessors: (String) -> List<uniffi.lakko_ffi_uniffi.BackupOwnPredecessor> = { emptyList() },
+        personal: (String) -> BackupPersonal = { BackupPersonal.NONE },
         held: () -> List<String>?,
     ) = AutoBackupDriver(
         applicationContext = context,
@@ -173,9 +175,53 @@ class RestoredKnownGroupsTest {
             accountIdentitySeed = { ByteArray(64) },
             knownGroupIds = held,
             syncedState = { byteArrayOf(1) },
+            ownPredecessors = ownPredecessors,
+            personal = personal,
         ),
         uploader = uploader,
     )
+
+    @Test
+    fun `a change of name, photo or setting gets a backup out, carrying them`() = runTest {
+        val uploader = RecordingUploader()
+        var personal = BackupPersonal(byteArrayOf(1), byteArrayOf(2))
+        val d = driver(this, uploader, personal = { personal }) { listOf(own) }
+        assertEquals(AutoBackupDriver.Outcome.UPLOADED, d.runOnce(nowMs = 1_000))
+        assertEquals(personal, uploader.requests.last().personal)
+        // Nothing moved: nothing goes out.
+        assertEquals(AutoBackupDriver.Outcome.CLEAN, d.runOnce(nowMs = 1_000 + AutoBackup.MIN_INTERVAL_MS + 1))
+        personal = BackupPersonal(byteArrayOf(9), byteArrayOf(2))
+        assertEquals(
+            AutoBackupDriver.Outcome.UPLOADED,
+            d.runOnce(nowMs = 2_000 + AutoBackup.MIN_INTERVAL_MS),
+        )
+        assertEquals(personal, uploader.requests.last().personal)
+    }
+
+    @Test
+    fun `every upload carries the account's own predecessors and zeroes them after`() = runTest {
+        AutoBackupStore.markDirty(context, a, 1)
+        val row = uniffi.lakko_ffi_uniffi.BackupOwnPredecessor(ByteArray(64) { 5 }, 1_000uL)
+        var carried: Byte? = null
+        val uploader = AutoBackupDriver.Uploader { request ->
+            carried = request.ownPredecessors.single().seed[0]
+            UploadResult.Uploaded
+        }
+        val outcome = driver(this, uploader, ownPredecessors = { listOf(row) }) { listOf(own) }.runOnce(nowMs = 1_000)
+        assertEquals(AutoBackupDriver.Outcome.UPLOADED, outcome)
+        assertEquals(5.toByte(), carried)
+        assertTrue(row.seed.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `a predecessor store that cannot be read fails the upload rather than leaving them out`() = runTest {
+        AutoBackupStore.markDirty(context, a, 1)
+        val uploader = RecordingUploader()
+        val driver = driver(this, uploader, ownPredecessors = { throw IllegalStateException("store") }) { listOf(own) }
+        assertEquals(AutoBackupDriver.Outcome.FAILED, driver.runOnce(nowMs = 1_000))
+        assertTrue(uploader.requests.isEmpty())
+        assertTrue("the change is not lost", AutoBackupStore.load(context, a).dirtySinceMs != null)
+    }
 
     @Test
     fun `the upload after a restore carries the restored groups plus the device's own`() = runTest {
@@ -223,6 +269,10 @@ class RestoredKnownGroupsTest {
         override suspend fun fetch(
             confirmStaleOverride: suspend (RestoreReason) -> Boolean,
         ): GatedRestoreOutcome = answers.removeAt(0)
+        override fun storeOwnPredecessors(
+            predecessors: List<uniffi.lakko_ffi_uniffi.BackupOwnPredecessor>,
+        ): OwnPredecessorsStored? = OwnPredecessorsStored(conversationKeyChanged = false)
+        override suspend fun rebindConversationKey() = Unit
         override fun mergeContacts(
             contacts: List<uniffi.lakko_ffi_uniffi.BackupContactRecord>,
             createdAtMs: ULong,
@@ -230,6 +280,10 @@ class RestoredKnownGroupsTest {
         override fun mergeSyncedState(bytes: ByteArray) = Unit
         override fun rememberRestoredGroups(groupIdsHex: List<String>) =
             BackupRestoreStore.addRestoredGroups(context, a, groupIdsHex, heldIdsHex = listOf(own))
+        override fun applyOwnProfile(envelope: ByteArray) = Unit
+        override fun applyVisibility(envelope: ByteArray) = Unit
+        override fun noteEveryoneUnknown() = Unit
+        override fun markRestored(knewConversations: Boolean) = Unit
         override fun markBackupDirty() = AutoBackupStore.markDirty(context, a, 1)
         override fun setRetryPending(pending: Boolean) = BackupRestoreStore.setRetryPending(context, a, pending)
         override fun retryPending(): Boolean = BackupRestoreStore.retryPending(context, a)
@@ -251,6 +305,9 @@ class RestoredKnownGroupsTest {
                     acceptedContacts = emptyList(),
                     knownGroupIds = listOf(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 }),
                     syncedState = ByteArray(0),
+                    ownPredecessors = emptyList(),
+                    ownProfile = ByteArray(0),
+                    visibility = ByteArray(0),
                 ),
             ),
         )

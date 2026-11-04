@@ -102,6 +102,9 @@ public interface ProfileRequestStore {
 
     /** Forget every group's stamp for [accountIdB64] (forget device). */
     public fun deleteAccount(accountIdB64: String)
+
+    /** Forget one group's stamp (ADR-0087 section 9). */
+    public fun deleteGroup(accountIdB64: String, groupIdHex: String)
 }
 
 /** An in-memory [ProfileRequestStore] for tests and for a caller with no
@@ -120,6 +123,10 @@ public class InMemoryProfileRequestStore : ProfileRequestStore {
 
     override fun deleteAccount(accountIdB64: String) {
         synchronized(rows) { rows.keys.removeAll { it.startsWith("$accountIdB64:") } }
+    }
+
+    override fun deleteGroup(accountIdB64: String, groupIdHex: String) {
+        synchronized(rows) { rows.keys.removeAll { it.startsWith("$accountIdB64:") && it.endsWith(groupIdHex.lowercase()) } }
     }
 }
 
@@ -147,6 +154,10 @@ public class ProfileRequestPrefsStore(context: Context) : ProfileRequestStore {
         val e = prefs.edit()
         for (k in prefs.all.keys) if (k.startsWith(prefix)) e.remove(k)
         e.apply()
+    }
+
+    override fun deleteGroup(accountIdB64: String, groupIdHex: String) {
+        prefs.edit().remove(key(accountIdB64, groupIdHex)).apply()
     }
 
     private companion object {

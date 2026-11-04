@@ -47,6 +47,8 @@ lakko-sync.workspace = true
 # ADR-0064 / ADR-0065: the conversation vault (names and keys, sealed
 # objects, the storage request proof, the saved-record codec, the merge).
 lakko-vault.workspace = true
+# ADR-0086: circle directories (the key tree, the filter, sealed rows).
+lakko-circle.workspace = true
 lakko-push.workspace = true
 lakko-presence.workspace = true
 # Phase 1.19b — attachment encryption + JSON envelope wire format.

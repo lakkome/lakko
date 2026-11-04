@@ -72,6 +72,8 @@ export const MAX_IMMEDIATE_REPOLLS = 4;
 export interface GroupPollResult {
   /** The poll consumed journal rows (the cursor moved), so more may follow. */
   readonly yieldedRows: boolean;
+  /** Another path took this batch, so this poll says nothing about the head. */
+  readonly cursorMoved?: boolean;
 }
 
 export interface SweepDeps {

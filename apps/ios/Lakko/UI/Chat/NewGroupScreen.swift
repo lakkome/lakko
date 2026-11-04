@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 /// Groups > New group (docs/ux/new-group.md): a name field above the
 /// accepted contacts, one checkbox per contact, and Create.
 ///
-/// The name is optional (ADR-0051 §3: sent into the group right after the
+/// A name with nobody picked founds a group with nobody else in it; people
+/// are added from its info as in any group. With people picked the name is
+/// optional (ADR-0051 §3: sent into the group right after the
 /// creating commit, so the first Welcome recipients get it with their first
 /// poll; empty means the title is built from the members). The group is
 /// created with the first picked contact through the same
@@ -26,6 +29,22 @@ struct NewGroupScreen: View {
     let onCreated: (_ groupIdHex: String, _ notice: UiText?) -> Void
 
     @State private var name: String = ""
+    /// ADR-0087 section 2.1 — the proposed `@name`, following the name field
+    /// until the person edits it.
+    @State private var handle: String = ""
+    @State private var handleEdited = false
+    @State private var isPublic = false
+    /// UX 4.5.3 — the photo chosen on the form, uploaded at Create.
+    @State private var photo: PendingAvatarMedia?
+    /// Under the photo: why Create stopped (upload failed / limit).
+    @State private var photoError: String?
+    /// UX 3.3 — "That @name is taken." from the live lookup (public only).
+    @State private var handleTaken = false
+    /// Discovery refused the check for now (429): the field says so.
+    @State private var handleRateLimited = false
+    @State private var takenCheck: Task<Void, Never>?
+    /// One random per form, so the suffix does not change on every keystroke.
+    @State private var handleRandom: UInt64 = UInt64.random(in: 0...UInt64.max)
     @State private var selected: Set<Data> = []
     @State private var busy = false
     /// The catalog key of the founding failure, rendered when shown.
@@ -43,8 +62,64 @@ struct NewGroupScreen: View {
         accepted.filter { selected.contains($0.request.fromPubkey) }
     }
 
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What Create needs (UX 3.1): a well-formed `@name` and, when public,
+    /// a name. Nobody has to be picked (a group of one, section 10).
+    static func canCreate(name: String, handle: String, isPublic: Bool) -> Bool {
+        ConversationHandles.wellFormed(handle)
+            && (!isPublic || !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    /// UX 3.3 — public only: 500 ms after typing stops, from 3 characters,
+    /// a lookup that answers means "taken". A private name is checked only at
+    /// Create (a lookup sees public names only).
+    private func scheduleTakenCheck() {
+        takenCheck?.cancel()
+        handleTaken = false
+        handleRateLimited = false
+        guard isPublic, handle.count >= 3, ConversationHandles.wellFormed(handle) else { return }
+        let typed = handle
+        // An answer from the last minute shows at once, with no new question.
+        if let held = HandleTakenCheck.held(typed) {
+            handleTaken = held == .taken
+            return
+        }
+        takenCheck = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: HandleTakenCheck.debounceNanoseconds)
+            guard !Task.isCancelled, typed == handle else { return }
+            let answer = await HandleTakenCheck.check(typed)
+            guard !Task.isCancelled, typed == handle else { return }
+            handleTaken = answer == .taken
+            handleRateLimited = answer == .rateLimited
+        }
+    }
+
+    /// Nothing was created: the uploaded photo is never referenced.
+    private func deleteUploaded(_ avatar: ProfileAvatar?) {
+        guard let avatar else { return }
+        BlobLifecycle.shared.delete([avatar.still.blobId] + (avatar.video.map { [$0.blobId] } ?? []))
+    }
+
+    private func proposedHandle() -> String {
+        suggestHandle(name: trimmedName, kind: .group, private: !isPublic, random: handleRandom)
+    }
+
     var body: some View {
         List {
+            Section {
+                NewGroupPhotoSlot(name: trimmedName, media: $photo, disabled: busy)
+                    .listRowBackground(Color.clear)
+                if let photoError {
+                    Text(l10n.t(photoError))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .frame(maxWidth: .infinity)
+                        .listRowBackground(Color.clear)
+                }
+            }
             Section {
                 TextField(l10n.t("chats.new_group.name_label"), text: $name)
                     .disabled(busy)
@@ -57,10 +132,48 @@ struct NewGroupScreen: View {
                         }
                     }
             } footer: {
-                Text(l10n.t("new_group.name_hint"))
+                if isPublic && trimmedName.isEmpty {
+                    Text(l10n.t("group_type.needs_name")).foregroundStyle(Color.lakkoDanger)
+                } else {
+                    Text(l10n.t("new_group.name_hint"))
+                }
+            }
+            // ADR-0087 / UX 3.1 — the @name and who can join.
+            Section {
+                HStack(spacing: 2) {
+                    Text("@").foregroundStyle(Color.lakkoTextMuted)
+                    TextField(l10n.t("group_type.handle"), text: Binding(
+                        get: { handle },
+                        set: { handle = ConversationHandles.canonical($0); handleEdited = true }))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .environment(\.layoutDirection, .leftToRight)
+                }
+                .disabled(busy)
+                LakkoPicker(
+                    l10n.t("group_type.who_can_join"), systemImage: "person.2",
+                    selection: $isPublic,
+                    options: [
+                        LakkoPickerOption(value: false, label: l10n.t("group_type.private")),
+                        LakkoPickerOption(value: true, label: l10n.t("group_type.public")),
+                    ])
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !handle.isEmpty && !ConversationHandles.wellFormed(handle) {
+                        Text(l10n.t("group_handle.error.bad_form")).foregroundStyle(Color.lakkoDanger)
+                    } else if isPublic && handleTaken {
+                        Text(l10n.t("group_handle.error.taken")).foregroundStyle(Color.lakkoDanger)
+                    } else if isPublic && handleRateLimited {
+                        Text(l10n.t("common.error.too_many_attempts")).foregroundStyle(Color.lakkoTextMuted)
+                    } else {
+                        Text(l10n.t(isPublic ? "group_type.handle_public" : "group_type.handle_private"))
+                    }
+                    Text(l10n.t(isPublic ? "group_type.public_desc" : "group_type.private_desc"))
+                }
             }
             Section(l10n.t("chat.members.title")) {
                 if accepted.isEmpty {
+                    // Nobody to pick: a name alone founds the group.
                     Text(l10n.t("new_group.no_contacts"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
@@ -85,10 +198,18 @@ struct NewGroupScreen: View {
                 Button(l10n.t(busy ? "chats.new_group.creating" : "chats.create.group")) {
                     Task { await create() }
                 }
-                .disabled(busy || picks.isEmpty)
+                .disabled(busy || !Self.canCreate(name: name, handle: handle, isPublic: isPublic))
             }
         }
         .disabled(busy)
+        .onAppear { if handle.isEmpty { handle = proposedHandle() } }
+        .onChange(of: name) { _, _ in if !handleEdited { handle = proposedHandle() } }
+        .onChange(of: isPublic) { _, _ in
+            if !handleEdited { handle = proposedHandle() }
+            scheduleTakenCheck()
+        }
+        .onChange(of: handle) { _, _ in scheduleTakenCheck() }
+        .onChange(of: photo) { _, _ in photoError = nil }
     }
 
     @ViewBuilder
@@ -137,26 +258,78 @@ struct NewGroupScreen: View {
     private func create() async {
         if busy { return }
         let chosen = picks
-        guard let first = chosen.first, let firstAccountId = first.request.fromAccountId else { return }
+        guard Self.canCreate(name: name, handle: handle, isPublic: isPublic) else { return }
+        // A public name the check found taken in the last minute: no claim,
+        // the field already says it.
+        if isPublic, HandleTakenCheck.held(handle) == .taken {
+            handleTaken = true
+            errorMessage = "group_handle.error.held"
+            return
+        }
         busy = true
         defer { busy = false }
         errorMessage = nil
 
+        // 0. UX 4.5.3 — the photo is uploaded before anything is created, so
+        //    a failed upload creates nothing and the form stays filled.
+        var uploadedPhoto: ProfileAvatar?
+        if let photo {
+            do {
+                uploadedPhoto = try await ProfileAvatarUpload.upload(photo)
+            } catch AttachmentBridgeError.uploadLimited {
+                photoError = "group_photo.error.limit"
+                return
+            } catch {
+                photoError = "group_photo.error.upload"
+                return
+            }
+        }
+
         // 1. Found the group with the first pick (one Welcome, we are the
-        //    owner). A failure here created nothing: the form stays filled.
+        //    owner), or with nobody else when none was picked. A failure here
+        //    created nothing: the form stays filled.
+        // 1. Found the group with nobody else (this account's other devices
+        //    join in the founding commit), claiming the @name BEFORE anything
+        //    about it leaves this device (UX 3.1 / 3.3): a held name creates
+        //    nothing and the form stays filled. The picks are added after,
+        //    through the normal add path.
         let groupIdHex: String
+        var claimed: (value: FfiConversationHandle, leaseUntilMs: UInt64)?
         do {
-            groupIdHex = try await chatRepository.startGroupWith(
-                recipientAccountId: firstAccountId,
-                recipientSignaturePubkey: first.request.fromPubkey,
-                // ADR-0062 — a group, fixed in the GroupContext, even while
-                // it still has two people.
-                kind: .group
-            )
+            let wanted = handle
+            let publicGroup = isPublic
+            let typedName = trimmedName
+            let photoForRecord = uploadedPhoto
+            groupIdHex = try await chatRepository.foundGroupWithNobodyElse(beforePublish: { groupId in
+                claimed = try await chatRepository.claimHandleBeforeFounding(
+                    groupId: groupId, handle: wanted, isPublic: publicGroup, name: typedName,
+                    avatar: photoForRecord)
+            })
+        } catch let refusal as DiscoveryClient.HandleWriteError {
+            if refusal.code == "name-taken" { HandleTakenCheck.note(handle, .taken) }
+            errorMessage = refusal.code == "name-taken"
+                ? "group_handle.error.held"
+                : (refusal.status == 429 ? "common.error.too_many_attempts" : "new_group.error.secure_setup")
+            deleteUploaded(uploadedPhoto)
+            return
+        } catch let token as AnonTokenUnavailable {
+            errorMessage = AnonTokenUnavailable.isQuotaExhausted(token)
+                ? "group_handle.error.too_many" : "group_handle.error.offline"
+            deleteUploaded(uploadedPhoto)
+            return
+        } catch let DiscoveryClientError.network(_, underlying) {
+            NSLog("New group: offline: \(underlying)")
+            errorMessage = "group_handle.error.offline"
+            deleteUploaded(uploadedPhoto)
+            return
         } catch {
             NSLog("New group: founding failed: \(error)")
-            errorMessage = "chats.new_group.error"
+            errorMessage = "new_group.error.secure_setup"
+            deleteUploaded(uploadedPhoto)
             return
+        }
+        if let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 {
+            chatRepository.groupSettingsStore.markCreatedHere(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         }
         /// Catalog keys and their arguments, rendered when shown.
         var notices: [(key: String, texts: [String: String])] = []
@@ -166,7 +339,6 @@ struct NewGroupScreen: View {
         //    poll and every later add's growth re-send has a stored name to
         //    carry. A failed send leaves the group nameless; the members
         //    panel offers the rename.
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedName.isEmpty {
             do {
                 try await chatRepository.setGroupName(groupIdHex: groupIdHex, name: trimmedName)
@@ -176,10 +348,24 @@ struct NewGroupScreen: View {
             }
         }
 
+        // 2a. UX 4.5.3 — the photo, sent after the creating commit like the
+        //     name. A failed send stays owed and goes when the device is back.
+        if let uploadedPhoto {
+            try? await chatRepository.setGroupPhoto(groupIdHex: groupIdHex, avatar: uploadedPhoto)
+        }
+
+        // 2b. ADR-0087 section 3 — the @name claimed above, stored and sent
+        //     into the group now that it exists.
+        if let claimed {
+            await chatRepository.adoptOwnHandle(
+                groupIdHex: groupIdHex, value: claimed.value, leaseUntilMs: claimed.leaseUntilMs,
+                name: trimmedName)
+        }
+
         // 3. The remaining picks, one after another through the normal add
         //    path. Each failure is collected, never fatal.
         var failed: [String] = []
-        for entry in chosen.dropFirst() {
+        for entry in chosen {
             guard let accountId = entry.request.fromAccountId else { continue }
             do {
                 _ = try await chatRepository.addMemberToGroup(

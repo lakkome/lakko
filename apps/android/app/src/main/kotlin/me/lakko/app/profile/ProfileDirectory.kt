@@ -38,12 +38,12 @@ import java.util.Base64
  * repository and every screen must agree on the same names.
  */
 public class ProfileDirectory internal constructor(
-    persistence: ProfilePersistence,
+    private val persistence: ProfilePersistence,
     private val scope: CoroutineScope,
     /** Where the retired device-wide rows live, removed on forget; `null`
      *  in host tests. */
     private val persistenceContext: Context? = null,
-    isNewer: (ULong, ULong) -> Boolean =
+    private val isNewer: (ULong, ULong) -> Boolean =
         { incoming, stored -> uniffi.lakko_ffi_uniffi.profileIsNewer(incoming, stored) },
     passesRule: ((String) -> Boolean)? = null,
     initialRenames: Map<String, String> = emptyMap(),
@@ -68,6 +68,18 @@ public class ProfileDirectory internal constructor(
      *  the person rather than `Member`. Standard base64 on both sides. */
     @Volatile
     private var aliases: Map<String, String> = emptyMap()
+
+    /** ADR-0079 — what each pending contact's invite link states about the
+     *  inviter (display name, username), keyed by the inviter's account key
+     *  (standard base64): the profile input of a key nothing else names. */
+    @Volatile
+    private var pendingStatements: Map<String, PeerProfile> = emptyMap()
+
+    /** The profile input for [signatureKeyB64]: the received profile, else
+     *  the statement of a pending contact's link. A received profile always
+     *  wins: it is the person's current statement. */
+    private fun profileFor(signatureKeyB64: String): PeerProfile? =
+        profiles.get(signatureKeyB64) ?: pendingStatements[signatureKeyB64]
 
     private val mutableVersion = MutableStateFlow(0L)
 
@@ -127,6 +139,28 @@ public class ProfileDirectory internal constructor(
         bump()
     }
 
+    /**
+     * ADR-0079 — replace the pending contacts whose link statements name a
+     * key no rename and no received profile names (the precedence is local
+     * rename > received profile > the link's statement > placeholder). Called
+     * wherever the pending list changes, so a roster re-reads when a pending
+     * contact is added, removed or handed over.
+     *
+     * The stated username is shown only when this `(key, username)` pair is
+     * ALREADY verified (from a profile that carried a certificate). No check
+     * is started for it: verification needs the discovery-signed certificate
+     * a profile envelope carries (ADR-0060 section 5), and an invite link
+     * carries none, so a check could only end "not yet" or, through the
+     * lookup path, as a false "not verified". A link that states only a
+     * username therefore stays the placeholder until a profile arrives.
+     */
+    public fun setPendingContacts(list: List<me.lakko.app.contacts.PendingContact>) {
+        val next = pendingStatementsOf(list)
+        if (next == pendingStatements) return
+        pendingStatements = next
+        bump()
+    }
+
     /** ADR-0073 phase 2 — replace the key aliases (new key -> previous key).
      *  A key with a rename or a profile of its own is never aliased away. */
     public fun setAliases(byKey: Map<String, String>) {
@@ -146,6 +180,53 @@ public class ProfileDirectory internal constructor(
             val key = signatureKeyB64 ?: return offer
             profile.username?.let { verifyInBackground(key, it) }
         }
+        return offer
+    }
+
+    /**
+     * A person this account found by search answered its request, so they are
+     * a contact before their profile has arrived: file what the Sent record
+     * held at stamp 0, so the row is not a stand-in meanwhile
+     * (`docs/ux/who-can-find-me.md` section 6.1). Any profile the person sends
+     * that says something replaces it, whatever its stamp
+     * ([PeerProfileStore.offer]), and one held already stays. It persists as
+     * any profile does.
+     *
+     * [verifiedUsername] was verified when the person was found. That is
+     * recorded with it: this entry carries no certificate, so a check could
+     * never complete, and it would retry until the real profile came.
+     */
+    public fun onFoundPersonAnswered(
+        signatureKeyB64: String,
+        name: String?,
+        verifiedUsername: String?,
+    ): ProfileOffer {
+        val stated = PeerProfile(displayName = name, username = verifiedUsername, updatedAtMs = 0uL)
+        val offer = profiles.offer(signatureKeyB64, stated)
+        if (offer == ProfileOffer.STORED) {
+            verifiedUsername?.let { verifications.put(signatureKeyB64, it, UsernameVerification.VERIFIED) }
+            bump()
+        }
+        return offer
+    }
+
+    /**
+     * ADR-0050 section 2.9 (state bundle v3) — store a profile a pairing
+     * bundle carried for [accountIdB64], under the same strictly-newer rule
+     * as a received one. When that account is the one signed in it goes
+     * through [onProfileReceived] (so screens re-read and the username is
+     * verified); otherwise it is filed in that account's rows directly, which
+     * the live store reads when the account binds.
+     */
+    public fun offerForAccount(accountIdB64: String, signatureKeyB64: String, profile: PeerProfile): ProfileOffer {
+        val account = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val bound = persistence.currentAccount()?.let { me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(it) }
+        if (bound == account) return onProfileReceived(signatureKeyB64, profile)
+        val fixed = object : ProfilePersistence by persistence {
+            override fun currentAccount(): String = account
+        }
+        val offer = PeerProfileStore(fixed, isNewer).offer(signatureKeyB64, profile)
+        if (offer == ProfileOffer.STORED) bump()
         return offer
     }
 
@@ -196,34 +277,27 @@ public class ProfileDirectory internal constructor(
     }
 
     /** The UX §3 resolution for a signature key (standard base64). */
-    public fun resolve(signatureKeyB64: String): ResolvedName {
-        val keyBytes = try {
-            Base64.getDecoder().decode(signatureKeyB64)
-        } catch (_: IllegalArgumentException) {
-            ByteArray(0)
+    public fun resolve(signatureKeyB64: String): ResolvedName =
+        resolveThroughAlias(signatureKeyB64, aliases) { key ->
+            resolveName(
+                localRename = renames[key],
+                profile = profileFor(key),
+                verificationOf = { username -> verifications.get(key, username) },
+                signatureKey = keyBytesOf(key),
+            )
         }
-        val own = resolveName(
-            localRename = renames[signatureKeyB64],
-            profile = profiles.get(signatureKeyB64),
-            verificationOf = { username -> verifications.get(signatureKeyB64, username) },
-            signatureKey = keyBytes,
-        )
-        if (!own.isPlaceholder) return own
-        // ADR-0073 phase 2 / UX 16.8 — nothing is known under the new key
-        // yet: fall through to the person it belongs to, one level deep.
-        val previous = aliases[signatureKeyB64] ?: return own
-        val previousBytes = try {
-            Base64.getDecoder().decode(previous)
-        } catch (_: IllegalArgumentException) {
-            return own
-        }
-        val inherited = resolveName(
-            localRename = renames[previous],
-            profile = profiles.get(previous),
-            verificationOf = { username -> verifications.get(previous, username) },
-            signatureKey = previousBytes,
-        )
-        return if (inherited.isPlaceholder) own else inherited
+
+    /**
+     * Whether this person's own profile is still owed: nothing names them, or
+     * only what [onFoundPersonAnswered] filed. The name found stands in on the
+     * row, and the daily profile request (ADR-0048 trigger 4) must go on asking
+     * for the real one, or a contact whose Welcome failed never gets it. A
+     * local rename names them as it always did.
+     */
+    public fun awaitsProfile(signatureKey: ByteArray): Boolean {
+        val keyB64 = Base64.getEncoder().encodeToString(signatureKey)
+        if (resolve(keyB64).isPlaceholder) return true
+        return renames[keyB64] == null && profiles.get(keyB64)?.isFoundName == true
     }
 
     /** [resolve] for raw key bytes. */
@@ -334,31 +408,61 @@ public class ProfileDirectory internal constructor(
  * persisted stores once and resolves, with no write, no verification and no
  * network. A name the app has not already learned resolves to the placeholder.
  */
-public class ProfileNameSnapshot private constructor(
+public class ProfileNameSnapshot internal constructor(
     private val profiles: Map<String, PeerProfile>,
     private val verifications: Map<String, UsernameVerification>,
     private val renames: Map<String, String>,
+    /** ADR-0079 — the pending contacts' link statements, the profile input
+     *  of a key with no received profile ([pendingStatementsOf]). */
+    private val pendingStatements: Map<String, PeerProfile> = emptyMap(),
+    /** The keys of one person ([me.lakko.app.contacts.nameAliases]), the
+     *  same set the app's directory falls through. */
+    private val aliases: Map<String, String> = emptyMap(),
 ) {
-    /** The resolved name for a signature key, standard base64. */
-    public fun resolve(signatureKeyB64: String): ResolvedName {
-        val keyBytes = try {
-            Base64.getDecoder().decode(signatureKeyB64)
-        } catch (_: IllegalArgumentException) {
-            ByteArray(0)
+    /** The resolved name for a signature key, standard base64, by the same
+     *  rule as [ProfileDirectory.resolve]. */
+    public fun resolve(signatureKeyB64: String): ResolvedName =
+        resolveThroughAlias(signatureKeyB64, aliases) { key ->
+            resolveName(
+                localRename = renames[key],
+                profile = profiles[key] ?: pendingStatements[key],
+                verificationOf = { username ->
+                    verifications[UsernameVerificationStore.pairKey(key, username)]
+                },
+                signatureKey = keyBytesOf(key),
+            )
         }
-        return resolveName(
-            localRename = renames[signatureKeyB64],
-            profile = profiles[signatureKeyB64],
-            verificationOf = { username ->
-                verifications[UsernameVerificationStore.pairKey(signatureKeyB64, username)]
-            },
-            signatureKey = keyBytes,
-        )
-    }
 
     /** `true` when the viewer knows SOMETHING about this person (a rename, a
-     *  profile name or a verified username). */
+     *  profile name, a pending contact's link-stated name, or a verified
+     *  username). */
     public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isPlaceholder
+
+    /**
+     * A profile this background pass read from the journal itself, applied
+     * IN MEMORY for the rest of the pass, under the store's own acceptance
+     * rule ([PeerProfileStore.offer]: strictly newer, or a found name replaced
+     * by a profile that says something). Nothing is written (C-59): the app
+     * stores the same row when it polls. A rename still wins, as everywhere.
+     */
+    public fun withBatchProfile(
+        signatureKeyB64: String,
+        profile: PeerProfile,
+        isNewer: (ULong, ULong) -> Boolean,
+    ): ProfileNameSnapshot {
+        if (signatureKeyB64.isEmpty()) return this
+        val held = profiles[signatureKeyB64]
+        val replacesFoundName = held?.isFoundName == true && !profile.isFoundName &&
+            (profile.displayName != null || profile.username != null)
+        if (held != null && !replacesFoundName && !isNewer(profile.updatedAtMs, held.updatedAtMs)) return this
+        return ProfileNameSnapshot(
+            profiles = profiles + (signatureKeyB64 to profile),
+            verifications = verifications,
+            renames = renames,
+            pendingStatements = pendingStatements,
+            aliases = aliases,
+        )
+    }
 
     public companion object {
         /** Load a snapshot. Never writes. The profiles, verifications and
@@ -372,10 +476,81 @@ public class ProfileNameSnapshot private constructor(
                 profiles = account?.let { persistence.loadProfiles(it) } ?: emptyMap(),
                 verifications = account?.let { persistence.loadVerifications(it) } ?: emptyMap(),
                 renames = ProfileDirectory.renamesFromAcceptedContacts(context.applicationContext, accountIdB64),
+                pendingStatements = account?.let { a ->
+                    try {
+                        pendingStatementsOf(
+                            me.lakko.app.contacts.PendingContactsFiles.onDevice(context.applicationContext).load(a),
+                        )
+                    } catch (_: Throwable) {
+                        emptyMap()
+                    }
+                } ?: emptyMap(),
+                aliases = account?.let { aliasesOnDevice(context.applicationContext, it) } ?: emptyMap(),
             )
         }
     }
 }
+
+/** The name aliases of [account] as the app's directory holds them, read
+ *  from the stores the contacts repository writes (reads only). */
+internal fun aliasesOnDevice(context: Context, account: String): Map<String, String> =
+    try {
+        val pins = me.lakko.app.contacts.PeerPinStore(context, account)
+        me.lakko.app.contacts.nameAliases(
+            provenLinks = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context).load(account),
+            resetRows = me.lakko.app.contacts.SharedPrefsResetLedgerStore(context).loadAll(account),
+            pinnedKeyOf = { id ->
+                try {
+                    pins.readPin(id)?.pinnedSignaturePubkeyB64
+                } catch (_: Throwable) {
+                    null
+                }
+            },
+        )
+    } catch (_: Throwable) {
+        emptyMap()
+    }
+
+/** Standard base64 to bytes, empty on a malformed key. */
+private fun keyBytesOf(keyB64: String): ByteArray =
+    try {
+        Base64.getDecoder().decode(keyB64)
+    } catch (_: IllegalArgumentException) {
+        ByteArray(0)
+    }
+
+/**
+ * ADR-0073 phase 2 / UX 16.8 — the one fall-through: when nothing is known
+ * under [keyB64], the name learned under the key [aliases] maps it to (one
+ * level deep), else the placeholder of [keyB64] itself.
+ */
+internal fun resolveThroughAlias(
+    keyB64: String,
+    aliases: Map<String, String>,
+    resolveOwn: (String) -> ResolvedName,
+): ResolvedName {
+    val own = resolveOwn(keyB64)
+    if (!own.isPlaceholder) return own
+    val previous = aliases[keyB64] ?: return own
+    val inherited = resolveOwn(previous)
+    return if (inherited.isPlaceholder) own else inherited
+}
+
+/**
+ * ADR-0079 — the link statement of each pending contact as a profile input,
+ * keyed by the inviter's account key (standard base64): the display name the
+ * link states and the username it states (shown only when that pair is
+ * already verified; no check is ever started for it), at stamp 0. A contact whose link states neither is left out, so it does not
+ * count as known.
+ */
+internal fun pendingStatementsOf(list: List<me.lakko.app.contacts.PendingContact>): Map<String, PeerProfile> =
+    list.mapNotNull { c ->
+        val key = c.signaturePubkeyB64.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        val name = c.displayName.trim().takeIf { it.isNotEmpty() }
+        val username = c.username.trim().takeIf { it.isNotEmpty() }
+        if (name == null && username == null) return@mapNotNull null
+        key to PeerProfile(displayName = name, username = username, updatedAtMs = 0uL)
+    }.toMap()
 
 /**
  * [ProfilePersistence] over plain `SharedPreferences` (JSON), one pair of rows

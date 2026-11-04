@@ -66,8 +66,9 @@
 //! and dashes cannot mislead. The server cannot enforce it (it sees a
 //! blinded element), so [`OprfBlinder::blind`] enforces it: a name
 //! that fails is refused before any request is built, for register
-//! and lookup alike. `@channel` handles ([`OprfBlinder::blind_channel`])
-//! are a separate namespace with their own (unchanged) policy.
+//! and lookup alike. Since ADR-0087 section 1 the same rule and the same
+//! OPRF input serve every `@name`, a person's, a group's and a channel's:
+//! one namespace, one lookup key per name.
 //!
 //! ## Display-name search (ADR-0060 section 5)
 //!
@@ -76,8 +77,8 @@
 //! [`name_search_terms`] the terms a name is published under,
 //! [`name_query_term`] the one term a query looks up, and
 //! [`name_matches_query`] the local filter over what comes back.
-//! [`OprfBlinder::blind_name_term`] blinds a term in a third OPRF namespace,
-//! domain-separated from usernames and `@channel` handles. It lives here
+//! [`OprfBlinder::blind_name_term`] blinds a term in a second OPRF namespace,
+//! domain-separated from `@name`s. It lives here
 //! rather than in `lakko-contacts` (where the ADR places it) because it needs
 //! the `unicode-normalization` tables, which the iOS notification extension
 //! that links `lakko-contacts` must not carry; see the `name` module.

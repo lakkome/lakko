@@ -21,13 +21,14 @@
  *      string.
  *
  * ADR-0054 S3: no route here takes a proof of work any more. The anonymous
- * routes a signed-in person uses - the OPRF evaluation, the channel-name
- * register and the three invite consumes - each spend one anonymous token
+ * routes a signed-in person uses - the OPRF evaluation and the three invite
+ * consumes - each spend one anonymous token
  * (`../tokens/anon-token-pool.ts`) and carry NO session: they are sent with
  * `anonymousFetchInit`, never through `authHeaders()`. The bearer routes
  * (register, identity, KeyPackage, the invite uploads) carry only the
  * session and can answer `429 {"code": "rate-limited"}`. `/discovery/lookup`
- * and `/discovery/channel/lookup` carry neither.
+ * carries neither. A channel's `@name` is a handle (ADR-0087 section 1,
+ * `discovery/handle-lookup.ts`); the old channel-name routes are gone.
  *
  * Errors mirror the auth-side surface — `DiscoveryClientArgError` /
  * `DiscoveryHttpError` / `DiscoveryNetworkError` — so the UI can
@@ -53,10 +54,6 @@ import { sessionFetch } from "../auth/session-fetch";
 import { errorCodeOf } from "../auth/session-401";
 import { finalizeOprf } from "./oprf-pair";
 import type {
-  ChannelLookupRequest,
-  ChannelLookupResponse,
-  ChannelRegisterRequest,
-  ChannelRegisterResponse,
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
@@ -112,27 +109,6 @@ export interface LookupResult {
   publicRecordIdentityPk?: Uint8Array | null;
 }
 
-/** Result of `DiscoveryClient.registerChannelName` (G4-5,
- *  ADR-0010). Mirror of [`RegisterResult`] for the channel
- *  namespace. */
-export interface ChannelRegisterResult {
-  /** The canonical `@channelname` actually claimed (after the
-   *  same NFKC + lowercase + trim + leading-`@` strip the
-   *  username path applies via `OprfBlinder.blind`). */
-  normalisedHandle: string;
-}
-
-/** Result of `DiscoveryClient.lookupChannel` (G4-5, ADR-0010).
- *  The server returns 404 for an unknown `@channelname`; the
- *  high-level orchestrator surfaces that as `channel: null`
- *  rather than an exception, so a not-found is visible in the
- *  type — same shape as [`LookupResult`]. */
-export interface ChannelLookupResult {
-  normalisedHandle: string;
-  /** Raw 16-byte `channel_id`, or `null` when the handle is not
-   *  registered. */
-  channel: Uint8Array | null;
-}
 
 /** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a +
  *  1.18d3c).
@@ -182,6 +158,12 @@ export type ConsumeInviteResult =
 export type RevokeInviteResult =
   | { readonly kind: "revoked" }
   | { readonly kind: "not-found-or-not-owner" };
+
+/** One row of a link ledger: the sealed blob and whether its uses ran out. */
+export interface LedgerLinkRow {
+  readonly sealed: Uint8Array;
+  readonly usedUp: boolean;
+}
 
 /** Programmer error — empty / invalid inputs caught before any
  *  network round-trip. Distinct from HTTP errors so the UI can
@@ -442,6 +424,37 @@ export class DiscoveryClient {
    *  session. */
   async oprfEvaluate(req: OprfRequest): Promise<OprfResponse> {
     return this.tokenPostJson("discovery-lookup", "/discovery/oprf", req);
+  }
+
+  /** Most blinded elements one batch carries: the server's bound, the most
+   *  search terms one record carries plus one (room for the old `@name` in a
+   *  replace). A longer list is sent in more batches; no term is dropped. */
+  static readonly OPRF_BATCH_MAX = 66;
+
+  /**
+   * `POST /discovery/oprf/batch`: evaluate the blinded elements of the
+   * account's or a conversation's OWN search terms in one round, for one
+   * `discovery-register` token and no session. The answers come back in the
+   * order sent. Searches for someone else stay on {@link oprfEvaluate}.
+   * Throws `DiscoveryHttpError` (400 / 401 / 429); a reply of another length
+   * is refused.
+   */
+  async oprfEvaluateBatch(blinded: readonly string[]): Promise<string[]> {
+    if (blinded.length === 0 || blinded.length > DiscoveryClient.OPRF_BATCH_MAX) {
+      throw new DiscoveryClientArgError(`an OPRF batch holds 1 to ${DiscoveryClient.OPRF_BATCH_MAX} elements`);
+    }
+    const resp = await this.tokenPostJson<{ evaluated?: unknown }>("discovery-register", "/discovery/oprf/batch", {
+      blinded,
+    });
+    const evaluated = resp.evaluated;
+    if (
+      !Array.isArray(evaluated) ||
+      evaluated.length !== blinded.length ||
+      !evaluated.every((e) => typeof e === "string")
+    ) {
+      throw new DiscoveryHttpError(200, "/discovery/oprf/batch", "answer does not match the batch");
+    }
+    return evaluated as string[];
   }
 
   async register(req: RegisterRequest): Promise<RegisterResponse> {
@@ -727,49 +740,6 @@ export class DiscoveryClient {
     return (await response.json()) as LookupResponse;
   }
 
-  /** `POST /discovery/channel/register` — bind an OPRF-hashed
-   *  `@channelname` to a `channel_id`. Spends one `discovery-register`
-   *  anonymous token and carries no session (ADR-0054 S3). */
-  async channelRegister(
-    req: ChannelRegisterRequest,
-  ): Promise<ChannelRegisterResponse> {
-    return this.tokenPostJson("discovery-register", "/discovery/channel/register", req);
-  }
-
-  /**
-   * `POST /discovery/channel/lookup`. Returns the raw response on
-   * 200, `null` on 404 (the typed not-found path), throws on any
-   * other non-2xx. Mirror of [`lookupRaw`] for the channel
-   * namespace — unauthenticated, so no bearer header.
-   */
-  async channelLookupRaw(
-    req: ChannelLookupRequest,
-  ): Promise<ChannelLookupResponse | null> {
-    const url = `${this.baseUrl}/discovery/channel/lookup`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(req),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError("/discovery/channel/lookup", err);
-    }
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(
-        response.status,
-        "/discovery/channel/lookup",
-        text,
-      );
-    }
-    return (await response.json()) as ChannelLookupResponse;
-  }
-
   // -----------------------------------------------------------------
   // High-level: full register / lookup flows
   // -----------------------------------------------------------------
@@ -874,6 +844,9 @@ export class DiscoveryClient {
     leafAuth?: Uint8Array | string,
     genesisAttest?: Uint8Array | string,
     keyResetAttest?: Uint8Array | string,
+    /** ADR-0074 section 3.7: the two-way conversation link a rotation mints.
+     *  Raw bytes, or a string already in standard base64. */
+    conversationLink?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -934,6 +907,12 @@ export class DiscoveryClient {
         typeof keyResetAttest === "string" ? keyResetAttest : base64Encode(keyResetAttest);
     }
 
+    let conversationLinkB64: string | undefined;
+    if (conversationLink !== undefined) {
+      conversationLinkB64 =
+        typeof conversationLink === "string" ? conversationLink : base64Encode(conversationLink);
+    }
+
     const resp = await this.identityUpload({
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
@@ -944,6 +923,7 @@ export class DiscoveryClient {
         ? { genesis_attest: genesisAttestB64 }
         : {}),
       ...(keyResetAttestB64 !== undefined ? { key_reset_attest: keyResetAttestB64 } : {}),
+      ...(conversationLinkB64 !== undefined ? { conversation_link: conversationLinkB64 } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(
@@ -1087,6 +1067,13 @@ export class DiscoveryClient {
    * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    return (await this.fetchInviteRow(blobId))?.sealed ?? null;
+  }
+
+  /** [`fetchInvite`] with the ledger's `used_up` flag: no uses left. A page
+   *  with no session reads such a link as dead; a signed-in client still
+   *  opens it, since only the consume can tell a person who used it. */
+  async fetchInviteRow(blobId: Uint8Array): Promise<LedgerLinkRow | null> {
     await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/invite/${slug}`;
@@ -1107,7 +1094,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return { sealed: base64Decode(raw.sealed), usedUp: raw.used_up === true };
   }
 
   /**
@@ -1315,6 +1302,12 @@ export class DiscoveryClient {
    * 429 (per-address rate limit).
    */
   async fetchGroupInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    return (await this.fetchGroupInviteRow(blobId))?.sealed ?? null;
+  }
+
+  /** [`fetchGroupInvite`] with the ledger's `used_up` flag (see
+   *  [`fetchInviteRow`]). */
+  async fetchGroupInviteRow(blobId: Uint8Array): Promise<LedgerLinkRow | null> {
     await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/group-invite/${slug}`;
@@ -1335,7 +1328,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return { sealed: base64Decode(raw.sealed), usedUp: raw.used_up === true };
   }
 
   /**
@@ -1580,7 +1573,9 @@ export class DiscoveryClient {
     const lookupResp = await this.lookupRaw({
       oprf_hash: lookupKeyB64,
     });
-    if (lookupResp === null) {
+    // ADR-0087 section 1: a group or channel answers a name lookup with no
+    // account; a person lookup finds nobody there.
+    if (lookupResp === null || lookupResp.account_id === undefined || lookupResp.kind === "handle") {
       return { normalisedUsername, account: null };
     }
     const account = base64Decode(lookupResp.account_id);
@@ -1606,101 +1601,6 @@ export class DiscoveryClient {
       }
     }
     return { normalisedUsername, account, mailboxBinding, publicRecordIdentityPk };
-  }
-
-  // -----------------------------------------------------------------
-  // High-level: @channel discovery (G4-5, ADR-0010)
-  //
-  // The channel namespace reuses the SAME OPRF flow as @username
-  // (the `/discovery/oprf` evaluate endpoint is namespace-agnostic
-  // — one static key over the blinded handle). Only the second
-  // endpoint differs: `/discovery/channel/{register,lookup}`
-  // instead of `/discovery/{register,lookup}`, and the id type is
-  // a 16-byte channel_id pseudonym rather than a 16-byte account
-  // UUIDv7.
-  // -----------------------------------------------------------------
-
-  /**
-   * Bind `@channelname` to a 16-byte `channel_id`.
-   *
-   * Flow: OPRF blind → POST `/discovery/oprf` (one `discovery-lookup`
-   * token) → finalize → POST `/discovery/channel/register` (one
-   * `discovery-register` token). Identical to
-   * [`registerUsername`] modulo the id type + second endpoint.
-   *
-   * Handle normalisation (NFKC + lowercase + trim + leading-`@`
-   * strip) happens inside `OprfBlinder.blind`; the canonical form
-   * is surfaced back via `ChannelRegisterResult.normalisedHandle`.
-   *
-   * The write is session-token-gated (a DoS rate-limit role, not
-   * an ownership proof — see `services/discovery/src/channel_names.rs`).
-   * Throws `DiscoveryHttpError` with `status === 409` when the
-   * handle is already registered (first-come-first-served).
-   */
-  async registerChannelName(
-    channelId: Uint8Array,
-    handle: string,
-  ): Promise<ChannelRegisterResult> {
-    if (channelId.length !== 16) {
-      throw new DiscoveryClientArgError("channelId must be 16 bytes");
-    }
-    const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blindChannel(handle);
-    const normalisedHandle = blinder.normalizedUsername;
-
-    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
-
-    // ADR-0060 section 5: discovery receives the lookup key only; the raw
-    // OPRF output stays on this device (it keys sealed records).
-    const lookupKeyB64 = base64Encode(
-      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
-    );
-
-    const registerResp = await this.channelRegister({
-      oprf_hash: lookupKeyB64,
-      channel_id: base64Encode(channelId),
-    });
-    if (!registerResp.ok) {
-      throw new DiscoveryHttpError(
-        200,
-        "/discovery/channel/register",
-        "server reported ok=false",
-      );
-    }
-    return { normalisedHandle };
-  }
-
-  /**
-   * Resolve `@channelname` to its raw 16-byte `channel_id`, or
-   * `null` when the handle is not registered.
-   *
-   * Same flow as [`registerChannelName`] modulo the second
-   * endpoint: OPRF → POST `/discovery/channel/lookup`.
-   * Exact-match only (the server does no prefix search).
-   */
-  async lookupChannel(handle: string): Promise<ChannelLookupResult> {
-    const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blindChannel(handle);
-    const normalisedHandle = blinder.normalizedUsername;
-
-    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
-
-    // ADR-0060 section 5: discovery receives the lookup key only; the raw
-    // OPRF output stays on this device (it keys sealed records).
-    const lookupKeyB64 = base64Encode(
-      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
-    );
-
-    const lookupResp = await this.channelLookupRaw({
-      oprf_hash: lookupKeyB64,
-    });
-    if (lookupResp === null) {
-      return { normalisedHandle, channel: null };
-    }
-    return {
-      normalisedHandle,
-      channel: base64Decode(lookupResp.channel_id),
-    };
   }
 
   // -----------------------------------------------------------------

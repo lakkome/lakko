@@ -224,9 +224,13 @@ public object DeviceReadmission {
         supersededKeysB64: Set<String>,
         /** The key of the verified binding of the account when NOT pinned. */
         bindingKeyB64: String?,
+        /** That key with its proven predecessors (ADR-0074 section 3.7: a
+         *  conversation link verified against it). */
+        bindingChainB64: List<String> = emptyList(),
     ): LookupStanding {
         if (pinnedChainB64 == null) {
-            return if (bindingKeyB64 != null && bindingKeyB64 == rosterKeyB64) LookupStanding.SAME_PERSON else LookupStanding.SKIP
+            val trusted = bindingKeyB64 != null && (bindingKeyB64 == rosterKeyB64 || rosterKeyB64 in bindingChainB64)
+            return if (trusted) LookupStanding.SAME_PERSON else LookupStanding.SKIP
         }
         if (rosterKeyB64 in pinnedChainB64) return LookupStanding.SAME_PERSON
         return if (rosterKeyB64 in supersededKeysB64) LookupStanding.RESET_IDENTITY else LookupStanding.SKIP
@@ -300,6 +304,20 @@ public object DeviceReadmission {
         } catch (_: Throwable) {
             emptySet()
         }
+
+    /** Forget what was remembered of one group (ADR-0087 section 9). */
+    public fun clearGroup(context: Context, accountIdB64: String, groupIdHex: String) {
+        clearSlot(groupIdHex)
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .remove("$accountIdB64|$groupIdHex")
+                    .apply()
+            } catch (cause: Throwable) {
+                android.util.Log.w("DeviceReadmission", "removed-device memory not cleared", cause)
+            }
+        }
+    }
 
     public fun clearForAccount(context: Context, accountIdB64: String) {
         try {

@@ -24,6 +24,19 @@
  *     folders), merged register by register;
  *   * the ids of the account's conversations, kept so this device's own
  *     uploads still list them (`restored-known-groups.ts`);
+ *   * the account's own predecessors (ADR-0074 section 3.7), stored where a
+ *     kept device holds them. Every conversation leaf stays under the oldest
+ *     own key, so a device restored with the newest key alone would hold a
+ *     key no conversation knows. A landing with the phrase in hand fetches
+ *     first ({@link prefetchAccountBackup}), so the device mints its binding
+ *     and names its DeviceGroup under that key from the start; a restore that
+ *     runs after the landing takes the pairing bundle's path (the session
+ *     mints the binding again while the device holds no conversation);
+ *   * the person's own profile and "who can find me" setting (`own-state.ts`),
+ *     each only when nothing newer is held; the setting reaches the same
+ *     intake as one from another device, so the mailbox and the Everyone
+ *     publication run, and the note of what was last published is dropped,
+ *     since nothing says it still stands;
  *   * NO MLS state. The backup carries none (payload v6): a provider
  *     snapshot belongs to the device that made it, and loading one here
  *     would clone a leaf (ADR-0050), roll a reinstalled device back behind
@@ -44,9 +57,16 @@
  * backup does not upload, so the blob this still has to read is not replaced
  * by this device's nearly empty state.
  */
+import { registerAccountMemory } from "../auth/account-memory";
+import type { DeviceCipher } from "../auth/device-cipher";
 import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
 import { mergeRestoredFoldBytes } from "../devices/sync/synced-projection";
+import {
+  accountKeyHexOfSeed,
+  applyOwnPredecessors,
+  type CarriedOwnPredecessor,
+} from "../devices/state-bundle";
 import { t } from "../l10n";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { loadWasm } from "../wasm";
@@ -64,6 +84,11 @@ import {
   markBackupRestoreOwed,
 } from "./restore-owed";
 import { addRestoredKnownGroups } from "./restored-known-groups";
+import { adoptRestoredOwnProfile, storeRestoredVisibility } from "./own-state";
+import { announceOwnStateRestored } from "../profile/own-profile-sync";
+import { markRestoreFinished } from "./restored-marker";
+import { resetEveryoneNote } from "../reach/publication-store";
+import { receiveServiceEnvelope } from "../reach/service-envelope-intake";
 
 /** What a run of {@link restoreAccountBackup} ended as. */
 export type AccountBackupRestoreOutcome =
@@ -92,11 +117,15 @@ export interface AccountBackupRestoreInputs {
   readonly accountIdB64: string;
   /** The device root key (the head-gate floor store and the synced-state
    *  row are wrapped under it). */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** Bearer token for `GET /backup`. */
   readonly sessionToken: string;
   /** The recovery phrase, canonical form. */
   readonly phrase: string;
+  /** ADR-0074 section 3.7: the backup carried own predecessors and they are
+   *  stored. The session mints the device binding again while the device
+   *  holds no conversation, and publishes again, as after a pairing bundle. */
+  readonly onOwnPredecessorsStored?: () => Promise<unknown>;
 }
 
 /** The effects, injectable so the rule can be tested without a network, a
@@ -113,13 +142,26 @@ export interface AccountBackupRestoreDeps {
   /** Merge the restored ADR-0058 synced state. */
   readonly applySyncedState: (
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     synced: Uint8Array,
   ) => Promise<void>;
   /** Keep the conversation ids the backup named. */
   readonly rememberKnownGroups: (accountIdB64: string, idsB64: readonly string[]) => void;
+  /** Keep the backup's own profile and setting, and tell the runtimes. */
+  readonly applyOwnState: (
+    accountIdB64: string,
+    own: { readonly ownProfile: Uint8Array; readonly visibility: Uint8Array },
+  ) => Promise<void>;
+  /** Store the own predecessors under the device key. */
+  readonly applyOwnPredecessors: (
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    ownPredecessors: readonly CarriedOwnPredecessor[],
+  ) => Promise<unknown>;
   readonly markOwed: (accountIdB64: string) => void;
   readonly clearOwed: (accountIdB64: string) => void;
+  /** The chat list's marker: the backup named this many conversations. */
+  readonly markRestored: (accountIdB64: string, conversations: number) => void;
   /** Tell the person a rolled-back / tampered backup was refused. */
   readonly alertRollbackRefused: () => void;
 }
@@ -132,7 +174,7 @@ export interface AccountBackupRestoreDeps {
  *  is written, nothing is announced, and the rest of the restore goes on. */
 async function mergeRestoredSyncedState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   synced: Uint8Array,
 ): Promise<void> {
   if (synced.length === 0) return;
@@ -149,6 +191,21 @@ async function mergeRestoredSyncedState(
   announceRestoredSyncedState(accountIdB64, synced);
 }
 
+/** The person's own part of a restore. Fail closed field by field: a field
+ *  that cannot be used changes nothing and the rest goes on. */
+async function applyRestoredOwnState(
+  accountIdB64: string,
+  own: { readonly ownProfile: Uint8Array; readonly visibility: Uint8Array },
+): Promise<void> {
+  await adoptRestoredOwnProfile(accountIdB64, own.ownProfile);
+  // Dropped before the setting lands, so the pass it starts publishes.
+  await resetEveryoneNote(accountIdB64);
+  if (await storeRestoredVisibility(accountIdB64, own.visibility)) {
+    await receiveServiceEnvelope(own.visibility);
+  }
+  announceOwnStateRestored();
+}
+
 const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   fetch: (phraseBytes, sessionToken, gate) => {
     const client = new BackupClient();
@@ -158,8 +215,16 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   applyContacts: applyRestoredContacts,
   applySyncedState: mergeRestoredSyncedState,
   rememberKnownGroups: (accountIdB64, idsB64) => addRestoredKnownGroups(accountIdB64, idsB64),
+  applyOwnState: applyRestoredOwnState,
+  applyOwnPredecessors: async (accountIdB64, deviceKey, ownPredecessors) => {
+    const wasm = await loadWasm();
+    return applyOwnPredecessors({ ownPredecessors }, accountIdB64, deviceKey, (seed) =>
+      accountKeyHexOfSeed(wasm, seed),
+    );
+  },
   markOwed: (accountIdB64) => markBackupRestoreOwed(accountIdB64),
   clearOwed: (accountIdB64) => clearBackupRestoreOwed(accountIdB64),
+  markRestored: (accountIdB64, conversations) => markRestoreFinished(accountIdB64, conversations),
   alertRollbackRefused: () => {
     // The app's own notice, never `window.alert` (design system section 6).
     void requestConfirm({
@@ -176,6 +241,75 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
 /** One run per account at a time: a landing's retry and a route's own run
  *  must not both fetch and apply. */
 const inFlight = new Map<string, Promise<AccountBackupRestoreOutcome>>();
+
+/** What {@link prefetchAccountBackup} fetched, for the restore of the same
+ *  landing to apply. Holds seeds: it goes with the account's memory. */
+const prefetched = new Map<string, RestoreResult>();
+
+registerAccountMemory(
+  "backup-prefetch",
+  (ids) => {
+    for (const id of ids) prefetched.delete(id);
+  },
+  { signOut: true },
+);
+
+/** Store the backup's own predecessors. Never throws: a device that could
+ *  not store them is one that knows only the current key. Answers whether
+ *  there were any to store. */
+async function storeOwnPredecessors(
+  inputs: AccountBackupRestoreInputs,
+  deps: AccountBackupRestoreDeps,
+  ownPredecessors: readonly CarriedOwnPredecessor[],
+): Promise<boolean> {
+  if (ownPredecessors.length === 0) return false;
+  try {
+    await deps.applyOwnPredecessors(inputs.accountIdB64, inputs.deviceKey, ownPredecessors);
+    return true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "account backup restore: the earlier account keys were not stored",
+      err instanceof Error ? err.name : "unknown",
+    );
+    return false;
+  }
+}
+
+/**
+ * The first half of a restore on a landing that holds the phrase, run BEFORE
+ * the session's identities are installed: fetch the backup and store its own
+ * predecessors, so the device mints its binding under the oldest key and
+ * derives its DeviceGroup id from it the first time (ADR-0074 section 3.7).
+ * What was fetched waits for {@link restoreAccountBackup} of the same landing,
+ * which applies it and fetches nothing. A failed fetch leaves nothing: that
+ * run fetches again. Never throws.
+ */
+export async function prefetchAccountBackup(
+  inputs: AccountBackupRestoreInputs,
+  overrides: Partial<AccountBackupRestoreDeps> = {},
+): Promise<void> {
+  const deps = { ...DEFAULT_DEPS, ...overrides };
+  prefetched.delete(inputs.accountIdB64);
+  const phraseBytes = new TextEncoder().encode(inputs.phrase);
+  try {
+    const result = await deps.fetch(phraseBytes, inputs.sessionToken, {
+      accountId: inputs.accountIdBytes,
+      accountIdB64: inputs.accountIdB64,
+      deviceKey: inputs.deviceKey,
+    });
+    if (result.kind === "transport-failed") return;
+    prefetched.set(inputs.accountIdB64, result);
+    if (result.kind === "restored") {
+      await storeOwnPredecessors(inputs, deps, result.ownPredecessors);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("account backup restore: fetch ahead of the landing threw", err);
+  } finally {
+    phraseBytes.fill(0);
+  }
+}
 
 /**
  * Fetch the account's backup, run the ADR-0037 head gate, and apply the
@@ -208,19 +342,25 @@ async function runRestore(
   deps.markOwed(accountIdB64);
 
   let result: RestoreResult;
-  const phraseBytes = new TextEncoder().encode(inputs.phrase);
-  try {
-    result = await deps.fetch(phraseBytes, inputs.sessionToken, {
-      accountId: inputs.accountIdBytes,
-      accountIdB64,
-      deviceKey: inputs.deviceKey,
-    });
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("account backup restore: fetch threw; retried on the next landing", err);
-    return { kind: "deferred" };
-  } finally {
-    phraseBytes.fill(0);
+  const fetchedAhead = prefetched.get(accountIdB64);
+  if (fetchedAhead !== undefined) {
+    prefetched.delete(accountIdB64);
+    result = fetchedAhead;
+  } else {
+    const phraseBytes = new TextEncoder().encode(inputs.phrase);
+    try {
+      result = await deps.fetch(phraseBytes, inputs.sessionToken, {
+        accountId: inputs.accountIdBytes,
+        accountIdB64,
+        deviceKey: inputs.deviceKey,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("account backup restore: fetch threw; retried on the next landing", err);
+      return { kind: "deferred" };
+    } finally {
+      phraseBytes.fill(0);
+    }
   }
 
   switch (result.kind) {
@@ -262,6 +402,19 @@ async function runRestore(
       return { kind: "not-applied", reason: result.kind };
 
     case "restored": {
+      // The own predecessors first, as a pairing bundle does: nothing below
+      // may run on the idea that the current key is the account's only one.
+      if (await storeOwnPredecessors(inputs, deps, result.ownPredecessors)) {
+        try {
+          await inputs.onOwnPredecessorsStored?.();
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "account backup restore: re-binding failed",
+            err instanceof Error ? err.name : "unknown",
+          );
+        }
+      }
       // Contacts first: the next upload reads the account's list, so the
       // merged set is what it carries.
       deps.applyContacts(result.acceptedContacts, accountIdB64);
@@ -275,7 +428,18 @@ async function runRestore(
       // cleared: once it is, the automatic backup may upload, and that
       // upload must already list them.
       deps.rememberKnownGroups(accountIdB64, result.knownGroupIds);
+      // Before the owed flag goes too: the first upload after it carries them.
+      try {
+        await deps.applyOwnState(accountIdB64, {
+          ownProfile: result.ownProfile,
+          visibility: result.visibility,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("account backup restore: own state not applied", err instanceof Error ? err.name : "");
+      }
       deps.clearOwed(accountIdB64);
+      deps.markRestored(accountIdB64, result.knownGroupIds.length);
       return {
         kind: "applied",
         contacts: result.acceptedContacts.length,
@@ -291,10 +455,12 @@ export interface OwedRestoreInputs {
   readonly accountIdB64: string;
   readonly sessionToken: string;
   /** The account's device root key, or `null` when this device has none. */
-  readonly deviceKey: () => Promise<CryptoKey | null>;
+  readonly deviceKey: () => Promise<DeviceCipher | null>;
   /** The phrase, when the landing itself has it in hand (the phrase prompt).
    *  Absent on every other landing, which reads the device's phrase cache. */
   readonly phrase?: string;
+  /** As in {@link AccountBackupRestoreInputs}. */
+  readonly onOwnPredecessorsStored?: () => Promise<unknown>;
 }
 
 /** The effects of the landing step, injectable for tests. */
@@ -302,7 +468,7 @@ export interface OwedRestoreDeps {
   readonly isOwed: (accountIdB64: string) => boolean;
   readonly clearOwed: (accountIdB64: string) => void;
   /** The phrase cached on this device, or `null`. */
-  readonly cachedPhrase: (accountIdB64: string, deviceKey: CryptoKey) => Promise<string | null>;
+  readonly cachedPhrase: (accountIdB64: string, deviceKey: DeviceCipher) => Promise<string | null>;
   readonly restore: (inputs: AccountBackupRestoreInputs) => Promise<AccountBackupRestoreOutcome>;
 }
 
@@ -370,6 +536,9 @@ export async function restoreOwedAccountBackup(
       deviceKey,
       sessionToken: inputs.sessionToken,
       phrase,
+      ...(inputs.onOwnPredecessorsStored !== undefined
+        ? { onOwnPredecessorsStored: inputs.onOwnPredecessorsStored }
+        : {}),
     });
   } catch (err) {
     // eslint-disable-next-line no-console

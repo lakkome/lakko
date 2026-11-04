@@ -365,7 +365,11 @@ mod tests {
     fn fixture_capability() -> (Vec<u8>, SigningKey) {
         let issuer = SigningKey::from_seed(&[0x42; 32]);
         let group_id = vec![0xABu8; 32];
-        let wire = compose_group_invite(&issuer, &group_id, 0).unwrap();
+        let knock = crate::group_invite::GroupKnockKey {
+            public_key: [0x4B; 32],
+            version: 1,
+        };
+        let wire = compose_group_invite(&issuer, &group_id, 0, &knock).unwrap();
         (wire, issuer)
     }
 

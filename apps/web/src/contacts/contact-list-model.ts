@@ -8,6 +8,10 @@
  * waiting for an answer. No Solid, no storage, no wasm; tested in
  * `contact-list-model.test.ts`.
  */
+import { base64Encode } from "../auth/account-id";
+import { badgeText } from "../feed/feed-marks";
+import { fingerprintLabel } from "../profile/resolver";
+
 
 /** The group every label that does not start with a letter falls into. */
 export const OTHER_LETTER = "#";
@@ -84,8 +88,11 @@ export function sortIncomingRequests<T extends { readonly messageId: number }>(
 
 /** A contact request this account sent and has not seen answered. */
 export interface SentRequestRecord {
-  /** The canonical username the request was addressed to. */
+  /** The canonical username the request was addressed to; empty for a person
+   *  found by name alone. */
   readonly recipientUsername: string;
+  /** The name the person was found under. Absent in older records. */
+  readonly recipientName?: string;
   /** The recipient's 16-byte account id as lower-case hex; the key the
    *  accepted list is matched on once their acceptance lands. */
   readonly recipientAccountIdHex: string;
@@ -109,12 +116,64 @@ export function upsertSentRequest(
 }
 
 /** The sent requests still waiting: those whose recipient is not yet in the
- *  accepted list, newest first. */
+ *  accepted list, newest first. The list is matched on the account id and on
+ *  the key: a row a Welcome made before the person's profile arrived names
+ *  the key alone. */
 export function waitingSentRequests(
   sent: readonly SentRequestRecord[],
   acceptedAccountIdHexes: ReadonlySet<string>,
+  acceptedKeysB64: ReadonlySet<string> = new Set(),
 ): SentRequestRecord[] {
   return sent
-    .filter((r) => !acceptedAccountIdHexes.has(r.recipientAccountIdHex))
+    .filter(
+      (r) =>
+        !acceptedAccountIdHexes.has(r.recipientAccountIdHex) &&
+        !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)),
+    )
     .sort((a, b) => b.sentAtMs - a.sentAtMs);
+}
+
+/** A new contact's name until their own profile arrives. */
+export interface FoundName {
+  readonly displayName: string | null;
+  /** Canonical, verified when the person was found. */
+  readonly username: string | null;
+}
+
+/**
+ * What the answered record says about the person who accepted: the name they
+ * were found under, so a new contact is never listed as a stand-in (UX 6.1).
+ *
+ * Only for the key they were found under: a found name and username say
+ * nothing about another key, and an ack states its own account id, so the
+ * record it matches proves nothing about who signed it. A person found by
+ * their username alone is named by it: that is a username, not a name. A
+ * found name that is only a key fingerprint names nobody.
+ */
+export function foundNameOf(
+  record: SentRequestRecord | undefined,
+  accepterPubkey: Uint8Array,
+): FoundName | null {
+  if (record === undefined || record.recipientKeyB64 !== base64Encode(accepterPubkey)) return null;
+  const name = record.recipientName?.trim() ?? "";
+  if (name.length === 0 || name === fingerprintLabel(accepterPubkey)) return null;
+  const username = record.recipientUsername.length > 0 ? record.recipientUsername : null;
+  return { displayName: username !== null && name === `@${username}` ? null : name, username };
+}
+
+/** What a Sent row shows: the name as found, and `@username` under it. A
+ *  person found by their username alone is named by it, once. */
+export function sentRowLines(record: SentRequestRecord): {
+  readonly title: string;
+  readonly username: string | null;
+} {
+  const handle = record.recipientUsername.length > 0 ? `@${record.recipientUsername}` : null;
+  const name = record.recipientName ?? handle ?? "";
+  return { title: name, username: handle === name ? null : handle };
+}
+
+/** What the Contacts item of the rail shows for the requests waiting: the
+ *  Chats badge's text, or nothing at zero. */
+export function contactsBadge(waiting: number): string | null {
+  return waiting > 0 ? badgeText(waiting) : null;
 }

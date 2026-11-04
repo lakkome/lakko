@@ -56,14 +56,14 @@ class AccountNoticesTest {
     }
 
     @Test
-    fun `a device with no cursor asks for the last 30 days, shows them, then keeps a cursor`() {
+    fun `a device with no cursor shows nothing older than itself and keeps the newest id`() {
         val now = 100L * 24L * 60L * 60L * 1000L
         // The first request names a time, never an id.
         assertEquals(NoticeQuery(after = null, sinceMs = now - NOTICE_FIRST_LOOKBACK_MS), noticeQuery(null, now))
         assertEquals(30L * 24L * 60L * 60L * 1000L, NOTICE_FIRST_LOOKBACK_MS)
         val fetched = listOf(row(3, AccountNoticeKind.EmailAdded), row(9, AccountNoticeKind.PhraseSaved))
         val selection = selectAccountNotices(fetched, nextAfter = 9, cursor = null, ownActions = emptyMap())
-        assertEquals(listOf(3L, 9L), selection.show.map { it.id })
+        assertTrue(selection.show.isEmpty())
         assertEquals(9L, selection.cursor)
         // From then on the device pages by its cursor and sees nothing twice.
         assertEquals(NoticeQuery(after = 9L, sinceMs = null), noticeQuery(selection.cursor, now))
@@ -79,7 +79,7 @@ class AccountNoticesTest {
             cursor = null,
             ownActions = mapOf(AccountNoticeKind.EmailAdded to at),
         )
-        assertEquals(listOf(2L), selection.show.map { it.id })
+        assertTrue(selection.show.isEmpty())
         assertEquals(setOf(AccountNoticeKind.EmailAdded), selection.spentOwn)
     }
 

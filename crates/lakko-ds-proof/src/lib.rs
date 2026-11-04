@@ -123,7 +123,10 @@ pub use commit::{
     COMMIT_ROW_FIELD, COMMIT_STATEMENT_FIELD,
 };
 
-pub use committer::{check_committer_delegations, delegation_for, CommitterDelegationCheckError};
+pub use committer::{
+    check_committer_delegations, committer_envelope_due, delegation_for,
+    CommitterDelegationCheckError, SentCommitterEnvelope, COMMITTER_ENVELOPE_RESEND_AFTER_MS,
+};
 pub use delegation::{
     sign_delegation, verify_delegated_proof, verify_delegation, Delegation, DelegationError,
     DELEGATION_HEADER_NAME, DELEGATION_LEN, MAX_DELEGATION_TTL_MS,

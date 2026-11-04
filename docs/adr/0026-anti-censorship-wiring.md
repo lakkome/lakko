@@ -236,3 +236,16 @@ proxy; Phase 5 is a deploy + live-network task flagged explicitly.
 - `docs/security/transport.md` — T-1..T-15.
 - Security invariants #2 (server opacity), #4 (fail-closed / no silent
   downgrade), #5 (social graph not materialised).
+
+## Amendment (2026-10-30, found building the desktop host, ADR-0085 section 14)
+
+- `dial(endpoint, ...)` no longer chooses where a tunnel goes. REALITY and
+  Shadowsocks-2022 had ignored the signed `remote` and dialled the endpoint,
+  which the clients pass as the API host: the blocked address. `BootstrapDialer`
+  pins each to its `remote`; a spec whose `remote` is not `host:port` is skipped.
+- `Connection::recv` must survive being dropped: the relay and
+  `ByteStreamConnection` `select!` it against outbound data. Shadowsocks closed
+  for good on that and WebTransport could lose bytes; both are fixed.
+- A request or socket write is cut into `aead_stream::MAX_CHUNK` frames, and a
+  chunked response is decoded.
+- `tools/bootstrap-config` signs the config.

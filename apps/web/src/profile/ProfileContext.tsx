@@ -37,11 +37,14 @@ import {
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { conversationLabelsOf, realNameOf } from "./member-label";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
-import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import type { FoundName } from "../contacts/contact-list-model";
+import { loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import { loadPendingContacts, pendingContacts, type PendingContact } from "../contacts/pending-contacts";
 import { loadWasm, type Wasm } from "../wasm";
 import {
   EMPTY_OWN_PROFILE,
@@ -55,15 +58,19 @@ import { OWN_AVATAR_KEY, avatarLookupChanged, bindAvatarRuntime, setAvatarLookup
 import { IdbProfileBackend } from "./profile-idb";
 import {
   ACCOUNT_ID_BYTES,
+  FOUND_NAME_STAMP,
   ProfileStore,
   accountIdHexOfBytes,
+  awaitsOwnProfile,
   type IncomingProfile,
 } from "./profile-store";
+import { installBeforeSend } from "../chat/before-send";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
-import { resolveDisplay, type ResolvedName } from "./resolver";
+import { resolveDisplay, resolvePerson, type ResolvedName } from "./resolver";
 import type { ReceivedGrantWire } from "./profile-envelope";
 import { UsernameVerifier } from "./username-verification";
-import { isOwnKeyB64 } from "./own-key";
+import { isOwnKeyB64, ownKeysB64Of } from "./own-key";
+import { subscribeCarriedNames, takeCarriedProfiles } from "../devices/carried-state";
 import {
   decideProfileRequest,
   lastProfileRequestAt,
@@ -89,6 +96,7 @@ import {
   bindOwnProfileSync,
   ownProfileChanged,
   subscribeOwnProfileAdopted,
+  subscribeOwnStateRestored,
   unbindOwnProfileSync,
 } from "./own-profile-sync";
 import { durableSnapshotHook } from "../chat/persist-hooks";
@@ -149,6 +157,10 @@ export interface ProfileApi {
   requestProfilesOnOpen(groupIdB64: string, memberKeysB64: readonly string[]): Promise<void>;
   /** Record a username binding a lookup already proved. */
   learnUsername(signatureKeyB64: string, username: string): void;
+  /** A new contact's name as a search found it, filed under their key at
+   *  {@link FOUND_NAME_STAMP}: what they send replaces it. Never over a
+   *  profile already held. */
+  fileFoundName(signatureKeyB64: string, found: FoundName): void;
   /** The own profile envelope, or `null` when there is nothing to publish.
    *  With `groupIdB64` it carries the ADR-0060 grants that conversation gets
    *  (`member` always, `group` when the setting allows, `contact` in a
@@ -157,6 +169,9 @@ export interface ProfileApi {
   /** ADR-0060 — this account's username certificate, `null` until fetched
    *  (or for a guest account). */
   ownUsernameCertificate(): Uint8Array | null;
+  /** The certificate, fetched first when none is held yet. `null` when it
+   *  could not be had; asked again next time. */
+  fetchOwnUsernameCertificate(): Promise<Uint8Array | null>;
   /** The 16-byte auth account id a person CLAIMED in their profile, as 32
    *  lower-case hex characters, or `null` when none is held. For the viewer's
    *  own key it is the signed-in account. Reactive. */
@@ -229,7 +244,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   };
 
   const store = new ProfileStore(
-    new IdbProfileBackend(getDeviceKey, () => untrack(renames)),
+    new IdbProfileBackend(getDeviceKey, () => untrack(renames), () => untrack(conversationLabels)),
     (incoming, stored) => (wasm !== null ? wasm.profileIsNewer(incoming, stored) : incoming > stored),
     (err) => {
       // eslint-disable-next-line no-console
@@ -509,6 +524,10 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         store.close();
         return;
       }
+      // ADR-0079 — the pending contacts name the inviters a link added
+      // before any profile of theirs arrived (`resolve`). Loaded here too, so
+      // a group screen opened first still names them.
+      void loadPendingContacts(account);
       // ADR-0048 section 4a — the own name between this account's devices.
       bindOwnProfileSync(account, ownAccountIdBytes());
       void applyHeldServiceEnvelopes();
@@ -564,6 +583,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     return owedConversations()?.length ?? null;
   });
   onCleanup(() => installProfileResend(null));
+  // ADR-0048 §2 — a profile owed to a group leaves before this device's next
+  // message there (`chat/before-send.ts`).
+  onCleanup(installBeforeSend((groupIdB64) => scheduler.beforeSend(groupIdB64)));
 
   // ADR-0048 section 4a — a name set on another device of this account was
   // adopted: re-read the own profile. Not republished into groups (the device
@@ -575,6 +597,40 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // and the member cards follow; the groups already got it.
   });
 
+  // A restore: the stored profile may be new, and the person is told again
+  // everywhere, as after any change (the groups this device holds now; the
+  // ones it joins later get it from `groupJoined`).
+  const unsubscribeOwnRestored = subscribeOwnStateRestored(() => {
+    setOwnProfileTick((t) => t + 1);
+    bump();
+    ownProfileChanged();
+    void scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
+  });
+
+  /** The pending contact (ADR-0079) whose account key is `keyB64` or the
+   *  canonical key it aliases, if any. Reactive on the pending list. */
+  function pendingContactOf(keyB64: string, canonical: string): PendingContact | undefined {
+    return pendingContacts().find(
+      (c) => c.signaturePubkeyB64 === keyB64 || c.signaturePubkeyB64 === canonical,
+    );
+  }
+
+  // ADR-0079 — a pending contact added, removed or handed over to a real
+  // contact changes what `resolve` returns for its key: re-resolve.
+  //
+  // A link-stated username is held to the same rule as a profile's claim:
+  // shown only once verified for the key (`verifier.state`). No lookup is
+  // started for it here: verification checks the discovery certificate the
+  // person's own PROFILE carries (ADR-0060 section 5), and a link carries
+  // none, so a lookup could only answer `mismatch` and would put a false
+  // "Username not verified" on the contact. The username is verified when
+  // their profile arrives (`ingest`), or when a lookup this device already
+  // made proved it (`learnUsername`).
+  createEffect(() => {
+    pendingContacts();
+    untrack(bump);
+  });
+
   const unsubscribeRenames = subscribeAcceptedChanged(() => {
     setRenames(loadRenames());
     setAliases(loadKeyAliases());
@@ -583,12 +639,85 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const account = accountId();
     if (account !== null) store.resave(account);
   });
+
+  /**
+   * The pairing state bundle v3 (`devices/carried-state.ts`): the profiles
+   * the confirming device holds, taken for the bound account once this
+   * device knows its own keys, and filed through the same `ingest` a
+   * received profile goes through ("strictly newer" wins, a newer one held
+   * here stays). A profile filed under one of this account's own keys is
+   * never stored.
+   */
+  function takeCarriedProfilesNow(): void {
+    const account = accountId();
+    const own = chats.identity();
+    if (account === null || own === null) return;
+    const ownKeys = ownKeysB64Of(own, [chats.conversationAccountIdentity()?.signaturePublicKey]);
+    const carried = takeCarriedProfiles(account);
+    for (const [keyB64, profile] of carried) {
+      if (ownKeys.includes(keyB64)) continue;
+      void store.ingest(account, keyB64, profile).then((replaced) => {
+        if (replaced) verifyIfClaimed(keyB64, store.get(keyB64)?.username ?? null);
+      });
+    }
+  }
+  createEffect(() => {
+    accountId();
+    chats.identity();
+    untrack(takeCarriedProfilesNow);
+  });
+  const unsubscribeCarried = subscribeCarriedNames(takeCarriedProfilesNow);
+
+  // The service worker names a person with what the app shows for them in a
+  // conversation (`conversationLabels`): the row is written again when the
+  // groups, the renames or the key aliases move, not only on a new profile.
+  let labelsTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    chats.groups();
+    renames();
+    aliases();
+    pendingContacts();
+    const account = accountId();
+    if (account === null) return;
+    if (labelsTimer !== null) clearTimeout(labelsTimer);
+    labelsTimer = setTimeout(() => store.resave(account), 1000);
+  });
+
   onCleanup(() => {
+    if (labelsTimer !== null) clearTimeout(labelsTimer);
     unsubscribeStore();
     unsubscribeRenames();
     unsubscribeOwnAdopted();
+    unsubscribeOwnRestored();
+    unsubscribeCarried();
     scheduler.stop();
   });
+
+  /**
+   * The label the app shows for each member of each conversation this device
+   * holds (a real name only; a person the app cannot name is left out),
+   * under every key the service worker can be handed for that person: the
+   * account key a leaf is bound to and the leaf's own key. Mirrored into the
+   * row for the worker, so a notification names a person exactly as the chat
+   * does, a group member who is not a contact included.
+   */
+  function conversationLabels(): Map<string, string> {
+    // Every contact, every received profile, and every retired key of a
+    // contact, beside the rosters: a sender is always one of these.
+    const others = new Set<string>();
+    for (const c of loadAccepted()) others.add(c.signaturePubkeyB64);
+    for (const c of pendingContacts()) others.add(c.signaturePubkeyB64);
+    for (const [key] of store.entries()) others.add(key);
+    for (const key of renames().keys()) others.add(key);
+    for (const key of aliases().keys()) others.add(key);
+    return conversationLabelsOf(
+      chats.groups().map((g) => rosterOf(g.group)),
+      // A name the app does not know is not written: no placeholder word.
+      (person) => realNameOf(api.resolve(person)),
+      base64Encode,
+      others,
+    );
+  }
 
   const api: ProfileApi = {
     version,
@@ -657,20 +786,34 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       // row key: its rename, and its profile when the alias key sent none.
       const canonical = aliases().get(keyB64) ?? keyB64;
       const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
-      const profileKeyB64 = store.get(keyB64) !== undefined ? keyB64 : canonical;
-      return resolveDisplay({
+      // ADR-0079 — with no received profile, a pending contact's invite
+      // link states the inviter's name and username (signed by their
+      // account key). `resolvePerson` decides the precedence; the username
+      // is verified under the key the claim is filed under.
+      const pending = profile === undefined ? pendingContactOf(keyB64, canonical) : undefined;
+      const claimKeyB64 =
+        profile !== undefined
+          ? store.get(keyB64) !== undefined
+            ? keyB64
+            : canonical
+          : (pending?.signaturePubkeyB64 ?? keyB64);
+      return resolvePerson({
         signatureKey: keyBytes,
         rename: renames().get(canonical),
-        profile,
-        verification:
-          profile?.username !== null && profile?.username !== undefined
-            ? verifier.state(profileKeyB64, profile.username)
-            : undefined,
+        received: profile,
+        linkStatement: pending,
+        verificationOf: (username) => verifier.state(claimKeyB64, username),
       });
     },
     claimedUsernameOf(keyB64) {
       version();
-      const username = store.get(keyB64)?.username ?? null;
+      // A pending contact's link-stated username is a claim like a
+      // profile's (ADR-0079), used only when no profile was received.
+      const received = store.get(keyB64);
+      const username =
+        received !== undefined
+          ? received.username
+          : (pendingContactOf(keyB64, aliases().get(keyB64) ?? keyB64)?.username ?? null);
       return username !== null && username.length > 0 ? username : null;
     },
     ingest(senderKeyB64, profile, context) {
@@ -758,13 +901,17 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (account === null || own === null) return;
       const w = await loadWasm();
       // The count reads the SAME resolver every screen renders from, so
-      // "unnamed" here is exactly a row that shows as `Member`.
+      // "unnamed" here is a row that shows as `Member`, or one that shows only
+      // what a search found: the person's own profile is still owed.
       const decision = decideProfileRequest(
         {
           joinedJustNow: false,
           memberKeysB64,
           isOwnKey: (k) => isOwnKeyB64(own, k),
-          sourceOf: (k) => api.resolve(k).source,
+          sourceOf: (k) => {
+            const source = api.resolve(k).source;
+            return source !== "rename" && awaitsOwnProfile(store.get(k)) ? "fingerprint" : source;
+          },
           lastRequestedAtMs: lastProfileRequestAt(account, groupIdB64),
           nowMs: Date.now(),
         },
@@ -778,8 +925,22 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       verifier.learn(signatureKeyB64, username);
       bump();
     },
+    fileFoundName(signatureKeyB64, found) {
+      const account = accountId();
+      if (account === null) return;
+      // Straight to the store: the check a stored username gets reads the
+      // certificate a profile carried, and this row has none. The search
+      // that showed the username verified it, so that verdict goes with it.
+      void store.ingest(account, signatureKeyB64, { ...found, updatedAtMs: FOUND_NAME_STAMP }).then((stored) => {
+        if (stored && found.username !== null) api.learnUsername(signatureKeyB64, found.username);
+      });
+    },
     ownProfileEnvelope,
     ownUsernameCertificate: () => ownCert(),
+    async fetchOwnUsernameCertificate() {
+      await ensureOwnCertificate();
+      return ownCert();
+    },
     accountIdHexOf(keyB64) {
       version();
       const own = chats.identity();

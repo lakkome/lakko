@@ -25,6 +25,8 @@
  * ones taken right after the change that made them worth taking.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
+
 /** No more than one upload per this interval, however much changes. */
 export const MIN_BACKUP_INTERVAL_MS = 5 * 60_000;
 
@@ -39,12 +41,17 @@ export interface AutoBackupState {
    *  the first report - which counts as a change, because nothing here can
    *  vouch for what the server already holds. */
   readonly lastGroupsKey: string | null;
+  /** The stamps of the own profile and the "who can find me" setting this
+   *  device last reported. `null` before the first report, which counts as a
+   *  change: an older blob may carry neither. */
+  readonly lastOwnStateKey: string | null;
 }
 
 export const CLEAN_STATE: AutoBackupState = {
   lastUploadAtMs: 0,
   dirtySinceMs: null,
   lastGroupsKey: null,
+  lastOwnStateKey: null,
 };
 
 export type AutoBackupVerdict = "clean" | "throttled" | "due";
@@ -118,7 +125,8 @@ export function loadAutoBackupState(accountIdB64: string): AutoBackupState {
     const last = typeof p.lastUploadAtMs === "number" ? p.lastUploadAtMs : 0;
     const dirty = typeof p.dirtySinceMs === "number" ? p.dirtySinceMs : null;
     const groups = typeof p.lastGroupsKey === "string" ? p.lastGroupsKey : null;
-    return { lastUploadAtMs: last, dirtySinceMs: dirty, lastGroupsKey: groups };
+    const own = typeof p.lastOwnStateKey === "string" ? p.lastOwnStateKey : null;
+    return { lastUploadAtMs: last, dirtySinceMs: dirty, lastGroupsKey: groups, lastOwnStateKey: own };
   } catch {
     return CLEAN_STATE;
   }
@@ -170,7 +178,7 @@ export interface AutoBackupDeps {
   readonly accountId: () => Uint8Array | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
-  readonly deviceKey: () => Promise<CryptoKey | null>;
+  readonly deviceKey: () => Promise<DeviceCipher | null>;
   readonly sessionToken: () => string | null;
   /** Whether a fetch of this account's backup is still owed
    *  (`restore-owed.ts`). While it is, nothing is uploaded: the blob on the
@@ -181,7 +189,7 @@ export interface AutoBackupDeps {
   readonly upload: (args: {
     accountId: Uint8Array;
     ed25519Seed: Uint8Array;
-    deviceKey: CryptoKey;
+    deviceKey: DeviceCipher;
     sessionToken: string;
   }) => Promise<boolean>;
   readonly now?: () => number;
@@ -271,5 +279,18 @@ export function knownGroupsChanged(
   const state = loadAutoBackupState(accountIdB64);
   if (state.lastGroupsKey === key) return false;
   saveAutoBackupState(accountIdB64, { ...state, lastGroupsKey: key });
+  return true;
+}
+
+/**
+ * Whether the person's own profile or setting moved since the last time this
+ * was asked, recording the new key as it goes. A name, a photo or the setting
+ * changes on this device or arrives from another one; the stamps say so for
+ * both, and asking at the tick needs no hook at either.
+ */
+export function ownStateChanged(accountIdB64: string, key: string): boolean {
+  const state = loadAutoBackupState(accountIdB64);
+  if (state.lastOwnStateKey === key) return false;
+  saveAutoBackupState(accountIdB64, { ...state, lastOwnStateKey: key });
   return true;
 }

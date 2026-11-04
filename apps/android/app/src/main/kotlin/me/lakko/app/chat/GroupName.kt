@@ -199,6 +199,14 @@ public object GroupNameStore {
         }
     }
 
+    /** Forget the name of one group (ADR-0087 section 9). */
+    public fun delete(context: Context, accountIdB64: String, groupIdHex: String) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().remove(key(accountIdB64, groupIdHex)).apply()
+            mutableVersion.value += 1
+        }
+    }
+
     /** Forget every group name held for [accountIdB64] (forget device). */
     public fun deleteAccount(context: Context, accountIdB64: String) {
         val p = prefs(context)

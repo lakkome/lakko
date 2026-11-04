@@ -71,7 +71,6 @@ import {
   rememberObservedOwner,
   transferActionLabel,
   transferCandidates,
-  transferOutcomeNotice,
   transferPendingLabel,
   type ExitBlockInput,
   type RosterEntryView,
@@ -414,31 +413,6 @@ describe("§6.1.5 — the step IS the confirmation", () => {
     // Asserting the exit is open before the commit lands would be the
     // optimistic update §3 forbids.
     expect(TRANSFER_UNLOCKS_LEAVE()).not.toContain("now");
-  });
-});
-
-describe("§6.1.7 — what the transferor sees afterwards", () => {
-  it("a swept transfer names the transferor's OWN new role", () => {
-    // Half the panel changes under them in one tap: an owner who chose
-    // `Become a regular member` loses the add form, the invite block, every
-    // `Remove` and every admin toggle at once.
-    expect(transferOutcomeNotice("committed", "Alice", "admin")).toBe(
-      "Alice is now the group owner. You are still an admin.",
-    );
-    expect(transferOutcomeNotice("committed", "Alice", "member")).toBe(
-      "Alice is now the group owner. You are now a regular member.",
-    );
-  });
-
-  it("a published-but-unswept transfer names NO role", () => {
-    // Nothing has changed yet; appending "you are now an admin" to a request
-    // that has not landed would be the optimistic-update lie in its purest form.
-    const notice = transferOutcomeNotice("proposed", "Alice", "admin");
-    expect(notice).toBe(
-      "Ownership transfer requested. It applies when an owner or an admin applies the change.",
-    );
-    expect(notice).not.toContain("admin.");
-    expect(transferOutcomeNotice("proposed", "Alice", "member")).toBe(notice);
   });
 });
 

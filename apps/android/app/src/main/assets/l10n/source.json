@@ -28,12 +28,12 @@
       "comment": "Update banner button while the page is reloading."
     },
     "auth.brand.body": {
-      "text": "Chats, groups, channels and calls, end-to-end encrypted by default. Lakko's servers never see your messages.",
+      "text": "Chats, groups, channels and calls, end-to-end encrypted by default.",
       "comment": "Text under the headline on the brand panel beside the sign-in and sign-up forms.",
       "security_critical": true
     },
     "auth.brand.foot": {
-      "text": "Open source. No phone number required.",
+      "text": "Communication your way. No phone number required.",
       "comment": "Small line at the bottom of the brand panel."
     },
     "auth.brand.tagline": {
@@ -61,6 +61,14 @@
     "auth.explainer.ways_back": {
       "text": "If you forget it, you can get back in with another device that is still logged in, a passkey, your recovery phrase, three words from it, or an authenticator app.",
       "comment": "Third paragraph of the password explanation: the ways back into an account (another device, a passkey, the recovery phrase, three words of it, an authenticator app)."
+    },
+    "auth.key_store_unavailable.body": {
+      "text": "Your system keyring isn't available. Unlock it or install one, then try again.",
+      "comment": "Body of the desktop key-store refusal screen; the button under it (common.try_again) repeats the step that failed."
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko can't store your keys safely on this computer.",
+      "comment": "Title of the desktop screen shown when the operating system's key store (Keychain, Windows key store, Linux keyring) is missing or refused. Sign-in stops here."
     },
     "auth.language.button": {
       "text": "Change language",
@@ -187,7 +195,7 @@
       "comment": "Line under the sign-up form; {link} is the 'Log in' link."
     },
     "auth.signup.lede": {
-      "text": "Your password never leaves your device. You will get a recovery phrase to write down next.",
+      "text": "Your password never leaves your device.",
       "comment": "Line under the sign-up title.",
       "security_critical": true
     },
@@ -605,6 +613,10 @@
       "text": "{name} ended the call for everyone",
       "comment": "Line on the ended-call screen when the person who started the call ended it for everyone; {name} is that person's name."
     },
+    "call.ended.no_longer_in_group": {
+      "text": "You are no longer in this group.",
+      "comment": "Line on the ended-call screen when the call ends because the reader has just stopped being a member of the group. Names nobody."
+    },
     "call.error.encryption_setup": {
       "text": "Could not set up call encryption, so the call did not start.",
       "comment": "Shown when the device could not derive the call's encryption key; the call is refused rather than started unencrypted.",
@@ -703,25 +715,9 @@
       "text": "Calls you make and receive appear here.",
       "comment": "Second line of the empty call history, under 'No calls yet'."
     },
-    "call.history.join_by_link": {
-      "text": "Join by link",
-      "comment": "Button on the Calls screen that opens a field to paste a call link."
-    },
-    "call.history.join_invalid": {
-      "text": "That does not look like a call link. Paste the whole link and try again.",
-      "comment": "Error under the call-link field on the Calls screen when the text is not a call link."
-    },
     "call.history.new_call": {
       "text": "New call",
       "comment": "Button on the Calls screen that starts a new group video call."
-    },
-    "call.history.paste_hint": {
-      "text": "The person who created the call shares the link.",
-      "comment": "Hint under the field where a call link is pasted to join a call."
-    },
-    "call.history.paste_label": {
-      "text": "Paste a call link",
-      "comment": "Label of the field on the Calls screen where a call link is pasted."
     },
     "call.history.unknown_conversation": {
       "text": "Unknown",
@@ -982,6 +978,10 @@
     "call.log.declined": {
       "text": "Declined",
       "comment": "Call history row: a call that was declined."
+    },
+    "call.log.failed": {
+      "text": "Call failed",
+      "comment": "Call history row: a call answered here that never connected."
     },
     "call.log.incoming": {
       "text": "Incoming call",
@@ -1479,7 +1479,7 @@
       "comment": "Channel info: how many subscribers this device has counted."
     },
     "channels.info.unsubscribe_sub": {
-      "text": "Takes the channel off your list and stops this device reading it. You can subscribe again later.",
+      "text": "Takes the channel off your list and removes its posts from all your devices. You can subscribe again later.",
       "comment": "Line under \"Stop following\": says exactly what happens (the publisher is not told).",
       "security_critical": true
     },
@@ -1602,7 +1602,7 @@
       "comment": "The reader's own row in a channel's member list."
     },
     "channels.meta.desc": {
-      "text": "The name and description reach every subscriber, encrypted. The server never reads them.",
+      "text": "The name and description reach every subscriber.",
       "comment": "Description of the channel details card on the manage screen.",
       "security_critical": true
     },
@@ -1692,12 +1692,12 @@
       "comment": "Label of the optional public handle of a new channel."
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "comment": "Example in the empty handle field. Keep the @ and Latin letters."
     },
     "channels.new.subtitle": {
-      "text": "Subscribers see the name and description. They travel encrypted; only ciphertext reaches the server.",
-      "comment": "Line under \"New channel\": who sees the name and description, and that the server sees only ciphertext.",
+      "text": "Subscribers see the name and description.",
+      "comment": "Line under \"New channel\": who sees the name and description.",
       "security_critical": true
     },
     "channels.new.title": {
@@ -1898,8 +1898,8 @@
       "comment": "Card title and button in channel info for a subscriber, and the confirm button of the dialog."
     },
     "channels.unsubscribe.body": {
-      "text": "It leaves your list and this device stops reading it. You can subscribe again later.",
-      "comment": "Body of the stop-following confirmation: what unsubscribing does on this device.",
+      "text": "It leaves your list and its posts are removed from all your devices. You can subscribe again later.",
+      "comment": "Body of the stop-following confirmation: what unsubscribing does on every device of the person.",
       "security_critical": true
     },
     "channels.unsubscribe.title": {
@@ -2213,6 +2213,10 @@
       "text": "Skin tones for {name}",
       "comment": "Accessible name of the skin tone choices for an emoji; {name} is the emoji's name."
     },
+    "chat.emoji.suggestions": {
+      "text": "Emoji suggestions",
+      "comment": "Accessible name of the strip of emoji offered above the message field after typing ':' and a word."
+    },
     "chat.emoji.tab": {
       "text": "Emoji",
       "comment": "Tab of the picker that shows emoji."
@@ -2232,6 +2236,14 @@
     "chat.ended.no_longer_member": {
       "text": "You are no longer a member of this group.",
       "comment": "Headline in the timeline once the reader is no longer in a group, whether they left or were removed. Names nobody."
+    },
+    "chat.ended.notice": {
+      "text": "You are no longer in {name}.",
+      "comment": "Banner at the top of Chats, and title of the dialog over the conversation if it is open, when the reader's membership of a group ended and everything from it was removed. {name} is the group's name. Never says who removed them."
+    },
+    "chat.ended.notice_body": {
+      "text": "The group and its messages are gone from your devices.",
+      "comment": "Body of the dialog over a conversation the reader is no longer in, under the title with the group name."
     },
     "chat.ended.unsent_draft": {
       "text": "Unsent draft",
@@ -2357,18 +2369,9 @@
       "text": "No GIFs found",
       "comment": "GIF search found nothing."
     },
-    "chat.gif.note_dismiss": {
-      "text": "Got it",
-      "comment": "Button that dismisses the note about how GIF search works."
-    },
     "chat.gif.open_full": {
       "text": "Open GIF full screen",
       "comment": "Accessible name of a GIF in a message; tapping shows it full screen."
-    },
-    "chat.gif.privacy_note": {
-      "text": "GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.",
-      "comment": "Note at the top of the GIF picker: GIF search goes through Lakko's server, which learns the search terms; a sent GIF is encrypted.",
-      "security_critical": true
     },
     "chat.gif.rate_limited": {
       "text": "Too many searches — try again in a moment",
@@ -2454,9 +2457,17 @@
       "text": "Link cleared. This device holds no key to revoke it, so it works until it expires.",
       "comment": "Notice after clearing a group invite link this device cannot revoke at the server (it keeps no revocation key for it)."
     },
+    "chat.invite_link.copied": {
+      "text": "Link copied.",
+      "comment": "Shown after an invite link was copied to the clipboard."
+    },
     "chat.invite_link.copy": {
       "text": "Copy link",
       "comment": "Button that copies the invite link."
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Couldn't copy the link.",
+      "comment": "Shown when the browser refused to copy an invite link to the clipboard."
     },
     "chat.invite_link.create": {
       "text": "Create invite link",
@@ -2483,8 +2494,8 @@
       "comment": "Button in group info that asks to leave the group."
     },
     "chat.leave.body": {
-      "text": "You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.",
-      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it.",
+      "text": "It leaves your list and its messages are removed from all your devices. You keep receiving messages until an owner or an admin applies your request.",
+      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it. \"It\" is the group.",
       "security_critical": true
     },
     "chat.leave.confirm": {
@@ -2560,40 +2571,32 @@
       "comment": "Screen-reader label of a voice or video message: {label} is its kind (Voice message, Video message), {duration} its spoken length."
     },
     "chat.members.add.action": {
-      "text": "Add member",
-      "comment": "Menu item in a group's header menu that opens group info with the add-member field."
-    },
-    "chat.members.add.done": {
-      "text": "{name} added.",
-      "comment": "Notice after someone was added to the group."
+      "text": "Add members",
+      "comment": "First row of a group's members list in group info, for the owner and admins; opens the Add members screen."
     },
     "chat.members.add.error.no_bundle": {
       "text": "This person has not finished setting up Lakko yet. Try again later.",
       "comment": "Adding someone failed because their account is not fully set up."
     },
     "chat.members.add.error.some_failed": {
-      "text": "Could not add {names}. Add them from the members panel.",
-      "comment": "After creating a group, some of the chosen people could not be added; {names} lists them."
+      "text": "Could not add {names}. Try again.",
+      "comment": "Shown in group info when some of the people picked on the Add members screen (or when creating a group) could not be added; {names} lists them."
     },
-    "chat.members.add.error.unknown_username": {
-      "text": "No account is registered as {name}.",
-      "comment": "Adding someone by username failed: nobody has that username. {name} is the username with an @ in front."
-    },
-    "chat.members.add.placeholder": {
-      "text": "@username",
-      "comment": "Placeholder of the field for adding someone to a group by username. Keep the @."
-    },
-    "chat.members.add.requested": {
-      "text": "{name} requested. They join when an owner or an admin applies the change.",
-      "comment": "Notice after the reader asked to add {name}; the addition is applied later by an owner or admin."
+    "chat.members.add.search_placeholder": {
+      "text": "Search contacts or people",
+      "comment": "Placeholder of the search field on the Add members screen; it filters contacts and searches people by username or name."
     },
     "chat.members.add.submit": {
       "text": "Add",
       "comment": "Button that adds the person whose username was typed."
     },
-    "chat.members.admin.demoted": {
-      "text": "Removed as admin.",
-      "comment": "Notice after the owner removed a member's admin role."
+    "chat.members.add.submit_count": {
+      "text": "Add {count}",
+      "comment": "Button on the Add members screen when more than one person is picked; {count} is the number picked (2 or more)."
+    },
+    "chat.members.add.title": {
+      "text": "Add members",
+      "comment": "Title of the screen where the owner or an admin picks contacts and found people to add to a group."
     },
     "chat.members.admin.make": {
       "text": "Make admin",
@@ -2603,17 +2606,9 @@
       "text": "Admin",
       "comment": "Marker next to a member who is an admin."
     },
-    "chat.members.admin.promoted": {
-      "text": "Promoted to admin.",
-      "comment": "Notice after the owner made a member an admin."
-    },
     "chat.members.admin.remove": {
       "text": "Remove admin",
       "comment": "Button next to an admin in the member list: take away their admin role."
-    },
-    "chat.members.admin.requested": {
-      "text": "Change requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after an admin role change was requested and not yet applied."
     },
     "chat.members.count": {
       "text": "{count, plural, one {# member} other {# members}}",
@@ -2635,25 +2630,49 @@
       "text": "Approve",
       "comment": "Button that approves a request to join the group."
     },
-    "chat.members.join.approved_added": {
-      "text": "Join approved. They have been added to the group.",
-      "comment": "Notice after approving a join request that was applied at once."
-    },
-    "chat.members.join.approved_requested": {
-      "text": "Join approved. They join when an owner or an admin applies the change.",
-      "comment": "Notice after approving a join request that is applied later."
+    "chat.members.join.asked": {
+      "text": "Asked {when}",
+      "comment": "Line under a request to join in the members panel (ADR-0087, group-and-channel-privacy.md section 8). {when} is a relative time such as \"2 hours ago\"."
     },
     "chat.members.join.heading": {
       "text": "Join requests ({count})",
       "comment": "Heading of the list of people asking to join through a link."
     },
+    "chat.members.join.heading_full": {
+      "text": "Join requests (64+)",
+      "comment": "Heading of the join requests section when 64 are waiting."
+    },
+    "chat.members.join.invited_by": {
+      "text": "Invited by {name} · {when}",
+      "comment": "Line under a request to join that came by an invite link (ADR-0087, group-and-channel-privacy.md section 8). {name} is the person whose link it was, {when} a relative time such as \"2 hours ago\"."
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Invited by {name}",
+      "comment": "Under a join request made from an invite link when the time it was sent is not known."
+    },
     "chat.members.join.link_unknown": {
       "text": "Invite link not known",
       "comment": "Under a join request when it is not known whose link it came through."
     },
+    "chat.members.join.more_waiting": {
+      "text": "More requests are waiting. They appear as you answer these.",
+      "comment": "Line under the join requests heading when 64 are waiting."
+    },
     "chat.members.join.reject": {
       "text": "Reject",
       "comment": "Button that rejects a request to join the group."
+    },
+    "chat.members.join.reject_all": {
+      "text": "Reject all",
+      "comment": "Button rejecting every waiting join request; also its dialog's confirm button."
+    },
+    "chat.members.join.reject_all_body": {
+      "text": "This removes every request waiting, including ones you haven't seen.",
+      "comment": "Body of the dialog before rejecting every join request."
+    },
+    "chat.members.join.reject_all_title": {
+      "text": "Reject all requests?",
+      "comment": "Title of the dialog before rejecting every join request."
     },
     "chat.members.join.rejected": {
       "text": "Join request rejected.",
@@ -2680,17 +2699,13 @@
       "text": "Membership changes are applied by the group owner or an admin. They will apply automatically when one does.",
       "comment": "Second line of the notice about waiting membership changes."
     },
-    "chat.members.pending.queue": {
-      "text": "{count, plural, one {# change is now waiting to apply.} other {# changes are now waiting to apply.}}",
-      "comment": "Added after an admin approves a join request: how many membership changes are now waiting to be applied."
-    },
     "chat.members.pending.waiting_added": {
       "text": "Waiting to be added.",
       "comment": "Next to a person whose addition to the group was requested but not applied yet."
     },
     "chat.members.pending.waiting_leave": {
       "text": "Waiting to leave.",
-      "comment": "Next to the reader in the member list: they asked to leave and it has not been applied yet."
+      "comment": "Next to the reader in the member list: they asked to leave and it has not been applied yet. Also the second line of the group's row in Chats while the reader's own request to leave waits."
     },
     "chat.members.pending.waiting_removed": {
       "text": "Waiting to be removed.",
@@ -2704,19 +2719,6 @@
     "chat.members.remove.confirm_named": {
       "text": "Remove {name}",
       "comment": "Button in the dialog confirming a removal from a group; {name} is the member's name."
-    },
-    "chat.members.remove.done": {
-      "text": "Member removed.",
-      "comment": "Notice after someone was removed from the group."
-    },
-    "chat.members.remove.requested": {
-      "text": "Removal requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after the reader asked to remove someone; the removal is applied later.",
-      "security_critical": true
-    },
-    "chat.members.remove.requested_short": {
-      "text": "Removal requested.",
-      "comment": "Short notice after the reader asked to remove someone from the group."
     },
     "chat.members.remove.title": {
       "text": "Remove this member?",
@@ -2982,6 +2984,26 @@
       "text": "React - Reacted by {names}",
       "comment": "Tooltip of a reaction someone else made: tapping adds the reader's; {names} lists who reacted."
     },
+    "chat.reaction.cap_reached": {
+      "text": "You can add up to 3 reactions. Take one off to add another.",
+      "comment": "Line under the reaction row or a message's reactions when the person already gave 3 reactions to it."
+    },
+    "chat.reaction.chip_a11y": {
+      "text": "{emoji}, {count, plural, one {# reaction} other {# reactions}}",
+      "comment": "Screen-reader name of a reaction chip under a message; {emoji} is the emoji."
+    },
+    "chat.reaction.chip_yours_a11y": {
+      "text": "{emoji}, your reaction",
+      "comment": "Screen-reader name of a reaction the person gave (a chip, or an emoji in the reaction row)."
+    },
+    "chat.reaction.list_all": {
+      "text": "All {count}",
+      "comment": "First tab of the list of who reacted to a message; {count} is the number of reactions."
+    },
+    "chat.reaction.list_title": {
+      "text": "Reactions",
+      "comment": "Accessible title of the popover listing who reacted to a message."
+    },
     "chat.reaction.reacted_by": {
       "text": "Reacted by {names}",
       "comment": "Tooltip of a reaction under a message; {names} lists who reacted with this emoji."
@@ -2994,9 +3016,17 @@
       "text": "Remove your reaction - Reacted by {names}",
       "comment": "Tooltip of a reaction the reader made: tapping removes it; {names} lists who reacted."
     },
+    "chat.reaction.show_who_a11y": {
+      "text": "Show who reacted",
+      "comment": "Screen-reader hint on a reaction chip: right-click opens the list of who reacted; also the name of the +N chip."
+    },
     "chat.reaction.single_emoji": {
       "text": "A reaction must be a single emoji.",
       "comment": "The reader tried to react with something that is not exactly one emoji."
+    },
+    "chat.reaction.unseen_a11y": {
+      "text": "New reactions to your messages, {count}",
+      "comment": "Screen-reader name of the round heart button in a conversation that goes to messages others reacted to."
     },
     "chat.reauth.action": {
       "text": "Sign in again",
@@ -3319,9 +3349,13 @@
       "text": "Join request",
       "comment": "Line in the timeline where someone asked to join the group."
     },
-    "chat.system.members_changed": {
-      "text": "Members changed",
-      "comment": "Line in the timeline where the group's membership changed."
+    "chat.system.member_joined": {
+      "text": "{name} joined",
+      "comment": "Row in a group's timeline: this person became a member. {name} is the person's display name, or 'Member' when unknown."
+    },
+    "chat.system.member_left": {
+      "text": "{name} is no longer in the group",
+      "comment": "Row in a group's timeline: this person is no longer a member (left or was removed). {name} is the person's display name, or 'Member' when unknown."
     },
     "chat.timeline.empty": {
       "text": "No messages yet. Say hi.",
@@ -3350,14 +3384,6 @@
     "chat.transfer.candidate_admin": {
       "text": "{name}, admin",
       "comment": "Accessible name of an admin in the list of possible new owners."
-    },
-    "chat.transfer.done_admin": {
-      "text": "{name} is now the group owner. You are still an admin.",
-      "comment": "Notice after an ownership transfer applied; the former owner kept admin."
-    },
-    "chat.transfer.done_member": {
-      "text": "{name} is now the group owner. You are now a regular member.",
-      "comment": "Notice after an ownership transfer applied; the former owner became a plain member."
     },
     "chat.transfer.irreversible_body": {
       "text": "Only an owner can change roles. Once you transfer this group you cannot take it back, you cannot restore your own owner role, and you cannot change your own role again unless the new owner does it for you.",
@@ -3400,10 +3426,6 @@
     "chat.transfer.pending_named": {
       "text": "Waiting to make {name} the owner.",
       "comment": "An ownership transfer to {name} was requested and has not been applied yet."
-    },
-    "chat.transfer.requested": {
-      "text": "Ownership transfer requested. It applies when an owner or an admin applies the change.",
-      "comment": "Notice after the owner requests an ownership transfer."
     },
     "chat.transfer.role_change_pending": {
       "text": "A role change is already waiting to apply. Wait for it to land, then try again.",
@@ -3677,6 +3699,14 @@
       "text": "{name}: {text}",
       "comment": "Chat list row of a group, second line: {name} is who sent the last message, {text} the message or its kind."
     },
+    "chats.restored.banner_other_devices": {
+      "text": "Your other devices are adding this one to your chats.",
+      "comment": "Banner on the chat list of a restored device while another device of the account is still signed in."
+    },
+    "chats.restored.card": {
+      "text": "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored.",
+      "comment": "Card on the empty chat list of a device restored from the recovery phrase or a passkey. It is not a loading state."
+    },
     "chats.row.actions": {
       "text": "Conversation actions",
       "comment": "Accessible name of the pin / mute / archive buttons on a chat list row."
@@ -3712,6 +3742,10 @@
     "chats.row.unread_overflow": {
       "text": "99+",
       "comment": "Unread badge on a chat list row when there are 100 or more unread messages."
+    },
+    "chats.row.unseen_reactions": {
+      "text": "New reactions",
+      "comment": "Tooltip of the small heart beside a chat-list row: others reacted to the person's own messages there."
     },
     "chats.search.clear": {
       "text": "Clear search",
@@ -3792,6 +3826,10 @@
     "common.copy": {
       "text": "Copy",
       "comment": "Button that copies the text next to it to the clipboard."
+    },
+    "common.copy_failed": {
+      "text": "Couldn't copy.",
+      "comment": "Shown when the browser refused to copy text to the clipboard."
     },
     "common.creating": {
       "text": "Creating...",
@@ -4049,6 +4087,10 @@
       "text": "Send a message first to start a call.",
       "comment": "Tooltip of the disabled Call and Video buttons when there is no chat with this contact on this device yet."
     },
+    "contacts.detail.chat_starting": {
+      "text": "Your chat is being set up.",
+      "comment": "Under the disabled Message button in the seconds between accepting a contact and the chat arriving."
+    },
     "contacts.detail.gone_body": {
       "text": "This person is no longer in your contacts.",
       "comment": "Shown on the contact page and the safety number page when the contact was removed while it was open."
@@ -4221,6 +4263,10 @@
       "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
       "security_critical": true
     },
+    "contacts.request.accept_failed": {
+      "text": "Couldn't accept. Try again.",
+      "comment": "Shown under an incoming contact request when accepting it failed and nothing happened; the request stays and Accept works again."
+    },
     "contacts.request.decline": {
       "text": "Decline",
       "comment": "Button that declines an incoming contact request."
@@ -4269,6 +4315,58 @@
       "text": "Verify safety number",
       "comment": "Title of the card on a contact's page that shows the safety number to compare.",
       "security_critical": true
+    },
+    "contacts.scan_qr": {
+      "text": "Scan QR code",
+      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "This code is not a Lakko link. Try another code.",
+      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
+    },
+    "contacts.search.ask_again": {
+      "text": "Ask again",
+      "comment": "Beside a person in search who has not answered an earlier request."
+    },
+    "desktop.capture.body": {
+      "text": "Allow it in your system's privacy settings, then try again.",
+      "comment": "Second line of the desktop screen shown when the operating system refused Lakko the microphone or camera."
+    },
+    "desktop.capture.camera.title": {
+      "text": "Lakko can't use your camera.",
+      "comment": "Title of the desktop screen shown when the operating system refused Lakko the camera."
+    },
+    "desktop.capture.microphone.title": {
+      "text": "Lakko can't use your microphone.",
+      "comment": "Title of the desktop screen shown when the operating system refused Lakko the microphone."
+    },
+    "desktop.capture.open_settings": {
+      "text": "Open settings",
+      "comment": "Button that opens the operating system's privacy settings for the microphone or camera."
+    },
+    "desktop.quit_call.confirm": {
+      "text": "End call and quit",
+      "comment": "Desktop app: confirm button of the quit-during-a-call question."
+    },
+    "desktop.quit_call.title": {
+      "text": "End the call and quit?",
+      "comment": "Desktop app: question shown when the person quits Lakko during a call."
+    },
+    "desktop.still_running.body": {
+      "text": "You'll get messages and calls. Quit from the tray icon to stop.",
+      "comment": "Body of the one notification shown the first time the window closes while Lakko keeps running, on Windows and Linux."
+    },
+    "desktop.still_running.title": {
+      "text": "Lakko is still running.",
+      "comment": "Title of the one notification shown the first time the window closes while Lakko keeps running, on Windows and Linux."
+    },
+    "desktop.tray.open": {
+      "text": "Open Lakko",
+      "comment": "Tray icon menu item that opens the window, on Windows and Linux."
+    },
+    "desktop.tray.quit": {
+      "text": "Quit Lakko",
+      "comment": "Tray icon menu item that stops the app, on Windows and Linux."
     },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
@@ -4403,10 +4501,6 @@
     "device_link.qr.waiting": {
       "text": "Waiting for your other device to scan this code...",
       "comment": "Shown under the pairing QR code while the other device has not scanned it yet."
-    },
-    "device_link.request.added": {
-      "text": "Device added.",
-      "comment": "Shown after a new device was added."
     },
     "device_link.request.adding": {
       "text": "Adding the device...",
@@ -4543,30 +4637,26 @@
     },
     "devices.added_notice.not_you": {
       "text": "If this was not you, remove the device, then change your password.",
-      "comment": "Second line of the notice shown on a person's other devices after a new device joined their own account. Tells them what to do if they did not add it.",
+      "comment": "Second line of the explanation shown in Settings > Devices after a new device joined the person's own account. Tells them what to do if they did not add it.",
       "security_critical": true
     },
     "devices.added_notice.notification_body": {
       "text": "Open Lakko to see your devices.",
-      "comment": "Body of the system notification shown when a new device joined the person's own account while Lakko was running but not in front. The notification title is 'A device was added to your account'."
-    },
-    "devices.added_notice.open_devices": {
-      "text": "Open Devices",
-      "comment": "Button on the 'A device was added to your account' notice. Opens Settings > Devices, where the device can be removed. 'Devices' is the name of that settings screen."
+      "comment": "Body of the system notification posted on the person's other devices when a new device joined their own account. Tapping it opens Settings > Devices. The notification title is 'A device was added to your account'."
     },
     "devices.added_notice.title": {
       "text": "A device was added to your account",
-      "comment": "Title of the notice shown on a person's other devices after one new device joined their own account. Also the title of the matching system notification.",
+      "comment": "Title of the explanation above the list in Settings > Devices, and of the system notification, after one new device joined the person's own account.",
       "security_critical": true
     },
     "devices.added_notice.title_many": {
       "text": "Devices were added to your account",
-      "comment": "Title of the same notice when two or more new devices joined the person's own account since the notice was last dismissed.",
+      "comment": "The same title when two or more new devices joined the person's own account and the person has not looked at them yet.",
       "security_critical": true
     },
     "devices.added_notice.when": {
       "text": "Added {date}.",
-      "comment": "First line of the 'A device was added to your account' notice. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
+      "comment": "First line of the 'A device was added to your account' explanation in Settings > Devices. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
     },
     "devices.pairing.qr_description": {
       "text": "Pairing QR code",
@@ -4878,6 +4968,11 @@
       "comment": "Asked after a pairing code was scanned, before the new device is let in.",
       "security_critical": true
     },
+    "devices.scan.confirm.title_named": {
+      "text": "Link “{name}”?",
+      "comment": "Asked after a pairing code was scanned, before the new device is let in. {name} is what the new device says it is, e.g. 'Chrome on macOS' or 'iPhone 16 Pro'. Followed by the device's other details and the warning.",
+      "security_critical": true
+    },
     "devices.scan.error.camera_denied": {
       "text": "Lakko cannot use the camera. Allow camera access in Settings, then try again.",
       "comment": "iOS and Android: camera access for scanning a pairing code was refused or failed. 'Settings' is the system settings app. devices.scan.error.camera_denied_browser is the web wording."
@@ -5057,11 +5152,6 @@
       "text": "Mix in random topics",
       "comment": "Discover settings switch: fetch a few random topics with the picked ones."
     },
-    "discover.mix.off_line": {
-      "text": "Uses less data. Lakko's server will see exactly which topics you picked.",
-      "comment": "Line under the 'Mix in random topics' switch while it is off.",
-      "security_critical": true
-    },
     "discover.nothing_yet": {
       "text": "No suggestions yet. Pick topics, or ask people in your groups to share their channels.",
       "comment": "Empty Discover."
@@ -5071,8 +5161,8 @@
       "comment": "Accessible name of the pick-topics card."
     },
     "discover.pick.body": {
-      "text": "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open.",
-      "comment": "Text of the pick-topics card: what the server can and cannot learn.",
+      "text": "Lakko downloads suggestions for them, mixed with a few random topics.",
+      "comment": "Text of the pick-topics card: what Lakko does with the picked topics.",
       "security_critical": true
     },
     "discover.pick.title": {
@@ -5107,11 +5197,6 @@
       "text": "Search",
       "comment": "Button beside the Discover search field."
     },
-    "discover.search.helper": {
-      "text": "Searches are sent to Lakko's server.",
-      "comment": "Line under the Discover search field.",
-      "security_critical": true
-    },
     "discover.search.no_results": {
       "text": "No channels found.",
       "comment": "A Discover search found nothing."
@@ -5141,12 +5226,12 @@
       "comment": "Switch in group info that shares the reader's listed channels with the group."
     },
     "discover.share.line": {
-      "text": "People in this group can see which channels you follow. Lakko's server cannot.",
+      "text": "People in this group can see which channels you follow.",
       "comment": "Line under the 'Share my channels with this group' switch.",
       "security_critical": true
     },
     "discover.shared.desc": {
-      "text": "Groups where people can see which channels you follow. Lakko's server cannot.",
+      "text": "Groups where people can see which channels you follow.",
       "comment": "Text at the top of the 'Channels I share' screen.",
       "security_critical": true
     },
@@ -5310,14 +5395,6 @@
     "feed.attachments.count": {
       "text": "{count, plural, one {# attachment} other {# attachments}}",
       "comment": "Stands in for text in a Feed item whose message carries only attachments, when there are several."
-    },
-    "feed.banner.dismiss": {
-      "text": "Got it",
-      "comment": "Button that dismisses the one-time note at the top of the Feed."
-    },
-    "feed.banner.local": {
-      "text": "Your feed shows messages this device has received.",
-      "comment": "One-time note at the top of the Feed: it is built only from what reached this device."
     },
     "feed.divider.new": {
       "text": "New",
@@ -6100,8 +6177,276 @@
       "comment": "Group invite page after the person asked to join: an admin must approve, then the change is applied."
     },
     "group.join.wait_secondary": {
-      "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
-      "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
+      "text": "If nothing happens, you can send the request again.",
+      "comment": "Second line on the group invite page while a join request is waiting: the request can be sent again."
+    },
+    "group_delete.action": {
+      "text": "Delete group",
+      "comment": "Destructive control in a group's info for an owner alone in it."
+    },
+    "group_delete.body": {
+      "text": "This removes the group and its messages from all your devices and frees @{name} in 30 days. This cannot be undone.",
+      "comment": "Body of the dialog before deleting a group; {name} is its @name without the @."
+    },
+    "group_delete.confirm": {
+      "text": "Delete",
+      "comment": "Confirm button of the dialog deleting a group."
+    },
+    "group_delete.title": {
+      "text": "Delete this group?",
+      "comment": "Title of the dialog before deleting a group."
+    },
+    "group_handle.error.bad_form": {
+      "text": "3 to 32 characters: letters a-z, digits and _.",
+      "comment": "Under the @name field of a group when the typed name is malformed."
+    },
+    "group_handle.error.failed": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Group type screen: saving the @name or the type failed."
+    },
+    "group_handle.error.held": {
+      "text": "That @name isn't available. Try another.",
+      "comment": "Under the @name field: the name is held by something the person cannot see. Never say 'taken' here."
+    },
+    "group_handle.error.offline": {
+      "text": "Could not reach Lakko. Check your connection and try again.",
+      "comment": "Creating a group or saving its type with no network."
+    },
+    "group_handle.error.taken": {
+      "text": "That @name is taken.",
+      "comment": "Under the @name field of a public group: a lookup found the name."
+    },
+    "group_handle.error.too_many": {
+      "text": "You've created a lot of groups today. Try again tomorrow.",
+      "comment": "Creating a group when the day's allowance of names is used up."
+    },
+    "group_info.handle.choose": {
+      "text": "Choose",
+      "comment": "Button in the banner of a group whose @name lapsed; opens Group type with a proposed name."
+    },
+    "group_info.handle.copy_a11y": {
+      "text": "Copy @name",
+      "comment": "Accessible name of the Copy button on a group's @name row."
+    },
+    "group_info.handle.lapsed": {
+      "text": "This group has no @name. Choose one.",
+      "comment": "Banner on a group's info, owner only, when the group's @name lapsed."
+    },
+    "group_info.header.aria": {
+      "text": "Group",
+      "comment": "Accessible name of the header block (photo, type line, @name) on a group's info screen."
+    },
+    "group_info.header.private": {
+      "text": "Private group · {count, plural, one {# member} other {# members}}",
+      "comment": "Header line of a private group's info screen."
+    },
+    "group_info.header.public": {
+      "text": "Public group · {count, plural, one {# member} other {# members}}",
+      "comment": "Header line of a public group's info screen."
+    },
+    "group_photo.error.limit": {
+      "text": "You have reached the limit for sending files. Try again later.",
+      "comment": "Under the group photo when the upload is over the file-sending limit."
+    },
+    "group_photo.error.not_allowed": {
+      "text": "Only the owner and admins can change the photo.",
+      "comment": "Under the group photo when the person was demoted while choosing a photo."
+    },
+    "group_photo.error.upload": {
+      "text": "Couldn't upload the photo. Check your connection and try again.",
+      "comment": "Under the group photo when its upload failed."
+    },
+    "group_photo.gone": {
+      "text": "The photo is no longer available. Choose another.",
+      "comment": "Line under a group's info header for the owner or an admin when the group photo's file expired or was deleted (ADR-0087 4.5.2)."
+    },
+    "group_photo.owed": {
+      "text": "Will apply when you're back online.",
+      "comment": "Group info, under the header photo: the new photo was uploaded but the device went offline before it was sent; it is sent when the device is back."
+    },
+    "group_photo.remove.body": {
+      "text": "Everyone in the group will see its initials instead.",
+      "comment": "Body of the dialog asking before removing a group's photo."
+    },
+    "group_photo.remove.confirm": {
+      "text": "Remove",
+      "comment": "Confirm button of the dialog removing a group's photo."
+    },
+    "group_photo.remove.title": {
+      "text": "Remove the group photo?",
+      "comment": "Title of the dialog asking before removing a group's photo."
+    },
+    "group_reactions.add": {
+      "text": "Add",
+      "comment": "Button under the chosen emoji on a group's Reactions screen; opens the emoji picker."
+    },
+    "group_reactions.all": {
+      "text": "All reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.all_sub": {
+      "text": "Members can react with any emoji.",
+      "comment": "Line under 'All reactions' on a group's Reactions screen."
+    },
+    "group_reactions.choose_one": {
+      "text": "Choose at least one.",
+      "comment": "Under the empty emoji grid on a group's Reactions screen with 'Some reactions'."
+    },
+    "group_reactions.max": {
+      "text": "You can choose up to 100.",
+      "comment": "In the picker of a group's Reactions screen when 100 emoji are chosen."
+    },
+    "group_reactions.none": {
+      "text": "No reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.none_sub": {
+      "text": "Members can't react to messages.",
+      "comment": "Line under 'No reactions' on a group's Reactions screen."
+    },
+    "group_reactions.remove_a11y": {
+      "text": "Remove {emoji}",
+      "comment": "Accessible name of an emoji in the chosen grid of a group's Reactions screen; a tap removes it."
+    },
+    "group_reactions.save_failed": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Saving a group's allowed reactions failed; the screen stays open."
+    },
+    "group_reactions.some": {
+      "text": "Some reactions",
+      "comment": "Choice on a group's Reactions screen."
+    },
+    "group_reactions.some_sub": {
+      "text": "Members can react only with the emoji you choose.",
+      "comment": "Line under 'Some reactions' on a group's Reactions screen."
+    },
+    "group_reactions.title": {
+      "text": "Reactions",
+      "comment": "Row on a group's info (owner, admins) and the title of the screen it opens."
+    },
+    "group_reactions.unsaved_body": {
+      "text": "Your changes will be lost if you don't save them.",
+      "comment": "Body of the Save changes? dialog when leaving the group Reactions screen with unsaved changes."
+    },
+    "group_reactions.value.all": {
+      "text": "All",
+      "comment": "Value of the Reactions row on a group's info: every reaction is taken."
+    },
+    "group_reactions.value.count": {
+      "text": "{count, plural, one {# reaction} other {# reactions}}",
+      "comment": "Value of the Reactions row on a group's info when only some emoji are taken."
+    },
+    "group_reactions.value.off": {
+      "text": "Off",
+      "comment": "Value of the Reactions row on a group's info: no reactions."
+    },
+    "group_solo.add_members": {
+      "text": "Add members",
+      "comment": "Button in a group of one: add people."
+    },
+    "group_solo.copy_invite": {
+      "text": "Copy invite link",
+      "comment": "Button in a group of one: make an invite link and copy it."
+    },
+    "group_solo.created": {
+      "text": "You created this group",
+      "comment": "Timeline row at the top of a group that has only its creator (ADR-0087 section 10)."
+    },
+    "group_solo.only_you": {
+      "text": "Only you are here.",
+      "comment": "Shown in a group with nobody but its creator."
+    },
+    "group_type.confirm.private.body": {
+      "text": "It leaves search. People can join only if the owner or an admin invites them. Everyone in the group stays.",
+      "comment": "Body of the dialog before making a group private."
+    },
+    "group_type.confirm.private.confirm": {
+      "text": "Make private",
+      "comment": "Confirm button of the dialog making a group private."
+    },
+    "group_type.confirm.private.title": {
+      "text": "Make this group private?",
+      "comment": "Title of the dialog before making a group private."
+    },
+    "group_type.confirm.private.waiting": {
+      "text": "{count, plural, one {# person is waiting to join. You can still answer them.} other {# people are waiting to join. You can still answer them.}}",
+      "comment": "Added to the body of the dialog before making a group private when join requests are pending (ADR-0087, docs/ux/group-and-channel-privacy.md 4.1)."
+    },
+    "group_type.confirm.public.body": {
+      "text": "Anyone can find it and ask to join. Its name, photo, description and rough size become visible to everyone.",
+      "comment": "Body of the dialog before making a group public."
+    },
+    "group_type.confirm.public.confirm": {
+      "text": "Make public",
+      "comment": "Confirm button of the dialog making a group public."
+    },
+    "group_type.confirm.public.title": {
+      "text": "Make this group public?",
+      "comment": "Title of the dialog before making a group public."
+    },
+    "group_type.confirm.rename.body": {
+      "text": "The old @name stops working now. It stays reserved for this group for 30 days.",
+      "comment": "Body of the dialog before changing a group's @name."
+    },
+    "group_type.confirm.rename.confirm": {
+      "text": "Change",
+      "comment": "Confirm button of the dialog changing a group's @name."
+    },
+    "group_type.confirm.rename.title": {
+      "text": "Change @name?",
+      "comment": "Title of the dialog before changing a group's @name."
+    },
+    "group_type.handle": {
+      "text": "@name",
+      "comment": "Label of the @name field of a group (New group form, Group type screen). Keep '@name' as is."
+    },
+    "group_type.handle_private": {
+      "text": "Only members see this.",
+      "comment": "Helper under the @name field of a private group."
+    },
+    "group_type.handle_public": {
+      "text": "Anyone can find this group by this name.",
+      "comment": "Helper under the @name field of a public group."
+    },
+    "group_type.needs_name": {
+      "text": "A public group needs a name.",
+      "comment": "Shown when a public group has no name; Create or Save is disabled."
+    },
+    "group_type.not_saved": {
+      "text": "The change to who can join could not be saved. Open it to try again.",
+      "comment": "Banner on a group's info when an owed change of who can join or of the @name was refused for good (ADR-0087)."
+    },
+    "group_type.owed": {
+      "text": "Will apply when you're back online.",
+      "comment": "Line on the Group type screen when the change could not reach the server and will be sent later (group-and-channel-privacy 4.1)."
+    },
+    "group_type.pending": {
+      "text": "Waiting to be saved",
+      "comment": "Shown after the value of the Who can join row while a change of who can join or of the @name did not reach the server yet; it is retried by itself (ADR-0087)."
+    },
+    "group_type.private": {
+      "text": "Private",
+      "comment": "Value of 'Who can join' for a group."
+    },
+    "group_type.private_desc": {
+      "text": "Only people invited by an admin can join. It stays out of search.",
+      "comment": "Line under the 'Who can join' picker when Private is chosen."
+    },
+    "group_type.public": {
+      "text": "Public",
+      "comment": "Value of 'Who can join' for a group."
+    },
+    "group_type.public_desc": {
+      "text": "Anyone can find this group and ask to join.",
+      "comment": "Line under the 'Who can join' picker when Public is chosen."
+    },
+    "group_type.title": {
+      "text": "Group type",
+      "comment": "Title of the pushed screen where the owner changes who can join and the @name."
+    },
+    "group_type.who_can_join": {
+      "text": "Who can join",
+      "comment": "Label of the picker choosing Private or Public for a group; also the row on the group's info."
     },
     "guest.claim.error.generic": {
       "text": "The account could not be created. Try again.",
@@ -6223,6 +6568,10 @@
       "text": "This link is no longer valid. Ask the person for a new one.",
       "comment": "Contact invite page: the link was revoked or expired since the page loaded."
     },
+    "invite.contact.page.about": {
+      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
+      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
+    },
     "invite.contact.page.add": {
       "text": "Add",
       "comment": "Primary button on the contact invite page: makes the inviter a contact."
@@ -6239,9 +6588,25 @@
       "text": "Could not reach {name}. Check your connection and try again.",
       "comment": "Line under Open chat on the invite page of a person already in the contacts, when the answer to the link could not be sent for a network reason. {name} as in the heading."
     },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
+    },
     "invite.contact.page.done": {
       "text": "Done",
       "comment": "Button that closes the contact invite page."
+    },
+    "invite.contact.page.have_account": {
+      "text": "I already have an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
     },
     "invite.contact.page.not_now": {
       "text": "Not now",
@@ -6258,6 +6623,10 @@
     "invite.contact.page.own_title": {
       "text": "This is your own invite link",
       "comment": "Contact invite page opened by the person who made the link."
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} invites you to Lakko",
+      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
     },
     "invite.contact.page.title": {
       "text": "Add {name} to your contacts?",
@@ -6369,9 +6738,8 @@
       "comment": "Link on an invite page back to the app's start page."
     },
     "invite.group.invited_by": {
-      "text": "Invited by {fingerprint}",
-      "comment": "Muted foot line of the group invite page. {fingerprint} is the digits of the inviter's key fingerprint, which the inviter cannot fake; keep it verbatim.",
-      "security_critical": true
+      "text": "Invited by {name}",
+      "comment": "Muted line of the group invite page. {name} is the inviter's display name from the link's sealed preview. With no name the line is not shown."
     },
     "invite.group.lead_anonymous": {
       "text": "You are invited to",
@@ -6426,10 +6794,46 @@
       "text": "Created {date}",
       "comment": "One of the facts under a link in your list of invite links. {date} is a short date and time formatted for the interface language, such as \"16 Sep, 14:32\"."
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Period",
+      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Number of people",
+      "comment": "Number field shown when Uses is Custom: how many people may use the link."
+    },
+    "invite.links.delete": {
+      "text": "Delete link",
+      "comment": "Accessible name of the trash button on an invite link."
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Anyone who already has it will no longer be able to use it.",
+      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Delete this link?",
+      "comment": "Confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.deleted": {
+      "text": "Link deleted.",
+      "comment": "Notice after an invite link was deleted."
+    },
     "invite.links.desc": {
       "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
       "comment": "Description of the invite links card: a link lets whoever holds it reach you, so it should be shared with care.",
       "security_critical": true
+    },
+    "invite.links.edit": {
+      "text": "Edit link",
+      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
+    },
+    "invite.links.edit_note": {
+      "text": "Saving makes a new link. The old one stops working.",
+      "comment": "One line on the invite link terms form."
+    },
+    "invite.links.edit_title": {
+      "text": "Link terms",
+      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
     },
     "invite.links.empty": {
       "text": "No active links.",
@@ -6438,6 +6842,22 @@
     "invite.links.error.copy": {
       "text": "Could not copy the link.",
       "comment": "Copying an invite link to the clipboard failed."
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Enter a period from 1 hour to 365 days.",
+      "comment": "Shown under the custom period of a new invite link when the value is out of range."
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Enter a number of people from 1 to {max}.",
+      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
+    },
+    "invite.links.error.delete": {
+      "text": "Could not delete the link. Check your connection and try again.",
+      "comment": "Shown when deleting an invite link failed."
+    },
+    "invite.links.error.edit": {
+      "text": "Could not save the link. Check your connection and try again.",
+      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     },
     "invite.links.error.load": {
       "text": "Could not load your invite links. Try again.",
@@ -6475,6 +6895,10 @@
       "text": "Expires in {count}m",
       "comment": "Compact fact under an invite link in your list; {count} is whole minutes. Keep it short."
     },
+    "invite.links.expires_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {In # day} other {In # days}}",
       "comment": "Option of the Expires field."
@@ -6511,6 +6935,10 @@
       "text": "New",
       "comment": "Small badge on the invite link you just created, in your list of invite links."
     },
+    "invite.links.qr_hint": {
+      "text": "Whoever scans this code can send you a contact request.",
+      "comment": "Under the QR code of an invite link."
+    },
     "invite.links.revoked": {
       "text": "Link revoked.",
       "comment": "An invite link was withdrawn."
@@ -6518,6 +6946,18 @@
     "invite.links.revoking": {
       "text": "Revoking...",
       "comment": "An invite link is being revoked."
+    },
+    "invite.links.show_qr": {
+      "text": "Show QR code",
+      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
+    },
+    "invite.links.unit_days": {
+      "text": "Days",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.unit_hours": {
+      "text": "Hours",
+      "comment": "Unit choice beside the custom period of a new invite link."
     },
     "invite.links.unlimited_uses": {
       "text": "Unlimited uses",
@@ -6534,6 +6974,10 @@
     "invite.links.uses_left": {
       "text": "{count, plural, one {# use left} other {# uses left}}",
       "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
     },
     "invite.links.uses_option_one": {
       "text": "One person",
@@ -6659,21 +7103,26 @@
       "text": "Settings",
       "comment": "Primary navigation: settings."
     },
+    "nav.settings.attention_a11y": {
+      "text": "Settings. A device was added to your account",
+      "comment": "Accessible name of the Settings navigation destination while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices.",
+      "security_critical": true
+    },
     "new_group.back": {
       "text": "Groups",
       "comment": "Web: back button to the groups list on a narrow screen."
+    },
+    "new_group.error.secure_setup": {
+      "text": "Couldn't create this group. Nothing was created. Try again.",
+      "comment": "New group form: creating the group failed for another reason."
     },
     "new_group.error.sign_in": {
       "text": "Sign in again to create a group.",
       "comment": "A group cannot be created because this session holds no keys."
     },
-    "new_group.index_hint": {
-      "text": "Select a group to start messaging",
-      "comment": "Web: hint in the empty main pane of the groups screen."
-    },
     "new_group.name_hint": {
-      "text": "Every member sees the name. It is sent encrypted; the server never reads it.",
-      "comment": "Hint under the group name field: who sees the name, and that the server cannot read it.",
+      "text": "Every member sees the name.",
+      "comment": "Hint under the group name field: who sees the name.",
       "security_critical": true
     },
     "new_group.name_not_sent": {
@@ -6685,8 +7134,8 @@
       "comment": "Example group name in the empty field."
     },
     "new_group.no_contacts": {
-      "text": "Add contacts first; a group starts from people you already know.",
-      "comment": "Create-group form with no contacts to pick."
+      "text": "A group can start with just you. Add people now or later.",
+      "comment": "Create-group form with no contacts to pick; the group can still be created."
     },
     "new_group.subtitle": {
       "text": "You will be the group's owner. You can add more people later.",
@@ -6769,6 +7218,14 @@
     "notification.message.new": {
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
+    },
+    "notification.reaction.body": {
+      "text": "{name} reacted {emoji} to your message",
+      "comment": "Notification body when someone reacts to the person's message. {name} is who reacted."
+    },
+    "open_in_app.button": {
+      "text": "Open in the app",
+      "comment": "Button on the invite, call-link and group-invite web pages: opens the desktop app."
     },
     "profile.avatar.change": {
       "text": "Change photo",
@@ -7093,7 +7550,7 @@
       "comment": "Row on the protect-your-account step."
     },
     "protect.phrase.body": {
-      "text": "12 words only you keep. Stronger, and nothing to do with email.",
+      "text": "12 words only you keep. The strongest way back.",
       "comment": "Under 'Save a recovery phrase' on the protect-your-account step.",
       "security_critical": true
     },
@@ -7196,7 +7653,7 @@
       "comment": "On a recovery form, names the account saved on this device. {username} is '@name'."
     },
     "recovery.device.intro": {
-      "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
+      "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. No camera needed; a QR code is there if you prefer.",
       "comment": "Line at the top of recovery from another device (signed out): the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
@@ -7733,8 +8190,24 @@
       "comment": "Placeholder of one word slot; {position} is its number in the phrase, in Latin digits.",
       "security_critical": true
     },
+    "requests_sent.ask_again": {
+      "text": "Ask again",
+      "comment": "Button on a request to join with no answer after 7 days."
+    },
+    "requests_sent.no_answer": {
+      "text": "No answer yet.",
+      "comment": "Line of a request to join sent 7 days ago or more. Never say it was refused."
+    },
+    "requests_sent.title": {
+      "text": "Requests sent",
+      "comment": "Row at the top of Chats and the title of the list of requests to join this device sent."
+    },
+    "requests_sent.waiting": {
+      "text": "Waiting for an admin.",
+      "comment": "Line of a request to join sent less than 7 days ago. Never say it was refused."
+    },
     "restore_identity.device_intro": {
-      "text": "A device that is still logged in shows a six-digit code; type it here. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer.",
+      "text": "A device that is still logged in shows a six-digit code; type it here. No camera needed; a QR code is there if you prefer.",
       "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
@@ -7932,6 +8405,50 @@
       "text": "Saved",
       "comment": "Title of the Saved screen, and its row in the Chats screen menu."
     },
+    "search.conversation.channel_line": {
+      "text": "Public channel · {band} subscribers",
+      "comment": "Second line of a public channel found by search; {band} is a size band like 10k+."
+    },
+    "search.conversation.group_line": {
+      "text": "Public group · {band} members",
+      "comment": "Second line of a public group found by search; {band} is a size band like 100+."
+    },
+    "search.conversation.open": {
+      "text": "Open",
+      "comment": "Button on a found group or channel the person is already in."
+    },
+    "search.conversation.out_of_requests": {
+      "text": "You've asked to join a lot of groups today. Try again tomorrow.",
+      "comment": "A request to join refused because the day's requests are used up."
+    },
+    "search.conversation.queue_full": {
+      "text": "This group has too many requests right now. Try again later.",
+      "comment": "A request to join refused because the group's queue is full."
+    },
+    "search.conversation.request": {
+      "text": "Request to join",
+      "comment": "Button on the card of a public group found by search."
+    },
+    "search.conversation.request_sent": {
+      "text": "Request sent. An admin will see it when they next open Lakko.",
+      "comment": "Line on the card after a request to join was sent."
+    },
+    "search.conversation.request_sent_button": {
+      "text": "Request sent",
+      "comment": "Disabled button on the card once a request to join was sent."
+    },
+    "search.conversation.subscribe": {
+      "text": "Subscribe",
+      "comment": "Button on the card of a public channel found by search."
+    },
+    "search.conversations.heading": {
+      "text": "Groups and channels",
+      "comment": "Heading of the search section listing public groups and channels, under People."
+    },
+    "search.nothing_found": {
+      "text": "Nothing found. Check the spelling, or ask for an invite link.",
+      "comment": "The one line of the search list when nothing local and nothing from the network stands in it (who-can-find-me.md section 6.1, One list)."
+    },
     "search.people.add_contact": {
       "text": "Add contact",
       "comment": "Button on a person found by search: sends them a contact request at once."
@@ -7989,7 +8506,7 @@
       "comment": "{licence} is the licence name, e.g. AGPL-3.0-or-later; keep it untranslated."
     },
     "settings.about.protection.body": {
-      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them, never Lakko's servers. Your password never leaves your device, and each contact has a safety number you can compare in person.",
+      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them. Your password never leaves your device, and each contact has a safety number you can compare in person.",
       "comment": "Explains end-to-end encryption and safety numbers.",
       "security_critical": true
     },
@@ -7997,6 +8514,54 @@
       "text": "How Lakko protects you",
       "comment": "Row title in About.",
       "security_critical": true
+    },
+    "settings.about.shortcuts.close_window": {
+      "text": "Close the window",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contacts, Calls, Settings",
+      "comment": "Keyboard shortcut list entry for Mod+Shift+1 to Mod+Shift+5, which open these five destinations in this order."
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Edit my last message (in an empty message field)",
+      "comment": "Keyboard shortcut list entry for the Up arrow."
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Close a menu, dialog or sheet; leave a search",
+      "comment": "Keyboard shortcut list entry for Esc."
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Switch chat folder",
+      "comment": "Keyboard shortcut list entry: selects a chat folder tab."
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "New chat",
+      "comment": "Keyboard shortcut list entry: opens the create menu."
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Previous or next conversation",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Quit Lakko",
+      "comment": "Keyboard shortcut list entry (macOS)."
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Search conversations and people",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Send or start a new line",
+      "comment": "Keyboard shortcut list entry for Enter / Shift+Enter in the composer."
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Settings",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Keyboard shortcuts",
+      "comment": "Card title in Settings > About, desktop app."
     },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
@@ -8154,6 +8719,18 @@
       "text": "The theme on this device.",
       "comment": "Line under the Appearance title in Settings."
     },
+    "settings.appearance.quick_reaction": {
+      "text": "Quick reaction",
+      "comment": "Row in Settings > Appearance: the emoji a double-tap or double-click sends."
+    },
+    "settings.appearance.quick_reaction_change": {
+      "text": "Change quick reaction",
+      "comment": "Accessible name of the button that opens the picker for the quick reaction."
+    },
+    "settings.appearance.quick_reaction_sub": {
+      "text": "Double-tap a message to send it.",
+      "comment": "Line under 'Quick reaction' in Settings > Appearance."
+    },
     "settings.appearance.theme": {
       "text": "Theme",
       "comment": "Label of the light / dark theme choice."
@@ -8202,6 +8779,30 @@
       "text": "Your data",
       "comment": "Card heading in Settings > Account: the data export."
     },
+    "settings.desktop.keep_running.sub": {
+      "text": "You'll get messages and calls while the window is closed.",
+      "comment": "Subtitle of the keep-running switch."
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Keep running when the window is closed",
+      "comment": "Switch row in Settings > Notifications, desktop app. Off: closing the window quits."
+    },
+    "settings.desktop.lede": {
+      "text": "How Lakko runs on this computer.",
+      "comment": "Line under the Notifications title in Settings, desktop app."
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Open Lakko when I sign in to this computer",
+      "comment": "Switch row in Settings > Notifications, desktop app. On: Lakko starts hidden at login."
+    },
+    "settings.desktop.read_failed": {
+      "text": "These settings could not be read. Open Settings again to retry.",
+      "comment": "Shown in Settings > Notifications, desktop app, when the current values could not be read."
+    },
+    "settings.desktop.save_failed": {
+      "text": "This setting could not be changed. Try again.",
+      "comment": "Shown under a desktop switch when the change was not saved; the switch keeps its old state."
+    },
     "settings.devices.add.lede": {
       "text": "Sign in to Lakko on the new device first. Then pick which of the two is showing a code.",
       "comment": "Text of the Add a device panel before choosing a side."
@@ -8209,6 +8810,11 @@
     "settings.devices.add.no_camera": {
       "text": "No camera on either device? Sign in on the new one and choose \"{method}\": an \"{prompt}\" prompt with a code to compare appears here.",
       "comment": "{method} is the recovery method name \"Another device\"; {prompt} is the prompt title \"Is this you?\". Both are passed already translated.",
+      "security_critical": true
+    },
+    "settings.devices.attention_a11y": {
+      "text": "Devices. A device was added to your account",
+      "comment": "Accessible name of the Devices row inside Settings while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet.",
       "security_critical": true
     },
     "settings.devices.device_n": {
@@ -8233,7 +8839,7 @@
       "comment": "Adding a scanned device failed."
     },
     "settings.devices.lede": {
-      "text": "The phones, tablets and computers signed in to your account. Adding one is end-to-end encrypted; Lakko's servers cannot read it.",
+      "text": "The phones, tablets and computers signed in to your account.",
       "comment": "Line under the Devices title.",
       "security_critical": true
     },
@@ -8290,10 +8896,6 @@
       "text": "Your account keys were reset on this device today. The other devices were signed out and removed. Add them again from Settings > Devices > Add a device.",
       "comment": "Dismissible note at the top of Settings > Devices for the rest of the session after the account keys were reset on this device (UX identity-recovery 15.3).",
       "security_critical": true
-    },
-    "settings.devices.scan.done": {
-      "text": "Device added. It will appear in the list once it has finished joining.",
-      "comment": "The scanned device was let in."
     },
     "settings.devices.scan.opening": {
       "text": "Opening the camera...",
@@ -8375,6 +8977,14 @@
     "settings.notifications.off.title": {
       "text": "Turn on notifications",
       "comment": "Settings row shown when notifications are off for Lakko; opens the system notification settings."
+    },
+    "settings.notifications.reactions": {
+      "text": "Reactions",
+      "comment": "Switch in Settings > Notifications for reaction notifications."
+    },
+    "settings.notifications.reactions_sub": {
+      "text": "When someone reacts to your messages",
+      "comment": "Line under the Reactions switch in Settings > Notifications."
     },
     "settings.passkeys.add": {
       "text": "Add passkey",
@@ -8608,7 +9218,7 @@
       "comment": "Switch in Settings > Privacy, on by default. When on, this device tells the person's other devices which city it is in, shown on their Devices screen."
     },
     "settings.privacy.show_city.sub": {
-      "text": "Your other devices show the city this one is in. Lakko's servers keep no record of it.",
+      "text": "Your other devices show the city this one is in.",
       "comment": "Line under the Show my city to my other devices switch.",
       "security_critical": true
     },
@@ -8818,6 +9428,11 @@
     "settings.section.security": {
       "text": "Security",
       "comment": "Settings section: passkeys, devices, recovery."
+    },
+    "settings.security.attention_a11y": {
+      "text": "Security. A device was added to your account",
+      "comment": "Accessible name of the Security entry in the Settings section list while it carries the exclamation-mark badge: a new device joined the person's own account and the person has not looked at it yet in Settings > Devices (which is inside Security).",
+      "security_critical": true
     },
     "settings.security.devices.sub": {
       "text": "See, add and remove the devices on this account.",
@@ -9230,6 +9845,26 @@
       "text": "Applying",
       "comment": "Accessible name of the small spinner beside Who can find me while a change is being applied."
     },
+    "who_can_find_me.contacts.all": {
+      "text": "All my contacts",
+      "comment": "Choice under Contacts of my contacts: the contacts of every contact count.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts.chosen": {
+      "text": "Only the ones I choose",
+      "comment": "Choice under Contacts of my contacts: only the contacts of the people switched on in the list count. Also the title of that list.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_chosen_helper": {
+      "text": "Only the contacts of the people you choose ({chosen} of {total}).",
+      "comment": "Line under Contacts of my contacts when only chosen contacts count. {chosen} is how many are on, {total} how many contacts the person has.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_excluded_notice": {
+      "text": "Now only the contacts you choose. Change in {privacy}.",
+      "comment": "Shown once after turning off Their contacts can find me while all contacts counted: the setting switched to chosen ones. {privacy} is a link to Settings > Privacy and reads Privacy.",
+      "security_critical": true
+    },
     "who_can_find_me.contacts_of_contacts": {
       "text": "Contacts of my contacts",
       "comment": "Switch under Some people: people the person's contacts have added can find them.",
@@ -9287,6 +9922,18 @@
     "who_can_find_me.list.choose": {
       "text": "Choose groups and channels",
       "comment": "iOS row under 'Only the ones I choose' in Settings > Privacy > Who can find me; opens the list of groups and channels to switch on one by one."
+    },
+    "who_can_find_me.list.choose_contacts": {
+      "text": "Choose contacts",
+      "comment": "Row under Contacts of my contacts that opens the list of contacts."
+    },
+    "who_can_find_me.list.contacts_empty": {
+      "text": "You have no contacts yet.",
+      "comment": "Shown in the list of contacts for Who can find me when the person has none."
+    },
+    "who_can_find_me.list.contacts_search": {
+      "text": "Search contacts",
+      "comment": "Placeholder and accessible name of the search field in the contacts list of Who can find me."
     },
     "who_can_find_me.list.empty": {
       "text": "You're not in any groups or channels yet.",
@@ -9361,118 +10008,15 @@
       "text": "Will apply when you're back online.",
       "comment": "Status line on Who can find me when a change was made offline."
     },
+    "who_can_find_me.their_contacts_can_find_me": {
+      "text": "Their contacts can find me",
+      "comment": "Switch on a contact's screen: people this contact has added can find the person by username or name.",
+      "security_critical": true
+    },
     "who_can_find_me.title": {
       "text": "Who can find me",
       "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
       "security_critical": true
-    },
-    "invite.links.show_qr": {
-      "text": "Show QR code",
-      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
-    },
-    "invite.links.qr_hint": {
-      "text": "Whoever scans this code can send you a contact request.",
-      "comment": "Under the QR code of an invite link."
-    },
-    "contacts.scan_qr": {
-      "text": "Scan QR code",
-      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
-    },
-    "contacts.scan_qr.not_a_link": {
-      "text": "This code is not a Lakko link. Try another code.",
-      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
-    },
-    "invite.links.expires_option_custom": {
-      "text": "Custom",
-      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
-    },
-    "invite.links.uses_option_custom": {
-      "text": "Custom",
-      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
-    },
-    "invite.links.custom_expiry_amount": {
-      "text": "Period",
-      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
-    },
-    "invite.links.unit_hours": {
-      "text": "Hours",
-      "comment": "Unit choice beside the custom period of a new invite link."
-    },
-    "invite.links.unit_days": {
-      "text": "Days",
-      "comment": "Unit choice beside the custom period of a new invite link."
-    },
-    "invite.links.custom_uses_count": {
-      "text": "Number of people",
-      "comment": "Number field shown when Uses is Custom: how many people may use the link."
-    },
-    "invite.links.error.custom_expiry": {
-      "text": "Enter a period from 1 hour to 365 days.",
-      "comment": "Shown under the custom period of a new invite link when the value is out of range."
-    },
-    "invite.links.error.custom_uses": {
-      "text": "Enter a number of people from 1 to {max}.",
-      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
-    },
-    "invite.contact.page.signed_out_title": {
-      "text": "{name} invites you to Lakko",
-      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
-    },
-    "invite.contact.page.about": {
-      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
-      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
-    },
-    "invite.contact.page.create_account": {
-      "text": "Create an account",
-      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
-    },
-    "invite.contact.page.have_account": {
-      "text": "I already have an account",
-      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
-    },
-    "invite.contact.page.dead_title": {
-      "text": "This invite link no longer works",
-      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Ask the person who sent it for a new one.",
-      "comment": "Line under 'This invite link no longer works'."
-    },
-    "invite.links.edit": {
-      "text": "Edit link",
-      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
-    },
-    "invite.links.edit_title": {
-      "text": "Link terms",
-      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
-    },
-    "invite.links.edit_note": {
-      "text": "Saving makes a new link. The old one stops working.",
-      "comment": "One line on the invite link terms form."
-    },
-    "invite.links.delete": {
-      "text": "Delete link",
-      "comment": "Accessible name of the trash button on an invite link."
-    },
-    "invite.links.delete_confirm_title": {
-      "text": "Delete this link?",
-      "comment": "Confirmation before deleting an invite link that was copied or used."
-    },
-    "invite.links.delete_confirm_body": {
-      "text": "Anyone who already has it will no longer be able to use it.",
-      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
-    },
-    "invite.links.deleted": {
-      "text": "Link deleted.",
-      "comment": "Notice after an invite link was deleted."
-    },
-    "invite.links.error.delete": {
-      "text": "Could not delete the link. Check your connection and try again.",
-      "comment": "Shown when deleting an invite link failed."
-    },
-    "invite.links.error.edit": {
-      "text": "Could not save the link. Check your connection and try again.",
-      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     }
   }
 }

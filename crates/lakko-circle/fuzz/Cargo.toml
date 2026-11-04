@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-circle-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-circle = { path = ".." }
+
+# ADR-0086: the directory head, read by anyone holding the id from bytes the
+# Delivery Service returns. Fixed layout; canonical.
+[[bin]]
+name = "head_decode"
+path = "fuzz_targets/head_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086: the member grant, read from a one-to-one conversation. Sealed in
+# transit, but written by a contact. Fixed layout; canonical.
+[[bin]]
+name = "grant_decode"
+path = "fuzz_targets/grant_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086 section 3: a member's walk up its path over edges the Delivery
+# Service chose.
+[[bin]]
+name = "path_walk"
+path = "fuzz_targets/path_walk.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086 section 2: a sealed filter from the Delivery Service, and the
+# plaintext parser behind the AEAD, which a fuzzer cannot reach through a tag.
+[[bin]]
+name = "filter_open"
+path = "fuzz_targets/filter_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086 section 2: a sealed row from the Delivery Service, and the padding
+# parser behind the AEAD.
+[[bin]]
+name = "row_open"
+path = "fuzz_targets/row_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086 section 2: a sealed card inside a row, chosen by anyone who can
+# write a row or the Delivery Service, and the padding parser behind the AEAD.
+[[bin]]
+name = "card_open"
+path = "fuzz_targets/card_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0086: the owner's device-local state.
+[[bin]]
+name = "state_decode"
+path = "fuzz_targets/state_decode.rs"
+test = false
+doc = false
+bench = false

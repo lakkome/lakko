@@ -28,6 +28,7 @@
  * phrase (typed, minted, opened from a passkey) or as its entropy (another
  * device).
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import type { WipeMark } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import { clearThreeWordsSuspended } from "../auth/recover/three-words";
@@ -82,7 +83,7 @@ export type PhraseLandingPath = (typeof PHRASE_LANDING_PATHS)[number];
 export async function storeDevicePhrase(
   accountIdB64: string,
   phrase: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   path: PhraseLandingPath,
   wipes?: WipeMark,
 ): Promise<boolean> {
@@ -113,7 +114,7 @@ export async function storeDevicePhrase(
  *  there is none or it does not open. Never throws. */
 export async function readDevicePhraseWith(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<string | null> {
   try {
     const cached = await getPhrase(accountIdB64, deviceKey);
@@ -131,7 +132,7 @@ export async function readDevicePhraseWith(
 /** The phrase this device holds for `accountIdB64`, or `null`: no device
  *  key, no stored phrase, or storage that cannot be read. Never throws. */
 export async function readDevicePhrase(accountIdB64: string): Promise<string | null> {
-  let deviceKey: CryptoKey | null;
+  let deviceKey: DeviceCipher | null;
   try {
     deviceKey = await getDeviceKey(accountIdB64);
   } catch (err) {
@@ -150,7 +151,7 @@ export async function readDevicePhrase(accountIdB64: string): Promise<string | n
  */
 export function devicePhraseRow(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   wipes: WipeMark,
 ): PhraseRow<PhraseRowSnapshot> {
   return {

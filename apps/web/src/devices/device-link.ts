@@ -42,8 +42,6 @@ export const LINK_HANDLED_ELSEWHERE: LinkText = () => t("device_link.request.han
 export const LINK_OLD_WRONG_CODE: LinkText = () => t("device_link.request.wrong_code");
 /** Old device: "It is not me". */
 export const LINK_DECLINED_OLD: LinkText = () => t("device_link.request.declined");
-/** Old device: the pairing finished. */
-export const LINK_DEVICE_ADDED: LinkText = () => t("device_link.request.added");
 /** Old device: the request went away while "Is this you?" was open. */
 export const LINK_REQUEST_EXPIRED: LinkText = () => t("device_link.request.expired");
 /** Old device: the answer limit is reached; the request is declined. */
@@ -182,14 +180,41 @@ export function answersInWindow(times: readonly number[], now: number): number[]
   return times.filter((t) => Number.isFinite(t) && t <= now && now - t < DEVICE_LINK_ANSWER_WINDOW_MS);
 }
 
+/**
+ * Whether this build keeps the answer limit. A build made with
+ * `VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off` (the test stack's) allows every
+ * answer, so testing sign-ins does not run out of answers (maintainer,
+ * 2026-10-29); any other build keeps the limit.
+ */
+export function answerLimitEnforcedInThisBuild(): boolean {
+  const env = import.meta.env as Record<string, string | undefined>;
+  return env["VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT"] !== "off";
+}
+
 /** `true` while this device may answer one more request. */
 export function canAnswer(store: AnswerLogStore, now: number): boolean {
   return answersInWindow(store.load(), now).length < DEVICE_LINK_ANSWER_LIMIT;
 }
 
-/** Record an answer at `now`, dropping the ones the window left behind. */
-export function recordAnswer(store: AnswerLogStore, now: number): void {
+/** Record an answer at `now`, dropping the ones the window left behind;
+ *  returns `now`, for {@link refundAnswer}. */
+export function recordAnswer(store: AnswerLogStore, now: number): number {
   store.save([...answersInWindow(store.load(), now), now]);
+  return now;
+}
+
+/**
+ * Give back the answer recorded at `at` (one entry, if still kept). Used
+ * when the code was RIGHT and the device was then not added for a reason on
+ * this side (the result did not land, the pairing failed): a right code is
+ * not a guess, and the person must not run out of tries because of our own
+ * failure. A wrong code is never given back.
+ */
+export function refundAnswer(store: AnswerLogStore, at: number): void {
+  const times = store.load();
+  const index = times.indexOf(at);
+  if (index < 0) return;
+  store.save([...times.slice(0, index), ...times.slice(index + 1)]);
 }
 
 function answerLogKey(accountId: string): string {
@@ -278,7 +303,9 @@ export interface ResponderPorts {
   /** Parse the opened payload against this account's own handle, exactly as
    *  a scanned QR (throws on a payload for another name or version). */
   checkPayload(payload: Uint8Array, ownHandle: Uint8Array): Promise<void>;
-  /** The unchanged add-device flow over the opened payload. */
+  /** The unchanged add-device flow over the opened payload. On success
+   *  the prompt simply closes: no result line (docs/ux/second-device.md
+   *  section 2.1, "When it is done"); the new device's row names it. */
   pair(payload: Uint8Array): Promise<void>;
   /** The toast for a failed `checkPayload` or `pair`. */
   failureMessage(err: unknown): LinkText;
@@ -339,12 +366,18 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
     readonly requestId: string;
     readonly responder: ResponderHandle;
     readonly ownHandle: Uint8Array;
+    /** When the answer was counted ({@link refundAnswer}). */
+    readonly answeredAt: number;
   };
   let active: Active | null = null;
   /** A verified exchange whose `accepted` outcome the server refused for
    *  want of a fresh proof; kept until `resume`, a decline or its expiry. */
-  let owed: { readonly requestId: string; readonly confirmB: Uint8Array; readonly payload: Uint8Array } | null =
-    null;
+  let owed: {
+    readonly requestId: string;
+    readonly confirmB: Uint8Array;
+    readonly payload: Uint8Array;
+    readonly answeredAt: number | null;
+  } | null = null;
   /** The request "Is this you?" is asked about; nothing sent for it yet. */
   let asking: PendingDeviceRequest | null = null;
   /** Requests the person said "Yes, it's me" to whose answer has not landed
@@ -384,7 +417,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
 
   async function answerNew(req: PendingDeviceRequest): Promise<void> {
     const now = ports.now();
-    if (!canAnswer(ports.answers, now)) {
+    if (answerLimitEnforcedInThisBuild() && !canAnswer(ports.answers, now)) {
       handled.add(req.requestId);
       consented.delete(req.requestId);
       show({ kind: "limited", message: LINK_TOO_MANY_REQUESTS });
@@ -431,8 +464,8 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       return;
     }
     consented.delete(req.requestId);
-    recordAnswer(ports.answers, now);
-    active = { requestId: req.requestId, responder, ownHandle };
+    const answeredAt = recordAnswer(ports.answers, now);
+    active = { requestId: req.requestId, responder, ownHandle, answeredAt };
     show({ kind: "showing", requestId: req.requestId, code: ports.core.formatCode(responder.code) });
   }
 
@@ -460,10 +493,21 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       show({ kind: "closed", message: ports.failureMessage(err) });
       return;
     }
-    await recordAndPair(a.requestId, opened.confirmB, opened.pairingPayload);
+    await recordAndPair(a.requestId, opened.confirmB, opened.pairingPayload, a.answeredAt);
   }
 
-  async function recordAndPair(requestId: string, confirmB: Uint8Array, payload: Uint8Array): Promise<void> {
+  /** A right code that ended without the device added for a reason on this
+   *  side: not a guess, so the answer is given back. */
+  const giveBack = (answeredAt: number | null): void => {
+    if (answeredAt !== null) refundAnswer(ports.answers, answeredAt);
+  };
+
+  async function recordAndPair(
+    requestId: string,
+    confirmB: Uint8Array,
+    payload: Uint8Array,
+    answeredAt: number | null,
+  ): Promise<void> {
     show({ kind: "adding", requestId });
     try {
       await ports.result(requestId, { outcome: "accepted", confirmB });
@@ -471,19 +515,23 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       if (ports.proofRefused?.(err) === true) {
         // The proof ran out while the code was being typed: keep the
         // verified exchange and ask for the proof again.
-        owed = { requestId, confirmB, payload };
+        owed = { requestId, confirmB, payload, answeredAt };
         show({ kind: "proving", requestId });
         return;
       }
       // Without the recorded outcome the new device never sees `confirm_b`
       // and would refuse the Welcome: pair nothing.
+      giveBack(answeredAt);
       show({ kind: "closed", message: LINK_RESULT_NOT_RECORDED });
       return;
     }
     try {
       await ports.pair(payload);
-      show({ kind: "closed", message: LINK_DEVICE_ADDED });
+      // docs/ux/second-device.md section 2.1: the prompt simply closes, with
+      // no "added" line.
+      show({ kind: "idle" });
     } catch (err) {
+      giveBack(answeredAt);
       show({ kind: "closed", message: ports.failureMessage(err) });
     }
   }
@@ -605,7 +653,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
         await serial(async () => {
           if (owed === null || owed.requestId !== pending.requestId) return;
           owed = null;
-          await recordAndPair(pending.requestId, pending.confirmB, pending.payload);
+          await recordAndPair(pending.requestId, pending.confirmB, pending.payload, pending.answeredAt);
         });
       } catch {
         // recordAndPair does not throw.
@@ -728,11 +776,18 @@ export interface DeviceLinkInitiatorFlow {
 /**
  * The new device's side. `pairingPayload` is exactly what the QR code would
  * carry (`encodePairingQr(handle, keyPackage, rendezvous)`); it leaves this
- * device only sealed.
+ * device only sealed. `pairingPayloadAtSeal`, when given, is asked for the
+ * payload at the moment the typed code seals it (docs/ux/second-device.md
+ * section 2.1: the city is used if its answer has arrived by then); a
+ * failure falls back to `pairingPayload`.
  */
 export function createDeviceLinkInitiator(
   ports: InitiatorPorts,
-  args: { readonly loginHandle: Uint8Array; readonly pairingPayload: Uint8Array },
+  args: {
+    readonly loginHandle: Uint8Array;
+    readonly pairingPayload: Uint8Array;
+    readonly pairingPayloadAtSeal?: () => Promise<Uint8Array>;
+  },
 ): DeviceLinkInitiatorFlow {
   let current: InitiatorView = { kind: "requesting" };
   let requestId: string | null = null;
@@ -743,6 +798,8 @@ export function createDeviceLinkInitiator(
   let posted = false;
   let confirmed = false;
   let busy = false;
+  /** A submit is reading the payload to seal; a second one waits out. */
+  let sealing = false;
 
   const show = (v: InitiatorView): void => {
     current = v;
@@ -848,7 +905,7 @@ export function createDeviceLinkInitiator(
       }
     },
     async submit(typed: string): Promise<void> {
-      if (current.kind !== "ready" || initiator === null || pakeB === null) return;
+      if (sealing || current.kind !== "ready" || initiator === null || pakeB === null) return;
       let code: string;
       try {
         code = ports.core.normalizeCode(typed);
@@ -856,8 +913,21 @@ export function createDeviceLinkInitiator(
         show({ kind: "ready", error: LINK_ENTER_SIX_DIGITS });
         return;
       }
+      let payload = args.pairingPayload;
+      if (args.pairingPayloadAtSeal !== undefined) {
+        sealing = true;
+        try {
+          payload = await args.pairingPayloadAtSeal();
+        } catch {
+          payload = args.pairingPayload;
+        } finally {
+          sealing = false;
+        }
+        // The request may have ended while the payload was read.
+        if (current.kind !== "ready" || initiator === null || pakeB === null) return;
+      }
       try {
-        sealed = initiator.finish(pakeB, code, args.pairingPayload);
+        sealed = initiator.finish(pakeB, code, payload);
       } catch (err) {
         if (errorText(err).startsWith("invalid-code")) {
           show({ kind: "ready", error: LINK_ENTER_SIX_DIGITS });

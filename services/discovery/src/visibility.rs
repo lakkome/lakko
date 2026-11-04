@@ -4,7 +4,7 @@
 //! ADR-0060 section 5 - Everyone, name search and username certificates.
 //!
 //! - **Everyone** is the only setting the server knows about. A person in
-//!   Everyone has `usernames.is_public` set and one `display_names` row per
+//!   Everyone has `usernames.is_public` set and one `search_terms` row per
 //!   name search term; `POST /discovery/lookup` answers their username and
 //!   `POST /discovery/name/lookup` finds them by name. Everyone else is
 //!   invisible to both: a lookup of their username answers exactly as for an
@@ -37,7 +37,7 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use lakko_attest::{UsernameCertificate, OPRF_HASH_LEN};
-use lakko_contacts::introduction::{IntroductionRecord, INTRODUCTION_RECORD_MAX_LEN};
+use lakko_contacts::introduction::{IntroductionRecord, PUBLIC_RECORD_MAX_LEN};
 use lakko_crypto::signing::SigningKey;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
@@ -55,10 +55,21 @@ pub(crate) const MAX_NAME_TERMS: usize = 64;
 /// by the whole query.
 pub(crate) const MAX_NAME_RESULTS: usize = 20;
 
-/// The longest public record accepted: the longest introduction record the
-/// codec composes. `migrations/0029_public_record_mailbox_binding.sql` sizes
-/// its column to it (pinned by a test).
-pub(crate) const MAX_PUBLIC_RECORD_LEN: usize = INTRODUCTION_RECORD_MAX_LEN;
+/// The longest public record accepted: the longest public record the codec
+/// composes, a person's or a group's or channel's (ADR-0087 section 4).
+/// `migrations/0035_one_namespace_handles.sql` created its column and
+/// `migrations/0037_public_record_photo_width.sql` (the photo) and
+/// `migrations/0039_public_record_knock_version.sql` (the knock version)
+/// widened it to this (pinned by a test).
+pub(crate) const MAX_PUBLIC_RECORD_LEN: usize = PUBLIC_RECORD_MAX_LEN;
+
+/// `public_records.kind` / `search_terms.kind` of a person in Everyone (the
+/// target is the account id).
+pub(crate) const TARGET_PERSON: u8 = 1;
+
+/// `public_records.kind` / `search_terms.kind` of a public group or channel
+/// (the target is its random `handle_id`, ADR-0087 section 2).
+pub(crate) const TARGET_HANDLE: u8 = 2;
 
 /// Dev / e2e override of the certificate signing seed (64 hex characters),
 /// so a test can pin the verifying key ahead of time. Never set in
@@ -244,7 +255,7 @@ pub(crate) struct VisibilityRequest {
 /// Decode and structurally check a public record. The length is checked on
 /// the base64 text before decoding so an oversized body never allocates the
 /// decoded bytes.
-fn decode_public_record(b64: &str) -> Result<Vec<u8>, HandlerError> {
+pub(crate) fn decode_public_record(b64: &str) -> Result<Vec<u8>, HandlerError> {
     if b64.len() > MAX_PUBLIC_RECORD_LEN.div_ceil(3) * 4 {
         return Err(bad_request(format!(
             "public record: at most {MAX_PUBLIC_RECORD_LEN} bytes"
@@ -260,12 +271,12 @@ fn decode_public_record(b64: &str) -> Result<Vec<u8>, HandlerError> {
     }
     // Structure only (entries, distinct tags, sealed length): the payload
     // stays sealed. A record that parses carries at least one tag.
-    IntroductionRecord::decode(&bytes)
+    IntroductionRecord::decode_public(&bytes)
         .map_err(|e| bad_request(format!("public record: {}", e.code())))?;
     Ok(bytes)
 }
 
-fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError> {
+pub(crate) fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError> {
     let bytes = B64
         .decode(b64)
         .map_err(|_| bad_request("name term: bad base64"))?;
@@ -353,45 +364,78 @@ pub(crate) async fn put_visibility(
             ));
         }
     }
-    sqlx::query("DELETE FROM display_names WHERE account_id = ?")
-        .bind(account)
-        .execute(&mut *tx)
+    publish(&mut tx, TARGET_PERSON, account, record.as_deref(), &terms)
         .await
-        .map_err(db_err("clear name terms"))?;
-    if !terms.is_empty() {
-        let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
-            "INSERT INTO display_names (oprf_hash, account_id) ",
-        );
-        q.push_values(&terms, |mut row, hash| {
-            row.push_bind(hash.to_vec()).push_bind(authed.0.to_vec());
-        });
-        q.build()
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err("store name terms"))?;
-    }
-    match &record {
-        Some(record) => {
-            sqlx::query(
-                "INSERT INTO public_records (account_id, record) VALUES (?, ?) \
-                 ON DUPLICATE KEY UPDATE record = VALUES(record)",
-            )
-            .bind(account)
-            .bind(record.as_slice())
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err("store public record"))?;
-        },
-        None => {
-            sqlx::query("DELETE FROM public_records WHERE account_id = ?")
-                .bind(account)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err("clear public record"))?;
-        },
-    }
+        .map_err(db_err("store public record and name terms"))?;
     tx.commit().await.map_err(db_err("commit visibility"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Replace what one target publishes: its public record (`None` deletes it)
+/// and its name search terms (`terms` is the whole new set; an empty set
+/// deletes them all). A term the target already had keeps its `created_at`,
+/// so re-publishing does not move it to the back of a name lookup.
+///
+/// # Errors
+///
+/// Any `sqlx::Error`.
+pub(crate) async fn publish(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    kind: u8,
+    target: &[u8],
+    record: Option<&[u8]>,
+    terms: &[[u8; OPRF_HASH_LEN]],
+) -> Result<(), sqlx::Error> {
+    if terms.is_empty() {
+        sqlx::query("DELETE FROM search_terms WHERE kind = ? AND target = ?")
+            .bind(kind)
+            .bind(target)
+            .execute(&mut **tx)
+            .await?;
+    } else {
+        let mut q =
+            sqlx::QueryBuilder::<sqlx::MySql>::new("DELETE FROM search_terms WHERE kind = ");
+        q.push_bind(kind)
+            .push(" AND target = ")
+            .push_bind(target.to_vec())
+            .push(" AND lookup_key NOT IN (");
+        let mut sep = q.separated(", ");
+        for term in terms {
+            sep.push_bind(term.to_vec());
+        }
+        q.push(")");
+        q.build().execute(&mut **tx).await?;
+        let mut q = sqlx::QueryBuilder::<sqlx::MySql>::new(
+            "INSERT IGNORE INTO search_terms (lookup_key, kind, target) ",
+        );
+        q.push_values(terms, |mut row, term| {
+            row.push_bind(term.to_vec())
+                .push_bind(kind)
+                .push_bind(target.to_vec());
+        });
+        q.build().execute(&mut **tx).await?;
+    }
+    match record {
+        Some(record) => {
+            sqlx::query(
+                "INSERT INTO public_records (kind, target, record) VALUES (?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE record = VALUES(record)",
+            )
+            .bind(kind)
+            .bind(target)
+            .bind(record)
+            .execute(&mut **tx)
+            .await?;
+        },
+        None => {
+            sqlx::query("DELETE FROM public_records WHERE kind = ? AND target = ?")
+                .bind(kind)
+                .bind(target)
+                .execute(&mut **tx)
+                .await?;
+        },
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -401,41 +445,65 @@ pub(crate) struct NameLookupRequest {
     pub(crate) oprf_hash_b64: String,
 }
 
-/// One person in Everyone found by a name term.
+/// One person in Everyone, or one public group or channel, found by a name
+/// term (ADR-0087 section 4: one query serves both).
 #[derive(Serialize)]
 pub(crate) struct NameLookupResult {
-    /// Standard base64 of the account id.
-    pub(crate) account_id_b64: String,
-    /// Standard base64 of their public record; the searcher opens it with
-    /// the OPRF output of the term it looked up (`openPublicRecord`).
+    /// `"person"` or `"handle"` (a public group or channel).
+    pub(crate) kind: &'static str,
+    /// Standard base64 of the account id. A person only: a group or channel
+    /// names no account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) account_id_b64: Option<String>,
+    /// Standard base64 of the public record; the searcher opens it with the
+    /// OPRF output of the term it looked up. Which payload it carries the
+    /// opened record says (`open_search_record`).
     pub(crate) public_record_b64: String,
+}
+
+/// The wire name of a target kind.
+pub(crate) const fn kind_name(kind: u8) -> &'static str {
+    if kind == TARGET_HANDLE {
+        "handle"
+    } else {
+        "person"
+    }
 }
 
 #[derive(Serialize)]
 pub(crate) struct NameLookupResponse {
-    /// At most [`MAX_NAME_RESULTS`], ascending by account id. Empty when
-    /// nobody in Everyone has the term.
+    /// At most [`MAX_NAME_RESULTS`], the oldest published first. Empty when
+    /// nothing public has the term.
     pub(crate) results: Vec<NameLookupResult>,
 }
 
-/// `POST /discovery/name/lookup` - the accounts in Everyone that published a
-/// name term. Anonymous and per-IP rate-limited like `/discovery/lookup`; its
-/// enumeration step is the token-gated OPRF evaluation.
+/// `POST /discovery/name/lookup` - the people in Everyone and the public
+/// groups and channels that published a name term, oldest first (ADR-0087
+/// section 4). Anonymous and per-IP rate-limited like `/discovery/lookup`;
+/// its enumeration step is the token-gated OPRF evaluation.
+///
+/// A person counts only while their current username is public; a group or
+/// channel only while its current handle is public and its lease runs.
 pub(crate) async fn name_lookup(
     State(state): State<AppState>,
     Json(req): Json<NameLookupRequest>,
 ) -> Result<Json<NameLookupResponse>, HandlerError> {
     let hash = decode_hash(&req.oprf_hash_b64)?;
-    let rows: Vec<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT d.account_id, p.record FROM display_names d \
-         JOIN public_records p ON p.account_id = d.account_id \
-         WHERE d.oprf_hash = ? \
-           AND EXISTS (SELECT 1 FROM usernames u \
-                       WHERE u.account_id = d.account_id AND u.is_public = TRUE \
-                         AND u.retired_at IS NULL) \
-         ORDER BY d.account_id ASC LIMIT ?",
+    let rows: Vec<(u8, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT s.kind, s.target, p.record FROM search_terms s \
+         JOIN public_records p ON p.kind = s.kind AND p.target = s.target \
+         WHERE s.lookup_key = ? \
+           AND ((s.kind = ? AND EXISTS (SELECT 1 FROM usernames u \
+                       WHERE u.account_id = s.target AND u.is_public = TRUE \
+                         AND u.retired_at IS NULL)) \
+             OR (s.kind = ? AND EXISTS (SELECT 1 FROM handles h \
+                       WHERE h.handle_id = s.target AND h.is_public = TRUE \
+                         AND h.retired_at IS NULL AND h.lease_until > NOW(3)))) \
+         ORDER BY s.created_at ASC, s.kind ASC, s.target ASC LIMIT ?",
     )
     .bind(&hash[..])
+    .bind(TARGET_PERSON)
+    .bind(TARGET_HANDLE)
     .bind(MAX_NAME_RESULTS as u64)
     .fetch_all(&state.db)
     .await
@@ -443,8 +511,9 @@ pub(crate) async fn name_lookup(
     Ok(Json(NameLookupResponse {
         results: rows
             .into_iter()
-            .map(|(id, record)| NameLookupResult {
-                account_id_b64: B64.encode(id),
+            .map(|(kind, target, record)| NameLookupResult {
+                kind: kind_name(kind),
+                account_id_b64: (kind == TARGET_PERSON).then(|| B64.encode(target)),
                 public_record_b64: B64.encode(record),
             })
             .collect(),
@@ -458,10 +527,11 @@ mod tests {
 
     #[test]
     fn the_public_record_column_fits_the_longest_record() {
-        assert_eq!(MAX_PUBLIC_RECORD_LEN, 6744);
-        let migration = include_str!("../migrations/0029_public_record_mailbox_binding.sql");
+        assert_eq!(MAX_PUBLIC_RECORD_LEN, 7584);
+        let migration = include_str!("../migrations/0039_public_record_knock_version.sql");
+        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            migration.contains(&format!("VARBINARY({MAX_PUBLIC_RECORD_LEN})")),
+            normalised.contains(&format!("MODIFY record VARBINARY({MAX_PUBLIC_RECORD_LEN})")),
             "the migration sizes public_records.record to MAX_PUBLIC_RECORD_LEN"
         );
     }
@@ -665,8 +735,8 @@ mod tests {
 
     async fn count_rows(db: &MySqlPool, table: &str, account: [u8; 16]) -> i64 {
         let sql = match table {
-            "display_names" => "SELECT COUNT(*) FROM display_names WHERE account_id = ?",
-            "public_records" => "SELECT COUNT(*) FROM public_records WHERE account_id = ?",
+            "search_terms" => "SELECT COUNT(*) FROM search_terms WHERE kind = 1 AND target = ?",
+            "public_records" => "SELECT COUNT(*) FROM public_records WHERE kind = 1 AND target = ?",
             other => panic!("no such table in this test: {other}"),
         };
         let (rows,): (i64,) = sqlx::query_as(sql)
@@ -804,7 +874,7 @@ mod tests {
         );
         assert_eq!(c.lookup(hash).await, unregistered);
         assert!(c.name_lookup(renamed[0]).await.is_empty());
-        for table in ["display_names", "public_records"] {
+        for table in ["search_terms", "public_records"] {
             assert_eq!(
                 count_rows(&c.state.db, table, account).await,
                 0,
@@ -921,7 +991,7 @@ mod tests {
             .call("DELETE", "/discovery/account", Some(account), None)
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        for table in ["display_names", "public_records"] {
+        for table in ["search_terms", "public_records"] {
             assert_eq!(
                 count_rows(&c.state.db, table, account).await,
                 0,
@@ -931,36 +1001,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_name_lookup_returns_at_most_twenty_public_accounts_in_order() {
-        let Some(c) = client("a_name_lookup_returns_at_most_twenty_public_accounts_in_order").await
+    async fn a_name_lookup_returns_at_most_twenty_public_accounts_oldest_first() {
+        let Some(c) =
+            client("a_name_lookup_returns_at_most_twenty_public_accounts_oldest_first").await
         else {
             return;
         };
         let term = random::<64>();
         let mut public = Vec::new();
-        for _ in 0..=MAX_NAME_RESULTS {
+        for i in 0..=MAX_NAME_RESULTS {
             let account = random::<16>();
             c.register(account, random::<64>()).await;
             assert_eq!(
                 c.visibility(account, true, &[term]).await,
                 StatusCode::NO_CONTENT
             );
+            // Pin the order: one second apart, in publish order.
+            sqlx::query(
+                "UPDATE search_terms SET created_at = TIMESTAMP('2026-01-01') + INTERVAL ? SECOND \
+                 WHERE lookup_key = ? AND kind = 1 AND target = ?",
+            )
+            .bind(i64::try_from(i).unwrap())
+            .bind(&term[..])
+            .bind(&account[..])
+            .execute(&c.state.db)
+            .await
+            .unwrap();
             public.push(account);
         }
         // A hidden account holding a stale row for the term never shows.
         let hidden = [0u8; 16];
-        sqlx::query("INSERT IGNORE INTO display_names (oprf_hash, account_id) VALUES (?, ?)")
+        sqlx::query("INSERT IGNORE INTO search_terms (lookup_key, kind, target, created_at) VALUES (?, 1, ?, TIMESTAMP('2025-01-01'))")
             .bind(&term[..])
             .bind(&hidden[..])
             .execute(&c.state.db)
             .await
             .unwrap();
-        public.sort_unstable();
         let expected: Vec<String> = public
             .iter()
             .take(MAX_NAME_RESULTS)
             .map(|a| B64.encode(a))
             .collect();
         assert_eq!(c.name_lookup(term).await, expected);
+
+        // Re-publishing keeps a term's place: the first account re-enters
+        // Everyone with the same term and is still first.
+        assert_eq!(
+            c.visibility(public[0], true, &[term]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(c.name_lookup(term).await[0], B64.encode(public[0]));
     }
 }

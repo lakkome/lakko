@@ -279,21 +279,18 @@ final class AccountLocalDataWipeTests: XCTestCase {
         let defaults = UserDefaults.standard
         let keys = [
             AppearanceSetting.storageKey, MediaPrefs.autoplayKey, MediaPrefs.recordModeKey,
-            MediaPrefs.gifNoteKey,
         ]
         let saved = keys.map { defaults.object(forKey: $0) }
         defer { for (key, value) in zip(keys, saved) { defaults.set(value, forKey: key) } }
         defaults.set("dark", forKey: AppearanceSetting.storageKey)
         defaults.set(true, forKey: MediaPrefs.autoplayKey)
         defaults.set("videoNote", forKey: MediaPrefs.recordModeKey)
-        defaults.set(true, forKey: MediaPrefs.gifNoteKey)
 
         AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
 
         XCTAssertEqual(defaults.string(forKey: AppearanceSetting.storageKey), "dark")
         XCTAssertTrue(defaults.bool(forKey: MediaPrefs.autoplayKey))
         XCTAssertEqual(defaults.string(forKey: MediaPrefs.recordModeKey), "videoNote")
-        XCTAssertTrue(defaults.bool(forKey: MediaPrefs.gifNoteKey))
     }
 
     // MARK: - Seeding
@@ -375,7 +372,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         // attestation, and the phrase-owed marker.
         RecoveryMarkers().markPublishOwed(
             KeyResetPublishRecord(
-                attestation: Data(repeating: 0xA7, count: 177), keyGeneration: 2, signedAtMs: 1,
+                attestation: Data(repeating: 0xA7, count: 145), keyGeneration: 2, signedAtMs: 1,
                 newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
             accountIdB64: x)
         RecoveryMarkers().markPhraseOwed(accountIdB64: x)

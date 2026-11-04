@@ -62,6 +62,31 @@ export function foldSearch(foundCount: number, legs: readonly LegOutcome[]): Peo
   return { kind: "not-found" };
 }
 
+/** The line under People for a state with `personRows` rows standing there:
+ *  "not found" would contradict a row, so it is said only over none. */
+export function peopleLineOf(state: PeopleSearchState, personRows: number): string | null {
+  if (state.kind === "not-found" && personRows > 0) return null;
+  return searchStateMessage(state);
+}
+
+/** What stands in the field, for the line that nothing matches. */
+export interface FieldContents {
+  /** Rows above People: matching conversations and list rows. */
+  readonly rowsAbove: number;
+  /** Rows under People. */
+  readonly peopleRows: number;
+  /** A channel handle was found. */
+  readonly channel: boolean;
+  /** A question for this text is out, or about to be asked. */
+  readonly searchOut: boolean;
+}
+
+/** The line that nothing matches shows only when nothing stands in the field
+ *  and nothing is on its way (UX 6.1). */
+export function showsNoMatchLine(field: FieldContents): boolean {
+  return field.rowsAbove === 0 && field.peopleRows === 0 && !field.channel && !field.searchOut;
+}
+
 /** The line under the row for a state; `null` when the state says nothing
  *  in words (idle, searching - the spinner says it - and found). */
 export function searchStateMessage(state: PeopleSearchState): string | null {

@@ -97,8 +97,9 @@ use crate::AppState;
 ///   Writes under a reach key or a delegation spend none. 50 a day is chosen,
 ///   not measured: well above the requests a person sends, low enough that
 ///   one account is a poor source for flooding open mailboxes.
-/// - `discovery-lookup`: one search spends up to three (username, name term,
-///   channel handle), and the search field asks the network as the person
+/// - `discovery-lookup`: one search spends up to two since ADR-0087 (the
+///   `@name`, one namespace for people, groups and channels, and a name
+///   term; it was three with a separate channel handle), and the search field asks the network as the person
 ///   types (`docs/ux/who-can-find-me.md` section 6.1, 2026-10-25). 300 a day
 ///   is chosen, not measured; the earlier 100 covered about 33 searches.
 /// - `call-join` (ADR-0078 section 2): one token per call admission (a join,
@@ -111,9 +112,24 @@ use crate::AppState;
 ///   every subscription of the device. 400 a day is chosen, not measured: a
 ///   device in about a hundred groups can re-send all of them a few times a
 ///   day; the earlier 100 assumed one registration per device.
+/// - `discovery-register` (ADR-0087 section 3): every group and channel
+///   claims an @name, and a person retrying a taken public name spends
+///   another. 20 a day is chosen, not measured; the earlier 10 covered
+///   usernames and channel handles only.
+/// - `circle-claim` (ADR-0086): an account claims one directory, again after a
+///   key reset or a tree started over. 10 a day is chosen, not measured.
+/// - `channel-react` (ADR-0087 section 13a): one token per reaction added
+///   under a channel post; taking one off spends none. 500 a day is chosen,
+///   not measured, with room to spare: far above the reactions a person gives
+///   in a day, and a person out of tokens sees the reaction drawn at once and
+///   sent at the next refill. A modified client can add up to its quota to a
+///   counter; the ADR accepts that.
+/// - `channel-comment` (ADR-0087 section 13a): one token per comment added;
+///   deleting one's own spends none. 200 a day is chosen, not measured, with
+///   room to spare over what a person writes in a day.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 300),
-    (TokenContext::DiscoveryRegister, 10),
+    (TokenContext::DiscoveryRegister, 20),
     (TokenContext::InviteConsume, 30),
     (TokenContext::DsKnock, 200),
     (TokenContext::PushRegister, 400),
@@ -124,6 +140,9 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::BlobRead, 96),
     (TokenContext::MailboxWrite, 50),
     (TokenContext::CallJoin, 100),
+    (TokenContext::CircleClaim, 10),
+    (TokenContext::ChannelReact, 500),
+    (TokenContext::ChannelComment, 200),
 ];
 
 /// The `call-join` quota per epoch of a young account (ADR-0078 section 2,

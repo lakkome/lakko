@@ -73,6 +73,10 @@ public enum ChannelMetaRecord {
                 topic: meta.topic, language: meta.language, listed: meta.listed))
         case .malformed:
             return .malformed
+        case .banList:
+            // ADR-0087 section 13.3 — a comment ban list. Channel comments are
+            // not built on this client (phase B): never rendered as a post.
+            return .malformed
         }
     }
 

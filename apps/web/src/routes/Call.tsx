@@ -165,7 +165,8 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
     {(url) => <img class={props.class} src={url()} alt="" />}
   </Show>
 );
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 // ============================================================================
 // Small shared pieces
@@ -261,7 +262,7 @@ function qualityWord(tier: QualityTier): string {
 
 /** A number with a fixed count of decimals, in the interface language. */
 function formatNumber(value: number, decimals: number): string {
-  return new Intl.NumberFormat(currentLanguage(), {
+  return new Intl.NumberFormat(displayLocale(), {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   }).format(value);
@@ -2141,7 +2142,12 @@ const ParticipantList: Component = () => (
 // itself after 2 s")
 // ============================================================================
 
-const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = (props) => {
+const CallEndedOverlay: Component<{
+  summary: string;
+  /** The group's name on a group call's end screen. */
+  title: string | null;
+  onDismiss: () => void;
+}> = (props) => {
   let timer: number | null = null;
   onMount(() => {
     timer = window.setTimeout(props.onDismiss, ENDED_DISMISS_MS);
@@ -2151,6 +2157,7 @@ const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = 
   });
   return (
     <div class="lk-call-ended" role="status" aria-live="polite">
+      <Show when={props.title}>{(title) => <p class="lk-call-ended-title">{title()}</p>}</Show>
       <p>{props.summary}</p>
     </div>
   );
@@ -2355,7 +2362,11 @@ const Call: Component<{
         props.group === true,
         callBarPhase(rules, callState.phase().kind, false),
       );
-    if (rings) sounds.startLoop("ringback-outgoing");
+    if (rings) {
+      // eslint-disable-next-line no-console
+      console.info(`[call-sounds] outgoing tone for phase ${callState.phase().kind}`);
+      sounds.startLoop("ringback-outgoing");
+    }
     else sounds.stopLoop("ringback-outgoing");
   });
 
@@ -3004,6 +3015,7 @@ const Call: Component<{
       <Show when={phaseKind() === "ended"}>
         <CallEndedOverlay
           summary={endedSummary(callState.connectedAt(), endedAtMs(callState.phase()))}
+          title={props.group === true ? (props.groupName ?? null) : null}
           onDismiss={exit}
         />
       </Show>

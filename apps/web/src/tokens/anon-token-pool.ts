@@ -21,7 +21,8 @@
  * a session is installed each context is topped up at once (a fresh session
  * holds no tokens and its first actions need them), and after that at independent
  * random intervals between {@link REFILL_INTERVAL_MIN_MS} and
- * {@link REFILL_INTERVAL_MAX_MS}. A take never starts an issuance. Before
+ * {@link REFILL_INTERVAL_MAX_MS}. A take never starts an issuance (a test
+ * build alone may, see {@link anonTokenRefillOnDemandInThisBuild}). Before
  * ADR-0078 a take below a low-water mark started one, so the bearer issuance
  * landed seconds from the anonymous spend it refilled for, from the same
  * address, and the issuer and the spending service could pair them by time.
@@ -96,13 +97,17 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /**
  * The token contexts, in wire order: the names `anonTokenContexts()` returns
- * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=12), pinned against
+ * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=15), pinned against
  * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
  * `directory-search` are ADR-0059; `vault-claim` is ADR-0064 (nothing spends
  * it yet); `blob-upload` and `blob-read` are ADR-0065, one per hour-long
  * blob pass (`storage/blob-access.ts`);
  * `mailbox-write` is ADR-0078 section 1: a mailbox write with no reach proof;
- * `call-join` is ADR-0078 section 2: one SFU call admission.
+ * `call-join` is ADR-0078 section 2: one SFU call admission;
+ * `circle-claim` is ADR-0086: claiming a circle directory;
+ * `channel-react` and `channel-comment` are ADR-0087 section 13a: one per
+ * write under a channel post (nothing on the web spends them yet: channel
+ * reactions and comments are phase B).
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -117,6 +122,9 @@ export const ANON_TOKEN_CONTEXTS = [
   "blob-read",
   "mailbox-write",
   "call-join",
+  "circle-claim",
+  "channel-react",
+  "channel-comment",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
@@ -141,6 +149,13 @@ export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
   // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
   // one-to-one call. Chosen, not measured.
   "call-join": 4,
+  // ADR-0086: claiming this account's one circle directory. Chosen, not
+  // measured.
+  "circle-claim": 2,
+  // ADR-0087 section 13a: channel reactions and comments. Chosen, not
+  // measured.
+  "channel-react": 4,
+  "channel-comment": 4,
 };
 
 /** The pool target of `context`. */
@@ -355,6 +370,21 @@ export interface AnonTokenPoolOptions {
   readonly random?: () => number;
   /** The timer the refill schedule runs on; defaults to `setTimeout`. */
   readonly timers?: RefillTimers;
+  /** A take that finds its bucket empty starts the issuance and waits for it.
+   *  Test builds only ({@link anonTokenRefillOnDemandInThisBuild}); the default
+   *  is the release rule, a take never starts one (ADR-0078 section 8). */
+  readonly refillOnDemand?: boolean;
+}
+
+/**
+ * Whether a take on an empty bucket may start an issuance. A build made with
+ * `VITE_LAKKO_ANON_TOKEN_REFILL=on-demand` (the test stack's and the local
+ * stack's) refills at once, so a walk never stops on a limit (limits have
+ * tests of their own); any other build keeps the release rule.
+ */
+export function anonTokenRefillOnDemandInThisBuild(): boolean {
+  const env = import.meta.env as Record<string, string | undefined>;
+  return env["VITE_LAKKO_ANON_TOKEN_REFILL"] === "on-demand";
 }
 
 /** The timer the refill schedule runs on (injectable for the tests). */
@@ -449,6 +479,7 @@ export class AnonTokenPool {
   private readonly store: AnonTokenStore | null;
   private readonly random: () => number;
   private readonly timers: RefillTimers;
+  private readonly refillOnDemand: boolean;
 
   private sessionToken: string | null = null;
   /** The load of the stored tokens for the current account, once started. */
@@ -478,6 +509,7 @@ export class AnonTokenPool {
     this.store = options.store === undefined ? defaultAnonTokenStore() : options.store;
     this.random = options.random ?? cryptoRandom;
     this.timers = options.timers ?? DEFAULT_TIMERS;
+    this.refillOnDemand = options.refillOnDemand ?? false;
   }
 
   // ------------------------------------------------------------------
@@ -660,8 +692,12 @@ export class AnonTokenPool {
     }
     // ADR-0078 section 8: a take never starts an issuance. It may wait for
     // one the schedule already runs: this session's first refill of the
-    // context, or a scheduled refill in flight.
-    const pending = bucket.refill ?? bucket.initial;
+    // context, or a scheduled refill in flight. A test build alone starts
+    // one here once the session's first refill has run.
+    const pending =
+      this.refillOnDemand && bucket.refill === null && bucket.resolveInitial === null
+        ? this.refill(context)
+        : (bucket.refill ?? bucket.initial);
     if (pending === null) {
       throw new AnonTokenUnavailableError(context, POOL_EMPTY_REASON);
     }
@@ -980,4 +1016,4 @@ export class AnonTokenPool {
 }
 
 /** The app's pool. `AuthContext` installs and unbinds its session. */
-export const anonTokens = new AnonTokenPool();
+export const anonTokens = new AnonTokenPool({ refillOnDemand: anonTokenRefillOnDemandInThisBuild() });

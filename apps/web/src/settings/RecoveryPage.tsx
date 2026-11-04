@@ -40,6 +40,8 @@ import { Icon } from "../ui/icons";
 import { PasswordField } from "../ui/PasswordField";
 import { PhraseGrid } from "../ui/PhraseGrid";
 import { paths } from "../routes/paths";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
+import { DevicesAttention } from "../devices/DeviceAddedNotice";
 import { t } from "../l10n";
 
 export function RecoveryPage(): JSX.Element {
@@ -89,10 +91,17 @@ export function RecoveryPage(): JSX.Element {
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{t("settings.recovery.devices.title")}</span>
+            <span class="lk-card-row-title">
+              {t("settings.recovery.devices.title")}
+              <DevicesAttention />
+            </span>
             <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
-          <A href={paths.devices} class="lk-card-row-action">
+          <A
+            href={paths.devices}
+            class="lk-card-row-action"
+            aria-label={badgeVisible(addedNotice()) ? t("settings.devices.attention_a11y") : undefined}
+          >
             {t("common.manage")}
           </A>
         </div>

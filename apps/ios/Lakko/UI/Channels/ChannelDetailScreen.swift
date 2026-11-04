@@ -40,6 +40,11 @@ struct ChannelDetailScreen: View {
     /// The handle the channel was found by when opened from the search field
     /// (a channel not yet in the local list). Empty otherwise.
     var foundHandle: String = ""
+    /// The name the channel's public record carried, when it was opened from
+    /// a directory card: the title until the channel's own record arrives.
+    var foundName: String = ""
+    /// The card's `Subscribe` was pressed: subscribe without asking again.
+    var subscribeOnOpen: Bool = false
     /// `docs/ux/feed.md` section 5 — the newest readable post was on screen
     /// in the subscriber view: it is read here and in the feed.
     var onPostRead: ((_ channelId: String, _ cursor: UInt64) -> Void)?
@@ -71,6 +76,8 @@ struct ChannelDetailScreen: View {
                     state: state,
                     client: client,
                     foundHandle: foundHandle,
+                    foundName: foundName,
+                    subscribeOnOpen: subscribeOnOpen,
                     onPostRead: onPostRead.map { read in { read(channelId, $0) } }
                 )
             }
@@ -94,9 +101,10 @@ struct ChannelDetailScreen: View {
                     .accessibilityHint)
             }
         }
-        .sheet(isPresented: $infoOpen) {
-            // Section 3 — a layer over the channel, which stays where it is
-            // behind it.
+        .navigationDestination(isPresented: $infoOpen) {
+            // Section 3 / 3.1 — a screen pushed over the channel, whose back
+            // returns to it as it was left (amended 2026-10-29: it was a sheet
+            // with a Done button).
             ChannelInfoSheet(
                 channelId: channelId,
                 state: state,
@@ -106,8 +114,7 @@ struct ChannelDetailScreen: View {
                 onUnsubscribed: {
                     infoOpen = false
                     dismiss()
-                },
-                onDone: { infoOpen = false }
+                }
             )
         }
     }
@@ -117,7 +124,7 @@ struct ChannelDetailScreen: View {
         let channel = state.channels.first(where: { $0.id == channelId })
         return ChannelsFormatting.title(
             sharedName: channel?.sharedName ?? "",
-            localName: channel?.localName ?? "",
+            localName: channel?.localName ?? foundName,
             handle: channel?.handle ?? foundHandle)
     }
 }
@@ -132,6 +139,8 @@ struct ChannelHeaderCard: View {
     let channel: ChannelHandle?
     /// The handle the channel was found by when it is not listed yet.
     var foundHandle: String = ""
+    /// The name a directory record carried, while the channel is not listed.
+    var foundName: String = ""
     let isOwner: Bool
     /// Overrides the role / handle status while access is being set up.
     var status: String? = nil
@@ -141,7 +150,7 @@ struct ChannelHeaderCard: View {
     private var title: String {
         ChannelsFormatting.title(
             sharedName: channel?.sharedName ?? "",
-            localName: channel?.localName ?? "",
+            localName: channel?.localName ?? foundName,
             handle: handle)
     }
 
@@ -337,8 +346,19 @@ private struct ChannelOwnerView: View {
                 }
             }
         }
-        .task { await refresh() }
+        .task {
+            await refresh()
+            // A co-publisher's post shows without reopening the channel.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.postRefreshNanos)
+                if Task.isCancelled { return }
+                await refresh(quiet: true)
+            }
+        }
     }
+
+    /// As the reader refreshes.
+    private static let postRefreshNanos: UInt64 = 5_000_000_000
 
     private func content(for post: PostView) -> ChannelPostCard.Content {
         guard let entry = decodedByCursor[post.cursor] else { return .decoding }
@@ -409,9 +429,11 @@ private struct ChannelOwnerView: View {
 
     // MARK: Actions
 
-    private func refresh() async {
-        loading = true
-        defer { loading = false }
+    /// `quiet` is the refresh of an open screen: it draws no progress and
+    /// says nothing when it fails, the next one tries again.
+    private func refresh(quiet: Bool = false) async {
+        if !quiet { loading = true }
+        defer { if !quiet { loading = false } }
         do {
             async let postsTask = client.fetchPosts(channelIdHex: channelId, after: 0)
             async let epochTask = client.fetchEpoch(channelIdHex: channelId)
@@ -427,7 +449,7 @@ private struct ChannelOwnerView: View {
             // here would stay on screen.
             if Cancellation.endedByCancellation(error) { return }
             NSLog("Channels: refresh failed: %@", String(describing: error))
-            publishError = .key("channels.posts.error.load")
+            if !quiet { publishError = .key("channels.posts.error.load") }
         }
     }
 
@@ -518,6 +540,8 @@ struct ChannelPostCard: View {
     let content: Content
     let serverTsMs: UInt64
     @ObservedObject private var l10n = Localization.shared
+    /// `docs/ux/message-links.md` section 2 — where a Lakko link in a post goes.
+    @EnvironmentObject private var inviteIntake: InviteIntake
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -527,7 +551,10 @@ struct ChannelPostCard: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             case .text(let text):
-                Text(text)
+                MessageText(
+                    text: text, linkColor: Color.lakkoAccent,
+                    onOwnLink: { inviteIntake.handle($0) }
+                )
                     .font(.body)
                     .foregroundStyle(Color.lakkoText)
                     .textSelection(.enabled)
@@ -537,9 +564,12 @@ struct ChannelPostCard: View {
             }
             HStack {
                 Spacer()
-                Text(timeLabel)
-                    .font(.caption)
-                    .foregroundStyle(Color.lakkoTextMuted)
+                // "5 minutes ago" keeps moving while the screen is open.
+                TimelineView(.periodic(from: TimelineAnchor.date, by: Self.timeLabelTickSeconds)) { context in
+                    Text(timeLabel(now: context.date))
+                        .font(.caption)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
             }
         }
         .padding(12)
@@ -552,10 +582,14 @@ struct ChannelPostCard: View {
         )
     }
 
-    private var timeLabel: String {
+    /// How often the relative time is read again. The label's smallest step
+    /// is a minute.
+    static let timeLabelTickSeconds: TimeInterval = 20
+
+    private func timeLabel(now: Date) -> String {
         ChannelsFormatting.relativeLabel(
             ms: Int64(clamping: serverTsMs),
-            nowMs: Int64(Date().timeIntervalSince1970 * 1000),
+            nowMs: Int64(now.timeIntervalSince1970 * 1000),
             calendar: .current,
             locale: l10n.locale
         )

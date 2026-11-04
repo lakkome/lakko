@@ -177,13 +177,10 @@ final class UnappliedRequestsTests: XCTestCase {
     /// to be applied…`:
     ///
     ///     XCTAssertTrue failed - the joiner is not told the wait is unbounded
-    func testTheJoinerIsToldTheWaitIsUnboundedAndOfferedTheOneRepair() {
+    func testTheJoinerIsToldTheWaitAndOfferedTheOneRepair() {
         XCTAssertEqual(
             joinWaitPrimary,
             "Request sent. An admin approves it, then the change is applied to the group.")
-        XCTAssertTrue(
-            joinWaitSecondary.contains("time limit"),
-            "the joiner is not told the wait is unbounded")
         XCTAssertTrue(joinWaitSecondary.contains("send the request again"))
         XCTAssertEqual(joinRequestAgain, "Request again")
     }
@@ -287,37 +284,5 @@ final class UnappliedRequestsTests: XCTestCase {
             observations.load(accountIdB64: account, groupIdB64: group)["add:\(joiner)"]?
                 .joinRequest,
             true)
-    }
-
-    // MARK: - Residual 2 — the queue an approve grows
-
-    /// DISCRIMINATION (RUN, then reverted): with the threshold changed from
-    /// `< 2` to `< 1` (in the same pass as the `of 64` probe below, which is why
-    /// the observed string carries both changes):
-    ///
-    ///     XCTAssertNil failed: "1 of 64 changes are now waiting to apply."
-    func testTheQueueLineStaysSilentForOneChangeAndCountsFromTwo() {
-        XCTAssertNil(waitingQueueLine(0))
-        XCTAssertNil(waitingQueueLine(1))
-        XCTAssertEqual(waitingQueueLine(2), "2 changes are now waiting to apply.")
-        XCTAssertEqual(waitingQueueLine(64), "64 changes are now waiting to apply.")
-    }
-
-    /// It states what IS, never a limit — the cap is `pub(crate)` in `lakko-mls`
-    /// and on neither FFI surface, so this layer has no number to compare
-    /// against and must not imply one.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): with the line changed to
-    /// `\(n) of 64 changes are now waiting to apply.`:
-    ///
-    ///     XCTAssertFalse failed - implies a limit (of 64): 2 of 64 changes are
-    ///     now waiting to apply.
-    func testTheQueueLineNeverImpliesALimitItCannotRead() {
-        for n in [2, 10, 64, 100] {
-            let line = waitingQueueLine(n) ?? ""
-            for word in ["limit", "maximum", "of 64", "full", "cap"] {
-                XCTAssertFalse(line.contains(word), "implies a limit (\(word)): \(line)")
-            }
-        }
     }
 }

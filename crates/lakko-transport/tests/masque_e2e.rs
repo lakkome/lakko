@@ -187,6 +187,18 @@ async fn masque_loopback_roundtrip() {
     let transport =
         MasqueTransport::with_extra_roots(cfg, vec![server_cert]).expect("MasqueTransport");
 
+    // Pay the OS trust store's per-process first-use cost before
+    // the clock starts. On macOS the first
+    // `SecTrustSettingsCopyCertificates` of a process looks up the
+    // main bundle, which for a bare test executable means reading
+    // its whole directory; in a large `target/debug/deps` that
+    // alone took longer than the 10 s handshake budget below. The
+    // budget is for the QUIC + h3 handshake, so keep that cost out
+    // of it. Later loads in the same process are fast.
+    let _ = tokio::task::spawn_blocking(rustls_native_certs::load_native_certs)
+        .await
+        .expect("native cert warm-up task");
+
     // The `Endpoint` arg is ignored by `MasqueTransport::connect`
     // — `cfg.proxy_url` is the canonical destination.
     let endpoint_arg = Endpoint::hostname("127.0.0.1", server_addr.port());

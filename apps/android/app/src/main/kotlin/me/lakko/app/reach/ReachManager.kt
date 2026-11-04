@@ -39,6 +39,7 @@ import uniffi.lakko_ffi_uniffi.FfiScopeKind
 import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
 import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.OprfResult
 
 /** Whether the setting the person chose is in effect on the server
  *  (`docs/ux/who-can-find-me.md` sections 8 and 9). */
@@ -93,6 +94,12 @@ public class ReachManager internal constructor(
     private val ownPredecessorKeys: (ownerAccountIdB64: String) -> List<Pair<ByteArray, ByteArray>> = { emptyList() },
     /** ADR-0078 - the binding check and sealing of mailbox rows. */
     private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
+    /** The added account key a committer-delegation envelope names; a throw
+     *  drops the envelope. A test injects a fake (the host JVM loads no
+     *  native library). */
+    private val delegationAddedKey: (envelope: ByteArray) -> ByteArray = {
+        uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(it).addedAccountKey
+    },
 ) {
     /**
      * ADR-0073 R.4 - the account and generation behind [ownerKey] when this
@@ -155,6 +162,19 @@ public class ReachManager internal constructor(
     /** Whether [visibility] is in effect on the server. */
     public val applyStatus: StateFlow<ReachApplyStatus> = mutableStatus.asStateFlow()
 
+    /** The Everyone publication did not land, so the person is not findable
+     *  the way the setting says (or still findable after leaving it). Shown
+     *  through [applyStatus], whose Retry runs the publication again. */
+    @Volatile
+    private var everyoneStuck: Boolean = false
+
+    /** The account whose backup was just restored, read at the next [bind]. */
+    private val restoredBeforeBind = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** The visibility envelope a restore handed over before a session bound:
+     *  a backup composed in that window still carries it. */
+    private val restoredVisibility = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
     /** Called after a setting change landed (profiles republished, Everyone
      *  published or withdrawn). Installed by the chat repository. */
     @Volatile
@@ -214,6 +234,10 @@ public class ReachManager internal constructor(
         // the setting, the version counters and the grants this account
         // HOLDS for other people are filed under the contact, not this key.
         if (!sameAccount) doc = store.load(accountIdB64)
+        if (restoredBeforeBind.remove(accountIdB64)) {
+            doc = doc.withUnknownEveryoneNote()
+            store.save(accountIdB64, doc)
+        }
         val boundKeyHex = reachHex(accountKey)
         val decision = rekeyDecision(
             boundKeyHex = boundKeyHex,
@@ -256,6 +280,7 @@ public class ReachManager internal constructor(
             val pending = pendingDeviceSync.poll() ?: break
             adoptDeviceSync(pending)
         }
+        restoredVisibility.remove(accountIdB64)
     }
 
     /** Forget the session (sign-out, forget device). The stored document stays
@@ -266,8 +291,31 @@ public class ReachManager internal constructor(
         old?.accountSeed?.fill(0)
         pendingDeviceSync.clear()
         doc = ReachDoc()
+        everyoneStuck = false
         mutableVisibility.value = null
         mutableStatus.value = ReachApplyStatus.APPLIED
+    }
+
+    /** A session with no native identity behind it, for the host suite. */
+    internal fun bindForTest(accountIdB64: String, accountKey: ByteArray) {
+        binding.set(
+            Binding(
+                accountIdB64 = accountIdB64,
+                accountSeed = ByteArray(32),
+                accountKey = accountKey,
+                mailbox = ByteArray(32),
+                mailboxPk = ByteArray(32),
+                mailboxBinding = ByteArray(97),
+                mailboxSigner = object : DsJournalSigner {
+                    override val epoch: ULong = 0uL
+                    override val verifyingKey: ByteArray = ByteArray(32)
+                    override fun sign(method: String, path: String, query: String, body: ByteArray): String =
+                        error("no signer in a test session")
+                    override fun mailboxClaimBody(): String = error("no signer in a test session")
+                },
+            ),
+        )
+        doc = store.load(accountIdB64)
     }
 
     /** The bound account's signature public key, or `null`. */
@@ -732,6 +780,47 @@ public class ReachManager internal constructor(
         }
     }
 
+    /**
+     * The visibility envelope a restored backup carried: the path an incoming
+     * DeviceGroup envelope takes, so the mailbox and the Everyone publication
+     * run. On a phrase route no session is bound yet and it waits for [bind];
+     * a session of another account never takes it.
+     */
+    public fun adoptFromBackup(accountIdB64: String, envelope: ByteArray) {
+        val bound = binding.get()
+        if (bound != null && bound.accountIdB64 != accountIdB64) return
+        if (bound == null) restoredVisibility[accountIdB64] = envelope.copyOf()
+        adoptDeviceSync(envelope)
+    }
+
+    /**
+     * A backup of [accountIdB64] was restored here: what this device noted
+     * about the Everyone publication describes an earlier state of the
+     * account, so the next refresh tells the server what the setting says.
+     */
+    public fun noteRestoredFromBackup(accountIdB64: String) {
+        val b = binding.get()
+        if (b == null || b.accountIdB64 != accountIdB64) {
+            restoredBeforeBind.add(accountIdB64)
+            return
+        }
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                doc = doc.withUnknownEveryoneNote()
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
+    /** The visibility envelope in force for [accountIdB64] with its original
+     *  stamp, for a backup; `null` when none was ever chosen. */
+    public fun visibilityEnvelopeFor(accountIdB64: String): ByteArray? {
+        val bound = binding.get()
+        val held = if (bound?.accountIdB64 == accountIdB64) doc else store.load(accountIdB64)
+        return held.visibilityHex?.let(::reachUnhex) ?: restoredVisibility[accountIdB64]?.copyOf()
+    }
+
     private suspend fun adoptVisibility(b: Binding, received: ReceivedDeviceSync.Visibility) {
         val accepted = lock.withLock {
             if (binding.get() !== b) return
@@ -864,7 +953,7 @@ public class ReachManager internal constructor(
                 doc = doc.copy(replies = liveReplies)
                 store.save(b.accountIdB64, doc)
             }
-            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            mutableStatus.value = settledStatus(recovery)
             // While the recovery is pending this reports the restricted set
             // (`link` / `reply` keys only), so a link or reply mint proceeds;
             // the status says the rest is not applied.
@@ -896,7 +985,7 @@ public class ReachManager internal constructor(
                 replies = liveReplies,
             )
             store.save(b.accountIdB64, doc)
-            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            mutableStatus.value = settledStatus(recovery)
             // Pending: only the restricted set went out (see above).
             true
         } catch (cancellation: CancellationException) {
@@ -911,6 +1000,11 @@ public class ReachManager internal constructor(
             false
         }
     }
+
+    /** What the reconcile leaves on screen: the recovery's status, a stuck
+     *  Everyone publication, or applied. */
+    private fun settledStatus(recovery: ReachApplyStatus?): ReachApplyStatus =
+        recovery ?: if (everyoneStuck) ReachApplyStatus.FAILED else ReachApplyStatus.APPLIED
 
     /**
      * ADR-0060 §1 ("Versions after a restore", amended 2026-10-01). Under [lock].
@@ -1055,9 +1149,10 @@ public class ReachManager internal constructor(
      *
      * ADR-0078 section 9, decision 4 — a change made HERE also rotates the
      * `group` and `channel` keys, so a group or channel the setting no longer
-     * allows stops holding a working key (one key serves them all). A setting
-     * adopted from another device arrives with that device's bumped counters
-     * and is not rotated again.
+     * allows stops holding a working key (one key serves them all), and `fof`
+     * when it narrowed which contacts get the record ([settingChangeRotation]).
+     * A setting adopted from another device arrives with that device's bumped
+     * counters and is not rotated again.
      */
     public suspend fun updateVisibility(chosen: FfiVisibilitySetting) {
         val b = binding.get() ?: return
@@ -1072,7 +1167,8 @@ public class ReachManager internal constructor(
         val stateEnvelope = lock.withLock {
             if (binding.get() !== b) return
             doc = doc.copy(visibilityHex = reachHex(envelope))
-            val stateEnvelope = bumpLocked(listOf(ReachKind.GROUP, ReachKind.CHANNEL))
+            val stateEnvelope =
+                bumpLocked(settingChangeRotation(previous?.contactsReach(), stamped.contactsReach()))
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
             stateEnvelope
@@ -1091,6 +1187,12 @@ public class ReachManager internal constructor(
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "applying the setting to profiles failed: ${cause.javaClass.simpleName}")
         }
+    }
+
+    /** A removed contact leaves the chosen list (UX section 4.1). */
+    public suspend fun forgetChosenContact(accountId: ByteArray) {
+        val setting = currentVisibility() ?: return
+        withoutChosenContact(setting, accountId)?.let { updateVisibility(it) }
     }
 
     /** Retry after a failure (the screen's Retry action). */
@@ -1188,9 +1290,82 @@ public class ReachManager internal constructor(
 
     /** Record what the Everyone publication now holds ([key] is `null` when
      *  not public). */
+    /**
+     * The OPRF round of the term [key], from what this account already holds
+     * when it can be: each round costs an anonymous token, and an Everyone
+     * publication that fails part way otherwise pays for every term again.
+     * The lookup key is kept beside the output under `k:<key>`.
+     */
+    internal suspend fun keptOprf(key: String, round: suspend () -> OprfResult): OprfResult {
+        val output = doc.termOutputs[key]?.let(::reachUnhex)
+        val lookupKey = doc.termOutputs["k:$key"]?.let(::reachUnhex)
+        if (output != null && lookupKey != null) return OprfResult(output, lookupKey)
+        val result = waitingOutRateLimit(round)
+        val b = binding.get() ?: return result
+        lock.withLock {
+            if (binding.get() === b) {
+                val kept = mapOf(key to reachHex(result.output), "k:$key" to reachHex(result.lookupKey))
+                doc = doc.copy(termOutputs = doc.termOutputs + kept)
+                store.save(b.accountIdB64, doc)
+            }
+        }
+        return result
+    }
+
+    /**
+     * The OPRF rounds of [keys] at once: those this account holds come from
+     * it, the rest are evaluated by ONE [batch] call (the own name's terms go
+     * through `POST /discovery/oprf/batch`, one token for all) and kept.
+     * Results in the order of [keys].
+     */
+    internal suspend fun keptOprfBatch(
+        keys: List<String>,
+        batch: suspend (missing: List<Int>) -> List<OprfResult>,
+    ): List<OprfResult> {
+        val held = keys.map { key ->
+            val output = doc.termOutputs[key]?.let(::reachUnhex)
+            val lookupKey = doc.termOutputs["k:$key"]?.let(::reachUnhex)
+            if (output != null && lookupKey != null) OprfResult(output, lookupKey) else null
+        }
+        val missing = held.indices.filter { held[it] == null }
+        if (missing.isEmpty()) return held.map { it!! }
+        val fresh = waitingOutRateLimit { batch(missing) }
+        val out = held.toMutableList()
+        for ((i, at) in missing.withIndex()) out[at] = fresh[i]
+        val b = binding.get()
+        if (b != null) {
+            lock.withLock {
+                if (binding.get() === b) {
+                    val kept = HashMap<String, String>()
+                    for ((i, at) in missing.withIndex()) {
+                        kept[keys[at]] = reachHex(fresh[i].output)
+                        kept["k:${keys[at]}"] = reachHex(fresh[i].lookupKey)
+                    }
+                    doc = doc.copy(termOutputs = doc.termOutputs + kept)
+                    store.save(b.accountIdB64, doc)
+                }
+            }
+        }
+        return out.map { it!! }
+    }
+
+    /** Whether the last Everyone publication did not land. */
+    public fun everyonePublicationStuck(): Boolean = everyoneStuck
+
+    /** The Everyone publication could not be made: the person sees it on the
+     *  Who can find me screen, with Retry. */
+    public fun noteEveryoneStuck() {
+        everyoneStuck = true
+        mutableStatus.value = ReachApplyStatus.FAILED
+    }
+
     public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
         doc = doc.copy(publishedPublic = public, publishedKey = key)
+        if (everyoneStuck) {
+            everyoneStuck = false
+            if (mutableStatus.value == ReachApplyStatus.FAILED) mutableStatus.value = ReachApplyStatus.APPLIED
+        }
         scope.launch {
             lock.withLock {
                 if (binding.get() !== b) return@withLock
@@ -1273,6 +1448,20 @@ public class ReachManager internal constructor(
         }
     }
 
+    /** Drop the one grant [grantWire] of [kind] held for [ownerKey] (a join
+     *  request's reply key, once the person is admitted or refused). */
+    public suspend fun withdrawHeldGrant(ownerKey: ByteArray, kind: ReachKind, grantWire: ByteArray) {
+        val b = binding.get() ?: return
+        val ownerKeys = personKeys(ownerKey)
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val kept = withoutHeldGrant(doc.held, ownerKeys, kind.name, reachHex(grantWire))
+            if (kept === doc.held) return@withLock
+            doc = doc.copy(held = kept)
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
     /** Whether a grant of [kind] is held for [ownerKey] at [scopeHex]. */
     public fun holdsHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String): Boolean {
         val ownerKeys = personKeys(ownerKey)
@@ -1281,19 +1470,15 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * The widest grant held for [ownerKey] as its wire, or `null` (web
-     * `bestGrantFor`): `contact`, else a `group`, else a `channel`. A bare
-     * `member` key is never one: a co-member the person hides from holds it
-     * (UX section 6.2). SECRET.
+     * Every grant held for [ownerKey] that a contact request may use, as
+     * wires, in the order they are tried ([contactRequestGrantsInOrder]). A
+     * bare `member` key is never one: a co-member the person hides from holds
+     * it (UX section 6.2). SECRET.
      */
-    public fun bestHeldGrantWire(ownerKey: ByteArray): ByteArray? {
-        val held = heldFor(ownerKey)
-        for (kind in listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL)) {
-            val pick = held.filter { it.first.kind == kind }.minByOrNull { it.first.scopeHex } ?: continue
-            return runCatching { uniffi.lakko_ffi_uniffi.encodeReachGrant(pick.second) }.getOrNull()
+    public fun heldGrantWiresInOrder(ownerKey: ByteArray): List<ByteArray> =
+        contactRequestGrantsInOrder(heldFor(ownerKey)).mapNotNull { grant ->
+            runCatching { uniffi.lakko_ffi_uniffi.encodeReachGrant(grant) }.getOrNull()
         }
-        return null
-    }
 
     /** Drop every grant held for [ownerKey] (a contact removed). */
     public fun forgetHeld(ownerKey: ByteArray) {
@@ -1303,6 +1488,21 @@ public class ReachManager internal constructor(
             lock.withLock {
                 if (binding.get() !== b) return@withLock
                 doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex in ownerKeys })
+                store.save(b.accountIdB64, doc)
+            }
+        }
+    }
+
+    /** Forget the grants learned in the group [scopeHex] (ADR-0087 section 9).
+     *  The same person's grants learned elsewhere stay: a row names its
+     *  scope. */
+    public fun forgetHeldScope(scopeHex: String) {
+        val b = binding.get() ?: return
+        val scoped = scopeHex.lowercase()
+        scope.launch {
+            lock.withLock {
+                if (binding.get() !== b) return@withLock
+                doc = doc.copy(held = doc.held.filterNot { it.scopeHex == scoped })
                 store.save(b.accountIdB64, doc)
             }
         }
@@ -1350,18 +1550,21 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * ADR-0078 - where a write of [purpose] to [ownerKey] goes: the first
-     * held grant that verifies ([reachAuthFor]), else a proofless write to
-     * the mailbox key a held binding names ([mailboxPkFor]; it spends one
-     * `mailbox-write` token), else `null` (no mailbox known: nothing is
-     * written).
+     * ADR-0078 - where a write of [purpose] to [ownerKey] may go, in turn:
+     * [first] (a grant or binding the caller holds for this write), each held
+     * grant that verifies, and a proofless write to the mailbox key a held
+     * binding names ([mailboxPkFor]; it spends one `mailbox-write` token), the
+     * last only when nothing before it yielded a destination.
      */
-    public fun writeDestFor(
+    public fun writeDestCandidates(
         ownerKey: ByteArray,
         purpose: WritePurpose,
-        groupHex: String? = null,
-    ): MailboxDest? =
-        reachAuthFor(ownerKey, purpose, groupHex) ?: mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) }
+        first: MailboxDest? = null,
+    ): List<() -> MailboxDest?> {
+        val grants = reachAuthCandidates(ownerKey, purpose)
+        val all = if (first == null) grants else listOf<() -> MailboxDest?>({ first }) + grants
+        return withProoflessLast(all) { mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) } }
+    }
 
     /**
      * Every authorisation this device holds for a write of [purpose] into
@@ -1494,6 +1697,23 @@ public class ReachManager internal constructor(
     public fun introductionBundleWires(): List<ByteArray> =
         doc.introBundles.toSortedMap().values.mapNotNull { reachUnhex(it.bundleHex) }
 
+    /** What the kept document holds, counts only, for the search log line. */
+    public fun storedCounts(): String =
+        "held=${doc.held.size} offers=${doc.introOffers.size} bundles=${doc.introBundles.size} " +
+            "own_offer=${doc.ownOffer != null} offer_sent=${doc.offerSentTo.size} " +
+            "bundle_sent=${doc.bundleSentTo.size} joined=${doc.joinedGroups.size}"
+
+    /** What this device holds from the person known by [accountKey]
+     *  (ADR-0060 section 4, whether it asks for introductions). */
+    internal fun introductionsHeldFrom(accountKey: ByteArray): IntroductionsHeld {
+        val keys = personKeys(accountKey)
+        return IntroductionsHeld(
+            offer = keys.any { it in doc.introOffers },
+            bundle = keys.any { it in doc.introBundles },
+            contactGrant = holdsHeld(accountKey, ReachKind.CONTACT, ""),
+        )
+    }
+
     /** Every record the contacts offered, hex, ordered by contact key. */
     public fun offeredIntroductionRecordsHex(): List<String> = doc.introOffers.toSortedMap().values.toList()
 
@@ -1503,6 +1723,7 @@ public class ReachManager internal constructor(
         ownOffer = doc.ownOffer,
         offerSentTo = doc.offerSentTo,
         bundleSentTo = doc.bundleSentTo,
+        reopenedAtMs = doc.introReopenedAtMs,
     )
 
     /** Persist the publication state after a step. */
@@ -1515,6 +1736,7 @@ public class ReachManager internal constructor(
                 ownOffer = state.ownOffer,
                 offerSentTo = state.offerSentTo,
                 bundleSentTo = state.bundleSentTo,
+                introReopenedAtMs = state.reopenedAtMs,
             )
             store.save(b.accountIdB64, doc)
         }
@@ -1557,15 +1779,15 @@ public class ReachManager internal constructor(
      *  group, the sender resolved at receipt (C-68). */
     public fun keepDelegation(groupHex: String, senderKey: ByteArray, envelope: ByteArray) {
         val b = binding.get() ?: return
-        val decoded = try {
-            uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(envelope)
+        val addedAccountKey = try {
+            delegationAddedKey(envelope)
         } catch (_: Throwable) {
             return
         }
         val entry = StoredDelegation(
             groupHex = groupHex.lowercase(),
             senderKeyHex = reachHex(senderKey),
-            addedAccountKeyHex = reachHex(decoded.addedAccountKey),
+            addedAccountKeyHex = reachHex(addedAccountKey),
             envelopeHex = reachHex(envelope),
         )
         scope.launch {
@@ -1579,7 +1801,10 @@ public class ReachManager internal constructor(
                 )
                 store.save(b.accountIdB64, doc)
             }
-            notifyGrantHeld(mailboxAccountKey(decoded.addedAccountKey))
+            // A re-sent envelope is what a committer that merged the commit
+            // and owes the Welcome waits for: its last delegation may have
+            // expired (ADR-0060 section 6).
+            notifyGrantHeld(mailboxAccountKey(addedAccountKey))
         }
     }
 
@@ -1634,44 +1859,158 @@ public class ReachManager internal constructor(
         }
     }
 
+    /** What [composeDelegations] made. */
+    public class ComposedDelegations(
+        /** The envelope plaintext. */
+        public val envelope: ByteArray,
+        /** Whether it carries delegations; one with none names a binding,
+         *  which does not expire. */
+        public val signed: Boolean,
+    )
+
     /**
-     * The committer-delegation envelope a contact of [addedAccountKey] sends
-     * next to an Add it proposed (ADR-0060 §6): one delegation per committer
-     * candidate ([candidateKeys], owner first then admins by rank, at most
-     * 16), each to that candidate's account key, living [ttlMs] (at most 24 h).
-     * `null` when this device holds no `contact` grant for the added person.
+     * The committer-delegation envelope this device sends next to an Add it
+     * proposed for [addedAccountKey] in [groupHex] (ADR-0060 section 6): one
+     * delegation per committer candidate ([candidateKeys], owner first then
+     * admins by rank, at most 16), each to that candidate's account key,
+     * living [ttlMs] (at most 24 h), signed with the first grant held for the
+     * person whose binding verifies against their current key
+     * ([delegationGrantOrder]: contact, group, channel, contacts of
+     * contacts; a grant a search found them through was kept as one).
+     *
+     * With no such grant but a binding this device recorded for the add of a
+     * person found in Everyone ([recordOpenBinding]): the envelope with that
+     * binding and NO delegation, which tells the committer it may write the
+     * Welcome into their open mailbox without a proof (ADR-0060 section 6,
+     * amended 2026-10-29). `null` when neither is held.
      */
     public fun composeDelegations(
         addedAccountKey: ByteArray,
         candidateKeys: List<ByteArray>,
+        groupHex: String? = null,
         ttlMs: Long = DELEGATION_TTL_MS,
         nowMs: Long = System.currentTimeMillis(),
-    ): ByteArray? {
-        val contact = heldFor(addedAccountKey).firstOrNull { it.first.kind == ReachKind.CONTACT }?.second
-            ?: return null
+    ): ComposedDelegations? {
         // ADR-0074 3.5a rule 1: the delegation opens the added person's
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
         val addedCurrent = mailboxAccountKey(addedAccountKey)
-        // ADR-0078: the mailbox comes from the contact grant's binding,
-        // verified against that current key; a refused binding sends no
-        // delegation.
-        val mailboxPk = mailboxCrypto.grantMailboxPkOrNull(contact, addedCurrent) ?: return null
-        val mailbox = mailboxCrypto.address(mailboxPk)
-        val expires = (nowMs + ttlMs).toULong()
-        val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
-        val blobs = candidateKeys.take(max).map { candidate ->
-            val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
-            uniffi.lakko_ffi_uniffi.signDelegationBlob(contact.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
+        val held = heldFor(addedAccountKey)
+        // ADR-0078: the mailbox comes from the grant's binding, verified
+        // against that current key; a grant whose binding is refused is
+        // passed over.
+        val signing = delegationGrantOrder(held.map { it.first }).asSequence()
+            .flatMap { ref -> held.filter { it.first == ref }.map { it.second }.asSequence() }
+            .mapNotNull { grant -> mailboxCrypto.grantMailboxPkOrNull(grant, addedCurrent)?.let { grant to it } }
+            .firstOrNull()
+        if (signing != null) {
+            val (grant, mailboxPk) = signing
+            val mailbox = mailboxCrypto.address(mailboxPk)
+            val expires = (nowMs + ttlMs).toULong()
+            val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
+            val blobs = candidateKeys.take(max).map { candidate ->
+                val nonce = ByteArray(DELEGATION_NONCE_LEN).also(random::nextBytes)
+                uniffi.lakko_ffi_uniffi.signDelegationBlob(grant.seed, mailbox, mailboxAccountKey(candidate), expires, nonce)
+            }
+            if (blobs.isEmpty()) return null
+            val envelope = uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
+                    addedAccountKey = addedAccountKey,
+                    addedMailboxBinding = grant.binding,
+                    delegations = blobs,
+                ),
+            )
+            return ComposedDelegations(envelope, signed = true)
         }
-        if (blobs.isEmpty()) return null
-        return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
+        val group = groupHex ?: return null
+        val binding = ownOpenBindingFor(group, addedAccountKey) ?: return null
+        val envelope = uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
             uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                 addedAccountKey = addedAccountKey,
-                addedMailboxBinding = contact.binding,
-                delegations = blobs,
+                addedMailboxBinding = binding,
+                delegations = emptyList(),
             ),
         )
+        return ComposedDelegations(envelope, signed = false)
+    }
+
+    // -----------------------------------------------------------------
+    // A person found in Everyone (ADR-0060 section 6, amended 2026-10-29)
+    // -----------------------------------------------------------------
+
+    /**
+     * Record the [mailboxBinding] a search found the Everyone person
+     * [accountKey] with, for the add this device is about to propose in
+     * [groupHex]: verified under their CURRENT account key first (a binding
+     * that does not verify is not recorded and `false` is returned). The
+     * delegation envelope then carries it ([composeDelegations]) and this
+     * device's own sweep may write their Welcome into that open mailbox
+     * ([openWelcomeMailboxPk]).
+     */
+    public suspend fun recordOpenBinding(groupHex: String, accountKey: ByteArray, mailboxBinding: ByteArray): Boolean {
+        val b = binding.get() ?: return false
+        val current = mailboxAccountKey(accountKey)
+        mailboxCrypto.bindingMailboxPkOrNull(mailboxBinding, current) ?: return false
+        val changed = lock.withLock {
+            if (binding.get() !== b) return@withLock false
+            val next = withOpenBinding(doc.openBindings, groupHex, reachHex(current), reachHex(mailboxBinding))
+            if (next == doc.openBindings) return@withLock true
+            doc = doc.copy(openBindings = next)
+            store.save(b.accountIdB64, doc)
+            true
+        }
+        // A Welcome already owed to them is retried now.
+        if (changed) notifyGrantHeld(current)
+        return changed
+    }
+
+    /** The binding this device recorded for the add of [accountKey] in
+     *  [groupHex], still verifying under their current key, or `null`. */
+    private fun ownOpenBindingFor(groupHex: String, accountKey: ByteArray): ByteArray? {
+        val current = mailboxAccountKey(accountKey)
+        return openWelcomeBindings(doc.openBindings, emptyList(), groupHex, personKeys(accountKey))
+            .firstOrNull { mailboxCrypto.bindingMailboxPkOrNull(it, current) != null }
+    }
+
+    /**
+     * The mailbox key a sweep's Welcome to [accountKey] in [groupHex] may be
+     * written to WITHOUT a proof, or `null`: only for a person this device
+     * recorded as found in Everyone for that add, or one a kept
+     * no-delegation envelope names ([openWelcomeBindings]), the binding
+     * verified under their current account key. The caller writes there only
+     * when it holds no usable grant or delegation for them at all; a refused
+     * one keeps the Welcome owed ([me.lakko.app.chat.writeWelcomeWithGrants]).
+     */
+    public fun openWelcomeMailboxPk(groupHex: String, accountKey: ByteArray): ByteArray? {
+        if (binding.get() == null) return null
+        val current = mailboxAccountKey(accountKey)
+        val kept = doc.delegations.filter { it.groupHex == groupHex.lowercase() }.mapNotNull { d ->
+            val env = runCatching {
+                uniffi.lakko_ffi_uniffi.decodeCommitterDelegationEnvelope(reachUnhex(d.envelopeHex)!!)
+            }.getOrNull() ?: return@mapNotNull null
+            KeptDelegationView(d.addedAccountKeyHex, env.addedMailboxBinding, env.delegations.size)
+        }
+        return openWelcomeBindings(doc.openBindings, kept, groupHex, personKeys(accountKey))
+            .firstNotNullOfOrNull { mailboxCrypto.bindingMailboxPkOrNull(it, current) }
+    }
+
+    /**
+     * The mailbox key a Welcome to [accountKey] goes to: [mailboxPkFor] (a
+     * held grant's binding), else, in [groupHex], the binding of a kept
+     * delegation naming this account, else the open binding of
+     * [openWelcomeMailboxPk]. `null`: no mailbox known, nothing is written.
+     * Only the ADDRESS is chosen here; what signs the write is
+     * [reachAuthCandidates]' (or the proofless fallback's).
+     */
+    public fun welcomeMailboxPkFor(accountKey: ByteArray, groupHex: String?): ByteArray? {
+        mailboxPkFor(accountKey)?.let { return it }
+        val group = groupHex ?: return null
+        val current = mailboxAccountKey(accountKey)
+        delegationFor(group, accountKey)?.let { picked ->
+            picked.signerSeed.fill(0)
+            mailboxCrypto.bindingMailboxPkOrNull(picked.addedMailboxBinding, current)?.let { return it }
+        }
+        return openWelcomeMailboxPk(group, accountKey)
     }
 
     // -----------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 package me.lakko.app.contacts
 
+import me.lakko.app.calls.originOf
 import me.lakko.app.discovery.InviteLinkArgument
 
 /**
@@ -68,6 +69,29 @@ public fun lakkoLinkFromScanned(raw: String): LakkoLink? {
     if (host !in LAKKO_LINK_HOSTS) return null
     val path = uri.path ?: return null
     return lakkoLinkFromPath(path, uri.fragment)
+}
+
+private val OWN_LINK_PATH = Regex("^/[icg]/[A-Za-z0-9_-]{8}$")
+private val OWN_LINK_SECRET = Regex("^[A-Za-z0-9_-]{16}$")
+
+/**
+ * The Lakko link [url] is at [ownOrigin], or `null`: same scheme, host and
+ * port, no user info, no query, a `/i/`, `/g/` or `/c/` ledger id and its
+ * secret, nothing else. The Kotlin twin of the web `parseLakkoLink`. Unlike
+ * [lakkoLinkFromScanned], which accepts every host the app claims, this names
+ * the one deployment this build talks to, because a link that passes opens
+ * inside the app.
+ */
+public fun lakkoLinkAt(url: String, ownOrigin: String): LakkoLink? {
+    val parsed = originOf(url.trim()) ?: return null
+    val own = originOf(ownOrigin.trim()) ?: return null
+    if (parsed.origin != own.origin) return null
+    val uri = parsed.uri
+    if (uri.rawUserInfo != null || uri.rawQuery != null) return null
+    val path = uri.rawPath ?: return null
+    val secret = uri.rawFragment ?: return null
+    if (!OWN_LINK_PATH.matches(path) || !OWN_LINK_SECRET.matches(secret)) return null
+    return lakkoLinkFromPath(path, secret)
 }
 
 /** Hand [link] to the slot its kind's landing screen reads. */

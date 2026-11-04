@@ -17,6 +17,9 @@ import UIKit
 struct TranslatableMessageText: View {
     let message: ChatMessage
     let outgoing: Bool
+    let linkColor: Color
+    /// Called with a Lakko link of this deployment (`docs/ux/message-links.md`).
+    let onOwnLink: (URL) -> Void
     @ObservedObject private var center = MessageTranslationCenter.shared
     @ObservedObject private var l10n = Localization.shared
     @Environment(\.translationConversation) private var conversation
@@ -25,9 +28,9 @@ struct TranslatableMessageText: View {
         let phase = conversation.flatMap { center.phase(conversation: $0, messageId: message.messageId) }
         VStack(alignment: .leading, spacing: 3) {
             if case .translated(let text, _) = phase {
-                Text(text).font(.body)
+                MessageText(text: text, linkColor: linkColor, onOwnLink: onOwnLink).font(.body)
             } else {
-                Text(message.text).font(.body)
+                MessageText(text: message.text, linkColor: linkColor, onOwnLink: onOwnLink).font(.body)
             }
             if let phase, let conversation {
                 TranslationQuietLine(phase: phase, outgoing: outgoing, actions: .init(

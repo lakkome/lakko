@@ -42,6 +42,7 @@
  * table exactly (R.12).
  */
 import { boundContactsAccount } from "./local-store";
+import type { AccountKeys } from "./predecessor";
 
 /** One verified binding. */
 export interface VerifiedBinding {
@@ -53,6 +54,11 @@ export interface VerifiedBinding {
   readonly keyGeneration: number;
   /** When this device recorded it, UNIX milliseconds. */
   readonly verifiedAtMs: number;
+  /** ADR-0074 section 3.7: the key the account's conversations are bound to,
+   *  from a two-way conversation link that verified under `keyB64`: a proven
+   *  predecessor of `keyB64`, for an account this device has no pin to hold
+   *  one on. */
+  readonly conversationKeyB64?: string;
 }
 
 /** What a group member's roster key is worth for one account id. */
@@ -87,6 +93,10 @@ export type MemberHeldVerdict =
  * first sight of a member whose account already moved on: neither is told
  * apart here, and neither is acted on. Row 6 is the same claim made after
  * this device already verified the account under its real key.
+ *
+ * One addition to row 6 (ADR-0074 section 3.7): a roster key that is the
+ * binding's conversation key, proven by a link signed by both keys, while
+ * the directory still serves the binding's key, is `confirmed`.
  */
 export function memberHeldKey(input: {
   readonly pinned: boolean;
@@ -101,7 +111,11 @@ export function memberHeldKey(input: {
   if (binding === undefined) {
     return input.fetchedKeyB64 === input.rosterKeyB64 ? { kind: "record" } : { kind: "none" };
   }
-  if (binding.keyB64 !== input.rosterKeyB64) return { kind: "none" };
+  if (binding.keyB64 !== input.rosterKeyB64) {
+    return binding.conversationKeyB64 === input.rosterKeyB64 && input.fetchedKeyB64 === binding.keyB64
+      ? { kind: "confirmed" }
+      : { kind: "none" };
+  }
   if (input.fetchedKeyB64 === input.rosterKeyB64) return { kind: "confirmed" };
   return {
     kind: "held",
@@ -132,7 +146,9 @@ function isBinding(v: unknown): v is VerifiedBinding {
     Number.isSafeInteger(b.keyGeneration) &&
     b.keyGeneration >= 0 &&
     typeof b.verifiedAtMs === "number" &&
-    Number.isFinite(b.verifiedAtMs)
+    Number.isFinite(b.verifiedAtMs) &&
+    (b.conversationKeyB64 === undefined ||
+      (typeof b.conversationKeyB64 === "string" && b.conversationKeyB64.length > 0))
   );
 }
 
@@ -185,6 +201,51 @@ export function recordVerifiedBinding(
   all[accountIdB64] = binding;
   save(account, all);
   return true;
+}
+
+/**
+ * ADR-0074 section 3.7: record the conversation key a link that verified
+ * under `keyB64` named. Written only on a binding of exactly that key, and
+ * the one change a held binding takes: it adds what the key signed, and the
+ * key itself stays. Returns whether anything changed.
+ */
+export function recordBindingConversationKey(
+  accountIdB64: string,
+  keyB64: string,
+  conversationKeyB64: string,
+  owner?: string,
+): boolean {
+  const account = ownerOf(owner);
+  if (account === null || conversationKeyB64.length === 0 || conversationKeyB64 === keyB64) return false;
+  const all = load(account);
+  const held = all[accountIdB64];
+  if (held === undefined || held.keyB64 !== keyB64) return false;
+  if (held.conversationKeyB64 === conversationKeyB64) return false;
+  all[accountIdB64] = { ...held, conversationKeyB64 };
+  save(account, all);
+  return true;
+}
+
+/** A binding as `predecessor.ts` reads an account's keys. */
+export function accountKeysOfBinding(binding: VerifiedBinding | undefined): AccountKeys | undefined {
+  if (binding === undefined) return undefined;
+  return {
+    currentKeyB64: binding.keyB64,
+    provenPredecessorsB64: binding.conversationKeyB64 === undefined ? [] : [binding.conversationKeyB64],
+  };
+}
+
+/** The keys of every account this device holds a proven link for through a
+ *  binding: the predecessor table's input beside the pins. A binding with no
+ *  conversation key adds nothing to that table. */
+export function loadBoundAccountKeys(owner?: string): AccountKeys[] {
+  const out: AccountKeys[] = [];
+  for (const binding of Object.values(load(ownerOf(owner)))) {
+    if (binding.conversationKeyB64 === undefined) continue;
+    const keys = accountKeysOfBinding(binding);
+    if (keys !== undefined) out.push(keys);
+  }
+  return out;
 }
 
 /** Drop a binding (the account is pinned now: the pin is the binding). */

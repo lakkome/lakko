@@ -14,6 +14,7 @@
  * other store tests use). `crypto.subtle` + `crypto.getRandomValues`
  * ARE present in node, so the AES-GCM wrap/unwrap runs for real.
  */
+import { type DeviceCipher, WebDeviceCipher } from "./device-cipher";
 import {
   afterEach,
   beforeAll,
@@ -160,11 +161,11 @@ afterEach(() => {
 // the test (we never export it).
 // ---------------------------------------------------------------------------
 
-async function makeDeviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+async function makeDeviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 }
 
 const ACCT = "YWNjb3VudC1pZC0wMDAwMDAwMDAwMDA="; // arbitrary base64

@@ -13,6 +13,21 @@ package me.lakko.app.reach
  * the FFI and the Delivery Service.
  */
 
+/** Who part 2.1 of the setting lets the record go to, as the narrowing rule
+ *  reads it. [chosenHex] is kept whatever the form. */
+public data class ContactsReach(val onlyChosen: Boolean, val chosenHex: Set<String>)
+
+/**
+ * Whether a change of the setting takes the record away from a contact: moving
+ * from all to chosen, or a contact switched off under chosen. Widening is not
+ * narrowing: the next run offers the record to the new contact.
+ */
+public fun contactsNarrowed(previous: ContactsReach?, next: ContactsReach): Boolean = when {
+    previous == null || !next.onlyChosen -> false
+    !previous.onlyChosen -> true
+    else -> !next.chosenHex.containsAll(previous.chosenHex)
+}
+
 /** Who a reach key is handed to (ADR-0060 §1). Mirror of `FfiReachClass`. */
 public enum class ReachKind {
     /** Every contact (sent in the 1:1 conversation). Empty scope. */
@@ -217,8 +232,9 @@ public enum class WritePurpose {
     /** A contact request: the person must have let this device find them. */
     CONTACT_REQUEST,
 
-    /** A reply to their own request (the 1:1 Welcome after an accept, the
-     *  ContactAck): their `reply` key first. */
+    /** The answer to their own request (the Welcome of an accept, the
+     *  ContactAck): their `reply` key, then a `contact` key, and nothing else.
+     *  A group key has nothing to do with answering a request. */
     REPLY,
 
     /** A Welcome into a group ([groupHex]). */
@@ -232,7 +248,7 @@ public enum class WritePurpose {
  *
  * - A contact request never uses `member`: a co-member the person hides from
  *   holds it, and it authorises only Welcomes (the ADR's residual).
- * - A reply prefers the person's `reply` key, then `contact`.
+ * - A reply is the person's `reply` key, then `contact`, and nothing else.
  * - A Welcome prefers `reply`, `contact`, then `member` of THAT group (the
  *   ADR-0050 re-admission of the person's new device), then anything that
  *   says the person lets this device find them.
@@ -282,6 +298,49 @@ public fun orderedWriteGrants(
     val out = LinkedHashSet<HeldGrantRef>()
     for (candidate in order) out.addAll(candidate())
     return out.toList()
+}
+
+/**
+ * The grants a contact request may use, out of [held], in the order they are
+ * tried: contact, each group, each channel, the found one. One class and
+ * scope may be held under several keys; each is listed, in [held]'s order.
+ */
+public fun <G> contactRequestGrantsInOrder(held: List<Pair<HeldGrantRef, G>>): List<G> =
+    orderedWriteGrants(held.map { it.first }, WritePurpose.CONTACT_REQUEST)
+        .flatMap { ref -> held.filter { it.first == ref }.map { it.second } }
+
+/**
+ * [grants] in order, then [proofless], which is asked only when no grant
+ * yielded an authorisation: a proofless write to a closed mailbox is answered
+ * as stored and dropped, so after a refused grant it would report a lost write
+ * as sent.
+ */
+public fun <A> withProoflessLast(grants: List<() -> A?>, proofless: () -> A?): List<() -> A?> {
+    var yielded = false
+    val tracked: List<() -> A?> = grants.map { grant ->
+        val tracking: () -> A? = {
+            val auth = grant()
+            if (auth != null) yielded = true
+            auth
+        }
+        tracking
+    }
+    val last: () -> A? = { if (yielded) null else proofless() }
+    return tracked + listOf(last)
+}
+
+/** Whether one of [candidates] passes [check], asked in order. A throw means
+ *  the question could not be asked and propagates. */
+public suspend fun <A> anyCandidateOpens(candidates: List<() -> A?>, check: suspend (A) -> Boolean): Boolean {
+    for (candidate in candidates) {
+        val auth = try {
+            candidate()
+        } catch (_: Throwable) {
+            null
+        } ?: continue
+        if (check(auth)) return true
+    }
+    return false
 }
 
 /** What [firstAcceptedWrite] ended with. */
@@ -526,3 +585,13 @@ public fun rekeyDecision(boundKeyHex: String, registeredForKeyHex: String?, prev
         previousKeyHex != null && previousKeyHex != boundKeyHex -> ReachRekey.MOVE
         else -> ReachRekey.STAMP
     }
+
+/**
+ * The classes a change of the setting made on this device rotates. `group` and
+ * `channel` always (ADR-0078 section 9); `fof` when it narrowed who the record
+ * goes to, so the old key comes off the mailbox at once and a new record goes to
+ * the contacts still allowed (the rotation a removed contact causes).
+ */
+public fun settingChangeRotation(previous: ContactsReach?, next: ContactsReach): List<ReachKind> =
+    listOf(ReachKind.GROUP, ReachKind.CHANNEL) +
+        (if (contactsNarrowed(previous, next)) listOf(ReachKind.FOF) else emptyList())

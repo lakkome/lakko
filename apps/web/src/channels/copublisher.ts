@@ -72,6 +72,7 @@
  * live-channel gate in the codebase.
  */
 
+import { INITIAL_KNOCK_VERSION } from "../ds/knock-seeds";
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
@@ -115,6 +116,7 @@ import { reachSession } from "../reach/reach-service";
 import { writeToPerson } from "../reach/mailbox-write";
 import {
   forgetJoinReply,
+  joinRepliesOpened,
   joinReplyBindingVerifies,
   joinReplyFor,
   rememberJoinReply,
@@ -215,13 +217,22 @@ export async function createCoPublisherLink(
   // the channel id (and its name) ride the sealed preview; the group id names
   // no channel.
   const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
+  // ADR-0087 section 5 — the co-publisher's request is a sealed knock row too;
+  // the owner (the only minter of this link) derives the knock key from its
+  // journal root.
+  const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
+  const knockSeed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
+  root.fill(0);
   const mint = wasm.composeCoPublisherInviteCapability(
     identity.ed25519Seed,
     groupId,
     0n,
     channelId,
     name === undefined || name.length === 0 ? undefined : name,
+    wasm.groupKnockPublicKey(knockSeed),
+    INITIAL_KNOCK_VERSION,
   );
+  knockSeed.fill(0);
   const sealed = mint.sealed;
   const linkSecret = mint.linkSecret;
   mint.free();
@@ -408,7 +419,7 @@ export async function pollCoPublisherJournal(
           // Not a proposal: it may be the joiner's attribution, which carries
           // the `reply` grant the approve writes the Welcome under (ADR-0060
           // section 6). Anything else is skipped.
-          rememberAttributionReply(wasm, groupId, k.payload);
+          await rememberAttributionReply(wasm, groupId, k.payload);
         }
       }
     }
@@ -474,7 +485,7 @@ export async function approveCoPublisher(
       commitB64: base64Encode(added.commit),
       welcomeB64: base64Encode(added.welcome),
       joinerKeyB64: base64Encode(proposalRef),
-      replyGrantB64: joinReplyFor(proposalRef),
+      replyGrantB64: await keptJoinReply(groupId, proposalRef),
       proofEpoch: proofEpoch.toString(),
       proofSeedB64: base64Encode(proofSeed),
       journalLost: false,
@@ -486,8 +497,15 @@ export async function approveCoPublisher(
     // refused write publishes nothing.
     await channelsActions.recordPublisherCommit(entry);
     await runPublisherCommit(entry, approvePorts(ds, identity, publisherGroup, channelIdHex, apiBase));
-    forgetJoinReply(proposalRef);
+    // The grant stays until it expires (7 days): a replayed approve may need
+    // to write the Welcome again.
   });
+}
+
+/** A joiner's kept reply grant, once the account's grants are loaded. */
+async function keptJoinReply(groupId: Uint8Array, joinerKey: Uint8Array): Promise<string | null> {
+  await joinRepliesOpened();
+  return joinReplyFor(groupId, joinerKey);
 }
 
 /**
@@ -523,7 +541,7 @@ function approvePorts(
         const wasm = await loadWasm();
         await writeToPerson(
           joinerKey,
-          { explicit: replyGrantB64 ?? joinReplyFor(joinerKey) },
+          { explicit: replyGrantB64 ?? (await keptJoinReply(groupId, joinerKey)) },
           (target, auth) => ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome-rendezvous", welcome), auth),
         );
       },
@@ -604,6 +622,8 @@ export function rejectCoPublisher(
   proposalRef: Uint8Array,
 ): void {
   publisherGroup.rejectExternalJoin(identity, proposalRef);
+  // Refused: the kept reply grant has nothing left to carry.
+  void forgetJoinReply(publisherGroup.groupId(), proposalRef);
 }
 
 // ---------------------------------------------------------
@@ -821,7 +841,7 @@ export async function pollForCoPublishWelcome(
 /** Keep the `reply` grant of a join attribution read from this group's knock
  *  queue (ADR-0060 section 6). Anything that is not an attribution for this
  *  group is ignored. */
-function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint8Array): void {
+async function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint8Array): Promise<void> {
   const session = reachSession();
   if (session === null) return;
   let attr: import("../../wasm/lakko_ffi_wasm").GroupJoinAttribution;
@@ -830,6 +850,7 @@ function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint
   } catch {
     return;
   }
+  let kept: { readonly key: Uint8Array; readonly grant: string } | null = null;
   try {
     if (base64Encode(attr.groupId) !== base64Encode(groupId)) return;
     const reply = attr.replyGrant;
@@ -839,13 +860,15 @@ function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint
       // attribution is self-signed with. A grant naming someone else's
       // mailbox is not kept (fail closed).
       if (!joinReplyBindingVerifies(reply, attr.joinerSignatureKey)) return;
-      rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+      kept = { key: attr.joinerSignatureKey, grant: session.encodeGrant(reply) };
     } finally {
       reply.free();
     }
   } finally {
     attr.free();
   }
+  // Durable before the knock cursor moves past the row (`join-replies.ts`).
+  if (kept !== null) await rememberJoinReply(groupId, kept.key, kept.grant);
 }
 
 function hexToBytes(hex: string): Uint8Array | null {

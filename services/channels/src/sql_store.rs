@@ -34,9 +34,12 @@ use sqlx::Row;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
+use crate::feedback::{Label, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN};
+use crate::feedback_sql;
 use crate::storage::{
-    ChannelId, ChannelStore, DirectoryQuery, ModerationAction, StorageError, StoredListing,
-    StoredPost, SubscriberId, OWNER_NONCE_LEN, OWNER_PUBKEY_LEN,
+    ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, ModerationAction, PublicSeedOutcome,
+    SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry, SubscriberId,
+    INVITE_KEY_LEN, OWNER_NONCE_LEN, OWNER_PUBKEY_LEN, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
@@ -127,6 +130,90 @@ fn db_err(e: sqlx::Error) -> StorageError {
     StorageError::Database(e.to_string())
 }
 
+/// Lock the channel row inside `tx` and read `(private, current_epoch)`;
+/// `None` for an unknown channel. Serialises every write that moves the
+/// subscriber counter or checks the flag.
+async fn lock_channel(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    channel: ChannelId,
+) -> Result<Option<(bool, u32)>, StorageError> {
+    let row: Option<(i8, u32)> =
+        sqlx::query_as("SELECT private, current_epoch FROM channels WHERE id = ? FOR UPDATE")
+            .bind(channel.as_bytes().as_slice())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    Ok(row.map(|(private, epoch)| (private != 0, epoch)))
+}
+
+/// Delete `(channel, subscriber)` and its staged envelopes inside `tx`
+/// (envelopes and the member card go through the FK cascades) and move the
+/// counter. The channel row must be locked. Returns whether a row went.
+async fn delete_subscriber_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    channel: ChannelId,
+    subscriber: SubscriberId,
+) -> Result<bool, StorageError> {
+    let n =
+        sqlx::query("DELETE FROM channel_subscribers WHERE channel_id = ? AND subscriber_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+    sqlx::query("DELETE FROM channel_staged_envelopes WHERE channel_id = ? AND subscriber_id = ?")
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    decrement_count(tx, channel, n).await?;
+    Ok(n > 0)
+}
+
+/// `subscriber_count -= n`, never below zero.
+async fn decrement_count(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    channel: ChannelId,
+    n: u64,
+) -> Result<(), StorageError> {
+    if n == 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE channels SET subscriber_count = subscriber_count - LEAST(subscriber_count, ?) \
+         WHERE id = ?",
+    )
+    .bind(n)
+    .bind(channel.as_bytes().as_slice())
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+fn ticket_from(bytes: Option<Vec<u8>>) -> Result<Option<SealedTicket>, StorageError> {
+    bytes
+        .map(|b| {
+            <[u8; SEALED_TICKET_LEN]>::try_from(b.as_slice())
+                .map_err(|_| StorageError::Database("sealed ticket of the wrong length".into()))
+        })
+        .transpose()
+}
+
+fn invite_row(
+    (pk, expiry_ms, max_uses, used_count): (Vec<u8>, u64, u32, u32),
+) -> Result<InviteKeyRow, StorageError> {
+    Ok(InviteKeyRow {
+        invite_pk: <[u8; INVITE_KEY_LEN]>::try_from(pk.as_slice())
+            .map_err(|_| StorageError::Database("invite key of the wrong length".into()))?,
+        expiry_ms,
+        max_uses,
+        used_count,
+    })
+}
+
 /// Escape a search needle for `LIKE ... ESCAPE '!'` and wrap it in `%`.
 fn like_pattern(needle: &str) -> String {
     let mut out = String::with_capacity(needle.len() + 2);
@@ -173,20 +260,23 @@ fn directory_entry(row: DirectoryRow, now_ms: u64) -> Result<DirectoryEntry, Sto
 
 #[async_trait]
 impl ChannelStore for SqlChannelStore {
-    async fn create(
+    async fn create_with_access(
         &self,
         channel: ChannelId,
         owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+        private: bool,
     ) -> Result<(), StorageError> {
         // INSERT IGNORE keeps the call idempotent; the owner key of the row
         // that won is then compared, so a second create with another key
-        // changes nothing and is refused (ADR-0059 section 1).
+        // changes nothing and is refused (ADR-0059 section 1). The flag is
+        // written with the row only (ADR-0087).
         sqlx::query(
-            "INSERT IGNORE INTO channels (id, current_epoch, next_cursor, owner_pubkey) \
-             VALUES (?, 0, 1, ?)",
+            "INSERT IGNORE INTO channels (id, current_epoch, next_cursor, owner_pubkey, private) \
+             VALUES (?, 0, 1, ?, ?)",
         )
         .bind(channel.as_bytes().as_slice())
         .bind(owner_pubkey.as_slice())
+        .bind(i8::from(private))
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -336,33 +426,81 @@ impl ChannelStore for SqlChannelStore {
         Ok(result.rows_affected())
     }
 
-    async fn subscribe(
+    async fn subscribe_with_ticket(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
         server_ts_ms: u64,
-    ) -> Result<(), StorageError> {
-        if !self.exists(channel).await {
+        sealed_ticket: Option<SealedTicket>,
+    ) -> Result<bool, StorageError> {
+        // One transaction under the channel row lock: whether the row is new
+        // decides the counter, so the check and the write are one step. A
+        // re-subscribe counts as activity; the first registration time and
+        // row number are kept, since the directory's 7-day growth signal
+        // counts new subscribers, not re-registrations (ADR-0059).
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        if lock_channel(&mut tx, channel).await?.is_none() {
             return Err(StorageError::UnknownChannel);
         }
-        // INSERT ... ON DUPLICATE KEY UPDATE keeps the call
-        // idempotent. A re-subscribe counts as activity; the first
-        // registration time is kept, since the directory's 7-day growth
-        // signal counts new subscribers, not re-registrations (ADR-0059).
-        sqlx::query(
-            "INSERT INTO channel_subscribers \
-                 (channel_id, subscriber_id, registered_at, last_active_at) \
-             VALUES (?, ?, FROM_UNIXTIME(? / 1000.0), FROM_UNIXTIME(? / 1000.0)) \
-             ON DUPLICATE KEY UPDATE last_active_at = VALUES(last_active_at)",
+        let ticket = sealed_ticket.map(|t| t.to_vec());
+        // A plain read, not a locking one: every insert and delete of this
+        // channel's rows holds the channel row lock taken above, so the read
+        // cannot race one, and a locking read of an absent row would take a
+        // gap lock that deadlocks against inserts of neighbouring channels.
+        let existing: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_subscribers \
+             WHERE channel_id = ? AND subscriber_id = ?",
         )
         .bind(channel.as_bytes().as_slice())
         .bind(subscriber.as_bytes().as_slice())
-        .bind(server_ts_ms)
-        .bind(server_ts_ms)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
-        Ok(())
+        let is_new = existing.is_none();
+        if is_new {
+            sqlx::query(
+                "INSERT INTO channel_subscribers \
+                     (channel_id, subscriber_id, registered_at, last_active_at, sealed_ticket) \
+                 VALUES (?, ?, FROM_UNIXTIME(? / 1000.0), FROM_UNIXTIME(? / 1000.0), ?)",
+            )
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .bind(server_ts_ms)
+            .bind(server_ts_ms)
+            .bind(&ticket)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query("UPDATE channels SET subscriber_count = subscriber_count + 1 WHERE id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        } else {
+            sqlx::query(
+                "UPDATE channel_subscribers \
+                 SET last_active_at = FROM_UNIXTIME(? / 1000.0), \
+                     sealed_ticket = COALESCE(?, sealed_ticket) \
+                 WHERE channel_id = ? AND subscriber_id = ?",
+            )
+            .bind(server_ts_ms)
+            .bind(&ticket)
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        sqlx::query(
+            "DELETE FROM channel_removed_subscribers WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(is_new)
     }
 
     async fn is_subscribed(&self, channel: ChannelId, subscriber: SubscriberId) -> bool {
@@ -406,21 +544,46 @@ impl ChannelStore for SqlChannelStore {
     }
 
     async fn prune_subscribers_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
-        // Single bulk DELETE. FK ON DELETE CASCADE on
-        // `channel_envelopes` cleans up the matching
-        // envelope rows automatically — no second query
-        // needed. The (last_active_at) index ferries
-        // this query past a full table scan even when
-        // the surviving subscriber set is the majority.
-        let result = sqlx::query(
-            "DELETE FROM channel_subscribers \
+        // Per channel, under its row lock, so each channel's counter moves
+        // by exactly the rows its DELETE removed (ADR-0087 section 15: a
+        // maintained counter). FK ON DELETE CASCADE on `channel_envelopes`
+        // and the member cards cleans up the matching rows. The
+        // (last_active_at) index finds the channels.
+        let channels: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT DISTINCT channel_id FROM channel_subscribers \
              WHERE last_active_at < FROM_UNIXTIME(? / 1000.0)",
         )
         .bind(cutoff_ms)
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
-        Ok(result.rows_affected())
+        let mut removed: u64 = 0;
+        for (id,) in channels {
+            let channel = ChannelId::from_bytes(&id)?;
+            let mut tx = self.pool.begin().await.map_err(db_err)?;
+            if lock_channel(&mut tx, channel).await?.is_none() {
+                continue;
+            }
+            let n = sqlx::query(
+                "DELETE FROM channel_subscribers \
+                 WHERE channel_id = ? AND last_active_at < FROM_UNIXTIME(? / 1000.0)",
+            )
+            .bind(channel.as_bytes().as_slice())
+            .bind(cutoff_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+            decrement_count(&mut tx, channel, n).await?;
+            tx.commit().await.map_err(db_err)?;
+            removed = removed.saturating_add(n);
+        }
+        sqlx::query("DELETE FROM channel_removed_subscribers WHERE removed_at_ms < ?")
+            .bind(cutoff_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(removed)
     }
 
     async fn list_subscribers(
@@ -1027,14 +1190,10 @@ impl ChannelStore for SqlChannelStore {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         // Lock the channel row: serialises concurrent listings of one channel
         // so the newer-than check and the write are one step.
-        let exists: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM channels WHERE id = ? FOR UPDATE")
-                .bind(channel.as_bytes().as_slice())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        if exists.is_none() {
-            return Err(StorageError::UnknownChannel);
+        match lock_channel(&mut tx, channel).await? {
+            None => return Err(StorageError::UnknownChannel),
+            Some((true, _)) => return Err(StorageError::ChannelPrivate),
+            Some((false, _)) => {},
         }
         let blocked: Option<(i8,)> =
             sqlx::query_as("SELECT blocked FROM channel_moderation WHERE channel_id = ?")
@@ -1295,29 +1454,107 @@ impl ChannelStore for SqlChannelStore {
         channel: ChannelId,
         subscriber: SubscriberId,
     ) -> Result<(), StorageError> {
-        if !self.exists(channel).await {
+        // One transaction under the channel row lock: the subscriber row
+        // (its envelopes and member card go with it through the FK cascades),
+        // its staged envelopes (no FK to the subscriber, so removed
+        // explicitly) and the counter.
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        if lock_channel(&mut tx, channel).await?.is_none() {
             return Err(StorageError::UnknownChannel);
         }
-        // One transaction: the subscriber row (its envelopes and member card
-        // go with it through the FK cascades) and its staged envelopes (no FK
-        // to the subscriber, so removed explicitly).
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
-        sqlx::query("DELETE FROM channel_subscribers WHERE channel_id = ? AND subscriber_id = ?")
-            .bind(channel.as_bytes().as_slice())
-            .bind(subscriber.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
-        sqlx::query(
-            "DELETE FROM channel_staged_envelopes WHERE channel_id = ? AND subscriber_id = ?",
-        )
-        .bind(channel.as_bytes().as_slice())
-        .bind(subscriber.as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        delete_subscriber_row(&mut tx, channel, subscriber).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    async fn post_exists(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::has_post(&self.pool, channel, post_cursor).await
+    }
+
+    async fn add_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::add_reaction(&self.pool, channel, post_cursor, writer_key, label, now_ms)
+            .await
+    }
+
+    async fn delete_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::delete_reaction(&self.pool, channel, post_cursor, writer_key, label).await
+    }
+
+    async fn reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<PostReactionCounts>, StorageError> {
+        feedback_sql::reaction_counts(&self.pool, channel, post_cursors).await
+    }
+
+    async fn add_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        writer_key: WriterKey,
+        sealed: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, StorageError> {
+        feedback_sql::add_comment(&self.pool, channel, post_cursor, writer_key, sealed, now_ms)
+            .await
+    }
+
+    async fn comment_writer(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Option<WriterKey>, StorageError> {
+        feedback_sql::comment_writer(&self.pool, channel, post_cursor, comment_cursor).await
+    }
+
+    async fn delete_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::delete_comment(&self.pool, channel, post_cursor, comment_cursor).await
+    }
+
+    async fn list_comments(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredComment>, StorageError> {
+        feedback_sql::list_comments(&self.pool, channel, post_cursor, after, limit).await
+    }
+
+    async fn consume_write_nonce(
+        &self,
+        nonce: [u8; WRITE_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::consume_write_nonce(&self.pool, nonce, now_ms).await
+    }
+
+    async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        feedback_sql::prune_write_nonces_older_than(&self.pool, cutoff_ms).await
     }
 
     async fn list_member_cards(
@@ -1361,6 +1598,395 @@ impl ChannelStore for SqlChannelStore {
             .map(|(sub, card)| Ok((SubscriberId::from_bytes(&sub)?, card)))
             .collect()
     }
+
+    async fn is_private(&self, channel: ChannelId) -> Result<Option<bool>, StorageError> {
+        let row: Option<(i8,)> = sqlx::query_as("SELECT private FROM channels WHERE id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(row.map(|(p,)| p != 0))
+    }
+
+    async fn set_private(&self, channel: ChannelId, private: bool) -> Result<bool, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let Some((was, _)) = lock_channel(&mut tx, channel).await? else {
+            return Err(StorageError::UnknownChannel);
+        };
+        sqlx::query("UPDATE channels SET private = ? WHERE id = ?")
+            .bind(i8::from(private))
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        if private {
+            for query in [
+                "DELETE FROM channel_listings WHERE channel_id = ?",
+                "DELETE FROM channel_public_seeds WHERE channel_id = ?",
+            ] {
+                sqlx::query(query)
+                    .bind(channel.as_bytes().as_slice())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            }
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(was != private)
+    }
+
+    async fn put_public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+        envelope: [u8; PUBLIC_SEED_LEN],
+        now_ms: u64,
+    ) -> Result<PublicSeedOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let current = match lock_channel(&mut tx, channel).await? {
+            None => return Err(StorageError::UnknownChannel),
+            Some((true, _)) => return Err(StorageError::ChannelPrivate),
+            Some((false, current)) => current,
+        };
+        if epoch > current.saturating_add(1) {
+            return Err(StorageError::PublicSeedEpochInFuture {
+                current,
+                got: epoch,
+            });
+        }
+        let stored: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT envelope FROM channel_public_seeds WHERE channel_id = ? AND epoch = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(epoch)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if let Some((stored,)) = stored {
+            return if stored.as_slice() == envelope.as_slice() {
+                Ok(PublicSeedOutcome::AlreadyStored)
+            } else {
+                Err(StorageError::PublicSeedConflict)
+            };
+        }
+        // A seed stored after a higher epoch's is superseded at once.
+        let higher: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_public_seeds WHERE channel_id = ? AND epoch > ? LIMIT 1",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(epoch)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO channel_public_seeds \
+                 (channel_id, epoch, envelope, stored_at_ms, superseded_at_ms) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(epoch)
+        .bind(envelope.as_slice())
+        .bind(now_ms)
+        .bind(higher.map(|_| now_ms))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "UPDATE channel_public_seeds SET superseded_at_ms = ? \
+             WHERE channel_id = ? AND epoch < ? AND superseded_at_ms IS NULL",
+        )
+        .bind(now_ms)
+        .bind(channel.as_bytes().as_slice())
+        .bind(epoch)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(PublicSeedOutcome::Stored)
+    }
+
+    async fn public_seed(
+        &self,
+        channel: ChannelId,
+        epoch: u32,
+    ) -> Result<Option<[u8; PUBLIC_SEED_LEN]>, StorageError> {
+        let row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT envelope FROM channel_public_seeds WHERE channel_id = ? AND epoch = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(epoch)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(|(b,)| {
+            <[u8; PUBLIC_SEED_LEN]>::try_from(b.as_slice())
+                .map_err(|_| StorageError::Database("public seed of the wrong length".into()))
+        })
+        .transpose()
+    }
+
+    async fn prune_public_seeds_superseded_before(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        Ok(
+            sqlx::query("DELETE FROM channel_public_seeds WHERE superseded_at_ms < ?")
+                .bind(cutoff_ms)
+                .execute(&self.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected(),
+        )
+    }
+
+    async fn put_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        expiry_ms: u64,
+        max_uses: u32,
+        max_keys: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        if lock_channel(&mut tx, channel).await?.is_none() {
+            return Err(StorageError::UnknownChannel);
+        }
+        let updated = sqlx::query(
+            "UPDATE channel_invite_keys SET expiry_ms = ?, max_uses = ? \
+             WHERE channel_id = ? AND invite_pk = ?",
+        )
+        .bind(expiry_ms)
+        .bind(max_uses)
+        .bind(channel.as_bytes().as_slice())
+        .bind(invite_pk.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_invite_keys WHERE channel_id = ? AND invite_pk = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(invite_pk.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if updated.rows_affected() == 0 && exists.is_none() {
+            let (count,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM channel_invite_keys WHERE channel_id = ?")
+                    .bind(channel.as_bytes().as_slice())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            if usize::try_from(count).unwrap_or(usize::MAX) >= max_keys {
+                return Err(StorageError::TooManyInviteKeys);
+            }
+            sqlx::query(
+                "INSERT INTO channel_invite_keys \
+                     (channel_id, invite_pk, expiry_ms, max_uses, used_count, registered_at_ms) \
+                 VALUES (?, ?, ?, ?, 0, ?)",
+            )
+            .bind(channel.as_bytes().as_slice())
+            .bind(invite_pk.as_slice())
+            .bind(expiry_ms)
+            .bind(max_uses)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn delete_invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<bool, StorageError> {
+        Ok(
+            sqlx::query("DELETE FROM channel_invite_keys WHERE channel_id = ? AND invite_pk = ?")
+                .bind(channel.as_bytes().as_slice())
+                .bind(invite_pk.as_slice())
+                .execute(&self.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected()
+                > 0,
+        )
+    }
+
+    async fn invite_key(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<Option<InviteKeyRow>, StorageError> {
+        let row: Option<(Vec<u8>, u64, u32, u32)> = sqlx::query_as(
+            "SELECT invite_pk, expiry_ms, max_uses, used_count FROM channel_invite_keys \
+             WHERE channel_id = ? AND invite_pk = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(invite_pk.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(invite_row).transpose()
+    }
+
+    async fn list_invite_keys(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Vec<InviteKeyRow>, StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        let rows: Vec<(Vec<u8>, u64, u32, u32)> = sqlx::query_as(
+            "SELECT invite_pk, expiry_ms, max_uses, used_count FROM channel_invite_keys \
+             WHERE channel_id = ? ORDER BY invite_pk ASC",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter().map(invite_row).collect()
+    }
+
+    async fn claim_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        // One conditional UPDATE: live (unexpired) and below its ceiling
+        // (`0` is one use, `u32::MAX` never runs out), so two concurrent
+        // subscribes cannot both take a key's last use.
+        let n = sqlx::query(
+            "UPDATE channel_invite_keys SET used_count = used_count + 1 \
+             WHERE channel_id = ? AND invite_pk = ? \
+               AND (expiry_ms = 0 OR expiry_ms > ?) \
+               AND used_count < CASE WHEN max_uses = 0 THEN 1 ELSE max_uses END",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(invite_pk.as_slice())
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        Ok(n == 1)
+    }
+
+    async fn release_invite_use(
+        &self,
+        channel: ChannelId,
+        invite_pk: [u8; INVITE_KEY_LEN],
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE channel_invite_keys SET used_count = used_count - 1 \
+             WHERE channel_id = ? AND invite_pk = ? AND used_count > 0",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(invite_pk.as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn prune_invite_keys_expired_before(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        Ok(
+            sqlx::query("DELETE FROM channel_invite_keys WHERE expiry_ms <> 0 AND expiry_ms < ?")
+                .bind(cutoff_ms)
+                .execute(&self.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected(),
+        )
+    }
+
+    async fn list_subscriber_page(
+        &self,
+        channel: ChannelId,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<SubscriberEntry>, StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows: Vec<(u64, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT seq, subscriber_id, sealed_ticket FROM channel_subscribers \
+             WHERE channel_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(after_seq)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter()
+            .map(|(seq, sub, ticket)| {
+                Ok(SubscriberEntry {
+                    seq,
+                    subscriber: SubscriberId::from_bytes(&sub)?,
+                    sealed_ticket: ticket_from(ticket)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn subscriber_count(&self, channel: ChannelId) -> Result<u64, StorageError> {
+        let row: Option<(u64,)> =
+            sqlx::query_as("SELECT subscriber_count FROM channels WHERE id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        row.map(|(n,)| n).ok_or(StorageError::UnknownChannel)
+    }
+
+    async fn remove_subscriber(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        match lock_channel(&mut tx, channel).await? {
+            None => return Err(StorageError::UnknownChannel),
+            Some((false, _)) => return Err(StorageError::ChannelPublic),
+            Some((true, _)) => {},
+        }
+        let removed = delete_subscriber_row(&mut tx, channel, subscriber).await?;
+        sqlx::query(
+            "INSERT INTO channel_removed_subscribers (channel_id, subscriber_id, removed_at_ms) \
+             VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE removed_at_ms = VALUES(removed_at_ms)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(removed)
+    }
+
+    async fn is_removed(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<bool, StorageError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_removed_subscribers WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.is_some())
+    }
 }
 
 // ============================================================================
@@ -1382,12 +2008,20 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect test db");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("migrate");
+        // Parallel tests share one database and two concurrent migrator runs
+        // on an empty one collide, so migrate once per process.
+        MIGRATED
+            .get_or_init(|| async {
+                sqlx::migrate!("./migrations")
+                    .run(&pool)
+                    .await
+                    .expect("migrate");
+            })
+            .await;
         Some(SqlChannelStore::new(pool))
     }
+
+    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
     /// The server clock the store is handed: since ADR-0059 the SQL store
     /// files the subscriber's `registered_at` / `last_active_at` from it, and

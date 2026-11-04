@@ -68,7 +68,15 @@ private fun sizeText(bytes: ULong): UiText {
         bytes < 1_000_000_000UL -> "common.size.mb" to 1_000_000.0
         else -> "common.size.gb" to 1_000_000_000.0
     }
-    val value = if (scale == 1.0) bytes.toString() else String.format(java.util.Locale.ROOT, "%.1f", bytes.toDouble() / scale)
+    // Separators from the device's region, digits from the interface
+    // language (localization.md section 5).
+    val words = java.util.Locale.forLanguageTag(me.lakko.app.l10n.Localization.strings.value.language)
+    val region = me.lakko.app.l10n.DeviceFormats.region()
+    val value = if (scale == 1.0) {
+        me.lakko.app.l10n.DeviceFormats.integer(bytes.toLong(), words, region)
+    } else {
+        me.lakko.app.l10n.DeviceFormats.decimal(bytes.toDouble() / scale, 1, words, region)
+    }
     return UiText(key, texts = mapOf("size" to value))
 }
 

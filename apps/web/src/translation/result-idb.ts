@@ -42,6 +42,17 @@ interface PersistedRow {
   ciphertext: Uint8Array;
 }
 
+/**
+ * The device key as `auth/key-store.ts` hands it out (its `DeviceCipher`):
+ * a browser WebCrypto key or the desktop host's key. Named here by shape so
+ * this module imports nothing outside the allowed list
+ * (`fail-closed.test.ts`).
+ */
+export interface RowCipher {
+  encrypt(iv: Uint8Array, plaintext: Uint8Array): Promise<ArrayBuffer>;
+  decrypt(iv: Uint8Array, ciphertext: Uint8Array): Promise<ArrayBuffer>;
+}
+
 const TAG_DOMAIN = "lakko/translation/conversation-tag/v1";
 
 /** The per-account tag keys, once opened. Dropped with the account's rows. */
@@ -95,27 +106,23 @@ function awaitReq<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function encryptBlob(key: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(key: RowCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, key, plaintext.slice()),
-  );
+  const ct = new Uint8Array(await key.encrypt(iv, plaintext));
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
   out.set(ct, IV_LEN);
   return out;
 }
 
-async function decryptBlob(key: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(key: RowCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted translation row is too short");
-  return new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv: blob.slice(0, IV_LEN) }, key, blob.slice(IV_LEN)),
-  );
+  return new Uint8Array(await key.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)));
 }
 
 /** The production backend. With no device key, reads find nothing and writes do nothing. */
 export class IdbResultBackend implements ResultBackend {
-  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>) {}
+  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<RowCipher | null>) {}
 
   /**
    * The account's tag key: read from its row (opened with the device key),

@@ -33,6 +33,7 @@
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { loadAccountKeys } from "./local-store";
 import { buildPredecessorTable, currentKeyOf, type AccountKeys } from "./predecessor";
+import { loadBoundAccountKeys } from "./verified-binding";
 
 // ---------------------------------------------------------------------------
 // Pure
@@ -237,7 +238,8 @@ function bytesOfHex(hex: string): Uint8Array {
 
 function pinnedNow(): AccountKeys[] {
   try {
-    return loadAccountKeys();
+    // A proven link can sit on a verified binding too (ADR-0074 section 3.7).
+    return [...loadAccountKeys(), ...loadBoundAccountKeys()];
   } catch {
     // An unreadable pin store proves nothing: every key names itself.
     return [];

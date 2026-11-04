@@ -168,7 +168,7 @@ public struct KeyResetClaims: Equatable, Sendable {
 /// (``RecoveryMarkers``). The attestation is a public, signed artifact; the
 /// record holds no key material.
 public struct KeyResetPublishRecord: Codable, Equatable {
-    /// The 177-byte attestation, re-used verbatim on every retry.
+    /// The 145-byte attestation, re-used verbatim on every retry.
     public var attestation: Data
     /// The generation it names (for the log and the directory comparison).
     public var keyGeneration: UInt64

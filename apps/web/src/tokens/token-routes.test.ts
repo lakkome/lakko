@@ -88,13 +88,6 @@ describe("discovery token routes carry the token and no session", () => {
     expect(seen.some((s) => s.url.endsWith("/pow/challenge"))).toBe(false);
   });
 
-  it("POST /discovery/channel/register", async () => {
-    const seen = stubFetch(() => ({ status: 200, json: { ok: true } }));
-    await client().channelRegister({ oprf_hash: "AA==", channel_id: "AA==" });
-    const reg = seen.find((s) => s.url.endsWith("/discovery/channel/register"));
-    expectAnonymous(reg);
-  });
-
   it.each([
     ["invite", (c: DiscoveryClient) => c.consumeInvite(new Uint8Array(6), new Uint8Array(160).fill(0x41), new Uint8Array(16))],
     ["call-invite", (c: DiscoveryClient) => c.consumeCallInvite(new Uint8Array(6), new Uint8Array(160).fill(0x41), new Uint8Array(16))],

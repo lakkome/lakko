@@ -86,6 +86,9 @@ export interface BackgroundEventPlan {
   readonly messageOps: readonly MessageOpEvent[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
+  /** ADR-0087 — the group photo, allowed reactions and handle, for the
+   *  role-gated receive beside the name. */
+  readonly groupSettings: readonly Of<"group-setting">[];
   /** ADR-0073 R.6 — successor claims, for the claim rule. */
   readonly groupClosed: readonly Of<"group-closed">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
@@ -107,6 +110,7 @@ type ServiceEnvelopeEvent = Of<
   | "pushRoutingSecret"
   | "committerBeacon"
   | "group-name"
+  | "group-setting"
   | "group-closed"
   | "pin"
   | "shared-channels"
@@ -121,6 +125,7 @@ function isServiceEnvelopeKind(e: IncomingChatEvent): e is ServiceEnvelopeEvent 
     case "pushRoutingSecret":
     case "committerBeacon":
     case "group-name":
+    case "group-setting":
     case "group-closed":
     case "pin":
     case "shared-channels":
@@ -196,6 +201,7 @@ export function planBackgroundEvents(
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
+  const groupSettings: Of<"group-setting">[] = [];
   const groupClosed: Of<"group-closed">[] = [];
   const pins: Of<"pin">[] = [];
   const sharedChannels: Of<"shared-channels">[] = [];
@@ -256,6 +262,9 @@ export function planBackgroundEvents(
       case "group-name":
         groupNames.push(e);
         break;
+      case "group-setting":
+        groupSettings.push(e);
+        break;
       case "group-closed":
         groupClosed.push(e);
         break;
@@ -295,6 +304,7 @@ export function planBackgroundEvents(
     readReceipts,
     messageOps,
     groupNames,
+    groupSettings,
     groupClosed,
     pins,
     sharedChannels,

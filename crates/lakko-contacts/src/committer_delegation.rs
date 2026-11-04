@@ -31,7 +31,7 @@
 //! ```text
 //! COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1 || version(1) = 0x02
 //!   || added_account_key(32) || added_mailbox_binding(97)
-//!   || count(1, 1..=16) || count × delegation(185)
+//!   || count(1, 0..=16) || count × delegation(185)
 //! ```
 //!
 //! `added_account_key` is the added person's account signature key, and
@@ -43,6 +43,25 @@
 //! below). Each `delegation` is a `lakko_ds_proof::Delegation` wire blob,
 //! exactly [`COMMITTER_DELEGATION_BLOB_LEN`] bytes. v1 (no binding) is
 //! refused: a flag day.
+//!
+//! ## No delegation: the added person's mailbox is open (2026-10-29)
+//!
+//! A person who chose Everyone ([ADR-0060] §5) keeps their mailbox open and
+//! publishes no reach key, only the mailbox binding in their public record,
+//! so a proposer who found them by search holds no grant to sign a
+//! delegation with. It then posts the envelope with **no delegation**: the
+//! binding (from the search result, verified under `added_account_key`)
+//! tells whichever candidate commits where the Welcome goes, and the
+//! committer writes it without a proof, spending one `mailbox-write`
+//! anonymous token ([ADR-0078] §1), as a contact request to that person
+//! does. Any member could post such an envelope; the binding must verify
+//! under the added person's key, so it can only ever point at that person's
+//! own mailbox, and the worst it costs a committer is one token.
+//!
+//! The residual is stated in the ADR: if the person left Everyone between
+//! the search and the sweep, the Delivery Service drops the proofless write
+//! while answering as for a stored one (it never tells open from closed), and
+//! the committer believes the Welcome delivered.
 //!
 //! ## What this module checks, and what it cannot
 //!
@@ -117,9 +136,9 @@ pub const ADDED_ACCOUNT_KEY_LEN: usize = 32;
 /// `added_account_key`, the binding, count.
 const HEADER_LEN: usize = 1 + ADDED_ACCOUNT_KEY_LEN + MAILBOX_BINDING_LEN + 1;
 
-/// Shortest well-formed envelope: one delegation.
+/// Shortest well-formed envelope: no delegation (an open mailbox).
 pub const COMMITTER_DELEGATION_ENVELOPE_MIN_LEN: usize =
-    COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len() + HEADER_LEN + COMMITTER_DELEGATION_BLOB_LEN;
+    COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len() + HEADER_LEN;
 
 /// Longest well-formed envelope: [`MAX_COMMITTER_DELEGATIONS`] delegations.
 pub const COMMITTER_DELEGATION_ENVELOPE_MAX_LEN: usize = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1
@@ -137,8 +156,9 @@ pub struct CommitterDelegationEnvelope {
     /// name its mailbox, and it must verify under `added_account_key`
     /// (checked in `lakko_ds_proof::committer`, not here).
     pub added_mailbox_binding: MailboxBinding,
-    /// 1 to [`MAX_COMMITTER_DELEGATIONS`] `lakko_ds_proof::Delegation` wire
-    /// blobs, one per committer candidate.
+    /// 0 to [`MAX_COMMITTER_DELEGATIONS`] `lakko_ds_proof::Delegation` wire
+    /// blobs, one per committer candidate. None: the added person's mailbox
+    /// is open (module docs).
     pub delegations: Vec<[u8; COMMITTER_DELEGATION_BLOB_LEN]>,
 }
 
@@ -154,9 +174,9 @@ pub enum CommitterDelegationError {
     /// The version byte is not [`COMMITTER_DELEGATION_VERSION_V2`].
     #[error("committer delegation carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
-    /// The count is 0 or above [`MAX_COMMITTER_DELEGATIONS`].
+    /// The count is above [`MAX_COMMITTER_DELEGATIONS`].
     #[error(
-        "committer delegation carries {0} delegations, 1 to {MAX_COMMITTER_DELEGATIONS} allowed"
+        "committer delegation carries {0} delegations, at most {MAX_COMMITTER_DELEGATIONS} allowed"
     )]
     BadCount(usize),
     /// The payload is not exactly the length its header declares.
@@ -191,14 +211,14 @@ impl CommitterDelegationError {
 ///
 /// # Errors
 ///
-/// [`CommitterDelegationError::BadCount`] for no delegation or more than
+/// [`CommitterDelegationError::BadCount`] for more than
 /// [`MAX_COMMITTER_DELEGATIONS`] — the same bound [`try_unwrap_committer_delegation`]
 /// refuses, so a conforming sender never emits what a receiver drops.
 pub fn compose_committer_delegation(
     envelope: &CommitterDelegationEnvelope,
 ) -> CoreResult<Vec<u8>, CommitterDelegationError> {
     let count = envelope.delegations.len();
-    if count == 0 || count > MAX_COMMITTER_DELEGATIONS {
+    if count > MAX_COMMITTER_DELEGATIONS {
         return Err(CommitterDelegationError::BadCount(count));
     }
     let count_byte = u8::try_from(count).map_err(|_| CommitterDelegationError::BadCount(count))?;
@@ -231,7 +251,7 @@ pub fn compose_committer_delegation(
 ///   length, so a later revision reports as a version.
 /// * [`CommitterDelegationError::BadLength`] — shorter than the header, or
 ///   not exactly `header + count × 185`.
-/// * [`CommitterDelegationError::BadCount`] — 0 or more than
+/// * [`CommitterDelegationError::BadCount`] — more than
 ///   [`MAX_COMMITTER_DELEGATIONS`].
 pub fn try_unwrap_committer_delegation(
     plaintext: &[u8],
@@ -267,7 +287,7 @@ pub fn try_unwrap_committer_delegation(
             expected: HEADER_LEN,
         })?;
     let count = usize::from(count_byte);
-    if count == 0 || count > MAX_COMMITTER_DELEGATIONS {
+    if count > MAX_COMMITTER_DELEGATIONS {
         return Err(CommitterDelegationError::BadCount(count));
     }
     let expected = count * COMMITTER_DELEGATION_BLOB_LEN;
@@ -326,7 +346,7 @@ mod tests {
 
     #[test]
     fn round_trips_at_every_count_and_pins_the_layout() {
-        for count in 1..=MAX_COMMITTER_DELEGATIONS {
+        for count in 0..=MAX_COMMITTER_DELEGATIONS {
             let env = envelope(count);
             let wire = compose_committer_delegation(&env).unwrap();
             let d = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len();
@@ -339,10 +359,10 @@ mod tests {
             assert_eq!(decode_committer_delegation(&wire).unwrap(), env);
         }
         assert_eq!(COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len(), 30);
-        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, 30 + 131 + 185);
+        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, 30 + 131);
         assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MAX_LEN, 30 + 131 + 16 * 185);
         assert_eq!(
-            compose_committer_delegation(&envelope(1)).unwrap().len(),
+            compose_committer_delegation(&envelope(0)).unwrap().len(),
             COMMITTER_DELEGATION_ENVELOPE_MIN_LEN
         );
         assert_eq!(
@@ -355,7 +375,7 @@ mod tests {
 
     #[test]
     fn the_count_bound_is_refused_by_compose_and_decode_alike() {
-        for count in [0, MAX_COMMITTER_DELEGATIONS + 1] {
+        for count in [MAX_COMMITTER_DELEGATIONS + 1, usize::from(u8::MAX)] {
             assert_eq!(
                 compose_committer_delegation(&envelope(count)),
                 Err(CommitterDelegationError::BadCount(count))
@@ -466,6 +486,7 @@ mod tests {
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::registrar_seed::REGISTRAR_SEED_ENVELOPE_DOMAIN_V1,

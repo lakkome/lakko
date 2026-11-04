@@ -20,6 +20,10 @@ vi.mock("../wasm", () => ({
     }),
     // ADR-0078 section 10: the link's own revocation key.
     linkRevocationPublicKey: () => new Uint8Array(32).fill(0x0a),
+    // ADR-0087 section 5: the owner derives the group's knock key.
+    dsJournalRootSeed: () => new Uint8Array(32).fill(0x0b),
+    groupKnockSeed: () => new Uint8Array(32).fill(0x0c),
+    groupKnockPublicKey: () => new Uint8Array(32).fill(0x0d),
     // The widths the real core exports (ADR-0028 short-link amendment).
     inviteBlobIdLen: () => 6,
     inviteBlobIdUrlLen: () => 8,
@@ -36,8 +40,15 @@ import {
 } from "../discovery/client";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
-const ACCOUNT = { ed25519Seed: new Uint8Array(32) } as unknown as WasmIdentity;
-const GROUP = { groupId: new Uint8Array(32).fill(3) } as unknown as WasmGroup;
+const ACCOUNT = {
+  ed25519Seed: new Uint8Array(32),
+  signaturePublicKey: new Uint8Array(32).fill(0x0e),
+} as unknown as WasmIdentity;
+/** This account owns the group, so the knock key is derived, not held. */
+const GROUP = {
+  groupId: new Uint8Array(32).fill(3),
+  roleTableOwner: () => new Uint8Array(32).fill(0x0e),
+} as unknown as WasmGroup;
 const PREVIEW = { memberCount: 3 };
 
 let uploaded: unknown[] = [];

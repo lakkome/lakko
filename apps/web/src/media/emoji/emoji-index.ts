@@ -196,6 +196,39 @@ export function saveRecent(
   }
 }
 
+/** `<prefix><accountIdB64>` holds one account's recent REACTIONS, newest
+ *  first: what the reaction row offers after the quick reaction
+ *  (`docs/ux/reactions-and-emoji.md` section 5). */
+export const RECENT_REACTIONS_KEY_PREFIX = "lakko.emoji.recent-reactions:";
+
+/** The recent reactions of `owner` (default: the signed-in account). */
+export function loadRecentReactions(store: KeyValueStore | null = defaultStore(), owner?: string): string[] {
+  const account = accountOf(owner);
+  if (store === null || account === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(store.getItem(RECENT_REACTIONS_KEY_PREFIX + account) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((e): e is string => typeof e === "string" && isSingleEmojiGrapheme(e)).slice(0, MAX_RECENT);
+  } catch {
+    return [];
+  }
+}
+
+/** Store the recent reactions of `owner`. */
+export function saveRecentReactions(
+  list: readonly string[],
+  store: KeyValueStore | null = defaultStore(),
+  owner?: string,
+): void {
+  const account = accountOf(owner);
+  if (store === null || account === null) return;
+  try {
+    store.setItem(RECENT_REACTIONS_KEY_PREFIX + account, JSON.stringify(list.slice(0, MAX_RECENT)));
+  } catch {
+    // A convenience.
+  }
+}
+
 /** Base emoji → the tone variant chosen for it by this account. */
 export type TonePrefs = Readonly<Record<string, string>>;
 
@@ -257,6 +290,7 @@ export function clearEmojiPrefsForAccount(
 ): void {
   if (store === null || accountIdB64.length === 0) return;
   store.removeItem(RECENT_KEY_PREFIX + accountIdB64);
+  store.removeItem(RECENT_REACTIONS_KEY_PREFIX + accountIdB64);
   store.removeItem(TONES_KEY_PREFIX + accountIdB64);
   for (const key of RETIRED_EMOJI_KEYS) store.removeItem(key);
 }

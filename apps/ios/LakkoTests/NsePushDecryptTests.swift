@@ -46,15 +46,12 @@ final class NsePushDecryptTests: XCTestCase {
             self.throwOn = throwOn
         }
 
-        func process(_ payload: Data) -> NseProcessedRow? {
+        func process(_ payload: Data) throws -> NseProcessedRow? {
             processCount += 1
             let tag = payload.isEmpty ? -1 : Int(payload[payload.startIndex])
-            if throwOn.contains(tag) {
-                // Mirror a per-row decrypt failure: the real impl returns nil;
-                // the fake models the "throws internally, dropped" shape by
-                // returning nil for the thrown tag (the core skips nils).
-                return nil
-            }
+            // A per-row decrypt failure, thrown as the real impl's core
+            // receive path throws it.
+            if throwOn.contains(tag) { throw FakeError.decrypt }
             return decode(payload)
         }
 
@@ -66,6 +63,10 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func close() { closed = true }
+
+        /// ADR-0062 — the conversation kind the real group reads.
+        var isGroup = false
+        var isGroupConversation: Bool { isGroup }
     }
 
     /// Fully-configurable fake deps. Records the resolved account + the
@@ -104,6 +105,11 @@ final class NsePushDecryptTests: XCTestCase {
         var lastCursorGroupHex: String?
         /// ADR-0053 — the group the fetch was handed to sign with.
         var lastFetchGroup: NseThrowawayGroup?
+        /// The DS message ids the app's message log holds for the group.
+        var held: Set<Int64> = []
+        /// This account's own person key, as the mirror reports it.
+        var ownKey: String?
+        var heldReads = 0
 
         init(
             account: NseResolvedAccount?,
@@ -198,9 +204,24 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func isAntiCensorshipArmed() -> Bool { armed }
+
+        func heldMessageIds(accountIdB64: String, groupIdHex: String) -> Set<Int64> {
+            heldReads += 1
+            return held
+        }
+
+        func ownPersonKeyB64(accountIdB64: String) -> String? { ownKey }
+
+        /// The person-name mirror the app writes, by person key.
+        var names: [String: String] = [:]
+        func personName(accountIdB64: String, keyB64: String) -> String? { names[keyB64] }
+
+        /// The Settings > Notifications > Reactions switch.
+        var reactionsOn = true
+        func reactionNotificationsOn() -> Bool { reactionsOn }
     }
 
-    private enum FakeError: Error { case open, ds }
+    private enum FakeError: Error { case open, ds, decrypt }
 
     private func okAccount() -> NseResolvedAccount {
         NseResolvedAccount(accountIdB64: accountId, groupIdBytes: groupIdBytes)
@@ -722,5 +743,208 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(deps.openCount, 0)
         XCTAssertEqual(deps.dsFetchCount, 0)
         XCTAssertFalse(deps.readAccounts.contains(otherAccount))
+    }
+
+    // MARK: - A wake for this device's own message
+
+    // The DS wakes every subscription of a group, the sender's own devices
+    // included. The sender's device cannot open its own message, so without
+    // these rules it posted the generic "New message" for what it just sent.
+
+    private func ownWakeDeps(
+        _ rows: [NseFetchedRow], decode: @escaping (Data) -> NseProcessedRow?, throwOn: Set<Int> = []
+    ) -> (FakeDeps, FakeThrowawayGroup) {
+        let group = FakeThrowawayGroup(decode: decode, throwOn: throwOn)
+        let deps = FakeDeps(account: okAccount(), group: group, rows: rows)
+        deps.ownKey = "own-person"
+        return (deps, group)
+    }
+
+    private func from(_ sender: String, _ text: String) -> NseProcessedRow {
+        NseProcessedRow(kind: .chat, text: text, attachmentCount: 0, senderKeyB64: sender)
+    }
+
+    func testOwnMessageTheLogHoldsPostsNothing() async {
+        // Row 10 is this device's own message: it does not decrypt here, and
+        // the app's log holds it.
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in nil }, throwOn: [1])
+        deps.held = [10]
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testMessageFromAnotherDeviceOfTheSamePersonPostsNothing() async {
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in self.from("own-person", "from my laptop") })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testServiceTrafficAlonePostsNothing() async {
+        // A service envelope (nil), a read receipt and a reaction from
+        // someone else: nothing a notification would show.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2), row(12, 3)], decode: { payload in
+            switch payload[payload.startIndex] {
+            case 2: return NseProcessedRow(kind: .readReceipt, text: "", attachmentCount: 0, senderKeyB64: "peer")
+            case 3: return NseProcessedRow(kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "peer")
+            default: return nil
+            }
+        })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+        XCTAssertEqual(outcome, .quiet(tag: groupHex))
+    }
+
+    func testPeerMessageIsPreviewedEvenWhenANewerOwnRowFollows() async {
+        // Row 10: a peer's message. Row 11: this device's own (held, does not
+        // decrypt). Row 12: from another device of this person. The peer's
+        // message is still the preview.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2), row(12, 3)], decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return self.from("peer", "hi there")
+            case 3: return self.from("own-person", "mine")
+            default: return nil
+            }
+        }, throwOn: [2])
+        deps.held = [11]
+        guard case .preview(let preview) = await decryptPushOutcome(
+            NsePushWake(groupHex: groupHex, pointer: 12), deps) else {
+            return XCTFail("a message from someone else is previewed")
+        }
+        XCTAssertEqual(preview.body, "hi there")
+    }
+
+    func testARowThatDoesNotDecryptAndIsNotHeldKeepsTheGenericLine() async {
+        // Row 10 is this device's own (held); row 11 does not decrypt and is
+        // not in the log: it may be a message from someone else.
+        let (deps, _) = ownWakeDeps([row(10, 1), row(11, 2)], decode: { _ in nil }, throwOn: [1, 2])
+        deps.held = [10]
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(outcome, .none)
+        XCTAssertEqual(deps.heldReads, 1, "the log is read once per wake")
+    }
+
+    func testAReadThatDidNotRunKeepsTheGenericLine() async {
+        let decode: (Data) -> NseProcessedRow? = { _ in self.from("own-person", "mine") }
+        let wake = NsePushWake(groupHex: groupHex, pointer: 10)
+        let noSeed = FakeDeps(account: okAccount(), seed: nil,
+                              group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)])
+        let noSnapshot = FakeDeps(account: okAccount(), snapshot: nil,
+                                  group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)])
+        let fetchFailed = FakeDeps(account: okAccount(),
+                                   group: FakeThrowawayGroup(decode: decode), rows: [row(10, 1)], dsThrows: true)
+        for deps in [noSeed, noSnapshot, fetchFailed] {
+            deps.ownKey = "own-person"
+            let outcome = await decryptPushOutcome(wake, deps)
+            XCTAssertEqual(outcome, .none)
+        }
+    }
+
+    func testOwnAccountCallSignalingStillDecides() async {
+        // Calls keep their own rules: an end from another device of this
+        // person (answered there) still takes the alert down.
+        let callIdHex = String(repeating: "c", count: 32)
+        let (deps, _) = ownWakeDeps([row(10, 1)], decode: { _ in
+            NseProcessedRow(kind: .callEnd, text: "", attachmentCount: 0,
+                            callIdHex: callIdHex, senderKeyB64: "own-person")
+        })
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertEqual(outcome, .callEnded(callIdHex: callIdHex))
+    }
+
+    /// The core's own-message refusal (`CannotDecryptOwnMessage`) is this
+    /// device's own row coming back; any other decrypt failure is not.
+    func testTheOwnMessageRefusalIsRecognised() {
+        struct Refusal: Error, CustomStringConvertible {
+            let description: String
+        }
+        XCTAssertTrue(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: ValidationError(CannotDecryptOwnMessage)\")")))
+        XCTAssertFalse(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: WrongEpoch\")")))
+    }
+
+    // MARK: - The sender's name (2026-11-04, seen on an iPhone)
+
+    /// A group message names its sender from the app's person-name mirror.
+    /// The mirror held the name and the notification still showed none: the
+    /// deps' lookup was reached through the protocol, which did not require it.
+    func testAGroupMessageNamesItsSenderFromTheMirror() async {
+        let group = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(kind: .chat, text: "Notification test 2", attachmentCount: 0, senderKeyB64: "vg3")
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        deps.names = ["vg3": "VG3"]
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(preview?.body, "VG3: Notification test 2")
+    }
+
+    /// A reaction to this person's own message names the reactor from the
+    /// mirror, and the Reactions switch is read from the deps.
+    func testAReactionNamesTheReactorAndHonoursTheSwitch() async {
+        let reacted = NseProcessedRow(
+            kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+            reaction: NseReaction(targetMessageId: 5, emoji: "\u{2764}\u{FE0F}", add: true, targetAuthorB64: "me"))
+        let group = FakeThrowawayGroup(decode: { _ in reacted })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        deps.ownKey = "me"
+        deps.names = ["vg3": "VG3"]
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(preview?.body, "VG3 reacted \u{2764}\u{FE0F} to your message")
+
+        let off = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        off.ownKey = "me"
+        off.names = ["vg3": "VG3"]
+        off.reactionsOn = false
+        let quiet = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), off)
+        XCTAssertFalse(quiet?.body.contains("reacted") ?? false, "the switch is off: no reaction line")
+    }
+
+    /// A sender the mirror holds no name for is a defect: the generic banner
+    /// (`.none`), never a placeholder name and never a group body without the
+    /// sender. Holds for a message and for a reaction.
+    func testASenderWithNoMirroredNameGetsTheGenericBanner() async {
+        let group = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(kind: .chat, text: "hi", attachmentCount: 0, senderKeyB64: "stranger")
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(outcome, .none)
+
+        let reacted = NseProcessedRow(
+            kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "stranger",
+            reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me"))
+        let reactionGroup = FakeThrowawayGroup(decode: { _ in reacted })
+        reactionGroup.isGroup = true
+        let reactionDeps = FakeDeps(account: okAccount(), group: reactionGroup, rows: [row(10, 1)])
+        reactionDeps.ownKey = "me"
+        let reactionOutcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), reactionDeps)
+        XCTAssertEqual(reactionOutcome, .none)
+    }
+
+    /// No notification text the extension composes carries a placeholder
+    /// word for a person.
+    func testNoNotificationTextCarriesAPlaceholderWord() async {
+        let rows: [NseProcessedRow] = [
+            NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "vg3"),
+            NseProcessedRow(
+                kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+                reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me")),
+            NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "stranger"),
+        ]
+        for made in rows {
+            for isGroup in [true, false] {
+                let group = FakeThrowawayGroup(decode: { _ in made })
+                group.isGroup = isGroup
+                let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+                deps.ownKey = "me"
+                deps.names = ["vg3": "VG3"]
+                let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+                for text in [preview?.title, preview?.body].compactMap({ $0 }) {
+                    for word in ["Someone", "Member", "Unknown"] {
+                        XCTAssertFalse(text.contains(word), "\(text) carries \(word)")
+                    }
+                }
+            }
+        }
     }
 }

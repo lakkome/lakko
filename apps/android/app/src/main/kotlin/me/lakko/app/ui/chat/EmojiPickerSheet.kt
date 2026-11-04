@@ -37,7 +37,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -54,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -68,7 +68,6 @@ import me.lakko.app.media.EmojiDataset
 import me.lakko.app.media.EmojiEntry
 import me.lakko.app.media.GIF_ATTRIBUTION
 import me.lakko.app.media.GIF_NO_RESULTS
-import me.lakko.app.media.GIF_PRIVACY_NOTE
 import me.lakko.app.media.GIF_RATE_LIMITED
 import me.lakko.app.media.GIF_UNAVAILABLE
 import me.lakko.app.media.GifItem
@@ -108,6 +107,12 @@ internal fun EmojiPickerSheet(
     onEmoji: (String) -> Unit,
     onGif: (GifItem) -> Unit,
     onDismiss: () -> Unit,
+    /** reactions-and-emoji section 5 — `Some reactions`: only these, as one
+     *  grid in the owner's order, search kept, no categories. */
+    only: List<String>? = null,
+    /** reactions-and-emoji section 10 — the person holds 3 here: only these
+     *  (their own) stay pressable; the rest are dimmed, with the line. */
+    capOwn: Set<String>? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val gifState = gifModel?.state?.collectAsStateWithLifecycle()?.value
@@ -131,9 +136,19 @@ internal fun EmojiPickerSheet(
                 }
             }
             if (tab == 0 || !gifAvailable) {
+                if (capOwn != null) {
+                    Text(
+                        t("chat.reaction.cap_reached"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
                 EmojiTab(
                     dataset = dataset,
                     prefs = prefs,
+                    only = only,
+                    capOwn = capOwn,
                     onEmoji = { emoji ->
                         // A reaction is exactly one emoji grapheme; the picker
                         // only produces those, and the check keeps it that way.
@@ -145,7 +160,7 @@ internal fun EmojiPickerSheet(
                 )
             } else if (gifModel != null) {
                 LaunchedEffect(gifModel) { gifModel.open() }
-                GifTab(gifModel, prefs, loadGifPreview, onGif = { item ->
+                GifTab(gifModel, loadGifPreview, onGif = { item ->
                     onGif(item)
                     onDismiss()
                 })
@@ -165,6 +180,8 @@ private fun EmojiTab(
     dataset: EmojiDataset?,
     prefs: MediaPrefs,
     onEmoji: (String) -> Unit,
+    only: List<String>? = null,
+    capOwn: Set<String>? = null,
 ) {
     var query by remember { mutableStateOf("") }
     var tones by remember { mutableStateOf(prefs.tonePrefs) }
@@ -181,10 +198,14 @@ private fun EmojiTab(
 
     val results = remember(query, dataset) { searchEmoji(dataset, query) }
     val strings = LocalStrings.current
-    val (items, headerIndex) = remember(dataset, recent, tones, query, strings) {
+    val (items, headerIndex) = remember(dataset, recent, tones, query, strings, only) {
         val list = ArrayList<EmojiGridItem>()
         val headers = HashMap<Int, Int>()
-        if (query.isBlank()) {
+        if (only != null) {
+            val found = if (query.isBlank()) null else results.map { it.emoji }.toSet()
+            only.filter { found == null || it in found }
+                .forEach { list.add(EmojiGridItem.Glyph(dataset.byEmoji[it], it, "a")) }
+        } else if (query.isBlank()) {
             if (recent.isNotEmpty()) {
                 list.add(EmojiGridItem.Header(strings["chat.emoji.recent"]))
                 recent.forEach { list.add(EmojiGridItem.Glyph(dataset.byEmoji[it], it, "recent")) }
@@ -240,6 +261,7 @@ private fun EmojiTab(
                         is EmojiGridItem.Glyph -> item(key = "e-$index-${item.keySuffix}") {
                             EmojiCell(
                                 item = item,
+                                enabled = capOwn == null || item.glyph in capOwn,
                                 onPick = { glyph ->
                                     onEmoji(glyph)
                                     recent = prefs.recentEmoji
@@ -267,6 +289,7 @@ private fun EmojiTab(
 @Composable
 private fun EmojiCell(
     item: EmojiGridItem.Glyph,
+    enabled: Boolean = true,
     onPick: (String) -> Unit,
     onTone: (EmojiEntry, String) -> Unit,
 ) {
@@ -277,7 +300,9 @@ private fun EmojiCell(
         modifier = Modifier
             .size(44.dp)
             .clip(RoundedCornerShape(8.dp))
+            .alpha(if (enabled) 1f else 0.35f)
             .combinedClickable(
+                enabled = enabled,
                 onClickLabel = t("chat.emoji.insert"),
                 onLongClickLabel = if (entry?.tones != null) {
                     t("chat.emoji.skin_tones", mapOf("name" to (entry?.name?.ifEmpty { null } ?: item.glyph)))
@@ -342,32 +367,15 @@ private fun CategoryStrip(dataset: EmojiDataset, gridState: LazyGridState, onJum
 @Composable
 private fun GifTab(
     model: GifPickerModel,
-    prefs: MediaPrefs,
     loadPreview: suspend (String) -> ByteArray?,
     onGif: (GifItem) -> Unit,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
-    var noteDismissed by remember { mutableStateOf(prefs.gifNoteDismissed) }
     val gridState = rememberLazyGridState()
     val searchGifLabel = t("chat.gif.search")
     val loadingGifsLabel = t("chat.gif.loading")
 
     Column(Modifier.fillMaxSize()) {
-        if (!noteDismissed) {
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
-                    Text(t(GIF_PRIVACY_NOTE), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    TextButton(onClick = {
-                        prefs.gifNoteDismissed = true
-                        noteDismissed = true
-                    }) { Text(t("chat.gif.note_dismiss")) }
-                }
-            }
-        }
         OutlinedTextField(
             value = state.query,
             onValueChange = model::onQueryChange,

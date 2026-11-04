@@ -357,7 +357,7 @@ pub(crate) async fn finish(
     //    The same statement records the new identity key (ADR-0074 section
     //    0.1): the reset is the one writer that moves it.
     let bumped = sqlx::query(
-        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), \
+        "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1), phrase_in_vault = 0, \
          identity_pubkey = ? WHERE id = ?",
     )
     .bind(&new_signature_pubkey[..])

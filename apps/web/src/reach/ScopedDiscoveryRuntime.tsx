@@ -13,36 +13,54 @@
  * failed step is retried at the next run (a setting or name change, a new
  * contact, coming back online, or the periodic tick). Decisions are in
  * `publication-model.ts`.
+ *
+ * An offer and a bundle go out once per conversation, so each run also asks
+ * for what this device never received, and answers such an ask by sending
+ * its own again (ADR-0060 section 4, "A device that holds nothing asks").
  */
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
-import { ChatClient } from "../chat/client";
+import { ChatClient, rosterOf } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
+import { personKeysHex, resolveAccountKeyHex } from "../contacts/address-resolver";
+import { loadAccepted } from "../contacts/local-store";
+import { journalHex } from "../ds/access";
+import { lastProfileRequestAt, recordProfileRequest } from "../profile/profile-request";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
+import { accountIdBytes, NO_ACCOUNT_ID } from "../settings/contact-visibility";
 import { loadWasm } from "../wasm";
 import {
+  askForMissingIntroductions,
+  askResetsRecords,
   bundleTargets,
   decodePublication,
   encodePublication,
+  evaluateMissingTermsInBatch,
+  type BatchTerm,
   everyoneAction,
   everyoneKey,
+  forgetSentRecords,
+  mayOfferTo,
   offerKey,
   offerNeedsRebuild,
   offerTargets,
+  oneToOnePeerHex,
   recordsDigest,
-  termsToEvaluate,
   type PublicationState,
 } from "./publication-model";
+import { heldClassesForPerson } from "./received-grants";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
+import { DiscoveryHttpError } from "../discovery/client";
 import type { OprfPair } from "../discovery/oprf-pair";
-import { introductionOffersTick, loadIntroductions } from "./scoped-intake";
+import { introductionOffersTick, loadIntroductions, takeIntroductionAsks } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { subscribeOwnStateRestored } from "../profile/own-profile-sync";
 
 /** How often the runtime re-checks without a trigger (a contact's offer that
  *  arrived, a new one-to-one). Chosen, not measured. */
@@ -93,27 +111,83 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       state = next;
       await saveReachRow(account, "publication", encodePublication(next));
     };
+
+    // One-to-one conversations with contacts that can still carry a message.
+    const oneToOnes = chats
+      .groups()
+      .filter((g) => readIsActive(g.group) !== false && isOneToOne(g.group));
+    const byId = new Map(oneToOnes.map((g) => [g.groupIdB64, g]));
+
+    /** The other person of a conversation (account key hex), or `null`. */
+    const peerOf = (group: Parameters<typeof rosterOf>[0]): string | null =>
+      oneToOnePeerHex(
+        rosterOf(group).map((m) => resolveAccountKeyHex(journalHex(m.accountKey ?? m.signaturePublicKey))),
+        session.accountKeyHex,
+      );
+
+    // The asks that arrived: forget those conversations in the sent records,
+    // so steps 3 and 4 below send the offer and the bundle there again.
+    for (const ask of takeIntroductionAsks()) {
+      const entry = byId.get(ask.groupIdB64);
+      const peerHex = entry === undefined ? null : peerOf(entry.group);
+      let senderHex: string | null = null;
+      try {
+        senderHex = resolveAccountKeyHex(journalHex(base64Decode(ask.senderKeyB64)));
+      } catch {
+        senderHex = null;
+      }
+      const now = Date.now();
+      const resets = askResetsRecords({
+        oneToOne: peerHex !== null,
+        fromOtherParticipant: peerHex !== null && senderHex === peerHex,
+        lastResetAtMs: state.introductionsResentAt[ask.groupIdB64],
+        nowMs: now,
+      });
+      if (resets) await save(forgetSentRecords(state, ask.groupIdB64, now));
+    }
+
+    // What this device itself never received: asked for first, since it
+    // needs no token and must not wait on the steps below.
+    await askForMissingIntroductions({
+      conversations: oneToOnes.map((g) => ({ groupIdB64: g.groupIdB64, peerHex: peerOf(g.group) })),
+      held: await loadIntroductions(account),
+      keysOfPerson: personKeysHex,
+      holdsContactGrant: (keys) => heldClassesForPerson(session.receivedGrants(), keys).has("contact"),
+      lastAskedAt: (g) => lastProfileRequestAt(account, g),
+      recordAsked: (g, at) => recordProfileRequest(account, g, at),
+      send: async (g) => {
+        const entry = byId.get(g);
+        if (entry === undefined) return;
+        await publisher.broadcastControl(secrets, entry.group, wasm.composeProfileRequest());
+      },
+      rule: (joined, unnamed, last, now) => wasm.shouldRequestProfiles(joined, unnamed, last, now),
+      now: () => Date.now(),
+    });
+
     const name = profiles.ownProfile().displayName;
     const username = profiles.ownUsername();
 
-    const certificate = username === null ? null : profiles.ownUsernameCertificate();
+    // Fetched here too: on a device that has written nothing yet (a restore,
+    // a new account with no conversation) no profile has asked for it, and a
+    // record with no certificate cannot show the username to a finder.
+    const certificate = username === null ? null : await profiles.fetchOwnUsernameCertificate();
 
     /** A term to evaluate: its cache key and the OPRF round that yields it. */
-    type Term = { readonly key: string; readonly evaluate: () => Promise<OprfPair> };
+    type Term = BatchTerm;
 
-    /** The OPRF OUTPUTS of the terms (cached; each new one costs a token).
-     *  Outputs never leave the device; see `lookupKeysOf`. */
+    /** The OPRF OUTPUTS of the terms (cached). The terms not yet kept go in
+     *  ONE batch round (`POST /discovery/oprf/batch`, one register token):
+     *  they are this account's own name words and username. Outputs never
+     *  leave the device; see `lookupKeysOf`. */
     const outputsOf = async (terms: readonly Term[]): Promise<Uint8Array[]> => {
-      const missing = termsToEvaluate(state, terms.map((t) => t.key));
-      if (missing.length > 0) {
-        const added: Record<string, string> = {};
-        for (const t of terms) {
-          if (!missing.includes(t.key)) continue;
-          added[t.key] = base64Encode((await t.evaluate()).output);
-        }
-        await save({ ...state, termOutputs: { ...state.termOutputs, ...added } });
-      }
-      return terms.map((t) => base64Decode(state.termOutputs[t.key] ?? ""));
+      const kept = await evaluateMissingTermsInBatch(state, terms, {
+        evaluateBatch: async (missing) =>
+          (await scoped.ownTermsOprf(missing)).map((pair: OprfPair) => base64Encode(pair.output)),
+        keep: (termOutputs) => save({ ...state, termOutputs }),
+        isRateLimited: (err) => err instanceof DiscoveryHttpError && err.status === 429,
+        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      });
+      return terms.map((t) => base64Decode(kept[t.key] ?? state.termOutputs[t.key] ?? ""));
     };
     /** The lookup keys discovery gets for these outputs (ADR-0060 §5). */
     const lookupKeysOf = (outputs: readonly Uint8Array[]): Uint8Array[] =>
@@ -121,19 +195,21 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const nameTerms = (n: string | null): Term[] =>
       n === null
         ? []
-        : wasm.nameSearchTerms(n).map((term) => ({
-            key: `n:${term}`,
-            evaluate: () => scoped.nameTermOprf(term),
-          }));
+        : wasm.nameSearchTerms(n).map((term) => ({ key: `n:${term}`, kind: "term" as const, value: term }));
     const usernameTerms = (u: string | null): Term[] =>
-      u === null ? [] : [{ key: `u:${u}`, evaluate: () => scoped.usernameOprf(u) }];
+      u === null ? [] : [{ key: `u:${u}`, kind: "username" as const, value: u }];
 
     // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
     //    reach session's; this is the discovery half: the lookup keys of the
     //    name terms, and the public record sealed under the OUTPUTS of the
     //    name terms plus the username.
     const everyone = setting.mode === wasm.VisibilityMode.Everyone;
-    const pubKey = everyoneKey(name, username, certificate === null ? null : base64Encode(certificate));
+    const pubKey = everyoneKey(
+      name,
+      username,
+      certificate === null ? null : base64Encode(certificate),
+      session.accountKeyHex,
+    );
     const action = everyoneAction(state.everyone, everyone, pubKey);
     if (action.kind === "publish") {
       const names = nameTerms(name);
@@ -141,8 +217,9 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       if (all.length === 0) {
         // A public record needs a term, and discovery refuses Everyone
         // without one: nothing to publish until a name or a username exists.
+        // Said out loud: this person stays unfindable while it holds.
         // eslint-disable-next-line no-console
-        console.warn("[reach] Everyone not published: no name and no username yet");
+        console.warn("[reach] Everyone not published: no name and no username yet; this account cannot be found");
       } else {
         const outputs = await outputsOf(all);
         const nameLookupKeys = lookupKeysOf(outputs.slice(0, names.length));
@@ -198,17 +275,24 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
       }
     }
 
-    // One-to-one conversations with contacts that can still carry a message.
-    const oneToOnes = chats
-      .groups()
-      .filter((g) => readIsActive(g.group) !== false && isOneToOne(g.group));
-    const byId = new Map(oneToOnes.map((g) => [g.groupIdB64, g]));
-
-    // 3. Offer the record to every contact not sent this version yet.
+    // 3. Offer the record to every contact the setting allows who was not
+    //    sent this version yet. An ask reaches this step like a new contact:
+    //    a contact not allowed gets no offer for it either.
     const offer = state.offer;
     if (offer !== null) {
       const offerBytes = wasm.composeIntroductionOffer(base64Decode(offer.recordB64));
-      for (const g of offerTargets(state, fof, [...byId.keys()])) {
+      const contacts = loadAccepted(account).map((c) => ({
+        keyHex: journalHex(base64Decode(c.signaturePubkeyB64)),
+        accountIdHex: c.accountIdHex ?? null,
+      }));
+      const allowsContact = (hex: string | null): boolean =>
+        wasm.allowsContact(setting, (hex === null ? null : accountIdBytes(hex)) ?? NO_ACCOUNT_ID);
+      const allowed = (g: string): boolean => {
+        const entry = byId.get(g);
+        const peer = entry === undefined ? null : peerOf(entry.group);
+        return peer !== null && mayOfferTo(personKeysHex(peer), contacts, allowsContact);
+      };
+      for (const g of offerTargets(state, fof, [...byId.keys()], allowed)) {
         const entry = byId.get(g);
         if (entry === undefined) continue;
         await publisher.broadcastControl(secrets, entry.group, offerBytes);
@@ -255,7 +339,10 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
   const onOnline = (): void => trigger();
   if (typeof window !== "undefined") window.addEventListener("online", onOnline);
   const tick = setInterval(trigger, TICK_MS);
+  // A restore dropped the note of what was published.
+  const unsubscribeRestored = subscribeOwnStateRestored(trigger);
   onCleanup(() => {
+    unsubscribeRestored();
     clearInterval(tick);
     if (typeof window !== "undefined") window.removeEventListener("online", onOnline);
   });

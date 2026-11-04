@@ -7,8 +7,13 @@ import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.Direction
 import me.lakko.app.chat.LocalUnread
+import me.lakko.app.chat.LineageEntry
 import me.lakko.app.chat.LocalUnreadCounter
+import me.lakko.app.chat.TimelinePosition
+import me.lakko.app.chat.buildLineage
 import me.lakko.app.chat.combinedUnread
+import me.lakko.app.chat.encodeReadPosition
+import me.lakko.app.chat.foldConversations
 import me.lakko.app.devices.sync.ReadCursorState
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -56,8 +61,8 @@ class UnreadCountTest {
     @Test
     fun `messages applied while the chat is not on screen count, with no read cursor at all`() {
         val counter = LocalUnreadCounter()
-        counter.onIncomingApplied(group, 2)
-        counter.onIncomingApplied(group, 1)
+        counter.onIncomingApplied(group, listOf(1, 2))
+        counter.onIncomingApplied(group, listOf(3))
         val local = counter.snapshot(group)
         assertEquals(LocalUnread(count = 3, viewedThisSession = false), local)
 
@@ -68,21 +73,21 @@ class UnreadCountTest {
     @Test
     fun `messages applied while the chat is on screen do not count, and showing it clears the count`() {
         val counter = LocalUnreadCounter()
-        counter.onIncomingApplied(group, 4)
+        counter.onIncomingApplied(group, listOf(1, 2, 3, 4))
         counter.setOnScreen(group, true)
         assertEquals(0, counter.snapshot(group).count)
-        counter.onIncomingApplied(group, 2)
+        counter.onIncomingApplied(group, listOf(5, 6))
         assertEquals(0, counter.snapshot(group).count)
 
         counter.setOnScreen(group, false)
-        counter.onIncomingApplied(group, 1)
+        counter.onIncomingApplied(group, listOf(7))
         assertEquals(LocalUnread(count = 1, viewedThisSession = true), counter.snapshot(group))
     }
 
     @Test
     fun `counts are per chat`() {
         val counter = LocalUnreadCounter()
-        counter.onIncomingApplied(group, 2)
+        counter.onIncomingApplied(group, listOf(1, 2))
         counter.setOnScreen("dd".repeat(16), true)
         assertEquals(2, counter.snapshot(group).count)
         counter.clear()
@@ -162,5 +167,76 @@ class UnreadCountTest {
     fun `an undecodable cursor counts nothing from the cursor`() {
         val broken = ReadCursorState(upToMessageId = ByteArray(3), readAtMs = 0uL, updatedAtHlc = 0uL)
         assertEquals(0, unreadCount(folded(), broken))
+    }
+
+    // ----- "History is not news" (docs/ux/second-device.md section 2) ------
+
+    private fun withFloor(messages: List<ChatMessage>, floor: Long, localUnread: Int = 0) =
+        thread(messages, localUnread).copy(syncedThrough = mapOf(group to floor))
+
+    @Test
+    fun `a message of the history bundle is not unread with no read cursor`() {
+        val messages = (1L..5L).map { incoming(it) }
+        assertEquals(0, unreadCount(withFloor(messages, floor = 5), cursor = null))
+    }
+
+    @Test
+    fun `a read cursor behind the floor does not bring the history back, and later messages count`() {
+        val messages = (1L..7L).map { incoming(it) }
+        // A cursor that arrives after the bundle, from a device that read two.
+        assertEquals(2, unreadCount(withFloor(messages, floor = 5), cursorAt(2)))
+        // The same with no cursor at all: the two came through this device's polls.
+        assertEquals(2, unreadCount(withFloor(messages, floor = 5, localUnread = 2), cursor = null))
+        // A cursor past the floor says what it always said.
+        assertEquals(1, unreadCount(withFloor(messages, floor = 5), cursorAt(6)))
+    }
+
+    @Test
+    fun `a polled message at or below the floor is not counted, one above it is`() {
+        val counter = LocalUnreadCounter()
+        counter.onIncomingApplied(group, listOf(4, 5, 6), syncedThrough = 5)
+        assertEquals(1, counter.snapshot(group).count)
+    }
+
+    @Test
+    fun `messages counted before the bundle came stop counting when it carries them`() {
+        val counter = LocalUnreadCounter()
+        counter.onIncomingApplied(group, listOf(8, 9, 12))
+        counter.onSyncedThrough(group, floor = 9)
+        assertEquals(1, counter.snapshot(group).count)
+        // Polled again after a held batch: still one row each.
+        counter.onIncomingApplied(group, listOf(12))
+        assertEquals(1, counter.snapshot(group).count)
+    }
+
+    @Test
+    fun `the feed takes the rows it showed out of the local count by id`() {
+        val counter = LocalUnreadCounter()
+        counter.onIncomingApplied(group, listOf(1, 2, 3))
+        counter.onSeenElsewhere(group, listOf(2, 99))
+        assertEquals(2, counter.snapshot(group).count)
+    }
+
+    @Test
+    fun `each segment of a conversation has its own floor, since ids restart in every group`() {
+        val older = "aa".repeat(16)
+        val head = "bb".repeat(16)
+        val lineage = buildLineage(listOf(LineageEntry(older, "root", 10UL), LineageEntry(head, "root", 20UL)))
+        val threads = listOf(
+            ChatThread(
+                groupIdHex = older,
+                messages = listOf(incoming(1), incoming(2), incoming(3)),
+                cursor = 0,
+                syncedThrough = mapOf(older to 2L),
+            ),
+            ChatThread(groupIdHex = head, messages = listOf(incoming(1), incoming(2)), cursor = 0),
+        )
+        val folded = foldConversations(threads, lineage).single()
+
+        // Position at the very start: every row is past it. The older segment's
+        // floor takes its first two rows, and the head's rows of the same ids stay.
+        val nothingRead = encodeReadPosition(TimelinePosition(0, 0))
+        val cursor = ReadCursorState(upToMessageId = nothingRead, readAtMs = 0uL, updatedAtHlc = 0uL)
+        assertEquals(3, unreadCount(folded, cursor))
     }
 }

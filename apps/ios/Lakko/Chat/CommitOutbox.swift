@@ -144,6 +144,17 @@ public struct PendingCommitEntry: Codable, Equatable {
     /// where the direct add path has exactly one destination
     /// (``secondArtifactMailboxB64``, which stays untouched for that path).
     public var welcomeMailboxesB64: [String]?
+    /// An accepted contact request whose Welcome is still owed to the person
+    /// who sent it: base64 of their account key. Such an entry has no commit;
+    /// ``ChatRepository/resolveOwedAnswers(groupIdHex:)`` owns it, because an
+    /// answer goes out only under the request's reply grant or a contact
+    /// grant, never the keys a sweep Welcome tries.
+    public var answerRequesterKeyB64: String?
+    /// The mailbox id of that request: the ack follows once the Welcome landed.
+    public var answerRequestMessageId: Int64?
+    /// That Welcome is also owed to this account's own mailbox (it has other
+    /// devices, and the write has not landed).
+    public var answerOwnWelcomeOwed: Bool?
     /// `false` until BOTH artifacts have (re)published. An un-acked entry is
     /// swept on the first `pollGroup` of a session.
     public var acked: Bool
@@ -163,6 +174,8 @@ public struct PendingCommitEntry: Codable, Equatable {
         sweepVerdictPending: Bool? = nil,
         sweepWelcomesOwed: Bool? = nil,
         welcomeMailboxesB64: [String]? = nil,
+        answerRequesterKeyB64: String? = nil,
+        answerRequestMessageId: Int64? = nil,
         acked: Bool = false,
         commitMessageId: Int64? = nil,
         secondMessageId: Int64? = nil
@@ -178,6 +191,8 @@ public struct PendingCommitEntry: Codable, Equatable {
         self.sweepVerdictPending = sweepVerdictPending
         self.sweepWelcomesOwed = sweepWelcomesOwed
         self.welcomeMailboxesB64 = welcomeMailboxesB64
+        self.answerRequesterKeyB64 = answerRequesterKeyB64
+        self.answerRequestMessageId = answerRequestMessageId
         self.acked = acked
         self.commitMessageId = commitMessageId
         self.secondMessageId = secondMessageId

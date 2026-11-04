@@ -101,12 +101,24 @@ final class DeviceLinkTests: XCTestCase {
 
     private let handle = Data(repeating: 0x5C, count: 32)
 
-    private func pairingPayload(handle: Data? = nil) throws -> Data {
+    private func pairingPayload(handle: Data? = nil, card: Data? = nil) throws -> Data {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x6D, count: 32))
         return try buildPairingQr(
             loginHandle: handle ?? self.handle,
             keyPackage: identity.createKeyPackage(),
-            rendezvousPseudonym: Data(repeating: 0x7E, count: 32))
+            rendezvousPseudonym: Data(repeating: 0x7E, count: 32),
+            deviceCardEnvelope: card)
+    }
+
+    /// A limit built with `enforced: false` (debug builds) allows every
+    /// answer; a default one stops at the fifth.
+    func testAnUnenforcedLimitAllowsEveryAnswer() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "dl-off-\(UUID().uuidString)"))
+        let off = DeviceLinkAnswerLimit(defaults: defaults, enforced: false)
+        let on = DeviceLinkAnswerLimit(defaults: defaults)
+        for _ in 0..<(DeviceLinkAnswerLimit.maxAnswers + 3) { off.record() }
+        XCTAssertTrue(off.canAnswer())
+        XCTAssertFalse(on.canAnswer())
     }
 
     private func limit() throws -> DeviceLinkAnswerLimit {
@@ -118,7 +130,11 @@ final class DeviceLinkTests: XCTestCase {
         var payloads: [Data] = []
         /// Whether the pairing reports the keys as handed over.
         var keysSent = true
+        /// Whether the pairing throws (a failure on this side).
+        var fails = false
     }
+
+    private struct PairingFailed: Error {}
 
     /// The fresh-auth side, scripted (UX 17.4).
     private final class FakeProof {
@@ -158,7 +174,11 @@ final class DeviceLinkTests: XCTestCase {
             checkPayload: { payload, handle in
                 _ = try PairingCodec.parsePairingQrPayload(wireBytes: payload, expectedLoginHandle: handle)
             },
-            runPairing: { paired.payloads.append($0); return paired.keysSent },
+            runPairing: {
+                paired.payloads.append($0)
+                if paired.fails { throw PairingFailed() }
+                return paired.keysSent
+            },
             limit: limit,
             proof: proof.ports))
     }
@@ -203,8 +223,76 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertTrue(trusted, "accepted AND the old device's confirmation verified")
         XCTAssertEqual(new.phase, .confirmed)
         XCTAssertEqual(paired.payloads, [payload], "the old device pairs the new device's payload")
-        XCTAssertNil(old.modal)
+        XCTAssertNil(old.modal, "UX 2.1: the prompt simply closes, no result line")
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// UX section 2.1 (decided 2026-10-29) — on the six-digit code route the
+    /// "Is this you?" prompt simply closes once the device was added with
+    /// its keys: no "added" line and no OK button, even when the payload
+    /// carries a card naming the device. The payload (with its card) still
+    /// reaches the pairing, which stores the card for the new leaf.
+    func testTheCodeRoutePromptClosesOnSuccess() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let card = FfiDeviceCard(
+            updatedAtMs: 1, lastActiveMs: 1, platform: .web, model: "Chrome on macOS",
+            appVersion: "web", os: "macOS 26", city: "Almere", country: "NL")
+        let payload = try pairingPayload(card: try composeDeviceCardEnvelope(card: card))
+        let new = joiner(server, payload: payload)
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown after the 200") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+
+        XCTAssertNil(old.modal, "the prompt closed; nothing waits for an OK")
+        XCTAssertEqual(paired.payloads, [payload], "the payload with its card reaches the pairing")
+        XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// UX section 2.1 — the code route builds its payload when the code is
+    /// typed, so a city that arrived after the screen opened is in the card
+    /// the other device reads.
+    func testTheCodeRouteBuildsItsPayloadWhenTheCodeIsTyped() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let card = FfiDeviceCard(
+            updatedAtMs: 1, lastActiveMs: 1, platform: .ios, model: "iPhone 16 Pro",
+            appVersion: "1.0", os: "iOS 26", city: "Almere", country: "NL")
+        let payload = try pairingPayload(card: try composeDeviceCardEnvelope(card: card))
+        var built = 0
+        let new = DeviceLinkJoin(
+            ports: .init(relay: server, sleep: { _ in await Task.yield() }),
+            handle: handle,
+            pairingPayloadAtSeal: { @MainActor in
+                built += 1
+                return payload
+            })
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown after the 200") }
+        while new.phase != .enterCode { await Task.yield() }
+        XCTAssertEqual(built, 0, "nothing is built before the code is typed")
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+
+        XCTAssertEqual(built, 1)
+        XCTAssertEqual(paired.payloads, [payload])
+        XCTAssertNil(old.modal)
     }
 
     /// The old device added the new one but could not hand over the keys (it
@@ -232,6 +320,59 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(DeviceLinkModalCopy.keysNotSent, Localization.text("device_link.keys_not_sent"))
         old.dismiss()
         XCTAssertNil(old.modal)
+    }
+
+    /// Run one exchange with the old device's budget one short of full, and
+    /// say whether one more answer is allowed afterwards.
+    private func budgetAfterExchange(
+        paired: Paired, typeWrongCode: Bool = false, until: @escaping (DeviceLinkResponderFlow) -> Bool
+    ) async throws -> Bool {
+        let server = FakeDeviceLinkServer()
+        let limit = try limit()
+        for _ in 0..<(DeviceLinkAnswerLimit.maxAnswers - 1) { limit.record() }
+        let old = responder(server, limit: limit, paired: paired)
+        let new = joiner(server, payload: try pairingPayload())
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else {
+            XCTFail("no code")
+            return false
+        }
+        XCTAssertFalse(limit.canAnswer(), "the answer is counted when the code is shown")
+        while new.phase != .enterCode { await Task.yield() }
+        let typed = typeWrongCode
+            ? String(shown.filter(\.isNumber).map { $0 == "9" ? "0" : "9" })
+            : shown
+        let submit = Task { await new.submit(code: typed) }
+        await runOldDevice(old) { until(old) }
+        submit.cancel()
+        start.cancel()
+        return limit.canAnswer()
+    }
+
+    /// A right code whose pairing then failed on this side is not a guess:
+    /// the answer is given back.
+    func testAFailedPairingGivesTheAnswerBack() async throws {
+        let paired = Paired()
+        paired.fails = true
+        let canAnswer = try await budgetAfterExchange(paired: paired) { $0.modal == .failed }
+        XCTAssertTrue(canAnswer)
+    }
+
+    func testKeysNotHandedOverGiveTheAnswerBack() async throws {
+        let paired = Paired()
+        paired.keysSent = false
+        let canAnswer = try await budgetAfterExchange(paired: paired) { $0.modal == .keysNotSent }
+        XCTAssertTrue(canAnswer)
+    }
+
+    func testAWrongCodeKeepsTheAnswerCounted() async throws {
+        let canAnswer = try await budgetAfterExchange(paired: Paired(), typeWrongCode: true) {
+            $0.modal == .wrongCode
+        }
+        XCTAssertFalse(canAnswer)
     }
 
     func testAWrongCodePairsNothingOnEitherSide() async throws {

@@ -5,9 +5,11 @@ package me.lakko.app.search
 
 import android.content.Context
 import java.util.Base64
+import kotlinx.coroutines.flow.StateFlow
 import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.PendingContact
 import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.l10n.UiText
@@ -43,6 +45,9 @@ public class PeopleSearchService(
         }
     }
 
+    /** The people added through their invite link who have not answered yet. */
+    public val invited: StateFlow<List<PendingContact>> get() = contacts.invited
+
     /** This account's key hex, `null` without a reach session. */
     public fun ownKeyHex(): String? = reach().ownAccountKey()?.let(::searchHex)
 
@@ -50,10 +55,15 @@ public class PeopleSearchService(
      *  requests sent from rows), shared by the Chats and the Contacts field. */
     public val memory: PeopleSearchMemory = PeopleSearchMemory()
 
+    /** The contact state a row reads: who the outgoing list holds, who
+     *  became a contact. */
+    public val contactsState: kotlinx.coroutines.flow.StateFlow<me.lakko.app.contacts.ContactsState>
+        get() = contacts.state
+
     /**
-     * UX section 6.1 — whether the field asks the network for [bare] (the
-     * text with a leading `@` dropped): from the core's minimum length, and
-     * only when the text could be a username or carries a name term.
+     * UX section 6.1 — whether the field may ask the network for [bare] (the
+     * text with a leading `@` dropped): only when it could be a username or
+     * carries a name term. [NETWORK_SEARCH_MIN_CHARS] is the session's.
      */
     public fun asksNetwork(bare: String): Boolean = try {
         val normalised = uniffi.lakko_ffi_uniffi.normalizeNameForSearch(bare)
@@ -78,7 +88,20 @@ public class PeopleSearchService(
         asks = ::asksNetwork,
         search = ::search,
         send = ::send,
+        reachCheck = { keyB64, wire -> reachCheckWith(Base64.getDecoder().decode(keyB64), wire) },
+        dismissSent = ::dismissSentTo,
     )
+
+    /** Contacts > Sent > Dismiss for this person, by key or by account id. */
+    private fun dismissSentTo(person: PersonResult) {
+        val sent = contacts.state.value.sent.filter { request ->
+            request.recipientKeyB64 == person.keyB64 ||
+                person.accountIdHex?.let { hex ->
+                    runCatching { searchHex(Base64.getDecoder().decode(request.recipientAccountIdB64)) }.getOrNull() == hex
+                } == true
+        }
+        sent.forEach(contacts::dismissSentRequest)
+    }
 
     /** The address book: account key base64 -> account id hex (or `null`). */
     private fun contactKeys(): Map<String, String?> =
@@ -94,11 +117,6 @@ public class PeopleSearchService(
         val verified = resolved.verifiedUsername
         // Named by a rename or a profile name (not only by a username).
         val named = !resolved.isPlaceholder && (verified == null || resolved.primary != "@$verified")
-        val keyBytes = try {
-            Base64.getDecoder().decode(keyB64)
-        } catch (_: IllegalArgumentException) {
-            ByteArray(0)
-        }
         // Only a rename or a profile name is a held name. A contact without
         // one keeps a fallback (their fingerprint, or their username), which
         // a name the person published beats in the search; anyone else is
@@ -109,18 +127,19 @@ public class PeopleSearchService(
             resolved.isPlaceholder -> resolved.fingerprint
             else -> resolved.primary
         }
-        val kept = try {
-            reach().bestHeldGrantWire(keyBytes)?.let { Base64.getEncoder().encodeToString(it) }
-        } catch (_: Throwable) {
-            null
-        }
         return KnownPerson(
             name = name,
             verifiedUsername = verified,
             isContact = isContact,
-            keptGrantWireB64 = kept,
             fallbackName = fallback,
         )
+    }
+
+    /** Every grant kept for a person, each once, in the order they are tried. */
+    private fun keptGrantWires(key: ByteArray): List<String> = try {
+        reach().heldGrantWiresInOrder(key).map { Base64.getEncoder().encodeToString(it) }.distinct()
+    } catch (_: Throwable) {
+        emptyList()
     }
 
     /**
@@ -137,11 +156,12 @@ public class PeopleSearchService(
             if (keys[keyB64] == null) keys[keyB64] = profile.accountIdHex
         }
         return keys.mapNotNull { (keyB64, accountIdHex) ->
-            val keyHex = try {
-                searchHex(Base64.getDecoder().decode(keyB64))
+            val key = try {
+                Base64.getDecoder().decode(keyB64)
             } catch (_: IllegalArgumentException) {
                 return@mapNotNull null
             }
+            val keyHex = searchHex(key)
             val k = known(keyB64, book)
             LocalCandidate(
                 keyB64 = keyB64,
@@ -152,20 +172,28 @@ public class PeopleSearchService(
                 verifiedUsername = k.verifiedUsername,
                 isContact = k.isContact,
                 accountIdHex = accountIdHex,
-                keptGrantWireB64 = k.keptGrantWireB64,
+                keptGrantWiresB64 = keptGrantWires(key),
             )
         }
     }
 
-    /** The local half, as the person types. */
-    public fun local(query: String): List<PersonResult> =
-        localPeople(localCandidates(), query, normalize, ownKeyHex())
+    /** The local half, as the person types: [candidates] with what the
+     *  Delivery Service said about their kept grants ([checks]), matched. */
+    public fun local(
+        query: String,
+        candidates: List<LocalCandidate>,
+        checks: Map<String, KeptGrantCheck>,
+    ): List<PersonResult> = localPeople(withKeptGrantChecks(candidates, checks), query, normalize, ownKeyHex())
 
     /** The network half. Never throws (a cancellation is let through). */
     public suspend fun search(query: String): PeopleSearchOutcome =
         DiscoveryClient().use { discovery -> searchPeople(query, deps(discovery)) }
 
+    private val usernameLookupKeys = KeptUsernameLookupKeys()
+
     private fun deps(discovery: DiscoveryClient): PeopleSearchDeps = object : PeopleSearchDeps {
+        private var recordsHeld = 0
+
         override fun canonicalUsername(typed: String): String? = canonicalUsernameOf(typed)
 
         override fun queryTerm(query: String): String? = try {
@@ -184,6 +212,9 @@ public class PeopleSearchService(
 
         override suspend fun usernameOprf(username: String): OprfResult = discovery.oprfUsername(username)
 
+        override suspend fun usernameLookupKey(username: String): ByteArray =
+            usernameLookupKeys.get(username) { discovery.oprfUsername(it).lookupKey }
+
         override suspend fun accountOfUsernameLookupKey(lookupKey: ByteArray): LookupHit? =
             discovery.lookupPublic(lookupKey)?.let { LookupHit(it.accountId, it.publicRecord) }
 
@@ -194,7 +225,10 @@ public class PeopleSearchService(
 
         override fun openPublicRecord(record: ByteArray, oprfOutput: ByteArray): OpenedPublicRecord? = try {
             uniffi.lakko_ffi_uniffi.openPublicRecord(record, oprfOutput)?.let {
-                OpenedPublicRecord(it.identityPk, it.accountId, it.displayName, it.mailboxBinding)
+                OpenedPublicRecord(
+                    it.identityPk, it.accountId, it.displayName, it.mailboxBinding,
+                    it.username, it.usernameCertificate,
+                )
             }
         } catch (_: Throwable) {
             null
@@ -217,6 +251,7 @@ public class PeopleSearchService(
                 offeredRecords = reach.offeredIntroductionRecordsHex().mapNotNull { me.lakko.app.reach.reachUnhex(it) },
                 core = FfiIntroductionCore,
             )
+            recordsHeld = records.size
             return openMatchingIntroductions(records, probes, FfiIntroductionCore)
         }
 
@@ -241,6 +276,15 @@ public class PeopleSearchService(
             if (me.lakko.app.anon.isAnonTokenQuotaExhausted(error)) LegOutcome.ALLOWANCE_USED else LegOutcome.FAILED
 
         override val ownKeyHex: String? = this@PeopleSearchService.ownKeyHex()
+
+        override fun noteSearch(counts: SearchCounts) {
+            android.util.Log.i(
+                "LakkoSearch",
+                "people search: records held=$recordsHeld opened=${counts.recordsOpened} " +
+                    "matched=${counts.keptAfterMatch} reach refused=${counts.refusedByReachCheck} " +
+                    "people=${counts.people} ${reach().storedCounts()}",
+            )
+        }
     }
 
     /** The supersession proof each served bundle carried, by the key it
@@ -314,11 +358,13 @@ public class PeopleSearchService(
      *  introduction (UX section 6.1). Never throws (a cancellation is let
      *  through). */
     public suspend fun send(person: PersonResult): SendOutcome =
-        sendFoundRequest(person, ByteArray(0), sendDeps(person.username))
+        sendFoundRequest(person, ByteArray(0), sendDeps(person.username, person.name))
 
-    private fun sendDeps(shownUsername: String?): SendDeps = object : SendDeps {
+    private fun sendDeps(shownUsername: String?, shownName: String): SendDeps = object : SendDeps {
         override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean =
             reachCheckWith(identityPk, grantWireB64)
+
+        override fun heldGrantWires(identityPk: ByteArray): List<String> = keptGrantWires(identityPk)
 
         override fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean =
             this@PeopleSearchService.isProvenPredecessor(foundKey, publishedKey)
@@ -334,6 +380,7 @@ public class PeopleSearchService(
                 introMessage = intro,
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
                 mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
+                shownName = shownName,
             )
         }
 
@@ -353,6 +400,7 @@ public class PeopleSearchService(
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
                 shownUsername = shownUsername,
                 mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
+                shownName = shownName,
             )
         }
 
@@ -363,6 +411,10 @@ public class PeopleSearchService(
 
         override fun errorMessage(error: Throwable): UiText {
             return contactsErrorText(error, "contacts.error.send", AllowanceKind.LOOKUP)
+        }
+
+        override fun noteRefusal(reason: String) {
+            android.util.Log.w("LakkoSearch", "contact request refused: $reason")
         }
     }
 

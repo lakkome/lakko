@@ -206,4 +206,26 @@ class CallTranscriptRowTest {
         assertTrue(spoken, spoken.contains("1 second"))
         assertTrue(spoken, !spoken.contains("1 seconds"))
     }
+
+    @Test
+    fun `a call answered here that never connected reads failed, not missed`() {
+        val outcome = callOutcome(
+            incoming = true,
+            answered = true,
+            declinedHere = false,
+            declinedByPeer = false,
+            connected = false,
+        )
+        assertEquals(CallOutcome.FAILED, outcome)
+        assertEquals("Call failed", callRowText(CallTranscriptEntry(outcome, video = true), EnglishForTests.strings))
+        // Never answered is still missed, and an outgoing call says which way it went.
+        assertEquals(
+            CallOutcome.MISSED,
+            callOutcome(incoming = true, answered = false, declinedHere = false, declinedByPeer = false, connected = false),
+        )
+        assertEquals(
+            CallOutcome.OUTGOING,
+            callOutcome(incoming = false, answered = true, declinedHere = false, declinedByPeer = false, connected = false),
+        )
+    }
 }

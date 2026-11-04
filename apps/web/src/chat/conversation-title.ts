@@ -15,10 +15,13 @@
  * was created, then the shared group name, then a title built from the
  * members - never an id.
  *
- * Pure: every lookup it needs arrives as a parameter, so it can be run by a
- * test (vitest has no jsdom and no Solid transform here) and so neither
- * screen's context leaks into the rule.
+ * Pure apart from the catalog word for an unnamed member: every lookup it
+ * needs arrives as a parameter, so it can be run by a test (vitest has no
+ * jsdom and no Solid transform here) and so neither screen's context leaks
+ * into the rule.
  */
+import { isUnnamedGroupLabel } from "./group-title";
+import { UNNAMED_MEMBER } from "../profile/member-label";
 
 /** What the caller must be able to answer about the conversation. */
 export interface ConversationTitleInput {
@@ -40,6 +43,9 @@ export interface ConversationTitleInput {
   readonly nameOf: (personKeyB64: string) => string;
   /** Build a group title from its name and its members' names. */
   readonly groupTitle: (name: string, memberNames: readonly string[]) => string;
+  /** ADR-0087 UX 4.3 — the group's `@name`: the title when there is no name
+   *  and no member to describe it by (a solo group with no name). */
+  readonly handle?: string | null | undefined;
 }
 
 /**
@@ -68,10 +74,22 @@ export function conversationTitle(input: ConversationTitleInput): string {
   ) {
     return input.contactNameByMember;
   }
-  return input.groupTitle(
-    input.sharedName ?? input.fallbackLabel,
-    peers.map(input.nameOf),
-  );
+  // A member this device cannot name is left out of a group title rather
+  // than shown as "Member" (docs/ux/client-redesign.md section 5.1, the iOS
+  // rule): "Anna, Ivan" reads as a group, "Anna, Member, Member" does not.
+  const unnamed = UNNAMED_MEMBER();
+  const names = peers.map(input.nameOf).filter((n) => n.length > 0 && n !== unnamed);
+  const label = input.sharedName ?? input.fallbackLabel;
+  // UX 4.3 — name, then the member-derived title, then `@name`.
+  if (
+    !isOneToOne &&
+    nonEmpty(input.handle ?? undefined) &&
+    names.length === 0 &&
+    isUnnamedGroupLabel(label)
+  ) {
+    return `@${input.handle as string}`;
+  }
+  return input.groupTitle(label, names);
 }
 
 function nonEmpty(text: string | undefined): text is string {

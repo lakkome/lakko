@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -70,11 +71,49 @@ public object DeviceCardCenter {
     @Volatile private var prefs: SharedPreferences? = null
     @Volatile private var sender: (suspend (ByteArray) -> Unit)? = null
     @Volatile private var growthJob: Job? = null
+
+    /** The account this device has just joined the DeviceGroup of (from a
+     *  pairing Welcome) and not yet sent its own card to; sent at once when
+     *  the center is bound for it ([noteJoined]). In memory: a restart in
+     *  between leaves the card to the person's next action. */
+    @Volatile private var joinedOwed: String? = null
     private val deciding = AtomicBoolean(false)
+    private val sending = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Whether the app is showing; set by `MainActivity`. */
+    /**
+     * The stored own card is owed to the account's other devices: its send
+     * failed, or a growth re-send came due while the app was not showing.
+     * Persisted, so a restart keeps it owed. Sent on the next DeviceGroup
+     * poll pass or the next time the app shows, whichever comes first, and
+     * only while the app is showing (never from the background).
+     */
+    @Volatile private var owed: Boolean = false
+
+    /** Whether the app is showing; set by `MainActivity`. Becoming shown
+     *  sends an owed own card. */
     @Volatile public var foreground: Boolean = false
+        set(value) {
+            val was = field
+            field = value
+            if (value && !was) sendOwedIfAny()
+        }
+
+    /** The own card's envelope; the native composer, replaceable in a test
+     *  (the JVM suite has no native library). */
+    @Volatile public var composeEnvelope: (StoredDeviceCard) -> ByteArray? = { card ->
+        runCatching { uniffi.lakko_ffi_uniffi.composeDeviceCardEnvelope(toFfi(card)) }.getOrNull()
+    }
+
+    /** One plain-text log line; no identifier beyond a platform word. Never
+     *  throws (a host test has no `android.util.Log`). */
+    private fun log(message: String) {
+        try {
+            Log.i(TAG, message)
+        } catch (_: Throwable) {
+            // no log in a host test
+        }
+    }
 
     /** Whether the anti-censorship connection is armed (then no city is
      *  asked for: the device's address is Lakko's relay). Replaceable in a
@@ -115,6 +154,8 @@ public object DeviceCardCenter {
         city = p.getString(DeviceCards.cityKey(accountIdB64), null)
             ?.let { runCatching { json.decodeFromString(CityAnswer.serializer(), it) }.getOrNull() }
         mutableShowCity.value = p.getBoolean(DeviceCards.showCityKey(accountIdB64), true)
+        owed = own != null && p.getBoolean(DeviceCards.owedKey(accountIdB64), false)
+        if (joinedOwed == accountIdB64) sendJoined(accountIdB64)
     }
 
     @Synchronized
@@ -124,10 +165,16 @@ public object DeviceCardCenter {
         sender = null
         city = null
         own = null
+        owed = false
         growthJob?.cancel()
         growthJob = null
         mutableCards.value = emptyMap()
         mutableShowCity.value = true
+    }
+
+    /** Forget a just-joined card still waiting for the bind (tests). */
+    internal fun resetJoined() {
+        joinedOwed = null
     }
 
     /** This device's own last card. */
@@ -176,14 +223,7 @@ public object DeviceCardCenter {
             try {
                 if (due) {
                     val answer = locate()
-                    if (answer != null && accountIdB64 == bound) {
-                        val fresh = CityAnswer(answer.first, answer.second, nowMs)
-                        city = fresh
-                        prefs?.let { p ->
-                            val row = json.encodeToString(CityAnswer.serializer(), fresh)
-                            AccountStoreGate.write(bound) { p.edit().putString(DeviceCards.cityKey(bound), row).apply() }
-                        }
-                    }
+                    if (answer != null && accountIdB64 == bound) storeCity(bound, answer, nowMs)
                 }
                 if (accountIdB64 != bound) return@launch
                 val fields = currentFields(nowMs)
@@ -211,23 +251,232 @@ public object DeviceCardCenter {
     /** The own card's envelope, stamps verbatim; `null` before the first. */
     public fun ownEnvelope(): ByteArray? {
         val card = own ?: return null
-        return runCatching { uniffi.lakko_ffi_uniffi.composeDeviceCardEnvelope(toFfi(card)) }.getOrNull()
+        return composeEnvelope(card)
     }
 
+    /** Whether the stored own card is owed (visible for tests). */
+    public fun isOwed(): Boolean = owed
+
+    private fun setOwed(account: String, value: Boolean) {
+        owed = value
+        val p = prefs ?: return
+        AccountStoreGate.write(account) { p.edit().putBoolean(DeviceCards.owedKey(account), value).apply() }
+    }
+
+    /** Send the stored own card. A failure keeps it owed. */
     private suspend fun sendOwn() {
+        val bound = accountIdB64 ?: return
         val envelope = ownEnvelope() ?: return
         val send = sender ?: return
         try {
             send(envelope)
+            if (accountIdB64 == bound) setOwed(bound, false)
+            log("own device card sent (android)")
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            if (accountIdB64 == bound) setOwed(bound, true)
             throw cancellation
         } catch (cause: Throwable) {
-            Log.w(TAG, "own device card not sent (${cause.javaClass.simpleName})")
+            if (accountIdB64 == bound) setOwed(bound, true)
+            log("own device card not sent, kept owed (${cause.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * Send the own card when it is owed and the app is showing. Called on
+     * every DeviceGroup poll pass and when the app comes to the foreground;
+     * one send at a time.
+     */
+    public fun sendOwedIfAny() {
+        val bound = accountIdB64 ?: return
+        if (!owed || !foreground || own == null) return
+        if (!sending.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                if (accountIdB64 == bound && owed && foreground) sendOwn()
+            } finally {
+                sending.set(false)
+            }
+        }
+    }
+
+    /**
+     * This device's own add commit just landed (a local pairing): send the
+     * stored own card at once on the post-add handle, so the new device
+     * learns this one without waiting for the growth timer.
+     */
+    public fun sendHandOver() {
+        val bound = accountIdB64 ?: return
+        if (own == null) return
+        if (!sending.compareAndSet(false, true)) {
+            setOwed(bound, true)
+            return
+        }
+        scope.launch {
+            try {
+                if (accountIdB64 == bound) sendOwn()
+            } finally {
+                sending.set(false)
+            }
+        }
+    }
+
+    /**
+     * The card this device puts into a pairing payload it shows as a code or
+     * seals for the code route (UX second-device.md section 2.1): its current
+     * fields with [place] as the city ([PairingPlace.settled]; `null` = no
+     * place), kept out exactly as for its own card (the switch, the
+     * anti-censorship connection). `null` when it cannot be composed: the
+     * payload then carries no card, and the pairing goes on.
+     */
+    public fun pairingCardEnvelope(
+        place: Pair<String, String>?,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ByteArray? = try {
+        val allowed = place != null && mutableShowCity.value && !antiCensorshipArmed()
+        val fields = currentFields(nowMs).copy(
+            city = if (allowed) place?.first.orEmpty() else "",
+            country = if (allowed) place?.second.orEmpty() else "",
+        )
+        composeEnvelope(fields)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** How long a code waits for the city before it is shown (UX
+     *  second-device.md section 2.1). Chosen, not measured. */
+    public const val PAIRING_PLACE_WAIT_MS: Long = 1_500L
+
+    /**
+     * The city for ONE pairing (UX second-device.md section 2.1, "The place
+     * in the payload card"). Started when the screen that shows a code or
+     * takes the six-digit code opens; [settled] waits for the answer until
+     * [PAIRING_PLACE_WAIT_MS] after that moment at most, then returns what
+     * has arrived, else a bound account's cached city, else `null` (no
+     * place). With no account bound the answer is held here only, for this
+     * pairing.
+     */
+    public class PairingPlace internal constructor(
+        private val deadlineMs: Long,
+        private val clock: () -> Long,
+        initial: Pair<String, String>?,
+    ) {
+        @Volatile internal var answer: Pair<String, String>? = initial
+        @Volatile internal var job: Job? = null
+
+        /** Whether this pairing asked the locate route. */
+        public val requested: Boolean get() = job != null
+
+        /** The answer, waiting no later than the bound from the start. The
+         *  QR route calls it before building the code (and never again);
+         *  the code route when it seals, long after the bound in practice. */
+        public suspend fun settled(): Pair<String, String>? {
+            val running = job
+            if (running != null && !running.isCompleted) {
+                val remaining = deadlineMs - clock()
+                if (remaining > 0) withTimeoutOrNull(remaining) { running.join() }
+            }
+            return answer
+        }
+
+        /** The screen closed: stop asking. */
+        public fun cancel() {
+            job?.cancel()
+        }
+    }
+
+    /**
+     * Start the city for one pairing (see [PairingPlace]). Asks nothing with
+     * the anti-censorship connection armed or the switch off (a device with
+     * no account bound has the default, on); a bound account whose cached
+     * city is fresh uses it and asks nothing; otherwise one locate request,
+     * whose answer a bound account keeps with its city cache.
+     */
+    public fun startPairingPlace(
+        scope: CoroutineScope = this.scope,
+        clock: () -> Long = System::currentTimeMillis,
+    ): PairingPlace {
+        val startedAtMs = clock()
+        val deadline = startedAtMs + PAIRING_PLACE_WAIT_MS
+        if (!mutableShowCity.value || antiCensorshipArmed()) return PairingPlace(deadline, clock, null)
+        val bound = accountIdB64
+        if (bound != null && !cityDue(startedAtMs)) {
+            return PairingPlace(deadline, clock, city?.let { it.city to it.country })
+        }
+        // A bound account's stale cached city is what its own card already
+        // states: it stands until a fresh answer replaces it, so no answer
+        // by the bound still gives that place. With nothing cached, no
+        // answer by the bound gives no place.
+        val cached = if (bound != null) city?.let { it.city to it.country } else null
+        val place = PairingPlace(deadline, clock, cached)
+        place.job = scope.launch {
+            val answer = try {
+                locate()
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                null
+            } ?: return@launch
+            place.answer = answer
+            if (bound != null && accountIdB64 == bound) storeCity(bound, answer, startedAtMs)
+        }
+        return place
+    }
+
+    private fun storeCity(bound: String, answer: Pair<String, String>, nowMs: Long) {
+        val fresh = CityAnswer(answer.first, answer.second, nowMs)
+        city = fresh
+        prefs?.let { p ->
+            val row = json.encodeToString(CityAnswer.serializer(), fresh)
+            AccountStoreGate.write(bound) { p.edit().putString(DeviceCards.cityKey(bound), row).apply() }
+        }
+    }
+
+    /**
+     * This device let in the device whose leaf key is [keyHex] for
+     * [forAccountB64], and the scanned (or code-route) payload carried [card]:
+     * keep it as that device's card until its own arrives (the
+     * [DeviceCards.pairingCard] rule). A card already stored for that leaf
+     * stays.
+     */
+    @Synchronized
+    public fun storePairingCard(forAccountB64: String, keyHex: String, card: StoredDeviceCard?) {
+        val account = accountIdB64 ?: return
+        if (account != forAccountB64) return
+        val next = DeviceCards.pairingCard(mutableCards.value, keyHex, card) ?: return
+        mutableCards.value = next
+        persist(account)
+        log("device card stored from the pairing payload (${card?.platform?.name?.lowercase() ?: "none"})")
+    }
+
+    /**
+     * This device has just joined [joinedAccountB64]'s DeviceGroup from a
+     * pairing Welcome (code scanned or code route): it sends its own card at
+     * once, not after the person's next action or a growth wait (the person
+     * is looking at it). When the center is not yet bound for that account,
+     * the send happens when it is.
+     */
+    public fun noteJoined(joinedAccountB64: String) {
+        joinedOwed = joinedAccountB64
+        if (accountIdB64 == joinedAccountB64) sendJoined(joinedAccountB64)
+    }
+
+    /** Whether a just-joined card is still waiting for the bind (tests). */
+    public fun isJoinedOwed(): Boolean = joinedOwed != null
+
+    private fun sendJoined(account: String) {
+        joinedOwed = null
+        scope.launch {
+            if (accountIdB64 != account) return@launch
+            own = currentFields(System.currentTimeMillis())
+            persist(account)
+            sendOwn()
         }
     }
 
     /** The DeviceGroup grew: re-send the stored own card, unchanged, after up
-     *  to 30 s (the ADR-0058 discipline), so the new device learns this one. */
+     *  to 300 ms (the ADR-0058 discipline), so the new device learns this one.
+     *  When the wait ends while the app is not showing, the re-send stays
+     *  owed and goes out at the next foreground. */
     @Synchronized
     public fun scheduleResend(random: Double = kotlin.random.Random.nextDouble()) {
         val bound = accountIdB64 ?: return
@@ -235,7 +484,13 @@ public object DeviceCardCenter {
         val wait = DeviceCards.growthDelayMs(random)
         growthJob = scope.launch {
             delay(wait)
-            if (accountIdB64 == bound && foreground) sendOwn()
+            if (accountIdB64 != bound) return@launch
+            if (foreground) {
+                sendOwn()
+            } else {
+                setOwed(bound, true)
+                log("device card re-send owed until the app is shown")
+            }
         }
     }
 
@@ -244,9 +499,20 @@ public object DeviceCardCenter {
     @Synchronized
     public fun receive(senderKeyHex: String, card: StoredDeviceCard, rosterKeysHex: Collection<String>) {
         val account = accountIdB64 ?: return
-        val next = DeviceCards.receive(mutableCards.value, senderKeyHex, card, rosterKeysHex) ?: return
+        val word = card.platform.name.lowercase()
+        val next = DeviceCards.receive(mutableCards.value, senderKeyHex, card, rosterKeysHex)
+        if (next == null) {
+            log("device card received and refused ($word)")
+            return
+        }
         mutableCards.value = next
         persist(account)
+        log("device card received and stored ($word)")
+    }
+
+    /** A card arrived that could not be bound to a device of the roster. */
+    public fun noteRefused(reason: String) {
+        log("device card received and refused ($reason)")
     }
 
     /** The roster changed: drop cards of leaves that left. */
@@ -264,6 +530,7 @@ public object DeviceCardCenter {
             .remove(DeviceCards.cardsKey(accountIdB64))
             .remove(DeviceCards.cityKey(accountIdB64))
             .remove(DeviceCards.showCityKey(accountIdB64))
+            .remove(DeviceCards.owedKey(accountIdB64))
             .commit()
     }
 

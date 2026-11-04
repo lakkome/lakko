@@ -6,8 +6,9 @@
  * sections 3, 4, 8 and 9).
  *
  * `WhoCanFindMeSection` is the screen: one choice of three, two switches under
- * Some people, one choice of two under the second switch, and a disclosure
- * into the list. `WhoCanFindMeList` is the list of section 4. Every tap runs
+ * Some people, one choice of two under each switch, and a disclosure into each
+ * list. `WhoCanFindMeList` is the list of section 4 and
+ * `WhoCanFindMeContactsList` the one of section 4.1. Every tap runs
  * a `lakko_ui_rules` transition (`visibility-actions.ts`); what is on screen
  * for a setting, and the copy, is `who-can-find-me.ts`. Nothing here decides
  * a rule.
@@ -23,11 +24,14 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
+import { accountIdsHexOf } from "./contact-visibility";
+import { useFindableContacts } from "./findable-contacts";
 import { useFindableScopes } from "./findable-scopes";
 import * as actions from "./visibility-actions";
 import {
   chosenCount,
   chosenKeysOf,
+  contactList,
   contactsOfContactsHelper,
   COPY,
   groupsHelper,
@@ -38,6 +42,7 @@ import {
   statusLine,
   viewOf,
   visibleRows,
+  type ContactEntry,
   type FormName,
   type ModeName,
   type ScopeEntry,
@@ -71,6 +76,14 @@ function useChosenKeys(): () => Set<string> {
     } finally {
       for (const c of chosen) c.free();
     }
+  });
+}
+
+/** The account ids of the chosen contacts, as hex. */
+function useChosenContacts(): () => Set<string> {
+  return createMemo(() => {
+    const s = visibilitySetting();
+    return new Set(s === null ? [] : accountIdsHexOf(s.chosenContacts));
   });
 }
 
@@ -139,11 +152,15 @@ export function WhoCanFindMeSection(): JSX.Element {
   const view = useView();
   const chosenKeys = useChosenKeys();
   const scopes = useFindableScopes();
+  const chosenContacts = useChosenContacts();
+  const contacts = useFindableContacts();
 
   const chosenAmongScopes = (): number => {
     const keys = chosenKeys();
     return chosenCount(scopes(), (e) => keys.has(e.key));
   };
+  const chosenAmongContacts = (): number =>
+    contacts().filter((c) => chosenContacts().has(c.accountIdHex)).length;
 
   function onContactsOfContacts(on: boolean): void {
     run(async () => {
@@ -160,6 +177,16 @@ export function WhoCanFindMeSection(): JSX.Element {
       const next = await actions.setGroupsForm(form);
       if (next !== null && form === "chosen" && opensListOnChoose(before)) {
         navigate(paths.settingsSection("privacy-groups"));
+      }
+    });
+  }
+
+  function onContactsForm(form: FormName): void {
+    const before = chosenAmongContacts();
+    run(async () => {
+      const next = await actions.setContactsForm(form);
+      if (next !== null && form === "chosen" && opensListOnChoose(before)) {
+        navigate(paths.settingsSection("privacy-contacts"));
       }
     });
   }
@@ -186,10 +213,51 @@ export function WhoCanFindMeSection(): JSX.Element {
                       <span class="lk-card-row-body">
                         <span class="lk-card-row-title">{COPY.contactsOfContacts()}</span>
                         <span class="lk-card-row-sub">
-                          {contactsOfContactsHelper(v().contactsOfContacts, cocSpreading())}
+                          {contactsOfContactsHelper(v(), chosenAmongContacts(), contacts().length, cocSpreading())}
                         </span>
                       </span>
                     </label>
+                    <Show when={rows().contactsForm}>
+                      <div
+                        class="lk-privacy-nested"
+                        role="radiogroup"
+                        aria-label={COPY.contactsOfContacts()}
+                      >
+                        <label class="lk-card-row lk-privacy-choice">
+                          <input
+                            type="radio"
+                            name="lk-visibility-contacts-form"
+                            checked={v().contactsForm === "all"}
+                            onChange={() => onContactsForm("all")}
+                          />
+                          <span class="lk-card-row-body">
+                            <span class="lk-card-row-title">{COPY.contactsAll()}</span>
+                          </span>
+                        </label>
+                        <div class="lk-card-row lk-privacy-choice">
+                          <label class="lk-privacy-choice-label">
+                            <input
+                              type="radio"
+                              name="lk-visibility-contacts-form"
+                              checked={v().contactsForm === "chosen"}
+                              onChange={() => onContactsForm("chosen")}
+                            />
+                            <span class="lk-card-row-body">
+                              <span class="lk-card-row-title">{COPY.contactsChosen()}</span>
+                            </span>
+                          </label>
+                          <Show when={rows().contactsDisclosure}>
+                            <A
+                              href={paths.settingsSection("privacy-contacts")}
+                              class="lk-card-row-action lk-privacy-disclosure"
+                              aria-label={COPY.contactsChosen()}
+                            >
+                              <Icon name="chevron" size={18} />
+                            </A>
+                          </Show>
+                        </div>
+                      </div>
+                    </Show>
                     <label class="lk-card-row lk-privacy-choice">
                       <input
                         type="checkbox"
@@ -309,7 +377,7 @@ export function WhoCanFindMeList(): JSX.Element {
       </A>
       <div class="lk-page-head">
         <h1>{COPY.chosen()}</h1>
-        <p>{groupsHelper({ mode: "some", contactsOfContacts: false, groups: "chosen" }, chosenCount(scopes(), isOn), scopes().length)}</p>
+        <p>{groupsHelper({ groups: "chosen" }, chosenCount(scopes(), isOn), scopes().length)}</p>
       </div>
       <Show
         when={scopes().length > 0}
@@ -341,6 +409,81 @@ export function WhoCanFindMeList(): JSX.Element {
         </Show>
         <Show when={list().groups.length === 0 && list().channels.length === 0}>
           <p class="lk-muted">{COPY.listNoMatch()}</p>
+        </Show>
+      </Show>
+    </>
+  );
+}
+
+/** One row of the list of contacts: avatar, name, switch. */
+function ContactRow(props: { readonly entry: ContactEntry; readonly on: boolean }): JSX.Element {
+  return (
+    <div class="lk-card-row">
+      <Avatar label={props.entry.name} id={props.entry.keyB64} personKey={props.entry.keyB64} size="md" />
+      <div class="lk-card-row-body">
+        <span class="lk-card-row-title">{props.entry.name}</span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={props.on}
+        aria-label={props.entry.name}
+        class="lk-card-row-action"
+        classList={{ primary: props.on }}
+        onClick={() => run(() => actions.setContactChosen(props.entry.accountIdHex, !props.on))}
+      >
+        {props.on ? t("common.on") : t("common.off")}
+      </button>
+    </div>
+  );
+}
+
+/** The list of contacts (UX section 4.1). */
+export function WhoCanFindMeContactsList(): JSX.Element {
+  const chosen = useChosenContacts();
+  const contacts = useFindableContacts();
+  const [query, setQuery] = createSignal("");
+  const list = createMemo(() => contactList(contacts(), query()));
+  const isOn = (e: ContactEntry): boolean => chosen().has(e.accountIdHex);
+
+  return (
+    <>
+      <A
+        href={paths.settingsSection("privacy")}
+        class="ghost small lk-wide-only"
+        style={{ "align-self": "flex-start" }}
+      >
+        <Icon name="back" size={16} />
+        {COPY.title()}
+      </A>
+      <div class="lk-page-head">
+        <h1>{COPY.contactsChosen()}</h1>
+        <p>
+          {contactsOfContactsHelper(
+            { contactsOfContacts: true, contactsForm: "chosen" },
+            contacts().filter(isOn).length,
+            contacts().length,
+            false,
+          )}
+        </p>
+      </div>
+      <Show when={contacts().length > 0} fallback={<p class="lk-muted">{COPY.contactsListEmpty()}</p>}>
+        <Show when={showsListSearch(contacts().length)}>
+          <label class="lk-search" style={{ margin: "0" }}>
+            <Icon name="search" size={16} />
+            <input
+              type="search"
+              placeholder={COPY.contactsListSearch()}
+              aria-label={COPY.contactsListSearch()}
+              value={query()}
+              onInput={(e) => setQuery(e.currentTarget.value)}
+            />
+          </label>
+        </Show>
+        <Show when={list().length > 0} fallback={<p class="lk-muted">{COPY.listNoMatch()}</p>}>
+          <section class="lk-card" aria-label={COPY.contactsChosen()}>
+            <For each={list()}>{(e) => <ContactRow entry={e} on={isOn(e)} />}</For>
+          </section>
         </Show>
       </Show>
     </>

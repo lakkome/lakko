@@ -25,6 +25,12 @@
 //!   the operator's obfuscated transports; the dialer never adds a plaintext /
 //!   direct-QUIC fallback the signed config did not list.
 //!
+//! - Every transport dials the address its signed spec names. REALITY and
+//!   Shadowsocks-2022 take the `Endpoint` they are handed, so the dialer pins
+//!   each of them to its signed `remote`: the endpoint a caller passes is the
+//!   server it wants to reach, usually the blocked one, and the obfuscated
+//!   listener lives elsewhere.
+//!
 //! # Scope (ADR-0025)
 //!
 //! This is the transport-layer wiring only. Routing a client's HTTP stack
@@ -39,7 +45,10 @@ use std::time::{Duration, SystemTime};
 use lakko_crypto::signing::VerifyingKey;
 use thiserror::Error;
 
+use async_trait::async_trait;
+
 use crate::endpoint::Endpoint;
+use crate::error::{Error, Result as TransportResult};
 use crate::masque::MasqueTransport;
 use crate::pluggable::{
     HappyEyeballs, PluggableCandidate, PluggableError, PluggableKind, PluggableTransport,
@@ -47,7 +56,7 @@ use crate::pluggable::{
 use crate::reality::RealityTransport;
 use crate::rendezvous::{BootstrapConfig, RendezvousError, TransportSpec};
 use crate::shadowsocks::ShadowsocksTransport;
-use crate::transport::Connection;
+use crate::transport::{Connection, Transport};
 use crate::webtransport_pt::WebTransportPt;
 
 /// Failure modes of the bootstrap dialer.
@@ -120,6 +129,9 @@ impl BootstrapDialer {
     /// Race the candidates and return the first to connect, or a fail-closed
     /// error. The candidate ORDER is the config's transport order.
     ///
+    /// Each candidate dials the address in its signed spec, so `endpoint` does
+    /// not choose where a tunnel goes.
+    ///
     /// # Errors
     ///
     /// [`SelectorError::Dial`] if every candidate fails within `deadline`.
@@ -141,6 +153,37 @@ impl BootstrapDialer {
     }
 }
 
+/// A transport that dials its signed address whatever endpoint it is handed.
+struct AtSignedRemote<T> {
+    inner: T,
+    remote: Endpoint,
+}
+
+#[async_trait]
+impl<T: Transport> Transport for AtSignedRemote<T> {
+    async fn connect(&self, _endpoint: &Endpoint) -> TransportResult<Box<dyn Connection>> {
+        self.inner.connect(&self.remote).await
+    }
+}
+
+/// Parse a spec's `host:port`. An IP literal needs no resolver, which is the
+/// point of signing one: a censor's DNS has no say in it.
+fn parse_remote(remote: &str) -> TransportResult<Endpoint> {
+    if let Ok(addr) = remote.parse() {
+        return Ok(Endpoint::Direct(addr));
+    }
+    let bad = || Error::Config("transport remote is not host:port".to_owned());
+    let (host, port) = remote.rsplit_once(':').ok_or_else(bad)?;
+    if host.is_empty() || host.contains(':') {
+        return Err(bad());
+    }
+    let port = port.parse().map_err(|_| bad())?;
+    Ok(Endpoint::Hostname {
+        host: host.to_owned(),
+        port,
+    })
+}
+
 /// Map each [`TransportSpec`] to its `Transport`, skipping any whose config is
 /// rejected (logged at `warn`, kind only — never the secret-bearing spec). The
 /// caller treats an empty result as fail-closed.
@@ -150,13 +193,25 @@ fn build_candidates(config: &BootstrapConfig) -> Vec<PluggableCandidate> {
         let (kind, built) = match spec {
             TransportSpec::Reality(cfg) => (
                 PluggableKind::Reality,
-                RealityTransport::new(cfg.clone())
-                    .map(|t| PluggableCandidate::new(PluggableKind::Reality, t)),
+                parse_remote(&cfg.remote).and_then(|remote| {
+                    RealityTransport::new(cfg.clone()).map(|inner| {
+                        PluggableCandidate::new(
+                            PluggableKind::Reality,
+                            AtSignedRemote { inner, remote },
+                        )
+                    })
+                }),
             ),
             TransportSpec::Shadowsocks2022(cfg) => (
                 PluggableKind::Shadowsocks2022,
-                ShadowsocksTransport::new(cfg.clone())
-                    .map(|t| PluggableCandidate::new(PluggableKind::Shadowsocks2022, t)),
+                parse_remote(&cfg.remote).and_then(|remote| {
+                    ShadowsocksTransport::new(cfg.clone()).map(|inner| {
+                        PluggableCandidate::new(
+                            PluggableKind::Shadowsocks2022,
+                            AtSignedRemote { inner, remote },
+                        )
+                    })
+                }),
             ),
             TransportSpec::WebTransport(cfg) => (
                 PluggableKind::WebTransport,
@@ -295,5 +350,61 @@ mod tests {
             BootstrapDialer::from_signed_config(&cfg, &signer.verifying_key(), SystemTime::now())
                 .expect("verifies + builds");
         assert_eq!(dialer.candidate_kinds(), vec![PluggableKind::Reality]);
+    }
+    #[test]
+    fn a_remote_parses_as_an_address_or_a_name() {
+        assert!(matches!(
+            parse_remote("1.2.3.4:443"),
+            Ok(Endpoint::Direct(_))
+        ));
+        assert!(matches!(parse_remote("[::1]:443"), Ok(Endpoint::Direct(_))));
+        match parse_remote("edge.example:8443") {
+            Ok(Endpoint::Hostname { host, port }) => {
+                assert_eq!(host, "edge.example");
+                assert_eq!(port, 8443);
+            },
+            other => panic!("expected a hostname, got {other:?}"),
+        }
+        for bad in ["", "edge.example", ":443", "edge.example:port", "::1:443"] {
+            assert!(parse_remote(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_spec_whose_remote_is_not_an_address_is_skipped() {
+        let cfg = config_with(vec![
+            TransportSpec::Reality(RealityConfig {
+                remote: "no-port".into(),
+                ..valid_reality()
+            }),
+            TransportSpec::Reality(valid_reality()),
+        ]);
+        let dialer = BootstrapDialer::from_verified_config(&cfg).expect("one candidate survives");
+        assert_eq!(dialer.candidate_kinds(), vec![PluggableKind::Reality]);
+    }
+
+    /// The bug this pins: the two TCP transports used to dial whatever the
+    /// caller named (the API host, blocked or not) and never read `remote`.
+    #[tokio::test]
+    async fn a_tcp_transport_dials_its_signed_remote_not_the_callers_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+        let cfg = config_with(vec![TransportSpec::Reality(RealityConfig {
+            remote: bound.to_string(),
+            ..valid_reality()
+        })]);
+        let dialer = BootstrapDialer::from_verified_config(&cfg).unwrap();
+        let reached = tokio::spawn(async move { listener.accept().await.is_ok() });
+
+        // Port 1 on loopback accepts nothing: a dial that honoured the
+        // endpoint would never reach the listener.
+        let elsewhere = Endpoint::direct("127.0.0.1:1".parse().unwrap());
+        let _ = dialer.dial(&elsewhere, Duration::from_secs(2)).await;
+
+        let reached = tokio::time::timeout(Duration::from_secs(2), reached)
+            .await
+            .expect("the signed remote got a connection")
+            .unwrap();
+        assert!(reached);
     }
 }

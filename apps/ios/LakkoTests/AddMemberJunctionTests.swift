@@ -308,7 +308,7 @@ final class AddMemberJunctionTests: XCTestCase {
         XCTAssertFalse(lineage.contains("fetchKeyPackages("))
 
         // ...and every path that adds another person calls it.
-        for signature in ["public func startGroupWith(", "public func addMemberToGroup(", "func repairResetMember("] {
+        for signature in ["private func foundGroup(", "public func addMemberToGroup(", "func repairResetMember("] {
             XCTAssertTrue(
                 try body(of: signature, in: repository).contains("expectedPersonDevices("),
                 "\(signature) adds devices that did not pass the filter")

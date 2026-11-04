@@ -35,6 +35,11 @@ public class ComposerCarry {
     public fun textOf(conversationHex: String): String? = texts[conversationHex.lowercase()]
 
     /** The session ended. */
+    /** Forget one conversation (ADR-0087 section 9). */
+    public fun forget(conversationHex: String) {
+        texts.remove(conversationHex.lowercase())
+    }
+
     public fun clear() {
         texts.clear()
     }

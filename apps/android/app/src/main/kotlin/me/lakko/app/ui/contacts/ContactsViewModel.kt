@@ -172,6 +172,8 @@ public class ContactsViewModel(
             refreshing = repoState.refreshing,
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
+            acceptingIds = ui.acceptingIds,
+            acceptFailedIds = ui.acceptFailedIds,
         )
 
     /** Remove an accepted contact from this device (UX 5.3). Local only. */
@@ -413,56 +415,40 @@ public class ContactsViewModel(
     }
 
     /**
-     * Accept a pending request:
-     *
-     *   1. If a [chatRepo] is wired AND the request carries a
-     *      `fromAccountId` (the sender's UUIDv7 — present on
-     *      every v2 ContactRequest, absent on v1 legacy
-     *      envelopes), call
-     *      [ChatRepository.startGroupWith] to fetch the
-     *      sender's KeyPackage and ship them a Welcome.
-     *   2. Move the row from `pending → accepted`, stashing the
-     *      resulting `groupIdHex` (or `null` if the bridge is
-     *      unwired / the chat handshake failed).
-     *
-     * Failures during the chat handshake fall through to the
-     * "move row to accepted with `groupIdHex = null`" branch —
-     * the user still sees the Accept confirmed in their UI; the
-     * sender just won't get the Welcome (Phase-1 trade-off the
-     * UI surfaces as "chat creation failed, retry"). A future
-     * sprint can add an explicit retry affordance.
+     * Accept a pending request ([ContactsRepository.acceptRequest]). A failure
+     * is never swallowed: when nothing could be delivered and no group stands,
+     * the request stays listed with `contacts.request.accept_failed` and
+     * Accept works again. With no [chatRepo] wired (tests, a contacts-only
+     * configuration) Accept stays a local marker.
      */
     public fun onAcceptClicked(messageId: Long) {
         val pending = repo.state.value.pending.firstOrNull { it.messageId == messageId }
         if (pending == null) return
-
-        if (chatRepo == null || pending.fromAccountId == null) {
-            // No chat bridge wired OR v1 legacy envelope without
-            // a sender account-id — fall back to the pre-1.15f4c
-            // "purely local marker" semantics.
+        if (chatRepo == null) {
             viewModelScope.launch { sendAckBestEffort(pending) }
             repo.acceptContactRequest(messageId)
             return
         }
+        if (messageId in mutableUi.value.acceptingIds) return
+        mutableUi.update { it.copy(acceptingIds = it.acceptingIds + messageId, acceptFailedIds = it.acceptFailedIds - messageId) }
         viewModelScope.launch {
-            val groupIdHex = try {
-                chatRepo.startGroupWith(
-                    recipientAccountId = pending.fromAccountId,
-                    recipientSignaturePubkey = pending.fromPubkey,
-                    // ADR-0062 — a contact accept creates a one-to-one, fixed
-                    // in the group: it lists under Chats on every device.
-                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
-                )
+            val outcome = try {
+                repo.acceptRequest(messageId)
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
             } catch (_: Throwable) {
-                // chat handshake failed — fall back to the
-                // local-marker path. The UI surfaces the
-                // missing groupIdHex as a "chat creation
-                // failed" hint on the accepted row.
-                null
+                me.lakko.app.contacts.AcceptOutcome.FAILED
             }
-            repo.acceptContactRequest(messageId, groupIdHex = groupIdHex)
-            // AFTER the chat's Welcome, never before it: see [sendAckBestEffort].
-            sendAckBestEffort(pending)
+            mutableUi.update { ui ->
+                ui.copy(
+                    acceptingIds = ui.acceptingIds - messageId,
+                    acceptFailedIds = if (outcome == me.lakko.app.contacts.AcceptOutcome.FAILED) {
+                        ui.acceptFailedIds + messageId
+                    } else {
+                        ui.acceptFailedIds - messageId
+                    },
+                )
+            }
         }
     }
 
@@ -483,12 +469,18 @@ public class ContactsViewModel(
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            // best-effort
+            android.util.Log.w("LakkoContacts", "accept: ack not sent")
         }
     }
 
     public fun onDeclineClicked(messageId: Long) {
+        mutableUi.update { it.copy(acceptFailedIds = it.acceptFailedIds - messageId) }
         repo.declineContactRequest(messageId)
+    }
+
+    /** **Dismiss** on a row of Contacts > Sent. */
+    public fun onDismissSentClicked(request: me.lakko.app.contacts.SentContactRequest) {
+        repo.dismissSentRequest(request)
     }
 
     /** Set (or clear, when blank) the user-chosen display name for an
@@ -507,6 +499,10 @@ public class ContactsViewModel(
      *  state. Persistent contacts data lives
      *  in the repository. */
     private data class UiSlice(
+        /** The requests whose Accept is running. */
+        val acceptingIds: Set<Long> = emptySet(),
+        /** The requests whose last Accept failed with nothing standing. */
+        val acceptFailedIds: Set<Long> = emptySet(),
         val generatingInvite: Boolean = false,
         val inviteError: UiText? = null,
         /** A notice on the Invite links sheet (`invite.links.deleted`). */
@@ -552,6 +548,10 @@ public data class ContactsUiState(
     val refreshing: Boolean,
     val refreshError: me.lakko.app.contacts.InboxError?,
     val requiresReauth: Boolean,
+    /** The requests whose Accept is running (the row's buttons are off). */
+    val acceptingIds: Set<Long> = emptySet(),
+    /** The requests whose last Accept failed: the row says so. */
+    val acceptFailedIds: Set<Long> = emptySet(),
 )
 
 // =============================================================================

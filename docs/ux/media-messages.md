@@ -270,11 +270,8 @@ the model the previous app used. Two things change from it:
   Recipients only ever fetch the encrypted blob from Lakko storage — they never contact
   GIPHY or the proxy.
 
-**What the Lakko server learns is stated in the UI once:** the first time the GIF tab is
-opened, a one-line note above the grid reads
-`GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.`
-with a dismiss **Got it** (remembered per device). This is the honest cost of the
-feature and the user sees it before searching.
+The Lakko server sees what is searched for. The picker shows no note about it
+(maintainer decision, 2026-10-28).
 
 ### GIF tab
 
@@ -312,7 +309,7 @@ start.
 
 | Situation | UI |
 |---|---|
-| Not yet asked | The system prompt (native) / browser prompt (web). Recording starts only once granted; the hold that triggered the prompt does not record |
+| Not yet asked | The system prompt (native) / browser prompt (web). Recording starts only once granted; the hold that triggered the prompt does not record. A grant that arrives while the pointer is still down records whatever the browser reported: nobody answers a prompt while holding the button |
 | Denied | An inline card above the composer: `Lakko needs microphone access to record voice messages` (or camera) with **Open Settings** on iOS/Android; on web, `Allow microphone access in your browser's site settings` |
 | Revoked while recording | Recording stops, the take is discarded, the denied card shows |
 | In a call | Mic and camera buttons are disabled with `Unavailable during a call` — the call owns the audio session and the camera |

@@ -43,9 +43,9 @@ public struct ConversationListRow: Identifiable, Equatable {
     public let title: String
     /// The last message or post, already flattened to one line.
     public let preview: String
-    /// When the last thing a person can SEE happened, in unix milliseconds, or
-    /// `nil` for a conversation nothing has happened in yet. A row that draws
-    /// nothing does not move a conversation to the top.
+    /// When the last thing a person can SEE happened, in unix milliseconds: the
+    /// last message, else the moment this device created or joined the
+    /// conversation (``GroupArrival``). `nil` when neither is known.
     public let lastActivityMs: Int64?
     public let unread: Int
     public let pinned: Bool
@@ -62,6 +62,12 @@ public struct ConversationListRow: Identifiable, Equatable {
     /// row's circle can show their profile photo. `nil` for a group or a
     /// channel (their avatars are not profile photos).
     public let personKey: Data?
+    /// ADR-0087 section 18 — the group whose photo the row's circle shows
+    /// (`nil` for a one-to-one or a channel).
+    public let photoGroupIdHex: String?
+    /// Reactions-and-emoji spec section 12 — others reacted to this person's
+    /// messages and those messages have not been on screen since.
+    public let hasUnseenReactions: Bool
 
     public init(
         id: String,
@@ -75,9 +81,13 @@ public struct ConversationListRow: Identifiable, Equatable {
         archived: Bool = false,
         endedLine: String? = nil,
         markedUnread: Bool = false,
-        personKey: Data? = nil
+        personKey: Data? = nil,
+        photoGroupIdHex: String? = nil,
+        hasUnseenReactions: Bool = false
     ) {
         self.personKey = personKey
+        self.photoGroupIdHex = photoGroupIdHex
+        self.hasUnseenReactions = hasUnseenReactions
         self.id = id
         self.kind = kind
         self.title = title

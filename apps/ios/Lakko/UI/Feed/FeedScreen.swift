@@ -9,7 +9,7 @@ import UIKit
 /// `routes/Feed.tsx`.
 ///
 /// What is here: the feed switcher (presets, saved feeds, New feed), Edit and
-/// Share on a saved feed, the one-time device banner, the items with their
+/// Share on a saved feed, the items with their source avatar, media bubbles,
 /// reactions and folded replies, opening an item in its chat or channel, the
 /// "Show N new" pill and pull to refresh, and the empty, loading and caught-up
 /// states. An item fully on screen for two seconds counts as seen.
@@ -51,7 +51,22 @@ struct FeedScreen: View {
     @State private var moreMenuOpen = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0047 — the chat's media runtime, for what an item carries: the same
+    /// downloads, the same files, one thing playing with sound. Nothing is
+    /// recorded or sent from here.
+    @StateObject private var media = ChatMediaController(port: ChatMediaController.playbackOnlyPort)
+    @EnvironmentObject private var callHost: CallHost
+    @EnvironmentObject private var groupCallHost: GroupCallHost
     private static let topId = "feed-top"
+
+    /// ADR-0047 §6 — a call owns the audio session, here as in a chat
+    /// (``ChatViewModel/callOwnsCapture``).
+    private var callOwnsCapture: Bool {
+        CallCapture.ownsCapture(
+            callIsLive: callHost.occupiesSlot || callHost.otherCallBusy || groupCallHost.occupiesSlot,
+            oneToOneState: callHost.activeCallState,
+            otherKindInSlot: callHost.otherCallBusy || groupCallHost.occupiesSlot)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -118,8 +133,16 @@ struct FeedScreen: View {
             model.start()
             model.discover.onOpen = { card in onOpenFoundChannel(card.channelIdHex, card.handle) }
             model.discover.onOpenChannel = { onOpenChannel($0) }
+            media.reloadPlayed()
+            media.callActive = callOwnsCapture
         }
-        .onDisappear { model.stop() }
+        .onChange(of: callOwnsCapture) { _, live in media.callActive = live }
+        .onDisappear {
+            model.stop()
+            media.chatHidden()
+        }
+        .environmentObject(media)
+        .environmentObject(media.live)
     }
 
     private func beginNew() {
@@ -218,13 +241,13 @@ struct FeedScreen: View {
                         if model.selection == .discover {
                             DiscoverView(model: model.discover)
                         } else {
-                            if !model.bannerDismissed && model.candidateCount > 0 {
-                                banner
-                            }
                             content(viewportHeight: outer.size.height)
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .environment(\.mediaColumnWidth, FeedLayout.columnWidth(viewport: outer.size.width))
+                    .frame(maxWidth: FeedLayout.maxContentWidth)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, FeedLayout.listPadding)
                     .padding(.bottom, 24)
                 }
                 .coordinateSpace(name: Self.scrollSpace)
@@ -304,20 +327,6 @@ struct FeedScreen: View {
                 .onChange(of: y >= -Self.topSlack) { _, atTop in model.nearTop = atTop }
         }
         .frame(height: 0)
-    }
-
-    private var banner: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle")
-                .foregroundStyle(Color.lakkoTextMuted)
-            Text(l10n.t("feed.banner.local"))
-                .font(.subheadline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button(l10n.t("feed.banner.dismiss")) { model.dismissBanner() }
-                .font(.subheadline)
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurfaceSunken))
     }
 
     @ViewBuilder
@@ -431,10 +440,37 @@ struct FeedScreen: View {
     private func timeText(_ message: FeedMessage) -> String {
         guard let ms = message.timeMs else { return "" }
         return ChatListFormatting.lastMessageTime(
-            ms: ms, nowMs: model.nowMs, calendar: .current, locale: .current)
+            ms: ms, nowMs: model.nowMs, calendar: .current, locale: l10n.locale)
     }
 
     private func itemView(_ item: RankedFeedItem, viewportHeight: CGFloat) -> some View {
+        let ref = item.ref
+        return HStack(alignment: .top, spacing: FeedLayout.avatarGap) {
+            // The circle of this conversation's row in Chats: the same
+            // component, the same name and the same conversation id, so one
+            // conversation has one colour on both screens.
+            InitialsAvatar(name: ref.source.title, identity: ref.source.key, size: FeedLayout.avatarSize)
+                .accessibilityHidden(true)
+            itemColumn(item, viewportHeight: viewportHeight)
+        }
+        .padding(FeedLayout.cardPadding)
+        .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
+        .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
+        .contentShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        // One menu for the whole card, the expanded replies included: a long
+        // press on a reply opens its parent's menu. Lakko's own menu, never
+        // the system context menu.
+        .lakkoLongPressMenu { menuItems(ref) }
+        .modifier(SeenWatcher(
+            enabled: model.wantsSeen(ref),
+            viewportHeight: viewportHeight,
+            onSeen: { model.markSeen(ref) }))
+    }
+
+    /// Everything beside the source avatar, in the order of UX spec section 3.
+    /// The first row and the text open the conversation; the media, the
+    /// replies and the rest keep their own actions.
+    private func itemColumn(_ item: RankedFeedItem, viewportHeight: CGFloat) -> some View {
         let ref = item.ref
         return VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -449,12 +485,13 @@ struct FeedScreen: View {
                         Text(timeText(ref.message))
                             .font(.caption)
                             .foregroundStyle(Color.lakkoTextMuted)
+                            .fixedSize()
                     }
                     // A channel speaks as itself: its name is already the source.
                     if ref.source.kind == .group {
                         HStack(spacing: 6) {
                             InitialsAvatar(
-                                name: model.author(ref), identity: ref.message.authorKeyB64, size: 18,
+                                name: model.authorAvatarName(ref), identity: ref.message.authorKeyB64, size: 18,
                                 photo: model.authorPhoto(ref))
                             Text(model.author(ref))
                                 .font(.caption.weight(.medium))
@@ -466,24 +503,26 @@ struct FeedScreen: View {
                             .font(.caption)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    (Text(FeedCopy.body(ref.message))
-                        + Text(ref.message.edited ? " " + l10n.t("chat.message.edited") : "")
-                        .foregroundColor(Color.lakkoTextMuted))
-                        .font(.body)
-                        .foregroundStyle(Color.lakkoText)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(8)
-                    if let why = FeedCopy.whyLine(ref, preset: model.whyPreset) {
-                        Text(why)
-                            .font(.caption)
-                            .foregroundStyle(Color.lakkoAccent)
-                    }
+                    itemText(ref.message)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
+            let mediaRefs = FeedCopy.mediaRefs(ref.message)
+            if !mediaRefs.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(mediaRefs.enumerated()), id: \.offset) { _, attachment in
+                        FeedMediaBubble(ref: attachment, incoming: ref.message.direction != .outgoing)
+                    }
+                }
+            }
+            if let why = FeedCopy.whyLine(ref, preset: model.whyPreset) {
+                Text(why)
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoAccent)
+            }
             let reactions = FeedModel.reactionSummary(ref.message)
             if !reactions.isEmpty {
                 HStack(spacing: 6) {
@@ -502,18 +541,23 @@ struct FeedScreen: View {
                 replies(item, viewportHeight: viewportHeight)
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
-        .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
-        .contentShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-        // One menu for the whole card, the expanded replies included: a long
-        // press on a reply opens its parent's menu. Lakko's own menu, never
-        // the system context menu.
-        .lakkoLongPressMenu { menuItems(ref) }
-        .modifier(SeenWatcher(
-            enabled: model.wantsSeen(ref),
-            viewportHeight: viewportHeight,
-            onSeen: { model.markSeen(ref) }))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The item's text, up to eight lines. A media-only message has none: its
+    /// bubble says it.
+    @ViewBuilder
+    private func itemText(_ message: FeedMessage) -> some View {
+        let text = FeedCopy.itemBody(message)
+        if !text.isEmpty || message.edited {
+            (Text(text)
+                + Text(message.edited ? (text.isEmpty ? "" : " ") + l10n.t("chat.message.edited") : "")
+                .foregroundColor(Color.lakkoTextMuted))
+                .font(.body)
+                .foregroundStyle(Color.lakkoText)
+                .multilineTextAlignment(.leading)
+                .lineLimit(8)
+        }
     }
 
     @ViewBuilder
@@ -546,7 +590,7 @@ struct FeedScreen: View {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
                                 InitialsAvatar(
-                                    name: model.author(reply), identity: reply.message.authorKeyB64, size: 18,
+                                    name: model.authorAvatarName(reply), identity: reply.message.authorKeyB64, size: 18,
                                     photo: model.authorPhoto(reply))
                                 Text(model.author(reply))
                                     .font(.caption.weight(.medium))
@@ -567,6 +611,39 @@ struct FeedScreen: View {
                 }
             }
             .padding(.leading, 12)
+        }
+    }
+}
+
+/// One attachment of a feed item: the chat's own bubble, playing in place. The
+/// chat draws a voice message inside the message bubble, whose fill its colours
+/// are made for, so here it brings that fill along; the other kinds stand on
+/// their own in the chat too.
+struct FeedMediaBubble: View {
+    let ref: AttachmentRef
+    let incoming: Bool
+
+    private static let voiceHorizontalPadding: CGFloat = 12
+
+    @Environment(\.mediaColumnWidth) private var columnWidth
+
+    var body: some View {
+        let bubble = InlineMedia.decision(for: ref).bubble
+        let attachment = MediaAttachmentView(
+            ref: ref,
+            bubble: bubble,
+            mediaKey: ChatMediaController.key(for: ref),
+            incoming: incoming)
+        if bubble == .voice {
+            attachment
+                .environment(\.mediaColumnWidth, columnWidth.map { $0 - 2 * Self.voiceHorizontalPadding })
+                .padding(.vertical, 8)
+                .padding(.horizontal, Self.voiceHorizontalPadding)
+                .background(incoming ? Color.lakkoSurfaceSunken : Color.lakkoAccent)
+                .foregroundStyle(incoming ? Color.lakkoText : Color.lakkoAccentForeground)
+                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+        } else {
+            attachment
         }
     }
 }

@@ -105,6 +105,7 @@ use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncom
 pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;
+pub mod conversation_envelopes;
 pub mod device_card;
 pub mod ds_proof;
 pub mod group_closed;
@@ -204,6 +205,9 @@ impl From<lakko_mls::Error> for FfiError {
             // match is exhaustive, so the arm is written rather than
             // wildcarded, and it keeps the sentence.
             lakko_mls::Error::MembershipRefused { detail, .. } => Self::Group(detail),
+            // Join and delete are not on this surface either (C-59: this
+            // process persists nothing), so this cannot arise here.
+            e @ lakko_mls::Error::GroupStillActive { .. } => Self::Group(e.to_string()),
             // ADR-0058 DeviceGroup folder payloads are never parsed here;
             // the arm exists because the match is exhaustive.
             lakko_mls::Error::PayloadBounds(e) => Self::Codec(e.to_string()),

@@ -98,12 +98,24 @@ public fun memberDerivedTitle(names: List<String>, strings: Strings = Localizati
     }
 }
 
-/** One- or two-letter initials for an avatar. */
+/**
+ * The shared initials rule (design-system.md, Avatar; `lakko_ui_rules`), the
+ * one every client draws: Android keeps no initials logic of its own. [rule]
+ * is a seam so host JVM tests, which cannot load the native core, can stand
+ * a function in.
+ */
+public object AvatarInitials {
+    @Volatile
+    public var rule: (String) -> String = { uniffi.lakko_ffi_uniffi.avatarInitials(it) }
+}
+
+/** The letters an avatar without a photo draws for [name]; the placeholder
+ *  "?" when the rule finds none (or the core cannot be reached). */
 public fun initialsOf(name: String): String {
-    val words = name.trim().trimStart('@').split(Regex("\\s+")).filter { it.isNotEmpty() }
-    if (words.isEmpty()) return "?"
-    val first = words[0].first()
-    val second = words.getOrNull(1)?.first()
-    val s = if (second != null) "$first$second" else first.toString()
-    return s.uppercase()
+    val letters = try {
+        AvatarInitials.rule(name)
+    } catch (_: Throwable) {
+        ""
+    }
+    return letters.ifEmpty { "?" }
 }

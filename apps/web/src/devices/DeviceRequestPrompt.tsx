@@ -30,6 +30,8 @@ import { noteDeviceLetIn } from "./added-notice";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { useChats } from "../chat/ChatContext";
+import { ownKeysB64Of } from "../profile/own-key";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
@@ -63,6 +65,8 @@ export function DeviceRequestPrompt(): JSX.Element {
   const auth = useAuth();
   // ADR-0050 section 2.8 — the confirmed device is admitted to every chat.
   const receive = useBackgroundReceive();
+  // The state bundle never carries this account's own profile.
+  const chats = useChats();
   const [view, setView] = createSignal<ResponderView>({ kind: "idle" });
   // The last confirmed device was added without the keys (this device does
   // not hold the recovery phrase, or the hand-over failed).
@@ -150,7 +154,9 @@ export function DeviceRequestPrompt(): JSX.Element {
     return created;
   }
 
-  /** The unchanged add-device flow over the opened payload. */
+  /** The unchanged add-device flow over the opened payload. On success the
+   *  prompt closes with no result line (docs/ux/second-device.md section
+   *  2.1); the device's row names it from its card, stored by the flow. */
   async function pair(payload: Uint8Array): Promise<void> {
     const s = auth.state();
     const secrets = auth.identitySecrets();
@@ -175,6 +181,7 @@ export function DeviceRequestPrompt(): JSX.Element {
       accountIdBytes: base64Decode(s.account.accountId),
       accountIdB64: s.account.accountId,
       deviceKey,
+      ownKeysB64: ownKeysB64Of(chats.identity(), [chats.conversationAccountIdentity()?.signaturePublicKey]),
       ...(recovery !== undefined ? { recovery } : {}),
     });
     // Without the recovery row the new device is added to the account's
@@ -306,7 +313,8 @@ export function DeviceRequestPrompt(): JSX.Element {
           </div>
         )}
       </Show>
-      {/* After the outcome toast is dismissed, so the two never overlap. */}
+      {/* Once the prompt closed (no "added" line, docs/ux/second-device.md
+          2.1), or after a failure toast is dismissed: the two never overlap. */}
       <Show when={keysNotSent() && toast() === null && modal() === null}>
         <div class="lk-toast" role="status">
           <span>{t("device_link.keys_not_sent")}</span>

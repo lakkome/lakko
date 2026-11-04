@@ -10,24 +10,32 @@
 //!   * [`build_pairing_qr`] — fresh-device side. Bundle the
 //!     32-byte login handle of the username the person typed
 //!     (`loginHandle(username)`) + KeyPackage bytes + 32-byte
-//!     rendezvous pseudonym into the wire-format payload the
-//!     platform's QR-render library turns into pixels, or that
-//!     `POST /device/request` carries.
+//!     rendezvous pseudonym + the device's own ADR-0080 device-card
+//!     envelope (optional) into the wire-format payload the
+//!     platform's QR-render library turns into pixels, or that the
+//!     ADR-0049 code route seals.
 //!
 //!   * [`parse_pairing_qr`] — confirming side. Parse the wire
 //!     bytes, verify the embedded login handle matches the
 //!     handle of the local account's own username (constant
 //!     time), return the KeyPackage bytes + rendezvous pseudonym
 //!     for the downstream `addDeviceFromWire` + DS-mailbox PUT
-//!     flow.
+//!     flow, and the new device's card, decoded, to name it
+//!     (`docs/ux/second-device.md` section 2.1).
 //!
 //! `Record` (vs `Object` handle) for the decode result keeps
 //! the boundary cheap — both byte arrays cross as `Data` /
 //! `ByteArray` and the lifetime ends at return.
 
+use lakko_contacts::device_card::{decode_device_card, DEVICE_CARD_ENVELOPE_MAX_LEN};
 use lakko_mls::pairing as inner;
 
+use crate::device_card::FfiDeviceCard;
 use crate::FfiError;
+
+// The pairing payload's card bound is the device-card envelope bound;
+// `lakko-mls` restates it because it does not depend on `lakko-contacts`.
+const _: () = assert!(inner::PAIRING_DEVICE_CARD_MAX_LEN == DEVICE_CARD_ENVELOPE_MAX_LEN);
 
 // `From<lakko_mls::Error> for FfiError` is already defined at
 // the crate root (`lib.rs`) — no duplicate impl here.
@@ -46,21 +54,33 @@ pub struct DecodedPairingQr {
     /// peer's removal gate checks it). `None` on a pairing QR.
     #[uniffi(default = None)]
     pub self_removal_proof: Option<Vec<u8>>,
+    /// The new device's ADR-0080 device card, decoded, when the payload
+    /// carries one that decodes. `None` when absent (always on a rejoin
+    /// knock) or when the card does not decode. Display only: it is what the
+    /// new device says about itself and nothing trusts it.
+    #[uniffi(default = None)]
+    pub device_card: Option<FfiDeviceCard>,
 }
 
 /// Build the wire-format pairing payload.
 ///
+/// `device_card_envelope` is this device's own ADR-0080 device-card
+/// envelope (`composeDeviceCardEnvelope`), or `None` for none. It is carried
+/// as given for the confirming device to show.
+///
 /// # Errors
 ///
 /// * [`FfiError::Codec`] on wrong-length `login_handle` (≠ 32)
-///   / `rendezvous_pseudonym` (≠ 32).
+///   / `rendezvous_pseudonym` (≠ 32), or a `device_card_envelope` longer
+///   than the device-card envelope bound (270 bytes).
 /// * [`FfiError::Codec`] also on the (practically unreachable) inner
 ///   encode failure.
-#[uniffi::export]
+#[uniffi::export(default(device_card_envelope = None))]
 pub fn build_pairing_qr(
     login_handle: Vec<u8>,
     key_package: Vec<u8>,
     rendezvous_pseudonym: Vec<u8>,
+    device_card_envelope: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, FfiError> {
     let handle = handle_array(&login_handle, "login_handle")?;
     let rendezvous: inner::RendezvousPseudonym =
@@ -70,7 +90,12 @@ pub fn build_pairing_qr(
                 inner::RENDEZVOUS_PSEUDONYM_LEN,
             ))
         })?;
-    Ok(inner::encode(&handle, &key_package, &rendezvous)?)
+    Ok(inner::encode(
+        &handle,
+        &key_package,
+        &rendezvous,
+        device_card_envelope.as_deref().unwrap_or_default(),
+    )?)
 }
 
 /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
@@ -107,7 +132,8 @@ pub fn build_rejoin_knock(
 /// Confirming side: parse the wire bytes, verify the embedded
 /// login handle matches `expected_login_handle` (the handle of
 /// the local account's own username), return the decoded
-/// contents.
+/// contents. A device card that does not decode is reported as `None`,
+/// never as an error: it only names the device.
 ///
 /// # Errors
 ///
@@ -128,7 +154,16 @@ pub fn parse_pairing_qr(
         key_package: decoded.key_package,
         rendezvous_pseudonym: decoded.rendezvous_pseudonym.to_vec(),
         self_removal_proof: decoded.self_removal_proof,
+        device_card: decoded_card(&decoded.device_card),
     })
+}
+
+/// The card, decoded; `None` for an empty field or one that does not decode.
+fn decoded_card(envelope: &[u8]) -> Option<FfiDeviceCard> {
+    if envelope.is_empty() {
+        return None;
+    }
+    decode_device_card(envelope).ok().map(Into::into)
 }
 
 fn handle_array(bytes: &[u8], what: &str) -> Result<inner::LoginHandle, FfiError> {
@@ -144,15 +179,101 @@ mod tests {
     #[test]
     fn build_then_parse_round_trips_under_the_same_handle() {
         let handle = vec![0x11u8; 32];
-        let wire = build_pairing_qr(handle.clone(), vec![7u8; 64], vec![9u8; 32]).unwrap();
+        let wire = build_pairing_qr(handle.clone(), vec![7u8; 64], vec![9u8; 32], None).unwrap();
         let got = parse_pairing_qr(wire, handle).unwrap();
         assert_eq!(got.key_package, vec![7u8; 64]);
         assert_eq!(got.rendezvous_pseudonym, vec![9u8; 32]);
     }
 
+    fn card() -> crate::device_card::FfiDeviceCard {
+        crate::device_card::FfiDeviceCard {
+            updated_at_ms: 10,
+            last_active_ms: 9,
+            platform: crate::device_card::FfiDevicePlatform::Web,
+            model: "Chrome on macOS".to_string(),
+            app_version: "1.4".to_string(),
+            os: "macOS 26".to_string(),
+            city: "Almere".to_string(),
+            country: "NL".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_pairing_card_bound_is_the_device_card_envelope_bound() {
+        assert_eq!(
+            inner::PAIRING_DEVICE_CARD_MAX_LEN,
+            DEVICE_CARD_ENVELOPE_MAX_LEN
+        );
+    }
+
+    #[test]
+    fn a_card_crosses_the_payload_and_is_decoded_on_the_other_side() {
+        let envelope = crate::device_card::compose_device_card_envelope(card()).unwrap();
+        let wire =
+            build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32], Some(envelope)).unwrap();
+        let got = parse_pairing_qr(wire, vec![0x11; 32]).unwrap();
+        assert_eq!(got.device_card, Some(card()));
+        assert_eq!(got.self_removal_proof, None);
+    }
+
+    #[test]
+    fn no_card_and_an_undecodable_card_both_read_as_none() {
+        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32], None).unwrap();
+        assert_eq!(
+            parse_pairing_qr(wire, vec![0x11; 32]).unwrap().device_card,
+            None
+        );
+        let wire = build_pairing_qr(
+            vec![0x11; 32],
+            vec![7u8; 64],
+            vec![9u8; 32],
+            Some(b"not a device card".to_vec()),
+        )
+        .unwrap();
+        let got = parse_pairing_qr(wire, vec![0x11; 32]).unwrap();
+        assert_eq!(got.device_card, None);
+        assert_eq!(got.key_package, vec![7u8; 64]);
+    }
+
+    /// The code route seals the payload with `lakko-device-link`, which
+    /// refuses a payload above its `MAX_PAYLOAD_LEN`: a real bound device
+    /// KeyPackage plus a card at its bound must still fit.
+    #[test]
+    fn a_payload_with_a_maximal_card_fits_the_code_route() {
+        let mut device = lakko_mls::Identity::from_seed(&[0x31; 64]).unwrap();
+        device.bind_to_account(&[0x42; 32], 1_700_000_000).unwrap();
+        let kp = lakko_mls::key_package::serialize(&device.create_key_package().unwrap()).unwrap();
+        let wire = build_pairing_qr(
+            vec![0x11; 32],
+            kp,
+            vec![9u8; 32],
+            Some(vec![0x6c; DEVICE_CARD_ENVELOPE_MAX_LEN]),
+        )
+        .unwrap();
+        assert!(
+            wire.len() <= lakko_device_link::MAX_PAYLOAD_LEN,
+            "payload {} > {}",
+            wire.len(),
+            lakko_device_link::MAX_PAYLOAD_LEN
+        );
+    }
+
+    #[test]
+    fn an_over_long_card_is_refused_at_build() {
+        assert!(matches!(
+            build_pairing_qr(
+                vec![0x11; 32],
+                vec![7u8; 64],
+                vec![9u8; 32],
+                Some(vec![0u8; DEVICE_CARD_ENVELOPE_MAX_LEN + 1]),
+            ),
+            Err(FfiError::Codec(_))
+        ));
+    }
+
     #[test]
     fn parse_refuses_another_handle() {
-        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32]).unwrap();
+        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32], None).unwrap();
         assert!(matches!(
             parse_pairing_qr(wire, vec![0x12; 32]),
             Err(FfiError::Group(_))
@@ -163,16 +284,16 @@ mod tests {
     fn wrong_length_handles_are_refused_at_the_boundary() {
         // A 16-byte value (an account id, the v1 shape) is not a handle.
         assert!(matches!(
-            build_pairing_qr(vec![0x11; 16], vec![7u8; 64], vec![9u8; 32]),
+            build_pairing_qr(vec![0x11; 16], vec![7u8; 64], vec![9u8; 32], None),
             Err(FfiError::Codec(_))
         ));
-        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32]).unwrap();
+        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32], None).unwrap();
         assert!(matches!(
             parse_pairing_qr(wire, vec![0x11; 16]),
             Err(FfiError::Codec(_))
         ));
         assert!(matches!(
-            build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 31]),
+            build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 31], None),
             Err(FfiError::Codec(_))
         ));
     }

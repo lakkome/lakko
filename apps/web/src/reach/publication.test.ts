@@ -13,24 +13,38 @@ import {
   everyoneKey,
   offerKey,
   offerNeedsRebuild,
+  mayOfferTo,
   offerTargets,
   recordsDigest,
+  staleEveryoneNote,
   termsToEvaluate,
 } from "./publication-model";
 import { keepsScopedEnvelope } from "./scoped-intake";
 
 describe("the Everyone publication", () => {
-  const anna = everyoneKey("Anna", "anna", "c");
+  const anna = everyoneKey("Anna", "anna", "c", "k1");
   it("publishes on entering Everyone and whenever the name, username or certificate moved, and only then", () => {
     expect(everyoneAction(null, true, anna)).toEqual({ kind: "publish" });
     expect(everyoneAction({ public: true, key: anna }, true, anna)).toEqual({ kind: "none" });
     for (const moved of [
-      everyoneKey("Anna W", "anna", "c"),
-      everyoneKey("Anna", null, null),
-      everyoneKey("Anna", "anna", "c2"),
+      everyoneKey("Anna W", "anna", "c", "k1"),
+      everyoneKey("Anna", null, null, "k1"),
+      everyoneKey("Anna", "anna", "c2", "k1"),
+      // A rotation: a finder keeps a record only under the key the directory
+      // serves, so the one already published finds nobody.
+      everyoneKey("Anna", "anna", "c", "k2"),
     ]) {
       expect(everyoneAction({ public: true, key: anna }, true, moved)).toEqual({ kind: "publish" });
     }
+  });
+
+  it("a stale note publishes again and still withdraws what stands at discovery", () => {
+    const state = { ...EMPTY_PUBLICATION, everyone: { public: true, key: anna } };
+    const stale = staleEveryoneNote(state);
+    expect(stale.everyone).toEqual({ public: true, key: null });
+    expect(everyoneAction(stale.everyone, true, anna)).toEqual({ kind: "publish" });
+    expect(everyoneAction(stale.everyone, false, anna)).toEqual({ kind: "withdraw" });
+    expect(staleEveryoneNote(EMPTY_PUBLICATION)).toBe(EMPTY_PUBLICATION);
   });
 
   it("withdraws on leaving, and never withdraws what was never published", () => {
@@ -56,8 +70,8 @@ describe("the introduction record", () => {
       offer: { key: "k2", recordB64: "r" },
       offerSentTo: { g1: "k2", g2: "k1" },
     };
-    expect(offerTargets(state, true, ["g1", "g2", "g3"])).toEqual(["g2", "g3"]);
-    expect(offerTargets(state, false, ["g1", "g2", "g3"])).toEqual([]);
+    expect(offerTargets(state, true, ["g1", "g2", "g3"], () => true)).toEqual(["g2", "g3"]);
+    expect(offerTargets(state, false, ["g1", "g2", "g3"], () => true)).toEqual([]);
   });
 
   it("relays a bundle only where its record set was not sent", () => {
@@ -107,8 +121,46 @@ describe("which scoped envelopes a conversation keeps", () => {
   it("drops DeviceGroup-only kinds, our own and unattributed envelopes", () => {
     for (const k of ["visibility", "reach-state", "registrar-seed"] as const) {
       expect(keepsScopedEnvelope(k, base)).toBe(false);
+      expect(keepsScopedEnvelope(k, { ...base, fromSelf: true })).toBe(false);
     }
-    expect(keepsScopedEnvelope("committer-delegation", { ...base, fromSelf: true })).toBe(false);
+    expect(keepsScopedEnvelope("introduction-offer", { ...base, fromSelf: true })).toBe(false);
+    expect(keepsScopedEnvelope("introductions", { ...base, fromSelf: true })).toBe(false);
     expect(keepsScopedEnvelope("committer-delegation", { ...base, senderResolved: false })).toBe(false);
+  });
+  it("keeps a committer envelope from this account's other device", () => {
+    expect(keepsScopedEnvelope("committer-delegation", { ...base, fromSelf: true, oneToOne: false })).toBe(true);
+  });
+});
+
+describe("the offer goes only to allowed contacts (who-can-find-me 4.1)", () => {
+  const state = { ...EMPTY_PUBLICATION, offer: { key: "k1", recordB64: "r" } };
+
+  it("passes over a conversation the setting does not allow, and leaves it unsent", () => {
+    expect(offerTargets(state, true, ["g1", "g2"], (g) => g === "g2")).toEqual(["g2"]);
+    // Switched on later: the same record goes, with no new key.
+    expect(offerTargets(state, true, ["g1", "g2"], () => true)).toEqual(["g1", "g2"]);
+  });
+
+  const contacts = [
+    { keyHex: "aa", accountIdHex: "11" },
+    { keyHex: "bb", accountIdHex: null },
+  ];
+  const chosen = (hex: string | null): boolean => hex === "11";
+
+  it("asks about the contact the conversation's person is, under any of their keys", () => {
+    expect(mayOfferTo(["aa"], contacts, chosen)).toBe(true);
+    expect(mayOfferTo(["new", "aa"], contacts, chosen)).toBe(true);
+  });
+
+  it("a contact with no known account id gets none when the setting names ids", () => {
+    expect(mayOfferTo(["bb"], contacts, chosen)).toBe(false);
+  });
+
+  it("under All everyone on the list gets it, known account id or not", () => {
+    expect(mayOfferTo(["bb"], contacts, () => true)).toBe(true);
+  });
+
+  it("a person the viewer removed keeps the conversation and never the record", () => {
+    expect(mayOfferTo(["cc"], contacts, () => true)).toBe(false);
   });
 });

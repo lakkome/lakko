@@ -12,8 +12,9 @@ import Foundation
 // list lived in memory only, so a relaunch showed no pending request and a
 // re-send carried no intro.
 //
-// A row holds the recipient (account id, the name typed), the DS message id
-// and time of the last send, and the intro text. The intro is the person's
+// A row holds the recipient (account id, the name typed, and the name and key
+// a search found them under), the DS message id and time of the last send, and
+// the intro text. The intro is the person's
 // own words, so the list is kept in the Keychain
 // (`AfterFirstUnlockThisDeviceOnly`, the app's own group), not in
 // `UserDefaults`. A row is removed when the request is answered, when it can
@@ -91,6 +92,25 @@ public enum SentRequests {
         return out
     }
 
+    /// Whether the list holds a request to this person, by account key or
+    /// account id (their key may have rotated since it went out).
+    public static func holds(
+        _ sent: [SentContactRequest], accountKey: Data, accountId: Data?
+    ) -> Bool {
+        row(sent, accountKey: accountKey, accountId: accountId) != nil
+    }
+
+    /// The newest row of this person, by account key or account id.
+    public static func row(
+        _ sent: [SentContactRequest], accountKey: Data, accountId: Data?
+    ) -> SentContactRequest? {
+        let keyB64 = base64Encode(accountKey)
+        let idB64 = accountId.map { base64Encode($0) }
+        return sent.last { row in
+            row.recipientKeyB64 == keyB64 || row.recipientAccountIdB64 == idB64
+        }
+    }
+
     /// The intro a re-send to `recipientAccountIdB64` carries: the one stored
     /// with the newest row for that person, or none.
     public static func intro(for recipientAccountIdB64: String, in sent: [SentContactRequest]) -> String {
@@ -101,6 +121,51 @@ public enum SentRequests {
     /// one last.
     public static func adding(_ request: SentContactRequest, to sent: [SentContactRequest]) -> [SentContactRequest] {
         sent.filter { $0.recipientAccountIdB64 != request.recipientAccountIdB64 } + [request]
+    }
+
+    /// The row of the person holding `recipientAccountIdB64`, if any.
+    public static func row(
+        recipientAccountIdB64: String, in sent: [SentContactRequest]
+    ) -> SentContactRequest? {
+        sent.last { $0.recipientAccountIdB64 == recipientAccountIdB64 }
+    }
+
+    /// What `row` found its person under, as a claim for the key that answered
+    /// it (`docs/ux/who-can-find-me.md` section 6.1, "the name a person was
+    /// found under is theirs until their own profile arrives"), at stamp 0 so
+    /// any profile of theirs replaces it.
+    ///
+    /// `nil` unless that key is exactly the one the row found: an answer names
+    /// its account id itself, so a row matched by account id says nothing
+    /// about who signed, and a found name must not go to them. A person who
+    /// rotated between the search and the answer waits for their profile.
+    /// `nil` too for a row with no name, and for a fingerprint, which names
+    /// nobody. A name that is only `@username` is the username, not a name.
+    public static func foundClaim(_ row: SentContactRequest, signatureKey: Data) -> ProfileClaim? {
+        guard let name = row.recipientName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty,
+              row.recipientKeyB64.flatMap(base64Decode) == signatureKey,
+              name != displayFingerprint(signatureKey) else { return nil }
+        let username = row.recipientUsername.isEmpty ? nil : row.recipientUsername
+        return ProfileClaim(
+            displayName: name == username.map { "@\($0)" } ? nil : name,
+            username: username,
+            updatedAtMs: 0)
+    }
+
+    /// The list after a Welcome made a one-to-one with `peer`: without the row
+    /// of the person holding that key, under any of their keys, and that
+    /// row's account id. `keyOfAccount` is the key this device pinned for an
+    /// account it wrote to, `current` the person's current key.
+    public static func answered(
+        byPeer peer: Data, in sent: [SentContactRequest],
+        keyOfAccount: (String) -> Data?, current: (Data) -> Data
+    ) -> (remaining: [SentContactRequest], accountIdB64: String?) {
+        let person = current(peer)
+        func matches(_ row: SentContactRequest) -> Bool {
+            keyOfAccount(row.recipientAccountIdB64).map(current) == person
+        }
+        return (sent.filter { !matches($0) }, sent.first(where: matches)?.recipientAccountIdB64)
     }
 
     /// The list after the person holding `recipientAccountIdB64` answered.

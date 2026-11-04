@@ -72,7 +72,11 @@ export interface LookupRequest {
  *  404 when the username is not registered — the high-level
  *  client surfaces that as a `null` rather than an error class. */
 export interface LookupResponse {
-  account_id: string;
+  /** `"person"`, or `"handle"` for a public group or channel (ADR-0087
+   *  section 1: one namespace). Absent from an older server. */
+  kind?: "person" | "handle";
+  /** A person only: a group or channel names no account. */
+  account_id?: string;
   /** base64 of the account's public record (ADR-0060 section 5); opened with
    *  the username's OPRF `output`, never sent anywhere. */
   public_record_b64?: string;
@@ -117,6 +121,11 @@ export interface IdentityUploadRequest {
    *  stores it and deletes every KeyPackage row of the account in the same
    *  transaction. Omitted on a routine upload. */
   key_reset_attest?: string;
+  /** ADR-0074 section 3.7: standard base64 of the two-way conversation link
+   *  of an account that rotated (`signConversationLink`). Stored opaque.
+   *  Omitted on a same-key upload (the row keeps what it holds); a key change
+   *  that carries none clears it. */
+  conversation_link?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
@@ -145,6 +154,11 @@ export interface IdentityFetchResponse {
    *  PROVEN rotation it no longer binds the published key, and that path
    *  carries a supersession proof instead. */
   key_reset_attest?: string;
+  /** ADR-0074 section 3.7: standard base64 of the two-way conversation link;
+   *  absent for an account that holds none. Discovery passes it through
+   *  unparsed; a peer verifies it against the key its gate left trusted
+   *  (`contacts/conversation-link.ts`). */
+  conversation_link?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -222,6 +236,8 @@ export interface InviteFetchResponse {
   /** Standard-alphabet base64 of the stored sealed blob; opened with the
    *  link secret from the fragment (`XCapability.openLink`). */
   sealed: string;
+  /** No uses left. Served by the contact and group ledgers, not by `/c/`. */
+  used_up?: boolean;
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -296,40 +312,3 @@ export interface InviteRevokeRequest {
 //   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/channel/register`. Binds an OPRF-
- *  hashed `@channelname` to a 16-byte `channel_id` pseudonym.
- *  Same OPRF ciphersuite + wire shape as `RegisterRequest`
- *  (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf`
- *  evaluate endpoint is namespace-agnostic, so the client reuses
- *  `OprfBlinder.blind(handle)` verbatim. First-come-first-served
- *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
- *  different channel id is 409 Conflict. */
-export interface ChannelRegisterRequest {
-  /** base64(lookup key) — exactly 64 bytes,
-   *  `blinder.finalize(..).lookupKey` (ADR-0060 section 5). */
-  oprf_hash: string;
-  /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
-   *  surfaces"). */
-  channel_id: string;
-}
-
-/** Response body of `POST /discovery/channel/register`. Returns
- *  409 on collision; the type is only for the 200-OK path. */
-export interface ChannelRegisterResponse {
-  ok: boolean;
-}
-
-/** Body of `POST /discovery/channel/lookup`. Resolves an OPRF-
- *  hashed `@channelname` to its `channel_id`. */
-export interface ChannelLookupRequest {
-  /** Same shape as `ChannelRegisterRequest.oprf_hash`. */
-  oprf_hash: string;
-}
-
-/** Response body of `POST /discovery/channel/lookup`. The server
- *  returns 404 for an unknown `@channelname` — the high-level
- *  client surfaces that as a `null` rather than an error class. */
-export interface ChannelLookupResponse {
-  /** base64(channel_id) — raw 16 bytes. */
-  channel_id: string;
-}

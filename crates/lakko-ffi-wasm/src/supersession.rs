@@ -71,6 +71,45 @@ pub fn verify_supersession(
     Ok(new.to_vec())
 }
 
+/// Sign a two-way conversation link (ADR-0074 section 3.7): both keys state
+/// that the account's conversations are bound to the first and the directory
+/// publishes the second. Pass each identity's `ed25519Seed`. Returns the
+/// 201-byte link to upload with the identity bundle.
+///
+/// Throws if a seed is not 32 bytes, or the two seeds are one key.
+#[wasm_bindgen(js_name = signConversationLink)]
+pub fn sign_conversation_link(
+    conversation_ed25519_seed: &[u8],
+    current_ed25519_seed: &[u8],
+    issued_at_unix_secs: i64,
+) -> Result<Vec<u8>, JsError> {
+    let conversation = signing_key_from_seed(conversation_ed25519_seed)?;
+    let current = signing_key_from_seed(current_ed25519_seed)?;
+    lakko_transparency::ConversationLink::sign(&conversation, &current, issued_at_unix_secs)
+        .map(|link| link.to_vec())
+        .map_err(|e| JsError::new(&format!("conversation link: {e}")))
+}
+
+/// Verify a conversation link against the key the caller left pinned for the
+/// account and return the 32-byte conversation key it names, which the caller
+/// records as a proven predecessor of that pin.
+///
+/// Throws if `trustedCurrentKey` is not 32 bytes, or the link is malformed,
+/// names another current key, or either signature does not verify. A caller
+/// ignores a refused link: it changes nothing.
+#[wasm_bindgen(js_name = verifyConversationLink)]
+pub fn verify_conversation_link(
+    link: &[u8],
+    trusted_current_key: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let current: [u8; 32] = trusted_current_key
+        .try_into()
+        .map_err(|_| JsError::new("trusted current key must be 32 bytes"))?;
+    lakko_transparency::verify_conversation_link(link, &current)
+        .map(|key| key.to_vec())
+        .map_err(|e| JsError::new(&format!("conversation link: {e}")))
+}
+
 /// Sign a genesis / fresh-start KT-log leaf's account-to-key binding with the
 /// leaf's OWN identity key (G-30 #2, ADR-0019). Used for the first-ever publish
 /// and a lost-everything fresh-start mint (a new key with NO supersession

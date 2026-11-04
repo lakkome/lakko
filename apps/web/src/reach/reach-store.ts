@@ -20,6 +20,7 @@
  * tests) every read is `null` and every write a no-op: callers keep their
  * state in memory for the session.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
@@ -64,10 +65,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encrypt(key: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encrypt(key: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, key, plaintext.slice()),
+    await key.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -75,10 +76,10 @@ async function encrypt(key: CryptoKey, plaintext: Uint8Array): Promise<Uint8Arra
   return out;
 }
 
-async function decrypt(key: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decrypt(key: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("reach row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv: blob.slice(0, IV_LEN) }, key, blob.slice(IV_LEN)),
+    await key.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -87,7 +88,7 @@ export async function loadReachRow(
   accountIdB64: string,
   kind: ReachRowKind,
 ): Promise<string | null> {
-  let deviceKey: CryptoKey | null;
+  let deviceKey: DeviceCipher | null;
   try {
     deviceKey = await getDeviceKey(accountIdB64);
   } catch {

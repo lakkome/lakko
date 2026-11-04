@@ -64,7 +64,7 @@ public struct KeyRotationRecord: Codable, Equatable {
     public var newSignaturePubkey: Data?
     /// The 145-byte supersession proof (a public artefact).
     public var supersessionProof: Data?
-    /// The 177-byte attestation of `rotate/finish`. `nil` when the answer was
+    /// The 145-byte attestation of `rotate/finish`. `nil` when the answer was
     /// lost and the commit was learned by adoption: the owed steps then run
     /// without it.
     public var attestation: Data?
@@ -875,8 +875,10 @@ public final class KeyRotationRunner: ObservableObject {
         return await finishOwed(record, session: adopted)
     }
 
-    /// "Save a recovery phrase" (ADR-0075 section 3, UX 19.5): the same
-    /// rotation with no device removed, committed with `phrase_saved: true`.
+    /// "Save a recovery phrase" for a phrase that was ever in an email vault
+    /// (ADR-0075 section 3, UX 19.5; any other phrase is saved without a key
+    /// change, ``SavePhraseFlow``): the same rotation with no device removed,
+    /// committed with `phrase_saved: true`.
     /// The account gets new keys and new words; the other devices are kept
     /// and adopt them; the email vault of the old phrase is deleted by the
     /// commit. The caller obtained the fresh proof first.
@@ -1158,6 +1160,9 @@ extension KeyRotationRunner.Ports {
             },
             sendToDeviceGroup: { [weak sync] envelope in
                 guard let sync else { throw SessionNotReady() }
+                // The DeviceGroup of a session that just landed may still be
+                // being founded.
+                await sync.waitForHandle()
                 return try await sync.sendKeyRotationEnvelope(envelope)
             },
             generate: { try KeyRotationMaterial.generate() },
@@ -1255,10 +1260,7 @@ extension KeyRotationRunner.Ports {
                     phraseSaved: true)
             },
             phraseWasSaved: { [weak auth] accountIdB64 in
-                auth?.protectionStore.setPhraseSaved(true, accountIdB64: accountIdB64)
-                auth?.protectionStore.markOwnAction(
-                    .phraseSaved, atMs: Int64(Date().timeIntervalSince1970 * 1000), accountIdB64: accountIdB64)
-                auth?.onProtectionChanged?()
+                auth?.notePhraseSaved(accountIdB64: accountIdB64)
             },
             phraseProtected: { [weak auth] accountIdB64 in
                 auth?.protectionStore.phraseSaved(accountIdB64: accountIdB64) ?? false
@@ -1332,7 +1334,13 @@ enum KeyRotationChannels {
         guard let secrets = auth.identitySecrets else { throw SessionNotReady() }
         let accountIdB64 = base64Encode(secrets.accountId)
         let channelIds = OwnedChannelGenerations.load(accountIdB64: accountIdB64).keys.sorted()
-        guard !channelIds.isEmpty else { return }
+        guard !channelIds.isEmpty else {
+            // No channel to hand over, and a channel created from here on is
+            // still recorded at the session's new key generation: the state
+            // that records it hears of the rotation here.
+            NotificationCenter.default.post(name: .lakkoAccountKeysRotated, object: nil)
+            return
+        }
         guard let predecessor = auth.ownPredecessorSeeds(accountIdB64: accountIdB64).last else {
             throw SessionNotReady()
         }

@@ -42,7 +42,7 @@ public class MediaSendQueue(
     ) -> AttachmentRef,
     /** Publishes the uploaded ref as its own message, carrying the reply the
      *  job was armed with (ADR-0052), or `null` for an ordinary send. */
-    private val publish: suspend (AttachmentRef, me.lakko.app.chat.ReplyRef?) -> Unit,
+    private val publish: suspend (AttachmentRef, me.lakko.app.chat.ReplyRef?, onRowShown: () -> Unit) -> Unit,
     private val onLog: (String) -> Unit = {},
     /** ADR-0065 section 6 — a take discarded after its file (or poster) was
      *  uploaded was never sent: its blobs are deleted at once. */
@@ -135,17 +135,23 @@ public class MediaSendQueue(
                     }
                 }
                 update(job) { it.copy(progress = 0.95f) }
-                publish(job.uploaded ?: throw MediaSendFailed("no ref"), job.reply)
-                jobs.remove(job.tempId)
-                mutableRows.update { rows -> rows.filterNot { it.tempId == job.tempId } }
+                publish(job.uploaded ?: throw MediaSendFailed("no ref"), job.reply) { handOver(job) }
+                handOver(job)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 onLog("media send failed: ${e.javaClass.simpleName}")
-                // UX 4.2 — the sending limit is said as such.
+                // UX 4.2 — the sending limit is said as such. Once the message
+                // has its row in the conversation, that row says "Not sent".
                 update(job) { it.copy(failed = true, limited = isUploadLimit(e)) }
             }
         }
+    }
+
+    /** The message's own row took over: one message, one row. */
+    private fun handOver(job: Job) {
+        jobs.remove(job.tempId)
+        mutableRows.update { rows -> rows.filterNot { it.tempId == job.tempId } }
     }
 
     private fun metaFor(job: Job): AttachmentMediaMeta = AttachmentMediaMeta(

@@ -215,6 +215,18 @@ public enum ReachRules {
                 channels: channels.isEmpty ? previous.channels : channels))
     }
 
+    /// What an Everyone publication was composed for. The account key and the
+    /// mailbox binding are in it because the record names both: a rotation
+    /// keeps the name and moves them.
+    public static func everyonePublishKey(
+        displayName: String, username: String?, certificate: Data?, accountKey: Data?, mailboxBinding: Data?
+    ) -> String {
+        [
+            displayName, username ?? "", certificate?.base64EncodedString() ?? "",
+            accountKey?.base64EncodedString() ?? "", mailboxBinding?.base64EncodedString() ?? "",
+        ].joined(separator: "|")
+    }
+
     /// The counter slots among `specs` that `state` holds no version for and
     /// that were not checked against the DS yet (`checked`): what must be
     /// recovered before anything is registered.
@@ -533,7 +545,7 @@ public enum ReachRules {
 
     /// Every distinct seed held for one person, in the order ``writeSeed(from:groupIdHex:)``
     /// prefers them: `contact`, then `member` of the group the write concerns,
-    /// then any `member`, `group`, `channel`, `reply` — newest first within a
+    /// then any `member`, `group`, `channel`, `fof`, `reply` — newest first within a
     /// class. A Welcome writer tries them in this order and moves to the next
     /// on a `401` (ADR-0050 2.5a item 7): one key the owner rotated away must
     /// not cost a Welcome another key still opens.
@@ -549,6 +561,9 @@ public enum ReachRules {
             out += all(.member)
             out += all(.group)
             out += all(.channel)
+            // ADR-0060 section 6 — a `fof` grant is held only when this
+            // device added a person the search found through it.
+            out += all(.fof)
             out += all(.reply)
             return out
         }
@@ -557,6 +572,140 @@ public enum ReachRules {
         let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
         var seen = Set<Data>()
         return ordered.filter { $0.count == 32 && seen.insert($0).inserted }
+    }
+
+    // MARK: - A device that holds nothing asks (ADR-0060 section 4)
+
+    /// How often an ask from the other person may reset the sent records of
+    /// one conversation. Chosen, not measured.
+    public static let introductionsResendMinMs: UInt64 = 3_600_000
+
+    /// The search terms still to evaluate: each once, and none whose OPRF
+    /// output is already kept (web `termsToEvaluate`). Every one of these
+    /// costs an anonymous token.
+    public static func termsToEvaluate(cached: Set<String>, terms: [String]) -> [String] {
+        var seen = Set<String>()
+        return terms.filter { !cached.contains($0) && seen.insert($0).inserted }
+    }
+
+    /// How often a device that holds a `contact` grant for the other person,
+    /// but no offer and no bundle, asks. Chosen, not measured.
+    public static let introductionsAskWithGrantMinMs: UInt64 = 7 * 24 * 3_600_000
+
+    /// What this device holds from the other person of a one-to-one.
+    public struct HeldIntroductions: Equatable {
+        public var offer: Bool
+        public var bundle: Bool
+        public var contactGrant: Bool
+
+        public init(offer: Bool, bundle: Bool, contactGrant: Bool) {
+            self.offer = offer
+            self.bundle = bundle
+            self.contactGrant = contactGrant
+        }
+    }
+
+    /// Whether this device has anything to ask for in a conversation: only a
+    /// one-to-one, and only when it holds neither an offer nor a bundle from
+    /// the other person. A `contact` grant does not stop it, or a device that
+    /// once got a profile would never ask; it only slows it down
+    /// (``ProfileRequester/noteIntroductionsMissing(groupIdHex:holdsContactGrant:)``).
+    public static func asksForIntroductions(isOneToOne: Bool, held: HeldIntroductions) -> Bool {
+        isOneToOne && !held.offer && !held.bundle
+    }
+
+    /// Whether a device holding a `contact` grant may ask now: never asked
+    /// yet, or ``introductionsAskWithGrantMinMs`` ago. A clock that went
+    /// backwards reads as recent.
+    public static func asksWithContactGrant(lastRequestedAtMs: UInt64?, nowMs: UInt64) -> Bool {
+        guard let lastRequestedAtMs else { return true }
+        return nowMs >= lastRequestedAtMs && nowMs - lastRequestedAtMs >= introductionsAskWithGrantMinMs
+    }
+
+    /// Whether an ask received in a conversation resets its sent records:
+    /// only in a one-to-one, only from its other participant, and at most
+    /// once in ``introductionsResendMinMs``. A clock that went backwards reads
+    /// as recent, as the profile request's own rule reads it.
+    public static func resetsIntroductions(
+        isOneToOneWithAsker: Bool, lastResetAtMs: UInt64?, nowMs: UInt64
+    ) -> Bool {
+        guard isOneToOneWithAsker else { return false }
+        guard let lastResetAtMs else { return true }
+        return nowMs >= lastResetAtMs && nowMs - lastResetAtMs >= introductionsResendMinMs
+    }
+
+    // MARK: - Answering a contact request
+
+    /// The grants a Welcome or an ack answering a contact request goes out
+    /// under, in order: the `reply` grant the request carried, then a `contact`
+    /// grant held for that person, newest first within a class. Nothing else:
+    /// a `group`, `member`, `channel` or found grant has nothing to do with
+    /// answering a request. A grant a rotation displaced comes last.
+    public static func answerGrants(from held: [HeldGrant]) -> [HeldGrant] {
+        func ordered(_ held: [HeldGrant]) -> [HeldGrant] {
+            func all(_ cls: FfiReachClass) -> [HeldGrant] {
+                held.filter { $0.reachClass == cls }.sorted { $0.storedAtMs > $1.storedAtMs }
+            }
+            return all(.reply) + all(.contact)
+        }
+        let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
+        var seen = Set<String>()
+        return ordered.filter { seen.insert($0.seedB64).inserted }
+    }
+
+    /// `docs/ux/who-can-find-me.md` section 8 — whether going from `old` to
+    /// `new` narrowed who is reached through the person's contacts: all
+    /// contacts became the chosen ones, or someone left the chosen list. The
+    /// `fof` key then moves at once, so the old key is unregistered and a new
+    /// record is offered to the contacts still allowed. Widening moves
+    /// nothing: the next offer pass reaches the new contact.
+    public static func narrowsContacts(
+        from old: FfiVisibilitySetting, to new: FfiVisibilitySetting,
+        allowsFof: (FfiVisibilitySetting) -> Bool
+    ) -> Bool {
+        guard allowsFof(old), allowsFof(new), new.mode == .some, new.contactsForm == .chosen else {
+            return false
+        }
+        if old.mode != .some || old.contactsForm == .all { return true }
+        return !Set(old.chosenContacts).isSubset(of: Set(new.chosenContacts))
+    }
+
+    /// ADR-0060 section 4, "Only the contacts I choose" — whether this
+    /// account's own introduction record goes to the person of a one-to-one.
+    /// `allows` is the core's `allowsContact`. With no account id known a
+    /// person cannot be matched against the chosen list, so under Only the
+    /// ones I choose they get none.
+    public static func offersRecord(
+        to accountId: Data?, setting: FfiVisibilitySetting,
+        allows: (FfiVisibilitySetting, Data) -> Bool
+    ) -> Bool {
+        if let accountId { return allows(setting, accountId) }
+        switch setting.mode {
+        case .nobody: return false
+        case .everyone: return true
+        case .some: return setting.contactsOfContacts && setting.contactsForm == .all
+        }
+    }
+
+    /// `docs/ux/who-can-find-me.md` section 6.1 — the grants a search may
+    /// offer a person under, in the order they are tried: `contact`, each
+    /// `group`, each `channel`, the `fof` one found through an introduction,
+    /// newest first within a class. Never a `member` grant: a co-member the
+    /// person hides from holds one (UX section 6.2). Never a `reply`: it
+    /// answers one request. A grant a rotation displaced comes after every
+    /// current one, as in ``writeSeeds(from:groupIdHex:)``.
+    public static func searchGrants(from held: [HeldGrant]) -> [HeldGrant] {
+        func ordered(_ held: [HeldGrant]) -> [HeldGrant] {
+            func all(_ cls: FfiReachClass) -> [HeldGrant] {
+                held.filter { $0.reachClass == cls }.sorted {
+                    ($0.storedAtMs, $1.scopeHex ?? "") > ($1.storedAtMs, $0.scopeHex ?? "")
+                }
+            }
+            return all(.contact) + all(.group) + all(.channel) + all(.fof)
+        }
+        let ordered = ordered(held.filter { !$0.isSuperseded }) + ordered(held.filter(\.isSuperseded))
+        var seen = Set<String>()
+        return ordered.filter { seen.insert($0.seedB64).inserted }
     }
 
     /// Replace the grants held for one person with `incoming` of the same
@@ -689,5 +838,15 @@ public enum ReachRules {
             if seen.insert(target).inserted { out.append(target) }
         }
         return out
+    }
+}
+
+/// ADR-0060 section 6 — which committer-delegation envelope an add posts:
+/// the one signed with a grant this device holds for the added person when
+/// there is one; else, for a person found in Everyone, the one with no
+/// delegation naming their open mailbox; else none.
+public enum CommitterDelegationChoice {
+    public static func envelope(signed: Data?, open: Data?) -> Data? {
+        signed ?? open
     }
 }

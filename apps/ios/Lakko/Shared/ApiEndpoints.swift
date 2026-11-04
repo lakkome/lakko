@@ -32,7 +32,7 @@ public enum ApiService: String, CaseIterable, Sendable {
         case .storage: return "http://localhost:8083"
         case .discovery: return "http://localhost:8084"
         case .pushGw: return "http://localhost:8085"
-        case .channels: return "http://localhost:8090"
+        case .channels: return "http://localhost:8086"
         case .gifs: return "http://localhost:8091"
         }
     }

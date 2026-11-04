@@ -50,6 +50,17 @@ export interface PersonGrants {
     readonly contact?: PreviousGrant;
     readonly scopes?: Readonly<Record<string, Partial<Record<ScopedGrantClass, PreviousGrant>>>>;
   };
+  /**
+   * The grant a network search found this person through (an introduction's
+   * `fof` key, a `group` or `channel` key) and this account then added them
+   * to a group with (ADR-0060 section 6, the add of a person found by search).
+   * Kept so the committer delegations are signed with it, re-sent while the
+   * add is pending, and a sweep this device runs can deliver the Welcome. Its
+   * mailbox binding was verified against the person's account key before it
+   * was filed ({@link fileFoundGrant}'s caller). Offered after the channel
+   * grants. Secret.
+   */
+  readonly found?: HeldGrant;
 }
 
 /** A committer-delegation envelope kept for a pending add. */
@@ -57,6 +68,11 @@ export interface HeldDelegations {
   /** Standard base64 of the committer-delegation envelope plaintext. */
   readonly envelopeB64: string;
   readonly receivedAtMs: number;
+  /** The group (journal id hex) the envelope arrived in, or was posted to
+   *  when this device is its proposer. Absent on envelopes kept before it was
+   *  recorded. An envelope with NO delegation (an Everyone person, ADR-0060
+   *  section 6) authorises the unsigned Welcome only for this group. */
+  readonly scopeHex?: string;
 }
 
 export interface ReceivedGrants {
@@ -245,6 +261,18 @@ export function dropScope(store: ReceivedGrants, scopeHex: string): ReceivedGran
   return changed ? { ...store, people } : store;
 }
 
+/**
+ * Keep the grant a network search found `personHex` through (ADR-0060
+ * section 6): the caller verified its mailbox binding against the person's
+ * account key. The newest found grant replaces an older one; the same wire
+ * again changes nothing.
+ */
+export function fileFoundGrant(store: ReceivedGrants, personHex: string, grant: HeldGrant): ReceivedGrants {
+  const person = store.people[personHex] ?? { scopes: {} };
+  if (person.found?.wireB64 === grant.wireB64) return store;
+  return { ...store, people: { ...store.people, [personHex]: { ...person, found: grant } } };
+}
+
 /** Forget the contact grant of a removed contact. */
 export function dropContactGrant(store: ReceivedGrants, senderHex: string): ReceivedGrants {
   const person = store.people[senderHex];
@@ -292,8 +320,8 @@ export function bestGrantFor(
  * Every kept grant that may authorise a write to `accountHex`, in the order of
  * {@link bestGrantFor} (which is its first element): the contact grant, then
  * each scope's `group` grant (the given scope first), then each scope's
- * `channel` grant, then - only when `allowMember` - the given scope's
- * `member` grant. A writer refused (`401`) under one moves to the next
+ * `channel` grant, then the grant a search found them through, then - only
+ * when `allowMember` - the given scope's `member` grant. A writer refused (`401`) under one moves to the next
  * (ADR-0050 section 2.5a item 7): a key the person rotated away answers 401,
  * another key they handed out may still work.
  */
@@ -318,6 +346,9 @@ export function grantsInOrder(
   for (const s of ordered) {
     const scope = person.scopes[s];
     if (scope?.channel !== undefined) out.push(scope.channel);
+  }
+  if (person.found !== undefined && !out.some((g) => g.wireB64 === person.found?.wireB64)) {
+    out.push(person.found);
   }
   if (options.allowMember === true && options.scopeHex !== undefined) {
     const member = person.scopes[options.scopeHex]?.member;
@@ -361,6 +392,29 @@ export function grantsInOrderForPerson(
         out.push(g);
       }
     }
+  }
+  return out;
+}
+
+/**
+ * The `contact` grants held for one person, under every key they have had,
+ * the one of before a rotation last and only while its address stands (rule
+ * 6). What an answer to a contact request may use after the request's own
+ * `reply` grant: a key handed out for a group, a channel or a search has
+ * nothing to do with it.
+ */
+export function contactGrantsForPerson(store: ReceivedGrants, keysHex: readonly string[]): HeldGrant[] {
+  const out: HeldGrant[] = [];
+  const seen = new Set<string>();
+  const add = (g: HeldGrant | undefined): void => {
+    if (g === undefined || seen.has(g.wireB64)) return;
+    seen.add(g.wireB64);
+    out.push(g);
+  };
+  for (const hex of keysHex) add(store.people[hex]?.contact);
+  for (const hex of keysHex) {
+    const previous = store.people[hex]?.previous?.contact;
+    if (previous !== undefined && previous.addressHex === keysHex[0]) add(previous);
   }
   return out;
 }
@@ -421,7 +475,9 @@ export function heldClassesForPerson(
 }
 
 /** Every kept committer-delegation envelope for adds of one person, under
- *  any key they have had, newest first. */
+ *  any key they have had, newest first. One envelope is listed once per group:
+ *  the bytes of an add with no delegation are the same for every group, and
+ *  which group it is for is what authorises the write. */
 export function delegationsForPerson(
   store: ReceivedGrants,
   keysHex: readonly string[],
@@ -430,8 +486,9 @@ export function delegationsForPerson(
   const seen = new Set<string>();
   for (const hex of keysHex) {
     for (const d of delegationsFor(store, hex)) {
-      if (seen.has(d.envelopeB64)) continue;
-      seen.add(d.envelopeB64);
+      const key = `${d.scopeHex ?? ""}|${d.envelopeB64}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(d);
     }
   }
@@ -442,6 +499,17 @@ export function delegationsForPerson(
  *  it holds a grant other than a bare `member` key. UX section 6.2. */
 export function canFind(store: ReceivedGrants, accountHex: string): boolean {
   return bestGrantFor(store, accountHex) !== null;
+}
+
+/**
+ * The sender a committer envelope from ANOTHER device of this account is filed
+ * under ({@link fileDelegations}). The account key alone is this device's own
+ * record of the envelope it posted (`openCommitterEnvelope` reads it back by
+ * that key to re-send it), and the other device's envelope, which may be for
+ * another group, must not take its place.
+ */
+export function otherDeviceSender(accountHex: string): string {
+  return `${accountHex}:other-device`;
 }
 
 /** Keep the newest committer-delegation envelope per (sender, added). */

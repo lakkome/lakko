@@ -26,6 +26,14 @@ struct MediaPickerSheet: View {
     @ObservedObject var media: ChatMediaController
     let onEmoji: (String) -> Void
     let onClose: () -> Void
+    /// Reactions-and-emoji spec section 5 — with `Some reactions`, the picker
+    /// shows only the conversation's list, one grid in its order.
+    var reactionOnly: [String]? = nil
+    /// Section 5 / 10 — whether an emoji responds (dimmed otherwise: the
+    /// person already holds 3, or the message holds the most kinds).
+    var reactionEnabled: (String) -> Bool = { _ in true }
+    /// The line under the picker when some emoji are dimmed.
+    var reactionNote: String? = nil
 
     @ObservedObject private var gifAvailability = GifAvailability.shared
     @State private var tab: Tab = .emoji
@@ -47,7 +55,14 @@ struct MediaPickerSheet: View {
                 if tab == .gif, showGifTab {
                     GifTab(media: media, onSent: onClose)
                 } else {
-                    EmojiTab(onPick: onEmoji)
+                    if let reactionNote {
+                        Text(reactionNote)
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 6)
+                    }
+                    EmojiTab(onPick: onEmoji, only: reactionOnly, enabled: reactionEnabled)
                 }
             }
             .navigationTitle(mode == .reaction ? Localization.text("chat.emoji.choose_reaction") : "")
@@ -89,8 +104,14 @@ struct EmojiTab: View {
     /// never the system context menu).
     @State private var toneRowFor: String?
 
-    init(onPick: @escaping (String) -> Void) {
+    /// Section 5 — only these, as one grid (no category strip).
+    var only: [String]? = nil
+    var enabled: (String) -> Bool = { _ in true }
+
+    init(onPick: @escaping (String) -> Void, only: [String]? = nil, enabled: @escaping (String) -> Bool = { _ in true }) {
         self.onPick = onPick
+        self.only = only
+        self.enabled = enabled
         let account = AcceptedContactsStore.boundAccountIdB64
         accountIdB64 = account
         _recent = State(initialValue: EmojiIndex.loadRecent(accountIdB64: account))
@@ -117,11 +138,26 @@ struct EmojiTab: View {
                 .textInputAutocapitalization(.never)
                 .padding(.horizontal, 16)
             ScrollViewReader { proxy in
-                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                if query.trimmingCharacters(in: .whitespaces).isEmpty, only == nil {
                     categoryStrip(proxy)
                 }
                 ScrollView {
-                    if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    if let only {
+                        let q = query.trimmingCharacters(in: .whitespaces)
+                        let matches = q.isEmpty ? only : only.filter { emoji in
+                            EmojiIndex.search(dataset, query: q).contains { $0.emoji == emoji }
+                        }
+                        if matches.isEmpty {
+                            Text(Localization.text("chat.emoji.no_results"))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 24)
+                        } else {
+                            LazyVGrid(columns: columns, spacing: 4) {
+                                ForEach(matches, id: \.self) { emoji in recentCell(emoji) }
+                            }
+                            .padding(.horizontal, 12)
+                        }
+                    } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                         let results = EmojiIndex.search(dataset, query: query)
                         if results.isEmpty {
                             Text(Localization.text("chat.emoji.no_results"))
@@ -202,7 +238,7 @@ struct EmojiTab: View {
     }
 
     private func pick(_ emoji: String) {
-        guard EmojiIndex.isSingleEmojiGrapheme(emoji) else { return }
+        guard EmojiIndex.isSingleEmojiGrapheme(emoji), enabled(emoji) else { return }
         recent = EmojiIndex.pushRecent(recent, emoji)
         EmojiIndex.saveRecent(recent, accountIdB64: writableAccount)
         onPick(emoji)
@@ -214,6 +250,7 @@ struct EmojiTab: View {
         let open = toneRowFor == entry.emoji
         return Text(shown).font(.system(size: 30))
             .frame(width: 42, height: 42)
+            .opacity(enabled(shown) ? 1 : 0.35)
             .contentShape(Rectangle())
             .onTapGesture {
                 if toneRowFor != nil { toneRowFor = nil } else { pick(shown) }
@@ -265,6 +302,7 @@ struct EmojiTab: View {
         Button { pick(emoji) } label: {
             Text(emoji).font(.system(size: 30))
                 .frame(width: 42, height: 42)
+                .opacity(enabled(emoji) ? 1 : 0.35)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(dataset.byEmoji[emoji]?.name ?? emoji)
@@ -361,7 +399,6 @@ struct GifTab: View {
     let onSent: () -> Void
 
     @StateObject private var model: GifSearchModel
-    @AppStorage(MediaPrefs.gifNoteKey) private var noteDismissed = false
 
     init(media: ChatMediaController, onSent: @escaping () -> Void) {
         self.media = media
@@ -373,19 +410,6 @@ struct GifTab: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            if !noteDismissed {
-                // UX spec §5 — what the server learns, stated before searching.
-                HStack(alignment: .top, spacing: 8) {
-                    Text(GifCopy.privacyNote).font(.footnote)
-                    Spacer(minLength: 0)
-                    Button(Localization.text("chat.gif.note_dismiss")) { noteDismissed = true }
-                        .font(.footnote.bold())
-                }
-                .padding(10)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal, 16)
-            }
             TextField(Localization.text("chat.gif.search"), text: $model.query)
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.search)

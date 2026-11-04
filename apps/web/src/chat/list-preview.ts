@@ -68,8 +68,11 @@ export function previewLine(input: PreviewLineInput): string {
 
 /** Case-insensitive match of a search query against a row's name and
  *  preview. An empty query matches everything. */
-export function rowMatchesQuery(query: string, name: string, preview: string): boolean {
+export function rowMatchesQuery(query: string, name: string, preview: string, handle?: string | null): boolean {
   const q = query.trim().toLocaleLowerCase();
   if (q.length === 0) return true;
-  return name.toLocaleLowerCase().includes(q) || preview.toLocaleLowerCase().includes(q);
+  if (name.toLocaleLowerCase().includes(q) || preview.toLocaleLowerCase().includes(q)) return true;
+  // A group's or channel's `@name` (ADR-0087), typed with or without the `@`.
+  const bare = q.replace(/^@+/, "");
+  return handle !== undefined && handle !== null && bare.length > 0 && handle.toLocaleLowerCase().includes(bare);
 }

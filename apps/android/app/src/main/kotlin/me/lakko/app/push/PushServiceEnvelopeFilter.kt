@@ -33,9 +33,11 @@ import uniffi.lakko_ffi_uniffi.MessageBodyKind
  *      `lakko/profile/v1` plus a trailing NUL). Its 17-byte prefix ending
  *      in a NUL is a complete classification on its own, so no codec is
  *      injected for it: a malformed profile envelope is still a profile
- *      envelope and is suppressed, never rendered. The background path only
- *      suppresses it — storing a profile is a WRITE, and this path is
- *      read-only (C-59).
+ *      envelope and is suppressed, never rendered. The background decrypt
+ *      reads a well-formed one before this classifier and applies it in
+ *      memory for the rest of its batch, so the sender's next row is named
+ *      (`PushBackgroundDecrypt.kt`, [withBatchProfile]); it stores nothing,
+ *      storing a profile is a WRITE and this path is read-only (C-59).
  *
  * Kind 3 is the MOST reachable of the three, not the least. A routing
  * secret is broadcast only on a membership change; a beacon is emitted
@@ -258,6 +260,12 @@ private fun isServiceEnvelopeOtherThanCall(
     // lock, and this path is read-only (C-59); the foreground applies it when
     // it next reads the journal.
     if (me.lakko.app.chat.looksLikeGroupClosedEnvelope(payload)) return true
+
+    // Kind 5c — ADR-0087: the group photo, the allowed reactions, the
+    // conversation handle and the knock seed. NUL-terminated domains, the same
+    // peek the foreground classifier uses; suppressed only (storing is a write,
+    // C-59).
+    if (me.lakko.app.chat.groupSettingKindOf(payload) != null) return true
 
     // Kind 6 — ADR-0048 trigger 4, the "introduce yourselves" request. The
     // same NUL-terminated-prefix shape again, and the same foreground peek.

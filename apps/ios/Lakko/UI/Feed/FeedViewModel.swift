@@ -77,7 +77,6 @@ struct FeedPreviewLine: Identifiable, Equatable {
 final class FeedViewModel: ObservableObject {
 
     static let selectionKey = "lakko.feed.preset"
-    static let bannerKey = "lakko.feed.device-banner-dismissed"
     /// How many items the editor's preview shows.
     static let previewItems = 8
 
@@ -93,7 +92,6 @@ final class FeedViewModel: ObservableObject {
     @Published private(set) var pending: [RankedFeedItem]?
     @Published private(set) var sourceCount: Int = 0
     @Published private(set) var candidateCount: Int = 0
-    @Published private(set) var bannerDismissed: Bool
     @Published var editing: FeedEditing?
     @Published var editError: String?
     @Published var sharing: SavedFeedView?
@@ -176,7 +174,6 @@ final class FeedViewModel: ObservableObject {
         self.feedStore = feedStore
         self.defaults = defaults
         self.selection = FeedSelection(storageValue: defaults.string(forKey: Self.selectionKey))
-        self.bannerDismissed = defaults.bool(forKey: Self.bannerKey)
         reloadSaved()
         refreshFailed = refreshCenter.failed
         refreshCenter.$failed.removeDuplicates()
@@ -384,11 +381,6 @@ final class FeedViewModel: ObservableObject {
         }
     }
 
-    func dismissBanner() {
-        bannerDismissed = true
-        defaults.set(true, forKey: Self.bannerKey)
-    }
-
     // MARK: - Sources and input
 
     /// The groups and channels the feed draws from. Groups only: a one-to-one
@@ -432,6 +424,7 @@ final class FeedViewModel: ObservableObject {
             attachmentLabels: m.attachments.map {
                 ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
             },
+            attachments: m.attachments,
             edited: m.edited,
             deleted: m.deleted,
             forwardAuthor: m.forward?.author)
@@ -646,6 +639,13 @@ final class FeedViewModel: ObservableObject {
         if ref.source.kind == .channel { return nil }
         if ref.message.direction == .outgoing { return .own }
         return ref.message.authorKeyB64.flatMap(base64Decode).map(AvatarPhoto.person)
+    }
+
+    /// What the author's initials come from: "You" is a label, not a name.
+    func authorAvatarName(_ ref: FeedCandidateRef) -> String {
+        guard ref.source.kind == .group, ref.message.direction == .outgoing else { return author(ref) }
+        let directory = ProfileDirectory.shared
+        return directory.ownProfile?.displayName ?? directory.ownUsername ?? author(ref)
     }
 
     func author(_ ref: FeedCandidateRef) -> String {

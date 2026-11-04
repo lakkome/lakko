@@ -21,9 +21,10 @@ import LakkoCore
 ///      ``AuthRepository`` + the accepted-contacts list from
 ///      ``ContactsRepository.state.accepted``.
 ///
-/// The payload (wire v6) carries the accepted contacts, the ids of the
-/// account's conversations and the ADR-0058 synced state. It carries NO MLS
-/// provider state: a snapshot belongs to the device that made it. Loaded on
+/// The payload (wire v7) carries the accepted contacts, the ids of the
+/// account's conversations, the ADR-0058 synced state, the account's own
+/// predecessor seeds (ADR-0074 section 3.7) and its own profile and "who can
+/// find me" envelopes. It carries NO MLS provider state: a snapshot belongs to the device that made it. Loaded on
 /// another device it would clone a leaf (ADR-0050); loaded on the same device
 /// after a reinstall it would roll the device back behind commits it already
 /// published (ADR-0040) and re-use ratchet positions (G-34). A restored
@@ -46,16 +47,32 @@ public final class BackupClient {
     /// the storage client's own).
     private let authSession: URLSession
 
-    public init(
+    /// ADR-0074 section 3.7 — the account's own predecessor seeds. Read at
+    /// the one place a payload is composed for upload, so no backup route can
+    /// leave them out.
+    private let ownPredecessors: OwnPredecessorStoring
+    private let adoptions = PredecessorMailbox.AdoptionStore()
+
+    /// The account's own profile and "who can find me" envelopes, read at the
+    /// same one place, for the same reason.
+    private let ownEnvelopes: @MainActor (_ accountIdB64: String) -> OwnBackupEnvelopes
+
+    init(
         storage: StorageClient = StorageClient(),
         phraseStore: PhraseStore = PhraseStore(),
         authBaseURL: String = AuthClient.defaultBaseURL,
-        authSession: URLSession = .shared
+        authSession: URLSession = .shared,
+        ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
+        ownEnvelopes: @escaping @MainActor (_ accountIdB64: String) -> OwnBackupEnvelopes = {
+            OwnBackupEnvelopes.current(accountIdB64: $0)
+        }
     ) {
         self.storage = storage
         self.phraseStore = phraseStore
         self.authBaseURL = authBaseURL
         self.authSession = authSession
+        self.ownPredecessors = ownPredecessors
+        self.ownEnvelopes = ownEnvelopes
         self.sessionToken = nil
     }
 
@@ -76,7 +93,21 @@ public final class BackupClient {
         return out
     }
 
-    /// Compose the backup payload bytes (wire v6). Pure: no clock beyond
+    /// ADR-0074 section 3.7 — the records a backup carries for `seeds`
+    /// (oldest first, as the predecessor slot holds them), each with the time
+    /// its key was retired. The rule of the pairing state bundle: at most
+    /// ``StateBundle/maxPredecessors``, the oldest always among them.
+    static func ownPredecessorRecords(
+        seeds: [Data], adoptedAtMs: (_ keyB64: String) -> Int64
+    ) -> [BackupOwnPredecessor] {
+        StateBundle.carriedOwnPredecessors(seeds: seeds, adoptedAtMs: adoptedAtMs).compactMap { own in
+            Data(base64Encoded: own.seedB64).map {
+                BackupOwnPredecessor(seed: $0, adoptedAtMs: UInt64(max(0, own.adoptedAtMs)))
+            }
+        }
+    }
+
+    /// Compose the backup payload bytes (wire v7). Pure: no clock beyond
     /// `createdAtMs`, no network, no store.
     ///
     /// There is no MLS snapshot argument, and none may be added: see the type
@@ -89,7 +120,9 @@ public final class BackupClient {
         ed25519Seed: Data,
         contacts: [BackupContactRecord],
         knownGroupIdsHex: [String],
-        syncedState: Data?
+        syncedState: Data?,
+        ownPredecessors: [BackupOwnPredecessor] = [],
+        own: OwnBackupEnvelopes = OwnBackupEnvelopes()
     ) throws -> Data {
         try buildBackupPayload(
             accountId: accountId,
@@ -97,7 +130,10 @@ public final class BackupClient {
             ed25519Seed: ed25519Seed,
             contacts: contacts,
             knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:)),
-            syncedState: syncedState
+            syncedState: syncedState,
+            ownPredecessors: ownPredecessors.isEmpty ? nil : ownPredecessors,
+            ownProfile: own.ownProfile,
+            visibility: own.visibility
         )
     }
 
@@ -136,13 +172,21 @@ public final class BackupClient {
         /// ADR-0058 section 5.2 — `SyncedState.toBytes()`, or `nil`.
         syncedState: Data? = nil
     ) async throws {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        // A key with no recorded adoption is stamped now, exactly as the
+        // pairing bundle and the mailbox poll stamp it.
+        let predecessors = Self.ownPredecessorRecords(
+            seeds: ownPredecessors.load(accountIdB64: accountIdB64)
+        ) { adoptions.recordIfAbsent(accountIdB64: accountIdB64, keyB64: $0, nowMs: nowMs) }
         let payloadBytes = try Self.composePayload(
             accountId: accountId,
-            createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            createdAtMs: UInt64(nowMs),
             ed25519Seed: ed25519Seed,
             contacts: contacts,
             knownGroupIdsHex: knownGroupIdsHex,
-            syncedState: syncedState
+            syncedState: syncedState,
+            ownPredecessors: predecessors,
+            own: await ownEnvelopes(accountIdB64)
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
         let (blob, floor) = await frameWithHead(envelope: envelope)
@@ -350,6 +394,24 @@ public final class BackupClient {
     /// cleanup. No-op when absent.
     public func wipePhrase(accountIdB64: String) throws {
         try phraseStore.deletePhrase(accountIdB64: accountIdB64)
+    }
+}
+
+/// What a backup says about the account itself: its own profile (name,
+/// username, photo references, with the profile's own stamp) and its "who can
+/// find me" setting, each as the core's envelope. `nil` for one that was
+/// never set.
+struct OwnBackupEnvelopes: Equatable {
+    var ownProfile: Data?
+    var visibility: Data?
+
+    /// What this device holds for `accountIdB64` now, whether or not its
+    /// session is up: a baseline can go out before the shell mounts.
+    @MainActor
+    static func current(accountIdB64: String) -> OwnBackupEnvelopes {
+        OwnBackupEnvelopes(
+            ownProfile: ProfileDirectory.shared.backupProfileEnvelope(accountIdB64: accountIdB64),
+            visibility: ReachCenter.shared.backupSettingEnvelope(accountIdB64: accountIdB64))
     }
 }
 

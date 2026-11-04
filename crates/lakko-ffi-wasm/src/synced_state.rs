@@ -30,6 +30,22 @@
 //! gets the list in the snapshot parts. Read with `saved()`, `isSaved` and
 //! `savedBlobIds()`.
 //!
+//! ## Conversation ends (ADR-0087 section 9)
+//!
+//! One more register of the same state. Ask
+//! `composeConversationEnded` / `composeConversationJoined` on the state,
+//! passing the MLS epoch (`Group.epoch`; `0n` for a channel): `undefined`
+//! means there is nothing to tell the other devices, so go on with the rest of
+//! the end without it. Otherwise hand the register to
+//! `FolderChangeSet.addConversationEnd`, fold with `applyFolderChanges` and
+//! send with `DeviceGroup.createDeviceGroupFolderChangesMessage`. A received
+//! one arrives through `applyPayload`; read `endedConversations()` after every
+//! apply and at launch. The register's `epoch` is what
+//! `Group.deleteAfterEndedElsewhere` takes. A device holding an active group
+//! at an epoch ABOVE a register's has come back since that end: it does not
+//! act on the register, and answers with `composeConversationJoined` at its
+//! own epoch.
+//!
 //! Blob ids cross this boundary **flat-concatenated**: one `Uint8Array`
 //! holding N ids of 32 bytes each, in and out. A length that is not a
 //! multiple of 32 is refused.
@@ -151,6 +167,49 @@ impl FolderConversationRef {
     #[wasm_bindgen(getter)]
     pub fn id(&self) -> Vec<u8> {
         self.id.clone()
+    }
+}
+
+/// How this account's membership of a conversation stands, stamped (ADR-0087
+/// section 9). Build it with `SyncedState.composeConversationEnded` /
+/// `composeConversationJoined`.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationEndRegister {
+    inner: Stamped<core::ConversationEnd>,
+}
+
+impl From<Stamped<core::ConversationEnd>> for ConversationEndRegister {
+    fn from(inner: Stamped<core::ConversationEnd>) -> Self {
+        Self { inner }
+    }
+}
+
+#[wasm_bindgen]
+impl ConversationEndRegister {
+    /// HLC stamp of this register.
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.inner.hlc
+    }
+
+    /// The conversation.
+    #[wasm_bindgen(getter)]
+    pub fn conversation(&self) -> FolderConversationRef {
+        self.inner.value.conversation.clone().into()
+    }
+
+    /// `true` for an end, `false` for a join after one.
+    #[wasm_bindgen(getter)]
+    pub fn ended(&self) -> bool {
+        self.inner.value.state == core::ConversationEndState::Ended
+    }
+
+    /// The MLS epoch of the end or the join; `0n` for a channel. The fold
+    /// orders by this before the stamp.
+    #[wasm_bindgen(getter)]
+    pub fn epoch(&self) -> u64 {
+        self.inner.value.epoch
     }
 }
 
@@ -340,6 +399,12 @@ impl FolderChangeSet {
             .saved
             .push(saved_removed(hlc, ref_kind, ref_id, message_id).map_err(js)?);
         Ok(())
+    }
+
+    /// Add a conversation-end register a `compose` call returned.
+    #[wasm_bindgen(js_name = addConversationEnd)]
+    pub fn add_conversation_end(&mut self, register: &ConversationEndRegister) {
+        self.inner.conversation_ends.push(register.inner.clone());
     }
 
     /// Number of registers carried.
@@ -1373,6 +1438,237 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
+    /// Set the account's quick reaction (UX reactions-and-emoji section 6),
+    /// stamped `hlc`. `true` when written: send `quickReactionEnvelope()`.
+    /// Throws `bounds: ...` for an empty or over-long value.
+    #[wasm_bindgen(js_name = setQuickReaction)]
+    pub fn set_quick_reaction(&self, hlc: u64, emoji: &str) -> Result<bool, JsError> {
+        self.with(|s| s.set_quick_reaction(hlc, emoji))?.map_err(js)
+    }
+
+    /// The account's quick reaction, or `undefined` (then use
+    /// `defaultQuickReaction()`).
+    #[wasm_bindgen(js_name = quickReaction)]
+    pub fn quick_reaction(&self) -> Result<Option<String>, JsError> {
+        self.with(|s| s.quick_reaction())
+    }
+
+    /// The envelope carrying the quick reaction with its original stamp, or
+    /// `undefined` when never written.
+    #[wasm_bindgen(js_name = quickReactionEnvelope)]
+    pub fn quick_reaction_envelope(&self) -> Result<Option<Vec<u8>>, JsError> {
+        self.with(|s| s.quick_reaction_envelope())
+    }
+
+    /// Fold in a quick-reaction envelope (route on `isQuickReactionEnvelope`).
+    /// Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyQuickReactionEnvelope)]
+    pub fn apply_quick_reaction_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_quick_reaction_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Record this account's reaction `emoji` (`reacted`) or its removal on
+    /// the post at `postCursor` of the 16-byte `channelId`, posted at
+    /// `postAtMs` (ADR-0087 section 13a). Returns the envelope to send, or
+    /// `undefined` when nothing changed. Throws `bounds: ...` for a fourth
+    /// own reaction on one post or a bad argument.
+    #[wasm_bindgen(js_name = setChannelReaction)]
+    pub fn set_channel_reaction(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| {
+            s.set_channel_reaction(hlc, channel, post_cursor, emoji, reacted, post_at_ms)
+        })?
+        .map_err(js)
+    }
+
+    /// Whether this account holds `emoji` on the post.
+    #[wasm_bindgen(js_name = hasChannelReaction)]
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> Result<bool, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.has_channel_reaction(&channel, post_cursor, emoji))
+    }
+
+    /// The emoji this account holds on the post.
+    #[wasm_bindgen(js_name = channelReactionsOn)]
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+    ) -> Result<Vec<String>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// Every held own channel reaction as envelopes (the catch-up re-send).
+    #[wasm_bindgen(js_name = channelReactionEnvelopes)]
+    pub fn channel_reaction_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.channel_reaction_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Fold in an own-channel-reaction envelope. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyChannelReactionEnvelope)]
+    pub fn apply_channel_reaction_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_channel_reaction_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Record a comment this account wrote: its 16-byte `commentNonce` under
+    /// the post. Returns the envelope to send, or `undefined`.
+    #[wasm_bindgen(js_name = recordChannelComment)]
+    pub fn record_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_nonce: &[u8],
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        let nonce = comment_nonce16(comment_nonce)?;
+        self.with(|s| s.record_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// Record that this account deleted one of its comments. Returns the
+    /// envelope to send, or `undefined`.
+    #[wasm_bindgen(js_name = deleteChannelComment)]
+    pub fn delete_channel_comment(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_nonce: &[u8],
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        let nonce = comment_nonce16(comment_nonce)?;
+        self.with(|s| s.delete_channel_comment(hlc, channel, post_cursor, nonce, post_at_ms))
+    }
+
+    /// The nonces of this account's live comments under the post,
+    /// concatenated (16 bytes each).
+    #[wasm_bindgen(js_name = channelCommentsOn)]
+    pub fn channel_comments_on(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.channel_comments_on(&channel, post_cursor).concat())
+    }
+
+    /// Every held own comment record as envelopes (the catch-up re-send).
+    #[wasm_bindgen(js_name = channelCommentEnvelopes)]
+    pub fn channel_comment_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.channel_comment_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Fold in an own-channel-comment envelope. Throws `"<code>: <reason>"`.
+    #[wasm_bindgen(js_name = applyChannelCommentEnvelope)]
+    pub fn apply_channel_comment_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_channel_comment_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
+    /// Drop own channel reactions and comments past the 30-day retention at
+    /// `nowMs`; returns how many registers were dropped.
+    #[wasm_bindgen(js_name = pruneChannelActivity)]
+    pub fn prune_channel_activity(&self, now_ms: u64) -> Result<u32, JsError> {
+        self.with(|s| u32::try_from(s.prune_channel_activity(now_ms)).unwrap_or(u32::MAX))
+    }
+
+    /// Record that the person has seen the "a device was added to your
+    /// account" warning (identity-recovery 17.5) for each device whose
+    /// 32-byte signature key is in `device_keys` (flat-concatenated),
+    /// stamped `hlc`, at wall-clock `now_ms`. Write-once per key. Returns
+    /// the envelopes to send in DeviceGroup service envelopes, carrying
+    /// exactly what this call wrote (empty when nothing was new). Throws
+    /// `"bounds: ..."` when the length is not a multiple of 32.
+    #[wasm_bindgen(js_name = acknowledgeDevices)]
+    pub fn acknowledge_devices(
+        &self,
+        hlc: u64,
+        device_keys: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        let n = core::DEVICE_ACK_KEY_LEN;
+        if device_keys.len() % n != 0 {
+            return Err(JsError::new("bounds: device keys must be 32 bytes each"));
+        }
+        let keys: Vec<[u8; 32]> = device_keys
+            .chunks_exact(n)
+            .filter_map(|c| <[u8; 32]>::try_from(c).ok())
+            .collect();
+        Ok(self
+            .with(|s| s.acknowledge_devices(hlc, &keys, now_ms))?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Whether the added-device warning for `deviceKey` was seen on some
+    /// device of the account. A key of another length is never acknowledged.
+    #[wasm_bindgen(js_name = isDeviceAcknowledged)]
+    pub fn is_device_acknowledged(&self, device_key: &[u8]) -> Result<bool, JsError> {
+        let Ok(key) = <[u8; 32]>::try_from(device_key) else {
+            return Ok(false);
+        };
+        self.with(|s| s.is_device_acknowledged(&key))
+    }
+
+    /// Every acknowledged device key, ascending, flat-concatenated (32 bytes
+    /// each).
+    #[wasm_bindgen(js_name = acknowledgedDevices)]
+    pub fn acknowledged_devices(&self) -> Result<Vec<u8>, JsError> {
+        self.with(|s| s.acknowledged_devices().concat())
+    }
+
+    /// Every held acknowledgement as envelopes: the re-send a device owes
+    /// when a live send did not go out.
+    #[wasm_bindgen(js_name = deviceAckEnvelopes)]
+    pub fn device_ack_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        Ok(self
+            .with(|s| s.device_ack_envelopes())?
+            .iter()
+            .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+            .collect())
+    }
+
+    /// Decode a device-acknowledgement envelope received in a DeviceGroup
+    /// service envelope (route on `isDeviceAckEnvelope`) and fold every
+    /// register in. Fail closed. Returns whether anything changed. Throws an
+    /// `Error` whose message is `"<code>: <reason>"` with code `wrongDomain`
+    /// / `unknownVersion` / `count` / `truncated` / `notCanonical` /
+    /// `trailing`.
+    #[wasm_bindgen(js_name = applyDeviceAckEnvelope)]
+    pub fn apply_device_ack_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_device_ack_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
     /// Write one of the account's invite links (ADR-0079 section 4) at
     /// `hlc`. `true` when written; then send `linkRecordEnvelopeFor(linkId)`
     /// in a DeviceGroup service envelope.
@@ -1537,6 +1833,90 @@ impl SyncedState {
         self.with(|s| s.saved_blob_ids().concat())
     }
 
+    /// The register to write now that this account's membership has ended,
+    /// or `undefined` when there is nothing to tell the other devices (the
+    /// register already says so, the account has rejoined at a later epoch, or
+    /// `conversationEndsMaxClient()` are held). `epoch` is the epoch the group
+    /// froze at, `0n` for a channel. `undefined` never stops the end itself:
+    /// the device still wipes the conversation. Folds nothing. Throws on a
+    /// conversation reference that is not well formed.
+    #[wasm_bindgen(js_name = composeConversationEnded)]
+    pub fn compose_conversation_ended(
+        &self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| s.compose_conversation_ended(hlc, &conversation, epoch))?
+            .map(|r| r.map(Into::into))
+            .map_err(js)
+    }
+
+    /// The register to write now that this account has joined a conversation,
+    /// or `undefined` when no end is held to clear: a first join writes
+    /// nothing. `epoch` is the epoch the Welcome joined at, `0n` for a
+    /// channel. Folds nothing. Throws on a conversation reference that is not
+    /// well formed.
+    #[wasm_bindgen(js_name = composeConversationJoined)]
+    pub fn compose_conversation_joined(
+        &self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        epoch: u64,
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let conversation = cref(ref_kind, ref_id)?;
+        self.with(|s| s.compose_conversation_joined(hlc, &conversation, epoch))?
+            .map(|r| r.map(Into::into))
+            .map_err(js)
+    }
+
+    /// The register held for a conversation, a "joined" included; `undefined`
+    /// when no end ever reached it or the reference is not well formed.
+    #[wasm_bindgen(js_name = conversationEnd)]
+    pub fn conversation_end(
+        &self,
+        ref_kind: u8,
+        ref_id: &[u8],
+    ) -> Result<Option<ConversationEndRegister>, JsError> {
+        let Ok(kind) = ConversationRefKind::from_wire(i64::from(ref_kind)) else {
+            return Ok(None);
+        };
+        let conversation = ConversationRef {
+            kind,
+            id: ref_id.to_vec(),
+        };
+        self.with(|s| s.conversation_end(&conversation).map(Into::into))
+    }
+
+    /// Whether this account's membership of a conversation has ended. `false`
+    /// for one never ended, for one joined again since, and for a reference
+    /// that is not well formed.
+    #[wasm_bindgen(js_name = isConversationEnded)]
+    pub fn is_conversation_ended(&self, ref_kind: u8, ref_id: &[u8]) -> Result<bool, JsError> {
+        let Ok(kind) = ConversationRefKind::from_wire(i64::from(ref_kind)) else {
+            return Ok(false);
+        };
+        let conversation = ConversationRef {
+            kind,
+            id: ref_id.to_vec(),
+        };
+        self.with(|s| s.is_conversation_ended(&conversation))
+    }
+
+    /// Every conversation whose register says ended, by `(kind, id)`.
+    #[wasm_bindgen(js_name = endedConversations)]
+    pub fn ended_conversations(&self) -> Result<Vec<ConversationEndRegister>, JsError> {
+        self.with(|s| {
+            s.ended_conversations()
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        })
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     #[wasm_bindgen(js_name = maxHlc)]
     pub fn max_hlc(&self) -> Result<u64, JsError> {
@@ -1618,6 +1998,16 @@ pub fn recovery_email_envelope_max_len() -> u32 {
     u32::try_from(core::RECOVERY_EMAIL_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
+/// `true` when `bytes` open with the device-acknowledgement envelope domain
+/// (`lakko/sync/device-ack/v1`): the routing question for a DeviceGroup
+/// service envelope. Says nothing about validity;
+/// `SyncedState.applyDeviceAckEnvelope` decides that.
+#[wasm_bindgen(js_name = isDeviceAckEnvelope)]
+#[must_use]
+pub fn is_device_ack_envelope(bytes: &[u8]) -> bool {
+    core::is_device_ack_envelope(bytes)
+}
+
 /// `true` when `bytes` open with the own-username envelope domain
 /// (`lakko/sync/username/v1`): the routing question for a DeviceGroup
 /// service envelope, asked before the `lakko-contacts` dispatcher. Says
@@ -1627,6 +2017,44 @@ pub fn recovery_email_envelope_max_len() -> u32 {
 #[must_use]
 pub fn is_own_username_envelope(bytes: &[u8]) -> bool {
     core::is_own_username_envelope(bytes)
+}
+
+fn channel16(bytes: &[u8]) -> Result<[u8; core::CHANNEL_REACTION_CHANNEL_ID_LEN], JsError> {
+    <[u8; core::CHANNEL_REACTION_CHANNEL_ID_LEN]>::try_from(bytes)
+        .map_err(|_| js("bounds: channel id must be 16 bytes"))
+}
+
+fn comment_nonce16(bytes: &[u8]) -> Result<[u8; core::CHANNEL_COMMENT_NONCE_LEN], JsError> {
+    <[u8; core::CHANNEL_COMMENT_NONCE_LEN]>::try_from(bytes)
+        .map_err(|_| js("bounds: comment nonce must be 16 bytes"))
+}
+
+/// Whether `bytes` is a quick-reaction envelope.
+#[wasm_bindgen(js_name = isQuickReactionEnvelope)]
+#[must_use]
+pub fn is_quick_reaction_envelope(bytes: &[u8]) -> bool {
+    core::is_quick_reaction_envelope(bytes)
+}
+
+/// Whether `bytes` is an own-channel-reaction envelope.
+#[wasm_bindgen(js_name = isChannelReactionEnvelope)]
+#[must_use]
+pub fn is_channel_reaction_envelope(bytes: &[u8]) -> bool {
+    core::is_channel_reaction_envelope(bytes)
+}
+
+/// Whether `bytes` is an own-channel-comment envelope.
+#[wasm_bindgen(js_name = isChannelCommentEnvelope)]
+#[must_use]
+pub fn is_channel_comment_envelope(bytes: &[u8]) -> bool {
+    core::is_channel_comment_envelope(bytes)
+}
+
+/// The most own reactions one post takes (3).
+#[wasm_bindgen(js_name = channelReactionsPerPostMax)]
+#[must_use]
+pub fn channel_reactions_per_post_max() -> u32 {
+    u32::try_from(core::CHANNEL_REACTIONS_PER_POST_MAX).unwrap_or(u32::MAX)
 }
 
 /// `true` when `bytes` open with the link-record envelope domain
@@ -1669,6 +2097,15 @@ pub fn mint_folder_id() -> Vec<u8> {
 #[must_use]
 pub fn saved_max_client() -> u32 {
     u32::try_from(core::SAVED_MAX_CLIENT).unwrap_or(u32::MAX)
+}
+
+/// How many conversation-end registers a client writes:
+/// `composeConversationEnded` answers `undefined` for a new conversation past
+/// it. A client-side limit, chosen; NOT a decode bound.
+#[wasm_bindgen(js_name = conversationEndsMaxClient)]
+#[must_use]
+pub fn conversation_ends_max_client() -> u32 {
+    u32::try_from(core::CONVERSATION_ENDS_MAX_CLIENT).unwrap_or(u32::MAX)
 }
 
 /// How many saved registers a client puts in one change set. A larger
@@ -1817,6 +2254,23 @@ mod tests {
             recovery_email_envelope_max_len()
                 <= crate::mls::device_group_service_envelope_max_len()
         );
+    }
+
+    /// Envelopes arrays cannot be built off wasm32, so the envelope comes
+    /// from the core here.
+    #[test]
+    fn a_device_acknowledgement_is_folded_and_read() {
+        let mut core_state = core::SyncedState::new();
+        let sent = core_state.acknowledge_devices(2, &[[9u8; 32], [4u8; 32]], 7);
+        let a = SyncedState::new();
+        assert_eq!(a.is_device_acknowledged(&[9u8; 32]).ok(), Some(false));
+        assert!(is_device_ack_envelope(&sent[0]));
+        assert_eq!(a.apply_device_ack_envelope(&sent[0]).ok(), Some(true));
+        assert_eq!(a.is_device_acknowledged(&[9u8; 32]).ok(), Some(true));
+        assert_eq!(a.is_device_acknowledged(&[9u8; 3]).ok(), Some(false));
+        let mut both = vec![4u8; 32];
+        both.extend_from_slice(&[9u8; 32]);
+        assert_eq!(a.acknowledged_devices().ok(), Some(both));
     }
 
     /// Success paths, plus the refusal of the pure canonicalising helper (a
@@ -2152,8 +2606,81 @@ mod tests {
         assert_eq!(saved_removed(1, 1, &CHAT, 7).map(|_| ()), Ok(()));
     }
 
+    fn end_of(s: &SyncedState, hlc: u64, epoch: u64) -> Option<ConversationEndRegister> {
+        s.compose_conversation_ended(hlc, 2, &CHAT, epoch)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn join_of(s: &SyncedState, hlc: u64, epoch: u64) -> Option<ConversationEndRegister> {
+        s.compose_conversation_joined(hlc, 2, &CHAT, epoch)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn fold_end(s: &SyncedState, register: &ConversationEndRegister) {
+        let mut c = FolderChangeSet::new();
+        c.add_conversation_end(register);
+        assert_eq!(c.register_count(), 1);
+        assert!(apply(s, &c));
+    }
+
+    /// An end, its reads, a late device, and a join clearing it.
+    #[test]
+    fn a_conversation_end_folds_reads_and_clears() {
+        let s = SyncedState::new();
+        // A first join leaves no register.
+        assert_eq!(join_of(&s, 1, 3), None);
+
+        let end = end_of(&s, 5, 7).unwrap_or_else(|| unreachable!());
+        assert!(end.ended());
+        assert_eq!((end.hlc(), end.epoch()), (5, 7));
+        assert_eq!(end.conversation().id(), CHAT.to_vec());
+        fold_end(&s, &end);
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(true));
+        assert_eq!(s.is_conversation_ended(9, &CHAT).ok(), Some(false));
+        let listed = s.ended_conversations().unwrap_or_default();
+        assert_eq!(listed, vec![end.clone()]);
+        // The same end from another device tells nobody anything.
+        assert_eq!(end_of(&s, 9, 7), None);
+
+        assert_eq!(
+            s.snapshot_parts().unwrap_or_default()[0].entry_count(),
+            1,
+            "the snapshot carries it"
+        );
+        let back = SyncedState::from_bytes(&s.to_bytes().unwrap_or_default()).unwrap_or_default();
+        assert_eq!(back.is_conversation_ended(2, &CHAT).ok(), Some(true));
+
+        let join = join_of(&s, 6, 9).unwrap_or_else(|| unreachable!());
+        assert!(!join.ended());
+        fold_end(&s, &join);
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(false));
+        assert_eq!(
+            s.conversation_end(2, &CHAT)
+                .ok()
+                .flatten()
+                .map(|r| r.epoch()),
+            Some(9)
+        );
+        // An end older than the join: nothing to write, and a stale one that
+        // arrives anyway does not stand.
+        assert_eq!(end_of(&s, 99, 7), None);
+        assert!(!s
+            .apply_folder_changes(&{
+                let mut c = FolderChangeSet::new();
+                c.add_conversation_end(&end);
+                c
+            })
+            .unwrap_or(true));
+        assert_eq!(s.is_conversation_ended(2, &CHAT).ok(), Some(false));
+    }
+
     #[test]
     fn the_client_limits_are_the_core_constants() {
+        assert_eq!(conversation_ends_max_client(), 4096);
+        assert_eq!(
+            conversation_ends_max_client() as usize,
+            core::CONVERSATION_ENDS_MAX_CLIENT
+        );
         assert_eq!(saved_max_client(), 2000);
         assert_eq!(saved_max_per_change_set(), 32);
         assert_eq!(saved_max_client() as usize, core::SAVED_MAX_CLIENT);
@@ -2161,5 +2688,43 @@ mod tests {
             saved_max_per_change_set() as usize,
             core::SAVED_MAX_PER_CHANGE_SET
         );
+    }
+
+    #[test]
+    fn quick_reaction_and_own_channel_activity() {
+        let a = SyncedState::new();
+        let b = SyncedState::new();
+        assert!(a.set_quick_reaction(1, "\u{1F44D}").ok().unwrap());
+        let env = a.quick_reaction_envelope().ok().flatten().unwrap();
+        assert!(is_quick_reaction_envelope(&env));
+        assert!(b.apply_quick_reaction_envelope(&env).ok().unwrap());
+        assert_eq!(
+            b.quick_reaction().ok().flatten(),
+            Some("\u{1F44D}".to_string())
+        );
+        let env = a
+            .set_channel_reaction(2, &[3; 16], 7, "\u{1F44D}", true, 1_000)
+            .ok()
+            .flatten()
+            .unwrap();
+        assert!(is_channel_reaction_envelope(&env));
+        assert!(b.apply_channel_reaction_envelope(&env).ok().unwrap());
+        assert!(b
+            .has_channel_reaction(&[3; 16], 7, "\u{1F44D}")
+            .ok()
+            .unwrap());
+        let env = a
+            .record_channel_comment(3, &[3; 16], 7, &[9; 16], 1_000)
+            .ok()
+            .flatten()
+            .unwrap();
+        assert!(is_channel_comment_envelope(&env));
+        assert!(b.apply_channel_comment_envelope(&env).ok().unwrap());
+        assert_eq!(
+            b.channel_comments_on(&[3; 16], 7).ok().unwrap(),
+            vec![9; 16]
+        );
+        assert_eq!(a.prune_channel_activity(u64::MAX).ok().unwrap(), 2);
+        assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

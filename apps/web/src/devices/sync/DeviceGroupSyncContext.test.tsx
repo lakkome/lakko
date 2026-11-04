@@ -92,6 +92,10 @@ vi.mock("../../wasm", () => ({
       ownUsername(): string | undefined {
         return undefined;
       }
+      // Reactions D3: the quick-reaction register, read on every refresh.
+      quickReaction(): string | undefined {
+        return undefined;
+      }
       // ADR-0079: the link-record register, read on every refresh.
       allLinkRecords(): unknown[] {
         return [];
@@ -140,6 +144,7 @@ vi.mock("./synced-projection", () => ({
       toBytes: () => bytes,
       recoveryEmail: () => undefined,
       ownUsername: () => undefined,
+      quickReaction: () => undefined,
     };
   },
   projectSyncedState: (synced: { owner: string }) => ({
@@ -156,7 +161,9 @@ vi.mock("../../reach/service-envelope-outbox", () => ({
   flushServiceEnvelopes: async () => undefined,
   registerServiceEnvelopeSender: () => () => undefined,
   setServiceEnvelopeComposer: () => undefined,
+  setServiceEnvelopeSentListener: () => undefined,
   markServiceEnvelopeDirty: () => undefined,
+  retryDirtyServiceEnvelopes: async () => undefined,
 }));
 vi.mock("../../chat/folders/folder-model", () => ({
   bytesToHex: () => "",

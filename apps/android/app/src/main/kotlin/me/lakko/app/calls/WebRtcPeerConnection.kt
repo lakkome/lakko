@@ -1715,7 +1715,9 @@ public class WebRtcPeerConnection(
                 ?.codecs
                 ?.let { VideoCodecPreference.vp8Preferences(it) }
         }.getOrNull()
-        val transceivers = runCatching { peer.transceivers }.getOrElse { emptyList() }
+        val transceivers = offerTransceivers(heldCameraTransceivers()) {
+            runCatching { peer.transceivers }.getOrElse { emptyList() }
+        }
         val outcome = VideoCodecPreference.preferVp8(
             transceivers = transceivers,
             isVideo = { tr ->
@@ -1744,6 +1746,7 @@ public class WebRtcPeerConnection(
      * instead, so it is told to prefer VP8 too.
      */
     private fun ensureVideoTransceiverForOffer(peer: PeerConnection) {
+        if (heldCameraTransceivers().isNotEmpty()) return
         runCatching {
             val hasVideo = peer.transceivers.any { tr ->
                 !tr.isStopped && tr.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
@@ -1756,6 +1759,12 @@ public class WebRtcPeerConnection(
             }
         }.onFailure { cause -> Log.w(TAG, "could not add a receive-only video transceiver", cause) }
     }
+
+    /** The transceivers this class was given for the camera's senders; see
+     *  [localVideoTransceiver] for why these are read and the connection's
+     *  list is not. */
+    private fun heldCameraTransceivers(): List<RtpTransceiver> =
+        listOfNotNull(localVideoTransceiver) + cameraCopies.values.map { it.transceiver }
 
     /**
      * After a suspension of an SDP step: refuse to go on when [close] ran

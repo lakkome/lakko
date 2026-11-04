@@ -128,6 +128,15 @@ public final class CallHistoryStore: ObservableObject {
         Self.save(backing: backing, accountIdB64: accountIdB64, entries: self.entries)
     }
 
+    /// Forget the calls of one conversation this account is no longer in
+    /// (ADR-0087 section 9).
+    public func forget(conversationId: String) {
+        guard let accountIdB64 = boundAccountIdB64,
+              entries.contains(where: { $0.conversationId == conversationId }) else { return }
+        entries.removeAll { $0.conversationId == conversationId }
+        Self.save(backing: backing, accountIdB64: accountIdB64, entries: entries)
+    }
+
     /// Forget this device's calls. The transcript rows in each conversation are
     /// untouched — they are the person's own history and the wipe that removes
     /// them is the message log's.

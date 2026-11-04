@@ -92,6 +92,9 @@ public fun classifiedPostOf(content: FfiChannelPostContent): ClassifiedPost = wh
         }
     }
     FfiChannelPostKind.MALFORMED -> ClassifiedPost.Malformed
+    // ADR-0087 phase B — a ban list is moderation state for comments, which
+    // this client does not build yet. Never rendered as text.
+    FfiChannelPostKind.BAN_LIST -> ClassifiedPost.Malformed
 }
 
 /** The FFI classification of a decrypted post plaintext. Never fails. */

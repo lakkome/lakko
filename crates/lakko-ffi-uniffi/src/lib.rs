@@ -43,8 +43,12 @@ pub mod attachments;
 pub mod auth;
 pub mod backup;
 pub mod call_relay;
+pub mod channel_access;
+pub mod channel_feedback;
 pub mod channels;
+pub mod circle;
 pub mod contacts;
+pub mod conversation_meta;
 pub mod device_card;
 pub mod device_link;
 pub mod discover;
@@ -53,9 +57,11 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
 pub mod feed;
+pub mod handles;
 pub mod journal_epoch;
 pub mod key_reset;
 pub mod key_rotation;
+pub mod knock;
 pub mod l10n;
 pub mod link_claim;
 pub mod link_founded;
@@ -67,6 +73,7 @@ pub mod passkey_vault;
 pub mod phrase_check;
 pub mod pow;
 pub mod push_wake;
+pub mod reaction_rules;
 pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
@@ -754,6 +761,35 @@ pub enum FfiError {
     /// `keyLength` / `subIdLength` for an argument of the wrong length.
     #[error("{0}")]
     PushWake(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0086 circle directories - appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A circle operation was refused (`circle.rs`). The message is
+    /// `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_circle::CircleError` (`length`, `unknownFormat`, `malformed`,
+    /// `authentication`, `seal`, `wrongEpoch`, `headerMismatch`, `notAMember`,
+    /// `treeFull`, `empty`, `writePending`, `overflow`, `filterTooLarge`,
+    /// `cardTooLong`, `cardNotSealed`, `rowOutOfRange`) or `keyLength` / `tagLength` /
+    /// `wrapLength` for an argument of the wrong length. `headerMismatch`
+    /// from `circleMemberEpochKey` means the header is stale or partial, or
+    /// this contact was removed.
+    #[error("{0}")]
+    Circle(String),
+
+    // ------------------------------------------------------------------
+    // Rejoin (ADR-0045 amendment of 2026-10-31, C-88). APPENDED last: a
+    // `flat_error` lowers by ordinal.
+    // ------------------------------------------------------------------
+    /// This device still holds a group as active, so a Welcome into it was
+    /// refused or its local state was not deleted, and nothing changed.
+    ///
+    /// **The message is a value here, not a sentence:** it is exactly the
+    /// lower-case hex of the group id, the same form `DsClient.pseudonymHex`
+    /// gives, because a `flat_error` carries no field and the caller has to
+    /// know which journal to read. Nothing else is ever in it.
+    #[error("{0}")]
+    MembershipGroupStillActive(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -823,6 +859,9 @@ impl From<lakko_mls::Error> for FfiError {
             lakko_mls::Error::MembershipRefused { reason, detail } => {
                 Self::from_refusal(reason, detail)
             },
+            lakko_mls::Error::GroupStillActive { group_id } => {
+                Self::MembershipGroupStillActive(lakko_mls::group_id_hex(&group_id))
+            },
             lakko_mls::Error::PayloadBounds(e) => Self::DeviceGroupPayloadRefused(e.to_string()),
         }
     }
@@ -864,6 +903,7 @@ impl FfiError {
             },
             MlsRefusalReason::OneToOneHasNoRoles => Self::MembershipOneToOneHasNoRoles(detail),
             MlsRefusalReason::GroupKindChanged => Self::MembershipGroupKindChanged(detail),
+            MlsRefusalReason::GroupStillActive => Self::MembershipGroupStillActive(detail),
         }
     }
 
@@ -902,6 +942,7 @@ impl FfiError {
             Self::MembershipOneToOneMembershipFixed(_) => FfiRefusalReason::OneToOneMembershipFixed,
             Self::MembershipOneToOneHasNoRoles(_) => FfiRefusalReason::OneToOneHasNoRoles,
             Self::MembershipGroupKindChanged(_) => FfiRefusalReason::GroupKindChanged,
+            Self::MembershipGroupStillActive(_) => FfiRefusalReason::GroupStillActive,
             _ => return None,
         })
     }
@@ -974,6 +1015,9 @@ pub enum FfiRefusalReason {
     /// The operation would change or remove the conversation's kind
     /// (ADR-0062).
     GroupKindChanged,
+    /// This device still holds the group as active, so a Welcome into it
+    /// cannot land (C-88). Appended: a uniffi enum lowers by ordinal.
+    GroupStillActive,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -1002,6 +1046,7 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
             MlsRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             MlsRefusalReason::GroupKindChanged => Self::GroupKindChanged,
+            MlsRefusalReason::GroupStillActive => Self::GroupStillActive,
         }
     }
 }
@@ -1032,6 +1077,7 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
             FfiRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
             FfiRefusalReason::GroupKindChanged => Self::GroupKindChanged,
+            FfiRefusalReason::GroupStillActive => Self::GroupStillActive,
         }
     }
 }
@@ -2077,6 +2123,24 @@ impl Group {
         Ok(g.approve_external_join(&identity.inner, &proposal_ref)?)
     }
 
+    /// ADR-0087 section 5 — retain a request to join carried as a bare
+    /// KeyPackage (opened from a knock row with `openKnockRow`). A kept
+    /// request is approved or rejected exactly like an external-join
+    /// proposal. Never advances the epoch or changes the roster.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when the bytes are not one KeyPackage or it does not
+    /// validate; nothing is changed.
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiJoinRequest, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.retain_join_request(&identity.inner, &key_package)?.into())
+    }
+
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027).
     /// `identity` is what the durable copy of the pending set is written
@@ -2641,6 +2705,43 @@ impl Group {
         Ok(g.is_active())
     }
 
+    /// Delete this group's state from `identity`'s storage, for a group this
+    /// device is out of (C-88). This is local: it tells nobody anything and
+    /// does not leave the group, which is why it is not called `delete`.
+    /// Repeating it changes nothing. Persist the snapshot afterwards.
+    ///
+    /// Refused with `MembershipGroupStillActive`, changing nothing, when the
+    /// group stored under this id is active, which also covers a stale handle
+    /// of a group a Welcome has since replaced.
+    pub fn delete_locally(&self, identity: &Identity) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.delete(&identity.inner)?)
+    }
+
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88). The one way a device offline past the journal's retention stops
+    /// holding a group.
+    ///
+    /// **Call this only holding a `conversationEnded` register from the
+    /// account's own synced state, and pass that register's `epoch`.** The core
+    /// cannot see the register: called on anything else, this deletes a live
+    /// membership. Never on a refused Delivery Service read.
+    ///
+    /// Refused with `MembershipGroupStillActive`, changing nothing, when the
+    /// stored group is active at an epoch above `ended_epoch`: this device
+    /// came back after that end, so it answers with a `joined` register. A
+    /// group that is not active goes at any epoch. Repeating it changes
+    /// nothing. Persist the snapshot afterwards.
+    pub fn delete_after_ended_elsewhere(
+        &self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.delete_after_ended_elsewhere(&identity.inner, ended_epoch)?)
+    }
+
     /// Local leaf index of the calling identity.
     pub fn own_leaf_index(&self) -> Result<u32, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
@@ -2873,6 +2974,55 @@ pub fn key_package_account_key(key_package: Vec<u8>) -> Result<Option<Vec<u8>>, 
 // composers consume.)
 // ============================================================================
 
+/// What [`Group::retain_join_request`] did with a request read off a knock
+/// row (ADR-0087 section 5).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiJoinRequestOutcome {
+    /// Kept. An approve can act on it.
+    Retained,
+    /// The same joiner was already waiting; an approve can still act on it.
+    AlreadyPending,
+    /// The joiner's leaf is already in the group. Nothing kept.
+    AlreadyMember,
+    /// The pending set is full. Nothing kept: stop the knock cursor before
+    /// this row so it is read again once a request is decided.
+    QueueFull,
+    /// The request can never join this group. Nothing kept; drop the row.
+    NotAdmissible,
+}
+
+impl From<lakko_mls::JoinRequestOutcome> for FfiJoinRequestOutcome {
+    fn from(o: lakko_mls::JoinRequestOutcome) -> Self {
+        use lakko_mls::JoinRequestOutcome as O;
+        match o {
+            O::Retained => Self::Retained,
+            O::AlreadyPending => Self::AlreadyPending,
+            O::AlreadyMember => Self::AlreadyMember,
+            O::QueueFull => Self::QueueFull,
+            O::NotAdmissible => Self::NotAdmissible,
+        }
+    }
+}
+
+/// The answer of [`Group::retain_join_request`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiJoinRequest {
+    /// The joiner's leaf signature key: the handle `approveExternalJoin` /
+    /// `rejectExternalJoin` take.
+    pub joiner_signature_key: Vec<u8>,
+    /// What was done with the request.
+    pub outcome: FfiJoinRequestOutcome,
+}
+
+impl From<lakko_mls::JoinRequest> for FfiJoinRequest {
+    fn from(r: lakko_mls::JoinRequest) -> Self {
+        Self {
+            joiner_signature_key: r.joiner_signature_key,
+            outcome: r.outcome.into(),
+        }
+    }
+}
+
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (ADR-0010 Tier 1).
 ///
@@ -3057,6 +3207,44 @@ impl PublisherGroup {
     pub fn pending_external_joins(&self) -> Result<Vec<Vec<u8>>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.inner().pending_external_joins())
+    }
+
+    /// ADR-0087 section 5 — retain a co-publisher's request to join read off
+    /// the channel's knock (`openKnockRow`); approve it with
+    /// [`Self::approve_external_join`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when the bytes are not one KeyPackage or it does not
+    /// validate; nothing is changed.
+    pub fn retain_join_request(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<FfiJoinRequest, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.retain_join_request(&identity.inner, &key_package)?.into())
+    }
+
+    /// ADR-0087 section 7 — encrypt an application message for the
+    /// publishers at the current epoch (the admission-seed envelope a channel
+    /// owner hands its co-publishers). Read it on the other side with
+    /// `processIncomingVerifyingRoles`; publish it to the PublisherGroup
+    /// journal like any group message.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when MLS refuses to encrypt.
+    pub fn create_application_message(
+        &self,
+        identity: &Identity,
+        plaintext: Vec<u8>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let msg = g
+            .inner_mut()
+            .create_application_message(&identity.inner, &plaintext)?;
+        Ok(group::encode_message(&msg)?)
     }
 
     /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
@@ -5409,6 +5597,50 @@ pub fn verify_supersession(
     Ok(new.to_vec())
 }
 
+/// Sign a two-way conversation link (ADR-0074 section 3.7): both keys state
+/// that the account's conversations are bound to the first and the directory
+/// publishes the second. Pass each identity's `ed25519_seed`. Returns the
+/// 201-byte link to upload with the identity bundle.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] when a seed is not 32 bytes or the two are one key.
+#[uniffi::export]
+pub fn sign_conversation_link(
+    conversation_ed25519_seed: Vec<u8>,
+    current_ed25519_seed: Vec<u8>,
+    issued_at_unix_secs: i64,
+) -> Result<Vec<u8>, FfiError> {
+    let conversation = signing_key_from_seed(&conversation_ed25519_seed)?;
+    let current = signing_key_from_seed(&current_ed25519_seed)?;
+    lakko_transparency::ConversationLink::sign(&conversation, &current, issued_at_unix_secs)
+        .map(|link| link.to_vec())
+        .map_err(|e| FfiError::Identity(format!("conversation link: {e}")))
+}
+
+/// Verify a conversation link against the key the caller left pinned for the
+/// account and return the 32-byte conversation key it names, which the caller
+/// records as a proven predecessor of that pin.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] when `trusted_current_key` is not 32 bytes, or the
+/// link is malformed, names another current key, or either signature does not
+/// verify. A caller ignores a refused link: it changes nothing.
+#[uniffi::export]
+pub fn verify_conversation_link(
+    link: Vec<u8>,
+    trusted_current_key: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let current: [u8; 32] = trusted_current_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("trusted current key must be 32 bytes".into()))?;
+    lakko_transparency::verify_conversation_link(&link, &current)
+        .map(|key| key.to_vec())
+        .map_err(|e| FfiError::Identity(format!("conversation link: {e}")))
+}
+
 /// Verify a complete identity-rotation chain against the KT log (G-30 #2,
 /// ADR-0019). Unlike [`verify_supersession`] — which checks only the bundle's
 /// standalone proof against the local pin — this anchors the rotation to the
@@ -6713,6 +6945,37 @@ mod tests {
     // ========================================================================
     // Typed membership refusals (ADR-0045 §9.1 item 1 / §12 item 6)
     // ========================================================================
+
+    /// `MembershipGroupStillActive` is the one variant whose message is a
+    /// value: a `flat_error` carries no field, so the group id the caller needs
+    /// is the whole message, in the hex every client keys a group on.
+    #[test]
+    fn a_group_still_active_refusal_names_the_group_in_hex() {
+        let alice = Identity::from_seed(vec![0xE1u8; 64]).unwrap();
+        let bob = Identity::from_seed(vec![0xE2u8; 64]).unwrap();
+        let alice_g = Group::create(&alice, GroupKind::Group).unwrap();
+        let add = alice_g
+            .add_member_from_wire(&alice, bob.create_key_package().unwrap())
+            .unwrap();
+        let bob_g = Group::join_from_welcome(add.welcome.clone(), &bob).unwrap();
+        let hex = lakko_mls::group_id_hex(&alice_g.group_id().unwrap());
+        assert_eq!(hex.len(), 64, "lower-case hex of a 32-byte id");
+        assert_eq!(hex, hex.to_lowercase());
+
+        for refused in [
+            Group::join_from_welcome(add.welcome, &bob).err().unwrap(),
+            bob_g.delete_locally(&bob).unwrap_err(),
+            bob_g
+                .delete_after_ended_elsewhere(&bob, bob_g.epoch().unwrap() - 1)
+                .unwrap_err(),
+        ] {
+            assert_eq!(
+                refused.refusal_reason(),
+                Some(FfiRefusalReason::GroupStillActive)
+            );
+            assert_eq!(refused.to_string(), hex);
+        }
+    }
 
     /// Every core [`RefusalReason`] reaches Swift / Kotlin as its **own**
     /// `FfiError` variant, and no two share one.

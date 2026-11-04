@@ -65,6 +65,8 @@ import me.lakko.app.auth.EMAIL_CODE_DIGITS
 import me.lakko.app.auth.EmailRecoverFailure
 import me.lakko.app.auth.FreshAuthRequired
 import me.lakko.app.auth.NotMeDestination
+import me.lakko.app.auth.PhraseSavePath
+import me.lakko.app.auth.PhraseSavedOutcome
 import me.lakko.app.auth.RecoveryEmailEnrolStart
 import me.lakko.app.auth.RecoveryEmailRow
 import me.lakko.app.auth.RecoveryPhraseRow
@@ -394,8 +396,16 @@ internal fun ResendRow(
 }
 
 /**
- * Save a recovery phrase (UX 19.5): the ADR-0074 key rotation with
- * `phrase_saved` on its server step, removing no device. The NEW words are
+ * Save a recovery phrase (UX 19.5, ADR-0075 section 3 as amended 2026-11-01).
+ * `GET /account/phrase` first, and no path is guessed when it fails.
+ *
+ * A phrase that was never in an email vault keeps the keys: the words the
+ * device holds, the three-word check, then `POST /account/phrase/saved`.
+ * Nothing counts as saved before that answer; a failure stays on the
+ * three-word step with `Try again`, and a person who leaves has saved nothing.
+ *
+ * Otherwise (and on a `409` from that POST) the ADR-0074 key rotation with
+ * `phrase_saved` on its server step, removing no device: the NEW words are
  * shown only once that step succeeded; until then a progress line, and on a
  * failure "We could not finish. Nothing changed." with `Try again`.
  */
@@ -416,6 +426,24 @@ public fun SaveRecoveryPhraseScreen(
     // Non-null once the key change went through: the words (or 15.4's
     // withheld state) replace this screen.
     var words: SavePhraseOutcome.ShowWords? by remember { mutableStateOf(null) }
+    // `null` until the server answered; nothing is decided without it.
+    var path: PhraseSavePath? by remember { mutableStateOf(null) }
+    // Non-null once the words the device already holds are on screen.
+    var heldWords: String? by remember { mutableStateOf(null) }
+    var finishing by remember { mutableStateOf(false) }
+    var finishFailed by remember { mutableStateOf(false) }
+
+    suspend fun readPath() {
+        try {
+            path = repository.phraseSavePath()
+        } catch (cause: Throwable) {
+            if (cause is CancellationException) throw cause
+            Log.w(TAG, "WARN recovery phrase path not read: ${cause.javaClass.simpleName}")
+            failed = true
+        }
+    }
+
+    LaunchedEffect(Unit) { readPath() }
 
     val run: () -> Unit = run@{
         if (working) return@run
@@ -423,7 +451,23 @@ public fun SaveRecoveryPhraseScreen(
         failed = false
         scope.launch {
             try {
+                if (path == null) {
+                    // `Try again` after a failed read: read, then the person
+                    // sees what this path says before going on.
+                    readPath()
+                    return@launch
+                }
                 if (!proof.ensure(context)) return@launch
+                if (path == PhraseSavePath.KeepKeys) {
+                    val held = withContext(Dispatchers.IO) { repository.devicePhrase() }
+                    if (held != null) {
+                        proof.clear()
+                        heldWords = held
+                    } else {
+                        path = PhraseSavePath.Rotate
+                    }
+                    return@launch
+                }
                 val outcome = withContext(Dispatchers.IO) {
                     repository.ensureIdentityKeyRecorded()
                     val runner = KeyRotationDevice.runner(
@@ -457,6 +501,67 @@ public fun SaveRecoveryPhraseScreen(
         }
     }
 
+    // After the three words: the account counts as protected from the
+    // server's answer on, not before.
+    val finishSave: () -> Unit = finishSave@{
+        if (finishing) return@finishSave
+        finishing = true
+        finishFailed = false
+        scope.launch {
+            try {
+                if (!proof.ensure(context)) return@launch
+                when (withContext(Dispatchers.IO) { repository.savePhraseKeepingKeys() }) {
+                    PhraseSavedOutcome.Saved -> {
+                        proof.clear()
+                        scope.launch { repository.refreshRecoveryEmail() }
+                        onDone()
+                    }
+                    // This phrase was in an email vault after all: the words
+                    // on screen are not the ones to keep.
+                    PhraseSavedOutcome.NeedsRotation -> {
+                        path = PhraseSavePath.Rotate
+                        heldWords = null
+                    }
+                    PhraseSavedOutcome.ProofRequired -> proof.onProofRefused()
+                    PhraseSavedOutcome.Failed -> finishFailed = true
+                }
+            } catch (cause: Throwable) {
+                if (cause is CancellationException) throw cause
+                Log.w(TAG, "WARN recovery phrase not marked saved: ${cause.javaClass.simpleName}")
+                finishFailed = true
+            } finally {
+                finishing = false
+            }
+        }
+    }
+
+    val heldPhrase = heldWords
+    if (heldPhrase != null) {
+        // Leaving saves nothing: the row in Settings stays as it was.
+        BackHandler(enabled = !finishing) { heldWords = null }
+        RecoveryPhraseOnboarding(
+            phrase = heldPhrase,
+            onDone = finishSave,
+            title = t("protect.phrase.title"),
+            lead = t("protect.phrase.save.body"),
+            onLeave = { heldWords = null },
+            finish = PhraseFinish(
+                busy = finishing || proof.view().working,
+                failure = if (finishFailed) t("protect.phrase.save.failed") else null,
+                enabled = proof.view().mainEnabled,
+                above = {
+                    ProofBlock(
+                        controller = proof,
+                        onSubmit = finishSave,
+                        onPasskey = { scope.launch { proof.provePasskey(context) } },
+                    )
+                },
+            ),
+            modifier = modifier,
+        )
+        return
+    }
+
     val shown = words
     if (shown != null) {
         me.lakko.app.ui.devices.RotatedPhraseScreen(
@@ -478,15 +583,18 @@ public fun SaveRecoveryPhraseScreen(
     val waitLeft = rememberRemainingMs(waitUntilMs)
     AuthScaffold(title = t("protect.phrase.title"), onBack = if (working) null else onBack, modifier = modifier) {
         Lead(t("protect.phrase.save.body"))
-        Spacer(Modifier.height(12.dp))
-        Lead(t("protect.phrase.save.effect"))
+        // Only where the keys change.
+        if (path == PhraseSavePath.Rotate) {
+            Spacer(Modifier.height(12.dp))
+            Lead(t("protect.phrase.save.effect"))
+        }
         Spacer(Modifier.height(16.dp))
         ProofBlock(
             controller = proof,
             onSubmit = run,
             onPasskey = { scope.launch { proof.provePasskey(context) } },
         )
-        if (working) {
+        if (working && path == PhraseSavePath.Rotate) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -505,9 +613,9 @@ public fun SaveRecoveryPhraseScreen(
         Spacer(Modifier.height(24.dp))
         BusyButton(
             label = if (failed) t("common.try_again") else t("protect.phrase.save.show"),
-            busy = working || proof.view().working,
+            busy = working || proof.view().working || (path == null && !failed),
             busyLabel = t("common.checking"),
-            enabled = waitLeft <= 0L && proof.view().mainEnabled,
+            enabled = waitLeft <= 0L && (path == null || proof.view().mainEnabled),
             onClick = run,
         )
         Spacer(Modifier.height(16.dp))
@@ -866,8 +974,7 @@ public fun AccountProtectionSection(
 private fun noticeDate(atMs: Long): String {
     val language = LocalStrings.current.language
     return remember(atMs, language) {
-        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
-            .format(java.util.Date(atMs))
+        me.lakko.app.l10n.DeviceFormats.mediumDate(atMs, language)
     }
 }
 

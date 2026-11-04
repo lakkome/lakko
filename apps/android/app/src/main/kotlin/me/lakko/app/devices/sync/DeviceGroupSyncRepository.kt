@@ -46,6 +46,8 @@ import me.lakko.app.ds.DsNetworkError
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.DeviceGroupBody
 import uniffi.lakko_ffi_uniffi.FolderChangeSet
+import uniffi.lakko_ffi_uniffi.FolderConversationKind
+import uniffi.lakko_ffi_uniffi.FolderConversationRef
 import uniffi.lakko_ffi_uniffi.FolderView
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.LinkAnswerVerdict
@@ -152,6 +154,12 @@ public class DeviceGroupSyncRepository(
     /** Bumped on every change to the folded state; the persistence writer
      *  watches it. */
     private val stateVersion: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** UX second-device.md section 3 - an open Devices screen hears of a
+     *  received commit once its snapshot is on disk. */
+    private val rosterChange = me.lakko.app.devices.RosterChangeAfterPersist {
+        me.lakko.app.devices.DeviceRosterChanges.note()
+    }
 
     // ------------------------------------------------------------
     // Internals
@@ -353,15 +361,21 @@ public class DeviceGroupSyncRepository(
         // starts empty, and the persistence writer's first write replaces the
         // refused file.
         if (seedState) {
-            val restored = runCatching {
+            val stored = runCatching {
                 DeviceGroupSnapshotStore.getSnapshot(
                     context = applicationContext,
                     accountIdB64 = accountIdB64,
                     dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )?.let { SyncedState.fromBytes(it) }
-            }.onFailure { Log.w(LOG_TAG, "persisted synced state dropped", it) }.getOrNull()
+                )
+            }.onFailure { Log.w(LOG_TAG, "persisted synced state not read", it) }.getOrNull()
+            val seeded = seedStateOrFresh(
+                stored = stored,
+                open = { SyncedState.fromBytes(it) },
+                fresh = { SyncedState() },
+                onRefused = { Log.w(LOG_TAG, "persisted synced state dropped", it) },
+            )
             synchronized(stateLock) {
-                syncedState = restored ?: SyncedState()
+                syncedState = seeded
             }
             val prefs = applicationContext.getSharedPreferences(PENDING_PREFS, Context.MODE_PRIVATE)
             pendingFlag = PendingSyncFlag(prefs.getBoolean(accountIdB64, false)) { value ->
@@ -377,13 +391,19 @@ public class DeviceGroupSyncRepository(
         // this roster. A reopen after this device let a device in
         // acknowledges what is there: the device that let it in shows no
         // banner about it.
-        me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64)
+        me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64) { keys ->
+            scope.launch { acknowledgeDevices(keys) }
+        }
+        // UX 17.6 - the account's acknowledged devices first, so a device seen
+        // on another one is never announced here by the roster that follows.
+        reportAcknowledged(accountIdB64)
         // ADR-0080 - this account's device cards, sent through this
         // runtime's DeviceGroup `ServiceEnvelope`.
         me.lakko.app.devices.DeviceCardCenter.bind(applicationContext, accountIdB64) { envelope ->
             sendServiceEnvelope(envelope)
         }
         reportRoster(ensured.group, accountIdB64, localChange = letIn)
+        me.lakko.app.devices.DeviceRosterChanges.note()
         if (seedState) startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
 
@@ -436,6 +456,7 @@ public class DeviceGroupSyncRepository(
         cancelPollAndDropHandles()
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
+        me.lakko.app.chat.ConversationEndsMirror.publish(null)
         synchronized(stateLock) {
             syncedState = null
             mutableRecoveryEmail.value = RecoveryAddressState.NOT_READY
@@ -465,7 +486,7 @@ public class DeviceGroupSyncRepository(
             if (localChange) {
                 me.lakko.app.devices.NewDeviceNotices.onLetIn(accountIdB64, roster)
             } else {
-                me.lakko.app.devices.NewDeviceNotices.onRoster(applicationContext, accountIdB64, roster, self)
+                me.lakko.app.devices.NewDeviceNotices.onRoster(accountIdB64, roster, self)
             }
             // ADR-0080 - a leaf that left takes its card with it.
             me.lakko.app.devices.DeviceCardCenter.prune(rows.map { hexOf(it.signaturePublicKey) })
@@ -487,9 +508,11 @@ public class DeviceGroupSyncRepository(
         } catch (_: Throwable) {
             return false
         }
-        val leaf = senderLeaf ?: return true
-        val roster = runCatching { g.devices() }.getOrNull() ?: return true
-        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        val center = me.lakko.app.devices.DeviceCardCenter
+        val leaf = senderLeaf ?: return true.also { center.noteRefused("no sender") }
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true.also { center.noteRefused("roster not read") }
+        val sender = roster.firstOrNull { it.leafIndex == leaf }
+            ?: return true.also { center.noteRefused("sender not in roster") }
         me.lakko.app.devices.DeviceCardCenter.receive(
             hexOf(sender.signaturePublicKey),
             me.lakko.app.devices.DeviceCardCenter.fromFfi(card),
@@ -572,6 +595,8 @@ public class DeviceGroupSyncRepository(
             try {
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
+                republishQuickReaction(state)
+                republishDeviceAcks(state)
                 republishLinkRecords(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
@@ -617,6 +642,7 @@ public class DeviceGroupSyncRepository(
                 }
                 mutableFolders.value = state.folders()
                 mutableSaved.value = state.saved()
+                republishConversationEnds(state)
                 // A restored or received stamp may be ahead of this device's
                 // clock; the next local write must still out-rank it.
                 Hlc.advancePast(state.maxHlc())
@@ -725,6 +751,150 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
+    // ADR-0087 section 9 - the end of a membership
+    // ------------------------------------------------------------
+
+    /** Project the ended registers for the chat layer. Under [stateLock]. */
+    private fun republishConversationEnds(state: SyncedState) {
+        val account = activeAccountIdB64.get() ?: return
+        val ends = try {
+            state.endedConversations().map {
+                me.lakko.app.chat.HeardConversationEnd(
+                    idHex = groupIdHexOf(it.conversation.id).lowercase(),
+                    channel = it.conversation.kind == FolderConversationKind.CHANNEL,
+                    epoch = it.epoch,
+                )
+            }
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "conversation ends not read (${cause.javaClass.simpleName})")
+            return
+        }
+        me.lakko.app.chat.ConversationEndsMirror.publish(me.lakko.app.chat.HeardConversationEnds(account, ends))
+    }
+
+    /** Whether the fold says the account is out of [conversation]. */
+    public fun isConversationEnded(conversation: FolderConversationRef): Boolean = synchronized(stateLock) {
+        try {
+            syncedState?.isConversationEnded(conversation) == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Tell the account's other devices the account is out of [conversation],
+     * at the MLS [epoch] of the end (0 for a channel).
+     */
+    public suspend fun publishConversationEnded(
+        conversation: FolderConversationRef,
+        epoch: ULong,
+    ): me.lakko.app.chat.EndPublish = publishEndRegister { state, hlc ->
+        state.composeConversationEnded(hlc, conversation, epoch)
+    }
+
+    /**
+     * Tell them the account is back in [conversation], at the epoch the join
+     * brought it to. A first join finds no register and writes none.
+     */
+    public suspend fun publishConversationJoined(
+        conversation: FolderConversationRef,
+        epoch: ULong,
+    ): me.lakko.app.chat.EndPublish = publishEndRegister { state, hlc ->
+        state.composeConversationJoined(hlc, conversation, epoch)
+    }
+
+    private suspend fun publishEndRegister(
+        compose: (SyncedState, ULong) -> uniffi.lakko_ffi_uniffi.ConversationEndRegister?,
+    ): me.lakko.app.chat.EndPublish {
+        val register = synchronized(stateLock) {
+            val state = syncedState ?: return me.lakko.app.chat.EndPublish.NOT_OPEN
+            try {
+                compose(state, Hlc.mint())
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "conversation end register refused (${cause.javaClass.simpleName})")
+                null
+            }
+        } ?: return me.lakko.app.chat.EndPublish.NOTHING_TO_TELL
+        try {
+            applyFolderChanges(
+                FolderChangeSet(
+                    metas = emptyList(),
+                    members = emptyList(),
+                    pins = emptyList(),
+                    removed = emptyList(),
+                    order = null,
+                    conversationEnds = listOf(register),
+                ),
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "conversation end register not applied (${cause.javaClass.simpleName})")
+            return me.lakko.app.chat.EndPublish.NOTHING_TO_TELL
+        }
+        // Past the debounce: the owed record moves on once this returns, and
+        // nothing else would write this register again.
+        syncStatePersistence.writeNow()
+        return me.lakko.app.chat.EndPublish.PUBLISHED
+    }
+
+    /**
+     * Clear what the synced state still holds of [conversation], each register
+     * by its own tombstone: saved messages, folder rows and folder pins, flags,
+     * the read position, the draft, the place in the order. Only what is held
+     * is written, so a device that hears of an end after the others cleared it
+     * sends nothing. The synced register of a profile is not tied to a group.
+     */
+    public suspend fun clearConversationRegisters(conversation: FolderConversationRef) {
+        val groupId = conversation.id
+        val conversationId = conversationOf(groupId).first
+        class Held(
+            val saved: List<uniffi.lakko_ffi_uniffi.SavedMessageView>,
+            val folders: List<me.lakko.app.chat.ChatFolder>,
+            val draft: Boolean,
+            val flags: Boolean,
+            val cursor: Boolean,
+            val order: List<ByteArray>?,
+        )
+        val held = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                Held(
+                    saved = state.saved().filter { hexEquals(it.conversation.id, groupId) || hexEquals(it.conversation.id, conversationId) },
+                    folders = state.folders().map(me.lakko.app.chat.ChatFolder::of),
+                    draft = state.draft(conversationId)?.text?.isNotEmpty() == true,
+                    flags = state.flags(conversationId)?.let { it.pinned || it.muted || it.archived || it.unreadOverride } == true,
+                    cursor = state.readCursor(conversationId)?.upToMessageId?.isNotEmpty() == true,
+                    order = state.conversationOrder()?.groupIds?.takeIf { ids -> ids.any { hexEquals(it, conversationId) } },
+                )
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "conversation registers not read (${cause.javaClass.simpleName})")
+                return
+            }
+        }
+        val savedRegisters = held.saved.map {
+            uniffi.lakko_ffi_uniffi.composeSavedRemoval(Hlc.mint(), it.conversation, it.messageId)
+        }
+        if (savedRegisters.isNotEmpty()) {
+            runCatching { applySavedChanges(savedRegisters) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+        val folderRef = FolderConversationRef(kind = conversation.kind, id = conversationId)
+        me.lakko.app.chat.conversationRemovalChanges(held.folders, folderRef) { Hlc.mint() }?.let { changes ->
+            runCatching { applyFolderChanges(changes) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+        if (held.draft) setDraft(groupId, "")
+        if (held.flags) setFlags(groupId, pinned = false, muted = false, archived = false, unreadOverride = false)
+        if (held.cursor) {
+            writeLocal(DeviceGroupBody.ReadCursor(groupId = conversationId, upToMessageId = ByteArray(0), readAtMs = 0u))
+        }
+        held.order?.let { ids -> setOrder(ids.filterNot { hexEquals(it, conversationId) }) }
+    }
+
+    private fun hexEquals(a: ByteArray, b: ByteArray): Boolean = a.contentEquals(b)
+
+    // ------------------------------------------------------------
     // ADR-0075 (amended 2026-10-13) - the recovery email address
     // ------------------------------------------------------------
 
@@ -792,6 +962,61 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
+    // reactions-and-emoji D3 - the account's quick reaction
+    // ------------------------------------------------------------
+
+    /** Project the register into [me.lakko.app.chat.QuickReaction]. Under
+     *  [stateLock]. */
+    private fun republishQuickReaction(state: SyncedState) {
+        me.lakko.app.chat.QuickReaction.held(runCatching { state.quickReaction() }.getOrNull())
+    }
+
+    /**
+     * Set the account's quick reaction and tell its other devices. `false`
+     * when the state is not open or the value is refused. A failed publish is
+     * re-sent by a catch-up.
+     */
+    public suspend fun setQuickReaction(emoji: String): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                state.setQuickReaction(Hlc.mint(), emoji)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.quickReactionEnvelope() }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** A received quick-reaction envelope, folded by its original stamp. */
+    private fun applyQuickReaction(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyQuickReactionEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "quick reaction envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
     // ADR-0076 - the account's own username
     // ------------------------------------------------------------
 
@@ -847,6 +1072,78 @@ public class DeviceGroupSyncRepository(
                 state.applyOwnUsernameEnvelope(envelope)
             } catch (cause: Throwable) {
                 Log.w(LOG_TAG, "own username envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
+    // UX 17.5 / 17.6 - the account's acknowledged new devices
+    // ------------------------------------------------------------
+
+    /** Hand the account's acknowledged devices to the new-device notice.
+     *  Under [stateLock]. */
+    private fun republishDeviceAcks(state: SyncedState) {
+        val accountIdB64 = activeAccountIdB64.get() ?: return
+        val keys = runCatching { state.acknowledgedDevices() }.getOrNull() ?: return
+        me.lakko.app.devices.NewDeviceNotices.onAcknowledged(
+            accountIdB64,
+            keys.mapTo(HashSet()) { me.lakko.app.devices.newDeviceKey(it) },
+        )
+    }
+
+    /** [republishDeviceAcks] outside a republish (right after the notice is
+     *  bound). */
+    private fun reportAcknowledged(accountIdB64: String) {
+        synchronized(stateLock) {
+            val state = syncedState ?: return
+            if (activeAccountIdB64.get() != accountIdB64) return
+            republishDeviceAcks(state)
+        }
+    }
+
+    /**
+     * Settings > Devices was opened with [keysHex] pending: write the
+     * account's acknowledgement for them (write-once per device) and tell
+     * the other devices. A send that fails is owed: the pending flag makes
+     * the next flush re-send every acknowledgement ([publishSnapshot]).
+     */
+    private suspend fun acknowledgeDevices(keysHex: Set<String>) {
+        val keys = keysHex.mapNotNull { me.lakko.app.devices.newDeviceKeyBytes(it) }
+        if (keys.isEmpty()) return
+        val envelopes = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.acknowledgeDevices(Hlc.mint(), keys, System.currentTimeMillis().toULong())
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement refused (${cause.javaClass.simpleName})")
+                emptyList()
+            }
+        }
+        if (envelopes.isEmpty()) return
+        republish()
+        for (envelope in envelopes) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+                return
+            }
+        }
+    }
+
+    /** A received device acknowledgement, folded write-once. */
+    private fun applyDeviceAck(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyDeviceAckEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "device acknowledgement envelope refused (${cause.javaClass.simpleName})")
                 false
             }
         }
@@ -978,18 +1275,19 @@ public class DeviceGroupSyncRepository(
     ): Long =
         publishRecorded(uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey), beforePublish)
 
-    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
-        persistHandleOrThrow(id, accountIdB64)
-        return DsClient().use { ds ->
-            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long =
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
+            persistHandleOrThrow(id, accountIdB64)
+            DsClient().use { ds ->
+                ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+            }
         }
-    }
 
     /** ADR-0079 - this device's DeviceGroup leaf key and the current
      *  roster's leaf keys, the inputs of the claim decision. `null` while no
@@ -1217,6 +1515,10 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
         // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
+        // reactions-and-emoji D3 - and the quick reaction.
+        runCatching { restored.quickReactionEnvelope() }.getOrNull()?.let { applyQuickReaction(it) }
+        // UX 17.6 - and the device acknowledgements.
+        for (envelope in runCatching { restored.deviceAckEnvelopes() }.getOrNull().orEmpty()) applyDeviceAck(envelope)
         // ADR-0079 - and the link records.
         for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
     }
@@ -1410,43 +1712,67 @@ public class DeviceGroupSyncRepository(
     }
 
     private suspend fun sendBody(body: DeviceGroupBody, hlc: ULong) {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get()
-            ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createDevicegroupMessage(id, body, hlc)
-        val groupId = g.groupId()
-        // ADR-0081 decision 3 — the ratchet step this message took is on disk
-        // before the ciphertext is published, or nothing is published.
-        persistHandleOrThrow(id, accountIdB64)
-        // G-13 (ADR-0015): wrap in the journal envelope (application messages
-        // carry no attestation).
-        val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
-        DsClient().use { ds ->
-            ds.publishGroup(groupId, envelope)
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get()
+                ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createDevicegroupMessage(id, body, hlc)
+            val groupId = g.groupId()
+            // ADR-0081 decision 3 — the ratchet step this message took is on disk
+            // before the ciphertext is published, or nothing is published.
+            persistHandleOrThrow(id, accountIdB64)
+            // G-13 (ADR-0015): wrap in the journal envelope (application messages
+            // carry no attestation).
+            val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
+            DsClient().use { ds ->
+                ds.publishGroup(groupId, envelope)
+            }
         }
     }
 
     /**
+     * Run one send, and once more when the held handle turned out to be behind
+     * the disk ([DeviceGroupSnapshotStore.SnapshotChanged]: another handle of
+     * this device wrote since). The first attempt sealed on the stale handle
+     * and nothing of it was published, so the retry on the reopened handle
+     * reuses no ratchet position. Not cancellable, because the reopen cancels
+     * the poll job a send may be running in.
+     */
+    private suspend fun <T> onHandleCaughtUp(send: suspend () -> T): T =
+        retryOnceAfterSnapshotChanged(
+            send = send,
+            catchUp = { reopenBehindDisk() },
+            again = { withContext(NonCancellable) { send() } },
+        )
+
+    /** Reopen the held handle from the disk unless another caller already
+     *  did. One at a time: two sends can lose the same race. */
+    private fun reopenBehindDisk() {
+        synchronized(reopenLock) {
+            val accountIdB64 = activeAccountIdB64.get() ?: return
+            if (handleGeneration == DeviceGroupSnapshotStore.generation(accountIdB64)) return
+            reopenAfterLocalChange()
+        }
+    }
+
+    private val reopenLock = Any()
+
+    /**
      * ADR-0081 decision 3 — persist the held handle, FAIL-CLOSED and
      * conditional on the generation it read. A handle another one wrote past
-     * (a commit of this device made N+1 current) is reopened from disk and the
-     * write throws: nothing built on the stale handle is published.
+     * (a commit of this device made N+1 current) makes the write throw: nothing
+     * built on the stale handle is published. A send catches up and runs again
+     * ([onHandleCaughtUp]); the poll reopens and reads on.
      */
     private fun persistHandleOrThrow(id: Identity, accountIdB64: String) {
-        try {
-            handleGeneration = DeviceGroupLifecycle.persistSnapshotOrThrow(
-                context = applicationContext,
-                identity = id,
-                accountIdB64 = accountIdB64,
-                expectedGeneration = handleGeneration,
-            )
-        } catch (changed: DeviceGroupSnapshotStore.SnapshotChanged) {
-            Log.w(LOG_TAG, "the DeviceGroup snapshot moved under this handle; reopening")
-            scope.launch { reopenAfterLocalChange() }
-            throw changed
-        }
+        handleGeneration = DeviceGroupLifecycle.persistSnapshotOrThrow(
+            context = applicationContext,
+            identity = id,
+            accountIdB64 = accountIdB64,
+            expectedGeneration = handleGeneration,
+        )
     }
 
     /**
@@ -1478,6 +1804,17 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
         ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
+        // reactions-and-emoji D3 - nor is the quick reaction.
+        val quickReactionEnvelope = synchronized(stateLock) {
+            runCatching { syncedState?.quickReactionEnvelope() }.getOrNull()
+        }
+        quickReactionEnvelope?.let { sendServiceEnvelope(it) }
+        // UX 17.6 - nor are the device acknowledgements: this is also how an
+        // acknowledgement whose live send failed is re-sent.
+        val deviceAckEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.deviceAckEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in deviceAckEnvelopes) sendServiceEnvelope(envelope)
         // ADR-0079 - nor are the link records; each goes with its own stamp.
         val linkRecordEnvelopes = synchronized(stateLock) {
             runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
@@ -1541,7 +1878,10 @@ public class DeviceGroupSyncRepository(
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
         if (!reopenAfterLocalChange(letIn = true)) return
-        me.lakko.app.devices.DeviceCardCenter.scheduleResend()
+        // ADR-0080 - the hand-over: the stored own card at once on the
+        // post-add handle (this device never sees its own add commit come
+        // back, so no growth timer is needed for the device it let in).
+        me.lakko.app.devices.DeviceCardCenter.sendHandOver()
         onGrowth(priorLeaves)
     }
 
@@ -1606,6 +1946,9 @@ public class DeviceGroupSyncRepository(
                 // The fetch answered, so the network works: send whatever of
                 // ours is still waiting.
                 flushPendingIfAny()
+                // ADR-0080 - an own device card that failed or came due in
+                // the background goes out now (only while the app shows).
+                me.lakko.app.devices.DeviceCardCenter.sendOwedIfAny()
                 val drainedBatch = result.messages.isEmpty() && !result.hasMore
 
                 // ADR-0081 decision 2, step 6 — a DeviceGroup commit of this
@@ -1704,11 +2047,25 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isDeviceAckEnvelope(body.envelope)
+                            ) {
+                                // UX 17.6 - another device of the account saw
+                                // a new device's warning; a `lakko-sync`
+                                // envelope, routed before the lakko-contacts
+                                // dispatcher.
+                                applyDeviceAck(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isLinkRecordEnvelope(body.envelope)
                             ) {
                                 // ADR-0079 - one of the account's invite links
                                 // from another of its devices.
                                 applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isQuickReactionEnvelope(body.envelope)
+                            ) {
+                                // reactions-and-emoji D3 - the account's quick
+                                // reaction from another of its devices.
+                                applyQuickReaction(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
                             ) {
@@ -1794,6 +2151,7 @@ public class DeviceGroupSyncRepository(
                         // device list: a device this one has not
                         // acknowledged raises the notice.
                         reportRoster(g, accountIdB64, localChange = false)
+                        rosterChange.onCommitApplied()
                     }
                     // Proposal / ExternalJoinProposal — no application-state
                     // mutation.
@@ -1811,7 +2169,9 @@ public class DeviceGroupSyncRepository(
                         try {
                             persistHandleOrThrow(id, accountIdB64)
                             saveAdmissions(accountIdB64)
+                            rosterChange.onPersisted()
                         } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
+                            scope.launch { reopenBehindDisk() }
                             return
                         } catch (cause: Throwable) {
                             Log.w(LOG_TAG, "DeviceGroup snapshot persist failed (${cause.javaClass.simpleName})")
@@ -2325,15 +2685,17 @@ public class DeviceGroupSyncRepository(
      * never lets a later handle reuse this message's ratchet position.
      */
     private suspend fun sendServiceEnvelope(envelope: ByteArray) {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get()
-            ?: error("DeviceGroupSync not bootstrapped")
-        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        persistHandleOrThrow(id, accountIdB64)
-        DsClient().use { ds ->
-            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+        onHandleCaughtUp {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get()
+                ?: error("DeviceGroupSync not bootstrapped")
+            val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            persistHandleOrThrow(id, accountIdB64)
+            DsClient().use { ds ->
+                ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+            }
         }
     }
 
@@ -2452,15 +2814,23 @@ public class DeviceGroupSyncRepository(
      * [me.lakko.app.devices.removeThenAnnounce] decides that.
      */
     public fun sealKeyRotation(envelope: ByteArray): Pair<ByteArray, ULong> {
-        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
-        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
-        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
-        val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        persistHandleOrThrow(id, accountIdB64)
-        val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
-            ?: error("the sealed message carries no epoch")
-        return wire to sealedAt
+        val seal = {
+            check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+            val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+            val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+            val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+            val wire = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+            persistHandleOrThrow(id, accountIdB64)
+            val sealedAt = uniffi.lakko_ffi_uniffi.epochOfMessage(wire)
+                ?: error("the sealed message carries no epoch")
+            wire to sealedAt
+        }
+        return try {
+            seal()
+        } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
+            reopenBehindDisk()
+            seal()
+        }
     }
 
     /** Publish a message [sealKeyRotation] made into THIS account's
@@ -2798,6 +3168,9 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
                 restored.recoveryEmailEnvelope()?.let { state.applyRecoveryEmailEnvelope(it) }
                 // ADR-0076 - and the own-username register.
                 restored.ownUsernameEnvelope()?.let { state.applyOwnUsernameEnvelope(it) }
+                restored.quickReactionEnvelope()?.let { state.applyQuickReactionEnvelope(it) }
+                // UX 17.6 - and the device acknowledgements.
+                for (envelope in restored.deviceAckEnvelopes()) state.applyDeviceAckEnvelope(envelope)
             }
             state.toBytes()
         }

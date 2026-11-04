@@ -103,6 +103,11 @@ public fun GroupCallOverlay(
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
+    // The slot empties when the call ends, and the end screen is still titled
+    // by the group: the last name it had stands.
+    val liveName = slot?.groupIdHex?.let(groupNameFor)
+    val lastGroupName = remember { mutableStateOf<String?>(null) }
+    if (liveName != null) lastGroupName.value = liveName
     // Section 4.1.2 — only the account that started the call is offered to end
     // it for everyone.
     val startedByMe by host.startedByThisAccount.collectAsStateWithLifecycle()
@@ -120,7 +125,7 @@ public fun GroupCallOverlay(
         // Section 4.5 — the CALL's connect moment, so the screen's running time
         // survives being put away and brought back.
         connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
-        groupName = slot?.groupIdHex?.let(groupNameFor),
+        groupName = lastGroupName.value,
     )
 }
 

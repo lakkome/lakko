@@ -516,6 +516,12 @@ public final class PushRoutingStore {
         }
     }
 
+    /// Drop one group's secret row (ADR-0087 section 9): the group is gone
+    /// from this device, and a re-add receives a secret of its own.
+    public func removeSecret(accountIdB64: String, groupIdHex: String) {
+        secretDefaults.removeObject(forKey: Self.secretKey(accountIdB64, groupIdHex))
+    }
+
     /// Wipe every push-routing secret + reverse-index entry for
     /// `accountIdB64`. Called from ``AccountLocalDataWipe`` so a
     /// device wipe leaves no push-routing residue (mirror of the web

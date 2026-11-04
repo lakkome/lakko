@@ -210,6 +210,14 @@ final class KeptDeviceAdoptionTests: XCTestCase {
     }
 
     private final class Directory: AccountDirectory, DeviceRestoreDirectory {
+        private(set) var rotatedPublishes: [(proof: Data?, key: Data, link: Data?)] = []
+        func publishRotatedIdentityBundle(
+            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+            supersessionProof: Data?, keyResetAttest: Data?, conversationLink: Data?,
+            sessionToken: String
+        ) async throws {
+            rotatedPublishes.append((supersessionProof, signaturePubkey, conversationLink))
+        }
         func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
             throw URLError(.notConnectedToInternet)
         }
@@ -265,6 +273,7 @@ final class KeptDeviceAdoptionTests: XCTestCase {
         let log: Log
         let notice: KeysRotatedNoticeStore
         let rotations: KeyRotationStore
+        let directory: Directory
     }
 
     private let accountId = Data((0..<16).map { UInt8(0xD0 | $0) })
@@ -354,7 +363,8 @@ final class KeptDeviceAdoptionTests: XCTestCase {
         }
         return Harness(
             repository: repository, pending: pending, predecessors: predecessors, upgrades: upgrades,
-            recalls: recalls, tokens: tokens, log: log, notice: notice, rotations: rotations)
+            recalls: recalls, tokens: tokens, log: log, notice: notice, rotations: rotations,
+            directory: directory)
     }
 
     private func waitUntil(_ condition: @MainActor () -> Bool, timeout: TimeInterval = 5) async -> Bool {
@@ -395,6 +405,78 @@ final class KeptDeviceAdoptionTests: XCTestCase {
         record.phase = .committed
         h.rotations.put(record, accountIdB64: accountIdB64)
         XCTAssertTrue(h.repository.keyResetPublishOwed(accountIdB64: accountIdB64))
+    }
+
+    // MARK: The conversation link the rotation publishes (ADR-0074 section 3.7)
+
+    func testARotationsPublishCarriesALinkFromTheOldKeyToTheNewOne() async throws {
+        let h = device()
+        let material = try KeyRotationMaterial.generate()
+        try await h.repository.adoptOwnKeyRotation(
+            material: material, session: .fixture(access: "tok-rotated", refresh: "r2.rotated", generation: 2))
+        let proof = Data(repeating: 1, count: KeyRotationWire.proofLength)
+
+        try await h.repository.publishRotatedIdentity(supersessionProof: proof, attestation: nil, withProof: true)
+
+        let sent = try XCTUnwrap(h.directory.rotatedPublishes.first)
+        XCTAssertEqual(sent.proof, proof)
+        XCTAssertEqual(sent.key, material.newSignaturePubkey)
+        XCTAssertEqual(
+            try verifyConversationLink(
+                link: try XCTUnwrap(sent.link), trustedCurrentKey: material.newSignaturePubkey),
+            try Identity.fromSeed(seed: oldSeed).signaturePublicKey(),
+            "the key the conversations are bound to")
+    }
+
+    /// A retried publish, and the fallback without a proof: that upload
+    /// changes the key too, and a key change with no link clears the stored
+    /// one.
+    func testEveryPublishOfARotationCarriesTheLinkTheRetryAndTheFallbackToo() async throws {
+        let h = device()
+        let material = try KeyRotationMaterial.generate()
+        try await h.repository.adoptOwnKeyRotation(
+            material: material, session: .fixture(access: "tok-rotated", refresh: "r2.rotated", generation: 2))
+        let proof = Data(repeating: 1, count: KeyRotationWire.proofLength)
+
+        try await h.repository.publishRotatedIdentity(supersessionProof: proof, attestation: nil, withProof: true)
+        try await h.repository.publishRotatedIdentity(supersessionProof: proof, attestation: nil, withProof: true)
+        try await h.repository.publishRotatedIdentity(
+            supersessionProof: proof, attestation: Data(repeating: 2, count: 145), withProof: false)
+
+        XCTAssertEqual(h.directory.rotatedPublishes.count, 3)
+        XCTAssertNil(h.directory.rotatedPublishes[2].proof, "the fallback sends no proof")
+        for publish in h.directory.rotatedPublishes {
+            XCTAssertNotNil(publish.link)
+        }
+    }
+
+    /// A second rotation: the conversations are still bound to the FIRST key.
+    func testALaterRotationsLinkNamesTheOldestKeyNotTheOneJustLeft() async throws {
+        let h = device()
+        let oldest = Data(repeating: 0x11, count: 64)
+        try h.predecessors.add(oldest, accountIdB64: accountIdB64)
+        let material = try KeyRotationMaterial.generate()
+        try await h.repository.adoptOwnKeyRotation(
+            material: material, session: .fixture(access: "tok-rotated", refresh: "r2.rotated", generation: 3))
+        XCTAssertEqual(h.predecessors.load(accountIdB64: accountIdB64), [oldest, oldSeed])
+
+        try await h.repository.publishRotatedIdentity(
+            supersessionProof: Data(repeating: 1, count: KeyRotationWire.proofLength),
+            attestation: nil, withProof: true)
+
+        XCTAssertEqual(
+            try verifyConversationLink(
+                link: try XCTUnwrap(h.directory.rotatedPublishes.first?.link),
+                trustedCurrentKey: material.newSignaturePubkey),
+            try Identity.fromSeed(seed: oldest).signaturePublicKey())
+    }
+
+    func testNoLinkIsSignedWithoutAPredecessorOrFromAKeyToItself() {
+        let seed = Data(repeating: 0x21, count: 64)
+        XCTAssertNil(OwnAccountKeys.conversationLink(
+            currentSeed: seed, predecessorSeeds: [], issuedAtUnixSecs: 1))
+        XCTAssertNil(OwnAccountKeys.conversationLink(
+            currentSeed: seed, predecessorSeeds: [seed], issuedAtUnixSecs: 1))
     }
 
     /// The rotating device's step 6: the same swap, with everything kept.
@@ -866,6 +948,223 @@ final class ProvenPredecessorTests: XCTestCase {
             XCTAssertEqual((error as? SupersessionRefused)?.reason, .proofInvalid)
         }
         XCTAssertTrue(predecessors.load().isEmpty)
+    }
+
+    // MARK: The conversation link (ADR-0074 section 3.7)
+
+    private func link(conversation: Data, current: Data) throws -> Data {
+        try signConversationLink(
+            conversationEd25519Seed: try Identity.fromSeed(seed: conversation).ed25519Seed(),
+            currentEd25519Seed: try Identity.fromSeed(seed: current).ed25519Seed(),
+            issuedAtUnixSecs: 1_700_000_000)
+    }
+
+    func testAVerifiedLinkEarnsTheTreatmentOfAProof() {
+        XCTAssertEqual(ProvenPredecessorRule.treatment(for: .verifiedConversationLink), .provenPredecessor)
+        XCTAssertFalse(ProvenPredecessorRule.flagsAsReset(.verifiedConversationLink))
+        var map = ProvenPredecessors()
+        XCTAssertTrue(map.record(oldKeyB64: "k0", newKeyB64: "k2", evidence: .verifiedConversationLink))
+        XCTAssertTrue(map.samePerson("k0", "k2"))
+    }
+
+    /// The defect: a contact first met after a rotation pinned only the
+    /// newest key, while the person's leaves and every device they restore
+    /// are bound to the oldest.
+    func testAContactMetAfterARotationFollowsThePersonToTheKeyTheirConversationsAreBoundTo() async throws {
+        let defaults = freshDefaults()
+        let pins = PeerPinStore(defaults: defaults, ownerAccountIdB64: "owner")
+        let predecessors = ProvenPredecessorStore(ownerAccountIdB64: "owner", defaults: defaults)
+        let contacts = client(pins: pins, predecessors: predecessors, defaults: defaults)
+        let contactId = Data(repeating: 0xC4, count: 16)
+        let conversationSeed = Data(repeating: 0x11, count: 32)
+        let currentSeed = Data(repeating: 0x22, count: 32)
+        let conversationKey = try pubB64(conversationSeed)
+        let currentKey = try pubB64(currentSeed)
+
+        try await contacts.verifyBundleAccountKey(
+            accountId: contactId,
+            bundle: IdentityFetchResponse(
+                signaturePubkey: currentKey, x25519Pubkey: "",
+                conversationLink: base64Encode(try link(conversation: conversationSeed, current: currentSeed))))
+
+        let pin = try XCTUnwrap(pins.readPin(accountIdB64: base64Encode(contactId)))
+        XCTAssertEqual(pin.pinnedSignaturePubkeyB64, currentKey, "the pin is the published key")
+        let proven = predecessors.load()
+        XCTAssertEqual(proven.allKeys(of: currentKey), [currentKey, conversationKey])
+        XCTAssertEqual(proven.current(of: conversationKey), currentKey)
+        // What the re-admission check reads.
+        XCTAssertEqual(
+            DeviceReadmission.lookupStanding(
+                rosterKeyB64: conversationKey,
+                pin: pin,
+                provenPredecessorsB64: proven.predecessors(of: pin.pinnedSignaturePubkeyB64),
+                binding: nil),
+            .samePerson)
+        // What the KeyPackage add filter reads.
+        XCTAssertTrue(
+            AddMemberKey.acceptableBoundKeys(expectedKeyB64: currentKey, proven: proven)
+                .contains(conversationKey))
+    }
+
+    /// The candidate list: the row holds the newest key, the roster the
+    /// oldest. Without the chain the row is not found and nothing is looked up.
+    func testAContactRowAnswersToItsProvenChainWhenTheRosterNamesTheOldestKey() {
+        var proven = ProvenPredecessors()
+        proven.record(oldKeyB64: "k0", newKeyB64: "k2", evidence: .verifiedConversationLink)
+        let accountId = Data(repeating: 0xC8, count: 16)
+        let row = DeviceReadmission.LookupContact(
+            signaturePubkeyB64: "k2",
+            previousKeysB64: DeviceReadmission.keysARowAnswersTo(
+                contactKeyB64: "k2", previousKeysB64: ["retired"], proven: proven),
+            accountId: accountId)
+        XCTAssertEqual(row.previousKeysB64, ["retired", "k0"])
+
+        let candidates = DeviceReadmission.readmissionCandidates(
+            rosterPersonKeysB64: ["k0"], ownPersonKeyB64: "me", contacts: [row],
+            profileAccountIdOf: { _ in nil })
+
+        XCTAssertEqual(candidates.map(\.accountId), [accountId])
+        XCTAssertEqual(candidates.map(\.rosterKeyB64), ["k0"])
+    }
+
+    func testTheLinkIsRecordedOnTheVerifiedBindingPathToo() async throws {
+        let defaults = freshDefaults()
+        let pins = PeerPinStore(defaults: defaults, ownerAccountIdB64: "owner")
+        let predecessors = ProvenPredecessorStore(ownerAccountIdB64: "owner", defaults: defaults)
+        let bindings = VerifiedBindingStore(defaults: defaults, ownerAccountIdB64: "owner")
+        let contacts = ContactsClient(
+            pinStore: pins,
+            transparencyVerify: TransparencyVerify(
+                client: nil, operatorKey: Data(repeating: 1, count: 32),
+                lastSeenRoot: LastSeenRoot(defaults: defaults), verifyInclusion: { _ in }),
+            predecessors: predecessors,
+            bindings: bindings)
+        let memberId = Data(repeating: 0xC5, count: 16)
+        let conversationSeed = Data(repeating: 0x11, count: 32)
+        let currentSeed = Data(repeating: 0x22, count: 32)
+        let currentKey = try pubB64(currentSeed)
+
+        try await contacts.verifyBundleAccountKey(
+            accountId: memberId,
+            bundle: IdentityFetchResponse(
+                signaturePubkey: currentKey, x25519Pubkey: "",
+                conversationLink: base64Encode(try link(conversation: conversationSeed, current: currentSeed))),
+            heldKeyB64: currentKey)
+
+        XCTAssertNil(pins.readPin(accountIdB64: base64Encode(memberId)), "a group member is not pinned")
+        XCTAssertEqual(bindings.read(accountIdB64: base64Encode(memberId))?.keyB64, currentKey)
+        XCTAssertEqual(predecessors.load().predecessors(of: currentKey), [try pubB64(conversationSeed)])
+    }
+
+    /// A proof follows the pin; the link then reaches the oldest key. Both
+    /// lead to one person, and a link seen a second time writes nothing.
+    func testALinkBesideAProofJoinsTheOldestKeyToTheSamePerson() async throws {
+        let defaults = freshDefaults()
+        let pins = PeerPinStore(defaults: defaults, ownerAccountIdB64: "owner")
+        let predecessors = ProvenPredecessorStore(ownerAccountIdB64: "owner", defaults: defaults)
+        let contacts = client(pins: pins, predecessors: predecessors, defaults: defaults)
+        let contactId = Data(repeating: 0xC6, count: 16)
+        let k0 = Data(repeating: 0x11, count: 32)
+        let k1 = Data(repeating: 0x22, count: 32)
+        let k2 = Data(repeating: 0x33, count: 32)
+
+        try await contacts.verifyBundleAccountKey(
+            accountId: contactId,
+            bundle: IdentityFetchResponse(signaturePubkey: try pubB64(k1), x25519Pubkey: ""))
+        let bundle = IdentityFetchResponse(
+            signaturePubkey: try pubB64(k2), x25519Pubkey: "",
+            supersessionProof: base64Encode(try proof(old: k1, new: k2)),
+            keyGeneration: 2,
+            conversationLink: base64Encode(try link(conversation: k0, current: k2)))
+        try await contacts.verifyBundleAccountKey(accountId: contactId, bundle: bundle)
+
+        XCTAssertEqual(
+            Set(predecessors.load().predecessors(of: try pubB64(k2))), [try pubB64(k0), try pubB64(k1)])
+
+        let before = predecessors.load()
+        try await contacts.verifyBundleAccountKey(accountId: contactId, bundle: bundle)
+        XCTAssertEqual(predecessors.load(), before)
+    }
+
+    /// A refused link records nothing and refuses nothing: the identity
+    /// stays what the gate made it.
+    func testALinkThatDoesNotVerifyIsIgnoredAndTheIdentityStands() async throws {
+        let conversationSeed = Data(repeating: 0x11, count: 32)
+        let currentSeed = Data(repeating: 0x22, count: 32)
+        let strangerSeed = Data(repeating: 0x33, count: 32)
+        var tampered = try link(conversation: conversationSeed, current: currentSeed)
+        tampered[tampered.count - 1] ^= 0x01
+        let refused: [String] = [
+            // Names another current key: a directory attaching a link it holds.
+            base64Encode(try link(conversation: conversationSeed, current: strangerSeed)),
+            // A signature that does not verify.
+            base64Encode(tampered),
+            // Not a link at all.
+            base64Encode(Data(repeating: 0xAB, count: 16)),
+            "not base64!",
+        ]
+        for (index, conversationLink) in refused.enumerated() {
+            let defaults = freshDefaults()
+            let pins = PeerPinStore(defaults: defaults, ownerAccountIdB64: "owner")
+            let predecessors = ProvenPredecessorStore(ownerAccountIdB64: "owner", defaults: defaults)
+            let contacts = client(pins: pins, predecessors: predecessors, defaults: defaults)
+            let contactId = Data(repeating: 0xD0 + UInt8(index), count: 16)
+
+            try await contacts.verifyBundleAccountKey(
+                accountId: contactId,
+                bundle: IdentityFetchResponse(
+                    signaturePubkey: try pubB64(currentSeed), x25519Pubkey: "",
+                    conversationLink: conversationLink))
+
+            XCTAssertTrue(predecessors.load().isEmpty, "link \(index) recorded something")
+            XCTAssertEqual(
+                pins.readPin(accountIdB64: base64Encode(contactId))?.pinnedSignaturePubkeyB64,
+                try pubB64(currentSeed), "link \(index) changed the identity")
+        }
+    }
+
+    /// The gate refused the key: a link signed by that key is worth nothing,
+    /// valid or not.
+    func testALinkOnABundleTheGateRefusedRecordsNothing() async throws {
+        let defaults = freshDefaults()
+        let pins = PeerPinStore(defaults: defaults, ownerAccountIdB64: "owner")
+        let predecessors = ProvenPredecessorStore(ownerAccountIdB64: "owner", defaults: defaults)
+        let contacts = client(pins: pins, predecessors: predecessors, defaults: defaults)
+        let contactId = Data(repeating: 0xC7, count: 16)
+        let pinnedSeed = Data(repeating: 0x11, count: 32)
+        let otherSeed = Data(repeating: 0x22, count: 32)
+        let attackerSeed = Data(repeating: 0x33, count: 32)
+
+        try await contacts.verifyBundleAccountKey(
+            accountId: contactId,
+            bundle: IdentityFetchResponse(signaturePubkey: try pubB64(pinnedSeed), x25519Pubkey: ""))
+        do {
+            try await contacts.verifyBundleAccountKey(
+                accountId: contactId,
+                bundle: IdentityFetchResponse(
+                    signaturePubkey: try pubB64(attackerSeed), x25519Pubkey: "", keyGeneration: 2,
+                    conversationLink: base64Encode(try link(conversation: otherSeed, current: attackerSeed))))
+            XCTFail("the gate must refuse an unproven change")
+        } catch {
+            XCTAssertEqual((error as? SupersessionRefused)?.reason, .proofAbsent)
+        }
+        XCTAssertTrue(predecessors.load().isEmpty)
+    }
+
+    func testTheWireCarriesTheLinkUnderItsOwnName() throws {
+        let fetched = try JSONDecoder().decode(
+            IdentityFetchResponse.self,
+            from: Data(#"{"signature_pubkey":"s","x25519_pubkey":"x","conversation_link":"bGluaw=="}"#.utf8))
+        XCTAssertEqual(fetched.conversationLink, "bGluaw==")
+        XCTAssertNil(try JSONDecoder().decode(
+            IdentityFetchResponse.self,
+            from: Data(#"{"signature_pubkey":"s","x25519_pubkey":"x"}"#.utf8)).conversationLink)
+
+        let upload = IdentityUploadRequest(
+            accountId: "a", signaturePubkey: "s", x25519Pubkey: "x", conversationLink: "bGluaw==")
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(upload)) as? [String: Any])
+        XCTAssertEqual(json["conversation_link"] as? String, "bGluaw==")
     }
 }
 

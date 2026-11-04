@@ -47,7 +47,7 @@ export type CallLogRows = ReadonlyMap<string, readonly CallLogEntry[]>;
 
 const EMPTY: readonly CallLogEntry[] = [];
 
-const OUTCOMES: readonly CallOutcome[] = ["outgoing", "incoming", "missed", "declined"];
+const OUTCOMES: readonly CallOutcome[] = ["outgoing", "incoming", "missed", "declined", "failed"];
 
 // ---------------------------------------------------------------------------
 // Row codec

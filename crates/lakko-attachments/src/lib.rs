@@ -71,6 +71,26 @@
 //!   `mime: text/html` is a file.
 //! - [`WIRE_VERSION`] stays 1.
 //!
+//! # Reaction op (ADR-0023, UX `reactions-and-emoji.md` section 17)
+//!
+//! A reaction is `react_to` + `emoji` + `react_op` (`"add"` or
+//! `"remove"`), with an optional `react_author` (standard base64 of the
+//! target author's 32-byte account key). The op is explicit and required:
+//! the earlier toggle form is not kept (no deployment), so an envelope with
+//! `react_to` and no recognised op degrades to a plain chat like any other
+//! malformed op. `react_author` is dropped alone when it does not decode to
+//! 32 bytes. What a sequence of ops means (per person, at most 3, journal
+//! order) is the fold in `lakko_ui_rules::reaction`, not this parser's.
+//!
+//! # Channel invitation (ADR-0087 section 14)
+//!
+//! `channel_invite` carries an invitation card a channel's owner or
+//! publisher sends a contact inside their one-to-one: standard base64 of the
+//! card bytes (`lakko_contacts::group_invite::ChannelInviteCard`), opaque
+//! here, kept only when it decodes to 1 to [`MAX_CHANNEL_INVITE_BYTES`]
+//! bytes. Like a reply it rides beside `text` and is surfaced on the `Chat`
+//! classification only; `WIRE_VERSION` stays 1.
+//!
 //! # Reply (ADR-0052)
 //!
 //! `reply_to` / `reply_author` / `reply_excerpt` are v1.x additions in the
@@ -126,6 +146,38 @@ pub const WIRE_VERSION: u8 = 1;
 /// parser — anything longer degrades to a plain chat message.
 pub const MAX_EMOJI_BYTES: usize = 64;
 
+/// The one rule a reaction emoji passes, in a chat (ADR-0023, ADR-0047) and
+/// under a channel post (ADR-0087 section 13a): not empty and at most
+/// [`MAX_EMOJI_BYTES`] bytes. Whether the text is one emoji grapheme is the
+/// client's to check when it offers the picker; this bound is what every
+/// parser enforces.
+#[must_use]
+pub const fn is_reaction_emoji(emoji: &str) -> bool {
+    !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES
+}
+
+/// Length of the optional target-author key a reaction carries: the 32-byte
+/// account key of the person who wrote the message reacted to (UX
+/// `reactions-and-emoji.md` section 17 item 7).
+pub const REACTION_TARGET_AUTHOR_LEN: usize = 32;
+
+/// What a reaction op does (UX `reactions-and-emoji.md` section 17 item 3,
+/// maintainer 2026-11-02): add the emoji to the sender's reactions on the
+/// target, or take it off. Explicit rather than a toggle: with a toggle two
+/// of a person's devices pressing at once cancel each other, and a fourth add
+/// a receiver ignored would turn into a removal the next time the same emoji
+/// is sent. With explicit ops an add of an emoji the person already holds,
+/// and a remove of one it does not, are no-ops (the fold in
+/// `lakko_ui_rules::reaction`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReactionAction {
+    /// Add the emoji to the sender's reactions on the target.
+    Add,
+    /// Take the emoji off the sender's reactions on the target.
+    Remove,
+}
+
 /// ADR-0052 — the longest quoted author name a reply may carry, in bytes.
 /// The profile display-name rule already caps a name at 255 bytes
 /// (`lakko-contacts::profile`), so a snapshot of one needs no more; a
@@ -155,6 +207,12 @@ pub const MAX_FORWARD_ORIGIN_GROUP_BYTES: usize = 128;
 /// group, since both name a group id. Over it, the marker is dropped as a
 /// whole on parse and not carried on compose.
 pub const MAX_RESEND_ORIGIN_GROUP_BYTES: usize = MAX_FORWARD_ORIGIN_GROUP_BYTES;
+
+/// ADR-0087 section 14: the longest channel invitation card, in decoded
+/// bytes, a chat envelope keeps. At least
+/// `lakko_contacts::group_invite::CHANNEL_INVITE_CARD_MAX_LEN` (2014, pinned
+/// by a test there); a larger value is dropped alone.
+pub const MAX_CHANNEL_INVITE_BYTES: usize = 2048;
 
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
 /// message.
@@ -951,6 +1009,29 @@ pub struct Envelope {
     /// set `react_to` degrades the message to a plain chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
+    /// The reaction op (`"add"` / `"remove"`), paired with `react_to`.
+    /// Required: a `react_to` without a recognised op degrades the message
+    /// to a plain chat (no toggle form is kept; there is no deployment).
+    /// Lenient, so an unknown value never fails the whole envelope into the
+    /// raw-JSON fallback.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub react_op: Option<ReactionAction>,
+    /// The account key of the target message's author, standard base64 of
+    /// [`REACTION_TARGET_AUTHOR_LEN`] bytes, so a background process can tell
+    /// a reaction is to the person's own message without the message log.
+    /// **The sender's claim**: a client that holds the message checks its
+    /// own record. Dropped alone when it does not decode to exactly
+    /// [`REACTION_TARGET_AUTHOR_LEN`] bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub react_author: Option<String>,
     /// ADR-0024 — if set, this is an ephemeral TYPING signal
     /// (`true` = started, `false` = stopped). Never persisted by the
     /// receiver; auto-expires after a few seconds.
@@ -1054,6 +1135,15 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub resend_origin_message: Option<i64>,
+    /// ADR-0087 section 14 — a channel invitation card, standard base64,
+    /// opaque here. Dropped alone when it does not decode or decodes to more
+    /// than [`MAX_CHANNEL_INVITE_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub channel_invite: Option<String>,
 }
 
 impl Envelope {
@@ -1070,6 +1160,8 @@ impl Envelope {
             delete_of: None,
             react_to: None,
             emoji: None,
+            react_op: None,
+            react_author: None,
             typing: None,
             read_up_to: None,
             reply_to: None,
@@ -1080,7 +1172,16 @@ impl Envelope {
             forward_origin_message: None,
             resend_origin_group: None,
             resend_origin_message: None,
+            channel_invite: None,
         }
+    }
+
+    /// The channel invitation card this envelope carries, decoded: present
+    /// only when it is valid base64 of 1 to [`MAX_CHANNEL_INVITE_BYTES`]
+    /// bytes.
+    #[must_use]
+    fn channel_invite(&self) -> Option<Vec<u8>> {
+        decode_channel_invite(self.channel_invite.as_deref()?)
     }
 
     /// The reply this envelope carries, with each snapshot string dropped
@@ -1138,6 +1239,26 @@ impl Envelope {
             message_id,
         })
     }
+}
+
+/// The bytes of a `channel_invite` field, when it is within bounds. The
+/// encoded length is checked before decoding so an oversized field costs no
+/// allocation.
+fn decode_channel_invite(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() > MAX_CHANNEL_INVITE_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = B64.decode(encoded).ok()?;
+    (!bytes.is_empty() && bytes.len() <= MAX_CHANNEL_INVITE_BYTES).then_some(bytes)
+}
+
+/// The target-author key of a reaction, when it is valid base64 of exactly
+/// [`REACTION_TARGET_AUTHOR_LEN`] bytes. The encoded length is checked first.
+fn decode_react_author(encoded: &str) -> Option<[u8; REACTION_TARGET_AUTHOR_LEN]> {
+    if encoded.len() != REACTION_TARGET_AUTHOR_LEN.div_ceil(3) * 4 {
+        return None;
+    }
+    B64.decode(encoded).ok()?.try_into().ok()
 }
 
 /// A snapshot string as the parser keeps it: present only if non-empty and
@@ -1250,6 +1371,10 @@ pub enum MessageBody {
         /// copy of one sent earlier in another conversation. Like `reply`,
         /// on the `Chat` classification only.
         resend: Option<ResendOrigin>,
+        /// ADR-0087 section 14 — the channel invitation card bytes, if any,
+        /// for `lakko_contacts::group_invite::ChannelInviteCard::decode`.
+        /// Like `reply`, on the `Chat` classification only.
+        channel_invite: Option<Vec<u8>>,
     },
     /// Replace the target message's body with `text`.
     Edit {
@@ -1263,12 +1388,18 @@ pub enum MessageBody {
         /// DS `messageId` of the deleted message.
         target: i64,
     },
-    /// React to the target message with `emoji`.
+    /// Add or take off a reaction `emoji` on the target message.
     Reaction {
         /// DS `messageId` of the reacted-to message.
         target: i64,
         /// The reaction emoji (validated, length-capped).
         emoji: String,
+        /// Add or remove; never a toggle.
+        action: ReactionAction,
+        /// The target message's author account key, as the sender states
+        /// it, when it decoded to exactly [`REACTION_TARGET_AUTHOR_LEN`]
+        /// bytes.
+        target_author: Option<[u8; REACTION_TARGET_AUTHOR_LEN]>,
     },
     /// ADR-0024 — an ephemeral typing signal.
     Typing {
@@ -1329,6 +1460,7 @@ impl Envelope {
         let reply = self.reply();
         let forward = self.forward();
         let resend = self.resend();
+        let channel_invite = self.channel_invite();
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
@@ -1351,18 +1483,26 @@ impl Envelope {
                 return MessageBody::ReadReceipt { up_to };
             }
             if let Some(target) = self.react_to {
-                if let Some(emoji) = self.emoji {
-                    if !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES {
-                        return MessageBody::Reaction { target, emoji };
+                if let (Some(emoji), Some(action)) = (self.emoji, self.react_op) {
+                    if is_reaction_emoji(&emoji) {
+                        let target_author =
+                            self.react_author.as_deref().and_then(decode_react_author);
+                        return MessageBody::Reaction {
+                            target,
+                            emoji,
+                            action,
+                            target_author,
+                        };
                     }
                 }
-                // react_to set without a valid emoji → degrade.
+                // react_to set without a valid emoji or op → degrade.
                 return MessageBody::Chat {
                     text: self.text,
                     attachments: self.attachments,
                     reply,
                     forward,
                     resend,
+                    channel_invite,
                 };
             }
         }
@@ -1372,6 +1512,7 @@ impl Envelope {
             reply,
             forward,
             resend,
+            channel_invite,
         }
     }
 }
@@ -1493,6 +1634,30 @@ pub fn compose_chat(
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
 }
 
+/// Encode a CHANNEL INVITATION (ADR-0087 section 14): an ordinary message
+/// whose `card` is a `ChannelInviteCard` the receiver renders with
+/// `Subscribe`. `text` may be empty.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] when `card` is empty or longer than
+/// [`MAX_CHANNEL_INVITE_BYTES`], or if serialisation fails.
+pub fn compose_channel_invite(text: &str, card: &[u8]) -> Result<Vec<u8>, AttachmentError> {
+    if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+        return Err(AttachmentError::WireFormat(format!(
+            "compose_channel_invite: card length {} not in 1..={MAX_CHANNEL_INVITE_BYTES}",
+            card.len()
+        )));
+    }
+    let envelope = Envelope {
+        text: text.to_string(),
+        channel_invite: Some(B64.encode(card)),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_channel_invite: {e}")))
+}
+
 /// Encode an EDIT of the message whose DS `messageId` is `target`,
 /// replacing its body with `new_text` (ADR-0023). The receiver
 /// applies it only if the editor is the target's original sender
@@ -1527,17 +1692,25 @@ pub fn compose_delete(target: i64) -> Result<Vec<u8>, AttachmentError> {
         .map_err(|e| AttachmentError::WireFormat(format!("compose_delete: {e}")))
 }
 
-/// Encode a REACTION (`emoji`) to the message whose DS `messageId`
-/// is `target` (ADR-0023). The emoji is length-capped at
-/// [`MAX_EMOJI_BYTES`]; an over-long value is refused here rather
-/// than silently degrading on the receiver.
+/// Encode a REACTION op: add `emoji` to, or take it off, the sender's
+/// reactions on the message whose DS `messageId` is `target` (ADR-0023, UX
+/// `reactions-and-emoji.md` section 17 items 3 and 7). `target_author` is the
+/// account key of the target's author when the sender knows it; a receiver's
+/// background process uses it to tell a reaction to its own message. The
+/// emoji is length-capped at [`MAX_EMOJI_BYTES`]; an over-long value is
+/// refused here rather than silently degrading on the receiver.
 ///
 /// # Errors
 ///
 /// [`AttachmentError::WireFormat`] if `emoji` is empty or exceeds
 /// [`MAX_EMOJI_BYTES`], or if serialisation fails.
-pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentError> {
-    if emoji.is_empty() || emoji.len() > MAX_EMOJI_BYTES {
+pub fn compose_reaction(
+    target: i64,
+    emoji: &str,
+    action: ReactionAction,
+    target_author: Option<&[u8; REACTION_TARGET_AUTHOR_LEN]>,
+) -> Result<Vec<u8>, AttachmentError> {
+    if !is_reaction_emoji(emoji) {
         return Err(AttachmentError::WireFormat(format!(
             "compose_reaction: emoji length {} not in 1..={MAX_EMOJI_BYTES}",
             emoji.len()
@@ -1546,6 +1719,8 @@ pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentE
     let envelope = Envelope {
         react_to: Some(target),
         emoji: Some(emoji.to_string()),
+        react_op: Some(action),
+        react_author: target_author.map(|k| B64.encode(k)),
         ..Envelope::base()
     };
     serde_json::to_vec(&envelope)
@@ -1644,6 +1819,7 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
             reply: None,
             forward: None,
             resend: None,
+            channel_invite: None,
         },
     }
 }
@@ -1683,8 +1859,9 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_chat, compose_forward, compose_reply, parse, parse_body, AttachmentRef,
-        MediaKind, MessageBody, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
+        compose, compose_channel_invite, compose_chat, compose_forward, compose_reaction,
+        compose_reply, is_reaction_emoji, parse, parse_body, AttachmentRef, MediaKind, MessageBody,
+        MAX_CHANNEL_INVITE_BYTES, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
         MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES,
         MAX_RESEND_ORIGIN_GROUP_BYTES, MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS,
         MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
@@ -1772,6 +1949,7 @@ pub mod fuzz_api {
             reply,
             forward,
             resend: Some(resend),
+            ..
         } = parse_body(bytes)
         else {
             return true;
@@ -1791,6 +1969,61 @@ pub mod fuzz_api {
             return false;
         };
         matches!(parse_body(&recomposed), MessageBody::Chat { resend: Some(again), .. } if again == resend)
+    }
+
+    /// ADR-0087 section 14 property oracle over attacker-controlled bytes: a
+    /// channel invitation card that survives [`parse_body`] is 1 to
+    /// [`MAX_CHANNEL_INVITE_BYTES`] bytes, and composing it again yields the
+    /// same card.
+    #[must_use]
+    pub fn channel_invite_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Chat {
+            text,
+            channel_invite: Some(card),
+            ..
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+            return false;
+        }
+        let Ok(recomposed) = compose_channel_invite(&text, &card) else {
+            return false;
+        };
+        matches!(parse_body(&recomposed), MessageBody::Chat { channel_invite: Some(again), .. } if again == card)
+    }
+
+    /// Reaction-op property oracle over attacker-controlled bytes (UX
+    /// `reactions-and-emoji.md` section 17 items 3 and 7): a reaction that
+    /// survives [`parse_body`] carries an emoji within the wire bound and an
+    /// explicit op, and re-composing it then parsing again yields the
+    /// identical reaction (the target author survives whole or not at all).
+    #[must_use]
+    pub fn reaction_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Reaction {
+            target,
+            emoji,
+            action,
+            target_author,
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if !is_reaction_emoji(&emoji) {
+            return false;
+        }
+        let Ok(recomposed) = compose_reaction(target, &emoji, action, target_author.as_ref())
+        else {
+            return false;
+        };
+        parse_body(&recomposed)
+            == MessageBody::Reaction {
+                target,
+                emoji,
+                action,
+                target_author,
+            }
     }
 
     /// ADR-0047 property oracle over attacker-controlled bytes.
@@ -1884,8 +2117,13 @@ pub mod fuzz_api {
             MessageBody::Delete { target } => {
                 let _ = target;
             },
-            MessageBody::Reaction { target, emoji } => {
-                let _ = (target, emoji.len());
+            MessageBody::Reaction {
+                target,
+                emoji,
+                action,
+                target_author,
+            } => {
+                let _ = (target, emoji.len(), action, target_author);
             },
             MessageBody::Typing { is_typing } => {
                 let _ = is_typing;
@@ -2079,13 +2317,80 @@ mod tests {
 
     #[test]
     fn reaction_round_trips_through_compose_parse_body() {
-        let bytes = compose_reaction(99, "\u{1F44D}").unwrap();
-        match parse_body(&bytes) {
-            MessageBody::Reaction { target, emoji } => {
-                assert_eq!(target, 99);
-                assert_eq!(emoji, "\u{1F44D}");
-            },
-            other => panic!("expected Reaction, got {other:?}"),
+        let author = [7_u8; REACTION_TARGET_AUTHOR_LEN];
+        for action in [ReactionAction::Add, ReactionAction::Remove] {
+            for target_author in [None, Some(author)] {
+                let bytes =
+                    compose_reaction(99, "\u{1F44D}", action, target_author.as_ref()).unwrap();
+                assert_eq!(
+                    parse_body(&bytes),
+                    MessageBody::Reaction {
+                        target: 99,
+                        emoji: "\u{1F44D}".to_string(),
+                        action,
+                        target_author,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_reaction_op_wire_is_pinned() {
+        let bytes = compose_reaction(5, "x", ReactionAction::Remove, None).unwrap();
+        assert_eq!(
+            bytes,
+            br#"{"v":1,"text":"","react_to":5,"emoji":"x","react_op":"remove"}"#
+        );
+        let bytes = compose_reaction(5, "x", ReactionAction::Add, Some(&[0; 32])).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(r#""react_op":"add""#), "{text}");
+        assert!(
+            text.contains(r#""react_author":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reaction_without_a_recognised_op_degrades_to_chat() {
+        // No toggle form is kept: an op-less reaction is not a reaction.
+        for json in [
+            r#"{"v":1,"react_to":5,"emoji":"x"}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":"toggle"}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":7}"#,
+            r#"{"v":1,"react_to":5,"emoji":"x","react_op":"Add"}"#,
+        ] {
+            assert!(
+                matches!(parse_body(json.as_bytes()), MessageBody::Chat { .. }),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_target_author_is_dropped_alone() {
+        let short = B64.encode([1_u8; 31]);
+        let long = B64.encode([1_u8; 33]);
+        for author in [
+            format!(r#""{short}""#),
+            format!(r#""{long}""#),
+            r#""not base64!""#.to_string(),
+            "17".to_string(),
+            "null".to_string(),
+        ] {
+            let json = format!(
+                r#"{{"v":1,"react_to":5,"emoji":"x","react_op":"add","react_author":{author}}}"#
+            );
+            assert_eq!(
+                parse_body(json.as_bytes()),
+                MessageBody::Reaction {
+                    target: 5,
+                    emoji: "x".to_string(),
+                    action: ReactionAction::Add,
+                    target_author: None,
+                },
+                "{json}"
+            );
         }
     }
 
@@ -2100,6 +2405,7 @@ mod tests {
                 reply: None,
                 forward: None,
                 resend: None,
+                channel_invite: None,
             }
         );
     }
@@ -2138,7 +2444,7 @@ mod tests {
         // A react_to with an emoji past the cap degrades rather than
         // carrying an unbounded string into the reaction path.
         let big = "x".repeat(MAX_EMOJI_BYTES + 1);
-        let json = format!(r#"{{"v":1,"react_to":5,"emoji":"{big}"}}"#);
+        let json = format!(r#"{{"v":1,"react_to":5,"emoji":"{big}","react_op":"add"}}"#);
         assert!(matches!(
             parse_body(json.as_bytes()),
             MessageBody::Chat { .. }
@@ -2147,9 +2453,9 @@ mod tests {
 
     #[test]
     fn compose_reaction_rejects_empty_and_overlong_emoji() {
-        assert!(compose_reaction(1, "").is_err());
+        assert!(compose_reaction(1, "", ReactionAction::Add, None).is_err());
         let big = "x".repeat(MAX_EMOJI_BYTES + 1);
-        assert!(compose_reaction(1, &big).is_err());
+        assert!(compose_reaction(1, &big, ReactionAction::Add, None).is_err());
     }
 
     #[test]
@@ -3073,10 +3379,12 @@ mod forward_tests {
 #[cfg(test)]
 mod resend_tests {
     use super::{
-        compose, compose_chat, compose_forward, compose_reply, encrypt_attachment, fuzz_api,
-        parse_body, AttachmentRef, Forward, ForwardOrigin, MessageBody, Reply, ResendOrigin,
+        compose, compose_channel_invite, compose_chat, compose_forward, compose_reply,
+        encrypt_attachment, fuzz_api, parse_body, AttachmentRef, Forward, ForwardOrigin,
+        MessageBody, Reply, ResendOrigin, B64, MAX_CHANNEL_INVITE_BYTES,
         MAX_RESEND_ORIGIN_GROUP_BYTES,
     };
+    use base64::Engine as _;
 
     fn chat_resend(bytes: &[u8]) -> Option<ResendOrigin> {
         match parse_body(bytes) {
@@ -3207,6 +3515,7 @@ mod resend_tests {
                 reply: Some(reply),
                 forward: Some(forward),
                 resend: Some(marker()),
+                channel_invite: None,
             }
         );
         assert!(fuzz_api::resend_within_bounds(&bytes));
@@ -3259,5 +3568,56 @@ mod resend_tests {
             }
             assert!(fuzz_api::resend_within_bounds(json));
         }
+    }
+
+    // --- ADR-0087: channel invitation -------------------------------------
+
+    #[test]
+    fn a_channel_invitation_round_trips_beside_its_text() {
+        let card = vec![0x5A; 300];
+        let bytes = compose_channel_invite("Join us", &card).unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Chat {
+                text,
+                channel_invite,
+                ..
+            } => {
+                assert_eq!(text, "Join us");
+                assert_eq!(channel_invite, Some(card));
+            },
+            other => panic!("expected Chat, got {other:?}"),
+        }
+        assert!(fuzz_api::channel_invite_within_bounds(&bytes));
+        let at_bound = vec![1u8; MAX_CHANNEL_INVITE_BYTES];
+        assert!(compose_channel_invite("", &at_bound).is_ok());
+        assert!(compose_channel_invite("", &[]).is_err());
+        assert!(compose_channel_invite("", &vec![1u8; MAX_CHANNEL_INVITE_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn a_bad_channel_invitation_is_dropped_alone() {
+        let over = B64.encode(vec![1u8; MAX_CHANNEL_INVITE_BYTES + 1]);
+        for field in [
+            r#""not base64!""#.to_string(),
+            r#""""#.to_string(),
+            "42".to_string(),
+            format!("\"{over}\""),
+        ] {
+            let json = format!(r#"{{"v":1,"text":"hi","channel_invite":{field}}}"#);
+            match parse_body(json.as_bytes()) {
+                MessageBody::Chat {
+                    text,
+                    channel_invite,
+                    ..
+                } => {
+                    assert_eq!(text, "hi", "{field}");
+                    assert_eq!(channel_invite, None, "{field}");
+                },
+                other => panic!("expected Chat, got {other:?}"),
+            }
+        }
+        // An op that also carries a card is that op.
+        let json = br#"{"v":1,"delete_of":4,"channel_invite":"AQ=="}"#;
+        assert_eq!(parse_body(json), MessageBody::Delete { target: 4 });
     }
 }

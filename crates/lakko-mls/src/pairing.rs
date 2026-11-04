@@ -9,8 +9,9 @@
 //!
 //!   * [`encode`] — fresh device side. Bundle its
 //!     `Identity::create_key_package()` bytes + the **login handle**
-//!     of the username the person typed into the wire payload, to
-//!     render as a QR or post to `POST /device/request` (ADR-0049).
+//!     of the username the person typed + its own ADR-0080 device card
+//!     into the wire payload, to render as a QR or seal for the
+//!     camera-less code route (ADR-0049).
 //!   * [`decode`] — confirming side. Parse the bytes, **verify the
 //!     embedded login handle matches the confirming device's own
 //!     handle** (constant time), and surface the inner `KeyPackage`
@@ -47,6 +48,11 @@
 //!   **not** stop an active attacker who can present an arbitrary
 //!   payload (the handle is a public function of the username) —
 //!   that is what the camera or the device-link code covers.
+//! - The device card (field 17) is what the new device says about itself.
+//!   The confirming device shows it to name the device it is adding
+//!   (`docs/ux/second-device.md` section 2.1) and trusts nothing in it;
+//!   this module only bounds its length and never decodes it
+//!   (`lakko-mls` does not depend on `lakko-contacts`).
 //! - The comparison is constant time ([`SecretBytes`]' equality, which is
 //!   `subtle::ConstantTimeEq`). The handle is not a secret, so this is
 //!   defence in depth that the ADR asks for, not a load-bearing property.
@@ -79,6 +85,13 @@ pub const RENDEZVOUS_PSEUDONYM_LEN: usize = 32;
 /// each pairing — never reused across pairings.
 pub type RendezvousPseudonym = [u8; RENDEZVOUS_PSEUDONYM_LEN];
 
+/// Longest device card a pairing payload may carry: the longest
+/// well-formed ADR-0080 device-card envelope
+/// (`lakko_contacts::device_card::DEVICE_CARD_ENVELOPE_MAX_LEN`). Restated
+/// here because `lakko-mls` does not depend on `lakko-contacts`; the FFI
+/// crates, which depend on both, pin the equality.
+pub const PAIRING_DEVICE_CARD_MAX_LEN: usize = 270;
+
 /// Decoded pairing-QR contents the scanner side acts on.
 /// Returned by [`decode`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +107,12 @@ pub struct DecodedPairingQr {
     /// (exactly [`crate::SELF_REMOVAL_PROOF_LEN`] bytes) when the payload is
     /// a DeviceGroup rejoin knock that carries one. Not verified here.
     pub self_removal_proof: Option<Vec<u8>>,
+    /// The new device's ADR-0080 device-card envelope bytes, empty when
+    /// the payload carries none (always empty on a rejoin knock). At most
+    /// [`PAIRING_DEVICE_CARD_MAX_LEN`] bytes; NOT decoded or checked here.
+    /// Display only: the caller decodes it to name the device and treats a
+    /// card that does not decode as absent.
+    pub device_card: Vec<u8>,
 }
 
 /// Fresh-device side: build the wire-format payload.
@@ -103,28 +122,40 @@ pub struct DecodedPairingQr {
 /// TLS-encoded `KeyPackage` from `Identity::create_key_package()`.
 /// `rendezvous_pseudonym` is a fresh random 32-byte slot the joining
 /// device chose for this pairing session; the confirming device PUTs the
-/// Welcome to the DS mailbox keyed by it.
+/// Welcome to the DS mailbox keyed by it. `device_card` is the joining
+/// device's own ADR-0080 device-card envelope (`composeDeviceCardEnvelope`),
+/// or empty for none; it is carried for display and not checked here.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Codec`] on the unlikely prost-encode
-/// failure (constant-size fields make it practically
-/// impossible).
+/// Returns [`Error::Codec`] when `device_card` is longer than
+/// [`PAIRING_DEVICE_CARD_MAX_LEN`], or on the unlikely prost-encode
+/// failure.
 pub fn encode(
     login_handle: &LoginHandle,
     key_package_bytes: &[u8],
     rendezvous_pseudonym: &RendezvousPseudonym,
+    device_card: &[u8],
 ) -> Result<Vec<u8>> {
+    if device_card.len() > PAIRING_DEVICE_CARD_MAX_LEN {
+        return Err(Error::Codec(format!(
+            "pairing payload: a device card is at most {PAIRING_DEVICE_CARD_MAX_LEN} bytes, got {}",
+            device_card.len()
+        )));
+    }
     encode_payload(
         login_handle,
         key_package_bytes,
         rendezvous_pseudonym,
         Vec::new(),
+        device_card.to_vec(),
     )
 }
 
 /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
-/// plus the device's self-removal proof for `key_package_bytes`.
+/// plus the device's self-removal proof for `key_package_bytes`. A knock
+/// carries no device card: the rejoining device is already known to its
+/// siblings.
 ///
 /// # Errors
 ///
@@ -148,6 +179,7 @@ pub fn encode_rejoin_knock(
         key_package_bytes,
         rendezvous_pseudonym,
         self_removal_proof.to_vec(),
+        Vec::new(),
     )
 }
 
@@ -156,6 +188,7 @@ fn encode_payload(
     key_package_bytes: &[u8],
     rendezvous_pseudonym: &RendezvousPseudonym,
     self_removal_proof: Vec<u8>,
+    device_card: Vec<u8>,
 ) -> Result<Vec<u8>> {
     let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
         version: PAIRING_VERSION,
@@ -163,6 +196,7 @@ fn encode_payload(
         rendezvous_pseudonym: rendezvous_pseudonym.to_vec(),
         login_handle: login_handle.to_vec(),
         self_removal_proof,
+        device_card,
     };
     let mut buf = Vec::with_capacity(payload.encoded_len());
     payload
@@ -180,9 +214,10 @@ fn encode_payload(
 ///
 /// # Errors
 ///
-/// - [`Error::Codec`] when the bytes don't decode or the embedded
+/// - [`Error::Codec`] when the bytes don't decode, the embedded
 ///   `login_handle` / `rendezvous_pseudonym` is the wrong length
-///   (structurally suspicious). A v1 payload carries no field 5 and so
+///   (structurally suspicious), or the device card is longer than
+///   [`PAIRING_DEVICE_CARD_MAX_LEN`]. A v1 payload carries no field 5 and so
 ///   fails here too if it somehow claims version 2.
 /// - [`Error::Unsupported`] when the payload's `version` is anything other
 ///   than [`PAIRING_VERSION`] (older or newer).
@@ -229,10 +264,17 @@ pub fn decode(bytes: &[u8], expected_login_handle: &LoginHandle) -> Result<Decod
             )))
         },
     };
+    if payload.device_card.len() > PAIRING_DEVICE_CARD_MAX_LEN {
+        return Err(Error::Codec(format!(
+            "PairingQr device_card length {} > {PAIRING_DEVICE_CARD_MAX_LEN}",
+            payload.device_card.len()
+        )));
+    }
     Ok(DecodedPairingQr {
         key_package: payload.key_package,
         rendezvous_pseudonym: rendezvous,
         self_removal_proof,
+        device_card: payload.device_card,
     })
 }
 
@@ -276,7 +318,7 @@ mod tests {
         let handle = fixture_handle();
         let kp_bytes = vec![0x42u8; 768]; // shape-realistic stub
         let rendezvous = fixture_rendezvous();
-        let qr = encode(&handle, &kp_bytes, &rendezvous).expect("encode");
+        let qr = encode(&handle, &kp_bytes, &rendezvous, &[]).expect("encode");
         let recovered = decode(&qr, &handle).expect("decode");
         assert_eq!(recovered.key_package, kp_bytes);
         assert_eq!(recovered.rendezvous_pseudonym, rendezvous);
@@ -284,7 +326,7 @@ mod tests {
 
     #[test]
     fn encoded_payload_carries_version_two_and_no_account_id() {
-        let qr = encode(&fixture_handle(), &[1, 2, 3], &fixture_rendezvous()).unwrap();
+        let qr = encode(&fixture_handle(), &[1, 2, 3], &fixture_rendezvous(), &[]).unwrap();
         let raw = PairingQr::decode(qr.as_slice()).unwrap();
         assert_eq!(raw.version, 2);
         assert_eq!(raw.login_handle, fixture_handle().to_vec());
@@ -314,7 +356,7 @@ mod tests {
         let handle_a = fixture_handle();
         let mut handle_b = fixture_handle();
         handle_b[0] ^= 0xFF;
-        let qr = encode(&handle_a, &[0x42u8; 128], &fixture_rendezvous()).expect("encode");
+        let qr = encode(&handle_a, &[0x42u8; 128], &fixture_rendezvous(), &[]).expect("encode");
         match decode(&qr, &handle_b) {
             Ok(_) => panic!("decode should reject a payload for another name"),
             Err(Error::Group(msg)) => {
@@ -334,6 +376,7 @@ mod tests {
                 rendezvous_pseudonym: fixture_rendezvous().to_vec(),
                 login_handle: handle.to_vec(),
                 self_removal_proof: Vec::new(),
+                device_card: Vec::new(),
             });
             match decode(&buf, &handle) {
                 Ok(_) => panic!("decode should reject version {version}"),
@@ -389,6 +432,7 @@ mod tests {
                 rendezvous_pseudonym: fixture_rendezvous().to_vec(),
                 login_handle: vec![0xab; len],
                 self_removal_proof: Vec::new(),
+                device_card: Vec::new(),
             });
             match decode(&buf, &handle) {
                 Ok(_) => panic!("decode should reject a {len}-byte handle"),
@@ -409,6 +453,7 @@ mod tests {
             rendezvous_pseudonym: vec![0xee; 16],
             login_handle: handle.to_vec(),
             self_removal_proof: Vec::new(),
+            device_card: Vec::new(),
         });
         match decode(&buf, &handle) {
             Ok(_) => panic!("decode should reject short rendezvous_pseudonym"),
@@ -423,17 +468,48 @@ mod tests {
     }
 
     proptest! {
-        /// Round trip for any handle, KeyPackage bytes and rendezvous.
+        /// Round trip for any handle, KeyPackage bytes and rendezvous, with
+        /// no device card and with any card within the bound.
         #[test]
         fn prop_round_trip(
             handle in any::<[u8; 32]>(),
             kp in proptest::collection::vec(any::<u8>(), 0..2048),
             rendezvous in any::<[u8; 32]>(),
+            card in proptest::option::of(
+                proptest::collection::vec(any::<u8>(), 1..=PAIRING_DEVICE_CARD_MAX_LEN),
+            ),
         ) {
-            let qr = encode(&handle, &kp, &rendezvous).unwrap();
+            let card = card.unwrap_or_default();
+            let qr = encode(&handle, &kp, &rendezvous, &card).unwrap();
             let got = decode(&qr, &handle).unwrap();
             prop_assert_eq!(got.key_package, kp);
             prop_assert_eq!(got.rendezvous_pseudonym, rendezvous);
+            prop_assert_eq!(got.self_removal_proof, None);
+            prop_assert_eq!(got.device_card, card);
+        }
+
+        /// A card longer than the bound is refused by the encoder, and a
+        /// payload that carries one anyway is refused by the decoder.
+        #[test]
+        fn prop_over_long_card_refused(
+            extra in 1usize..1024,
+            byte in any::<u8>(),
+        ) {
+            let handle = fixture_handle();
+            let card = vec![byte; PAIRING_DEVICE_CARD_MAX_LEN + extra];
+            let refused_encode =
+                matches!(encode(&handle, &[1], &fixture_rendezvous(), &card), Err(Error::Codec(_)));
+            prop_assert!(refused_encode);
+            let buf = encode_raw(&PairingQr {
+                version: PAIRING_VERSION,
+                key_package: vec![1],
+                rendezvous_pseudonym: fixture_rendezvous().to_vec(),
+                login_handle: handle.to_vec(),
+                self_removal_proof: Vec::new(),
+                device_card: card,
+            });
+            let refused_decode = matches!(decode(&buf, &handle), Err(Error::Codec(_)));
+            prop_assert!(refused_decode);
         }
 
         /// Any handle that differs from the embedded one is refused with the
@@ -445,13 +521,14 @@ mod tests {
             kp in proptest::collection::vec(any::<u8>(), 0..256),
         ) {
             prop_assume!(handle != other);
-            let qr = encode(&handle, &kp, &fixture_rendezvous()).unwrap();
+            let qr = encode(&handle, &kp, &fixture_rendezvous(), &[]).unwrap();
             let refused = matches!(decode(&qr, &other), Err(Error::Group(_)));
             prop_assert!(refused);
         }
 
         /// Arbitrary bytes never panic, and anything that decodes carries
-        /// version 2 and the expected handle (the fuzz oracle, run here too).
+        /// version 2, the expected handle and a device card within the bound
+        /// (the fuzz oracle, run here too).
         #[test]
         fn prop_arbitrary_bytes_never_panic(
             bytes in proptest::collection::vec(any::<u8>(), 0..512),
@@ -459,6 +536,65 @@ mod tests {
             let _ = decode(&bytes, &fixture_handle());
             prop_assert!(crate::fuzz_api::pairing_qr_acceptance_is_bound(&bytes));
         }
+    }
+
+    // ---- docs/ux/second-device.md 2.1: the payload names the new device ----
+
+    #[test]
+    fn a_pairing_payload_carries_the_device_card_verbatim() {
+        let handle = fixture_handle();
+        let card = b"lakko/device-card/v1\x00 any bytes, not decoded here".to_vec();
+        let qr = encode(&handle, &[1, 2, 3], &fixture_rendezvous(), &card).unwrap();
+        let raw = PairingQr::decode(qr.as_slice()).unwrap();
+        assert_eq!(raw.device_card, card);
+        let decoded = decode(&qr, &handle).unwrap();
+        assert_eq!(decoded.device_card, card);
+        assert_eq!(decoded.self_removal_proof, None);
+    }
+
+    #[test]
+    fn a_payload_without_a_card_decodes_to_an_empty_card() {
+        let handle = fixture_handle();
+        let qr = encode(&handle, &[1, 2, 3], &fixture_rendezvous(), &[]).unwrap();
+        assert!(decode(&qr, &handle).unwrap().device_card.is_empty());
+    }
+
+    #[test]
+    fn the_card_bound_is_inclusive_and_one_more_byte_is_refused() {
+        let handle = fixture_handle();
+        let at = vec![0x6c; PAIRING_DEVICE_CARD_MAX_LEN];
+        let qr = encode(&handle, &[1], &fixture_rendezvous(), &at).unwrap();
+        assert_eq!(decode(&qr, &handle).unwrap().device_card, at);
+        let over = vec![0x6c; PAIRING_DEVICE_CARD_MAX_LEN + 1];
+        assert!(matches!(
+            encode(&handle, &[1], &fixture_rendezvous(), &over),
+            Err(Error::Codec(_))
+        ));
+        let buf = encode_raw(&PairingQr {
+            version: PAIRING_VERSION,
+            key_package: vec![1],
+            rendezvous_pseudonym: fixture_rendezvous().to_vec(),
+            login_handle: handle.to_vec(),
+            self_removal_proof: Vec::new(),
+            device_card: over,
+        });
+        match decode(&buf, &handle) {
+            Err(Error::Codec(msg)) => assert!(msg.contains("device_card"), "got: {msg}"),
+            other => panic!("expected a device_card refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rejoin_knock_carries_no_device_card() {
+        let handle = fixture_handle();
+        let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
+        let knock =
+            encode_rejoin_knock(&handle, &[1, 2, 3], &fixture_rendezvous(), &proof).unwrap();
+        assert!(PairingQr::decode(knock.as_slice())
+            .unwrap()
+            .device_card
+            .is_empty());
+        assert!(decode(&knock, &handle).unwrap().device_card.is_empty());
     }
 
     // ---- ADR-0081 amendment: the rejoin knock carries a self-removal proof ----
@@ -472,7 +608,7 @@ mod tests {
         let decoded = decode(&knock, &handle).unwrap();
         assert_eq!(decoded.self_removal_proof, Some(proof));
         assert_eq!(decoded.key_package, vec![1, 2, 3]);
-        let plain = encode(&handle, &[1, 2, 3], &fixture_rendezvous()).unwrap();
+        let plain = encode(&handle, &[1, 2, 3], &fixture_rendezvous(), &[]).unwrap();
         assert_eq!(decode(&plain, &handle).unwrap().self_removal_proof, None);
     }
 
@@ -492,6 +628,7 @@ mod tests {
                 rendezvous_pseudonym: fixture_rendezvous().to_vec(),
                 login_handle: handle.to_vec(),
                 self_removal_proof: vec![0u8; len],
+                device_card: Vec::new(),
             });
             assert!(
                 matches!(decode(&buf, &handle), Err(Error::Codec(_))),

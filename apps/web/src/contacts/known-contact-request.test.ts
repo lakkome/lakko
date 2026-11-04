@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  contactSignedBy,
   establishedContactOfAccount,
   knownContactRequestVerdict,
   pinKeysOf,
@@ -85,5 +86,22 @@ describe("establishedContactOfAccount", () => {
       { signaturePubkeyB64: "victim-key", accountIdHex: "aabb" },
     ];
     expect(establishedContactOfAccount(rows, "aabb", { pinKeysB64: ["victim-key"], bindingKeyB64: null })).toBe(rows[1]);
+  });
+});
+
+describe("contactSignedBy", () => {
+  it("a row under the key that signed is that contact, with no account id on it", () => {
+    const rows = [{ signaturePubkeyB64: "other" }, { signaturePubkeyB64: "signer" }];
+    expect(contactSignedBy(rows, "signer")).toBe(rows[1]);
+  });
+  it("a row no pin or binding vouches for is still found by the signing key", () => {
+    const rows = [{ signaturePubkeyB64: "signer", accountIdHex: "aabb" }];
+    expect(establishedContactOfAccount(rows, "aabb", { pinKeysB64: [], bindingKeyB64: null })).toBeUndefined();
+    expect(contactSignedBy(rows, "signer")).toBe(rows[0]);
+  });
+  it("another key finds nothing, so a claimed account id swallows no request", () => {
+    const rows = [{ signaturePubkeyB64: "member-key", accountIdHex: "aabb" }];
+    expect(contactSignedBy(rows, "victim-key")).toBeUndefined();
+    expect(contactSignedBy(rows, "")).toBeUndefined();
   });
 });

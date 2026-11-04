@@ -515,6 +515,12 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     /// The number of steps of the flow this guide opens (its own two come
     /// first), or `nil` for no step line.
     var totalSteps: Int? = nil
+    /// The confirm button shows its spinner: `onDone` started something that
+    /// is still running.
+    var doneBusy = false
+    /// Under the three words, above the confirm button: what the caller has
+    /// to say about the step after `onDone` when it did not go through.
+    var confirmFooter: AnyView? = nil
     @ViewBuilder let extra: Extra
     let onDone: () -> Void
 
@@ -616,9 +622,17 @@ struct RecoveryPhraseGuide<Extra: View>: View {
             AuthHint(text: mismatch, isError: true)
         }
 
-        AuthPrimaryButton(title: doneTitle ?? l10n.t("common.continue"), disabled: entries.contains(where: {
-            $0.trimmingCharacters(in: .whitespaces).isEmpty
-        })) {
+        if let confirmFooter {
+            confirmFooter
+        }
+
+        AuthPrimaryButton(
+            title: doneTitle ?? l10n.t("common.continue"),
+            busy: doneBusy,
+            disabled: entries.contains(where: {
+                $0.trimmingCharacters(in: .whitespaces).isEmpty
+            })
+        ) {
             verify()
         }
 

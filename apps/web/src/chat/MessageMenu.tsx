@@ -86,7 +86,6 @@ import { t } from "../l10n";
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
-import { REACTION_EMOJI } from "./message-ops";
 import { messageMenuLayout, SURFACE_GAP_PX, type MessageMenuLayout } from "./message-menu-placement";
 import { Icon } from "../ui/icons";
 
@@ -130,6 +129,18 @@ export interface MessageMenuProps {
   copyText: string | null;
   onReact: (emoji: string) => void;
   onMoreReactions: () => void;
+  /** `docs/ux/reactions-and-emoji.md` section 5 — the six emoji of the row,
+   *  from `quickReactionRow` (the quick reaction, recent ones, the defaults,
+   *  narrowed to what the conversation takes). Empty: no row, the card alone. */
+  reactionRow: readonly string[];
+  /** The emoji this person already gave the message (drawn on the accent-soft
+   *  circle; pressing one takes it off). */
+  ownReactions: readonly string[];
+  /** Whether the trailing expand control is shown (`rowHasExpand`). */
+  showExpand: boolean;
+  /** The person holds the most reactions one person gives (3): the others are
+   *  dimmed and do nothing, with the line under the row. */
+  capReached: boolean;
   /** ADR-0052 — arm the composer's reply strip for this message. */
   onReply: () => void;
   /** ADR-0052 decision 2 — whether Forward is offered: the message has an id
@@ -246,6 +257,11 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
   // the card that holds it. Two spellings of it - `!== null` on the card and
   // truthiness on the row - differ on the empty string, and would draw an empty
   // bordered card for a caller that passed `""` rather than `null`.
+  /** The reaction row is drawn: not on an older segment's row, and not when
+   *  the conversation takes no reactions. Without it the card takes the
+   *  row's single-surface slot. */
+  const hasRow = (): boolean => props.pinOnly !== true && props.reactionRow.length > 0;
+
   const copyable = (): string | null =>
     props.copyText !== null && props.copyText.length > 0 ? props.copyText : null;
 
@@ -278,7 +294,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               };
         })()}
       >
-        <Show when={props.pinOnly !== true}>
+        <Show when={hasRow()}>
         <div
           ref={row}
           class="lk-msg-menu-surface lk-msg-menu-reactions"
@@ -286,31 +302,51 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           aria-label={t("chat.message.react")}
           style={offset((l) => l.row)}
         >
-          <For each={REACTION_EMOJI}>
-            {(emoji, i) => (
+          <div class="lk-msg-menu-reaction-row">
+            <For each={props.reactionRow}>
+              {(emoji, i) => {
+                const mine = (): boolean => props.ownReactions.includes(emoji);
+                const dimmed = (): boolean => props.capReached && !mine();
+                return (
+                  <button
+                    ref={(el) => {
+                      if (i() === 0) firstItem = el;
+                    }}
+                    type="button"
+                    role="menuitem"
+                    classList={{ mine: mine(), dimmed: dimmed() }}
+                    aria-disabled={dimmed() ? "true" : undefined}
+                    aria-label={
+                      mine()
+                        ? t("chat.reaction.chip_yours_a11y", { emoji })
+                        : t("chat.message.react_with", { emoji })
+                    }
+                    onClick={() => {
+                      if (dimmed()) return;
+                      run(() => props.onReact(emoji));
+                    }}
+                  >
+                    {emoji}
+                  </button>
+                );
+              }}
+            </For>
+            <Show when={props.showExpand}>
               <button
-                ref={(el) => {
-                  if (i() === 0) firstItem = el;
-                }}
                 type="button"
                 role="menuitem"
-                aria-label={t("chat.message.react_with", { emoji })}
-                onClick={() => run(() => props.onReact(emoji))}
+                class="more"
+                aria-label={t("chat.message.more_reactions")}
+                title={t("chat.message.more_reactions")}
+                onClick={() => run(() => props.onMoreReactions())}
               >
-                {emoji}
+                <Icon name="plus" size={16} />
               </button>
-            )}
-          </For>
-          <button
-            type="button"
-            role="menuitem"
-            class="more"
-            aria-label={t("chat.message.more_reactions")}
-            title={t("chat.message.more_reactions")}
-            onClick={() => run(() => props.onMoreReactions())}
-          >
-            <Icon name="plus" size={16} />
-          </button>
+            </Show>
+          </div>
+          <Show when={props.capReached}>
+            <p class="lk-msg-menu-reaction-cap">{t("chat.reaction.cap_reached")}</p>
+          </Show>
         </div>
         </Show>
         {/* The second surface. It always has at least the Reply row now
@@ -321,14 +357,21 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             placement's single-surface slot (measured and placed as `row`). */}
         <div
           ref={(el) => {
-            if (props.pinOnly === true) row = el;
+            if (!hasRow()) row = el;
             else card = el;
           }}
           class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
-          style={offset((l) => (props.pinOnly === true ? l.row : l.card))}
+          style={offset((l) => (!hasRow() ? l.row : l.card))}
         >
             <Show when={props.pinOnly !== true}>
-            <button type="button" role="menuitem" onClick={() => run(() => props.onReply())}>
+            <button
+              ref={(el) => {
+                if (!hasRow()) firstItem = el;
+              }}
+              type="button"
+              role="menuitem"
+              onClick={() => run(() => props.onReply())}
+            >
               <Icon name="reply" size={16} />
               <span>{t("chat.message.reply")}</span>
             </button>

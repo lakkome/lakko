@@ -173,6 +173,25 @@ public fun retiredKeyAliases(
     return out
 }
 
+/**
+ * The name-resolution aliases between the keys of one person, the ONE set
+ * both the app's name directory and the background notification lookup read
+ * ([me.lakko.app.profile.ProfileNameSnapshot]): a proven successor key names
+ * the key the person was first known by (ADR-0074 section 3.5), the current
+ * key inherits what was learned under a key an accepted reset retired, and a
+ * retired key names the current one.
+ */
+public fun nameAliases(
+    provenLinks: List<ProvenLink>,
+    resetRows: Map<String, ResetLedgerRow>,
+    pinnedKeyOf: (accountIdB64: String) -> String?,
+): Map<String, String> {
+    val retired = retiredKeyAliases(resetRows, pinnedKeyOf)
+    val inherited = LinkedHashMap<String, String>()
+    for ((old, current) in retired) if (current !in inherited) inherited[current] = old
+    return provenAliases(provenLinks) + inherited + retired
+}
+
 /** Where ledger rows live, per signed-in account. */
 public interface ResetLedgerStore {
     public fun loadAll(ownerAccountIdB64: String): Map<String, ResetLedgerRow>

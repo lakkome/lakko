@@ -47,13 +47,14 @@ final class PairedAfterRotationTests: XCTestCase {
     private func publicKey(_ seed: Data) throws -> Data { try Identity.fromSeed(seed: seed).signaturePublicKey() }
 
     private func json(
-        v: Int = 2, own: String = "[]", pinPredecessors: String? = "[]"
+        v: Int = 3, own: String = "[]", pinPredecessors: String? = "[]"
     ) -> Data {
         let pinField = pinPredecessors.map { #","provenPredecessorsB64":\#($0)"# } ?? ""
         return Data("""
         {"v":\(v),"contacts":[],"pins":[{"accountIdB64":"\(peerAccount)",\
         "pinnedSignaturePubkeyB64":"\(key(0xC3))","rotationMarker":7\(pinField)}],\
-        "knownGroupIdsB64":[],"ownPredecessors":\(own)}
+        "knownGroupIdsB64":[],"ownPredecessors":\(own),\
+        "groupNames":[],"profiles":[],"pendingContacts":[]}
         """.utf8)
     }
 
@@ -65,7 +66,7 @@ final class PairedAfterRotationTests: XCTestCase {
     // MARK: - The codec
 
     func testAFormat2BundleRoundTripsWithPredecessors() throws {
-        let bundle = StateBundle.V2(
+        let bundle = StateBundle.V3(
             contacts: [],
             pins: [StateBundle.CarriedPin(
                 accountIdB64: peerAccount, pinnedSignaturePubkeyB64: key(0xC3), rotationMarker: 7,
@@ -75,7 +76,7 @@ final class PairedAfterRotationTests: XCTestCase {
                 StateBundle.OwnPredecessor(seedB64: seed(1).base64EncodedString(), adoptedAtMs: 1_000),
                 StateBundle.OwnPredecessor(seedB64: seed(2).base64EncodedString(), adoptedAtMs: 2_000),
             ])
-        XCTAssertEqual(bundle.v, 2)
+        XCTAssertEqual(bundle.v, 3)
         XCTAssertEqual(StateBundle.decode(StateBundle.encode(bundle)), bundle)
 
         // The contract's field names, read from another client's JSON.
@@ -90,7 +91,8 @@ final class PairedAfterRotationTests: XCTestCase {
     func testFormat1AndEveryOtherVersionIsRefused() {
         XCTAssertNotNil(StateBundle.decode(json()))
         XCTAssertNil(StateBundle.decode(json(v: 1)), "flag day: no dual accept")
-        XCTAssertNil(StateBundle.decode(json(v: 3)))
+        XCTAssertNil(StateBundle.decode(json(v: 2)), "format 2 is refused too (bundle v3 flag day)")
+        XCTAssertNil(StateBundle.decode(json(v: 4)))
         XCTAssertNil(StateBundle.decode(
             Data(#"{"v":1,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)))
     }
@@ -122,10 +124,10 @@ final class PairedAfterRotationTests: XCTestCase {
         XCTAssertNil(
             StateBundle.decode(json(pinPredecessors: #"["\#(Data(repeating: 1, count: 31).base64EncodedString())"]"#)),
             "a proven key that is not 32 bytes")
-        XCTAssertNil(StateBundle.decode(json(pinPredecessors: nil)), "the field is part of format 2")
+        XCTAssertNil(StateBundle.decode(json(pinPredecessors: nil)), "the field is part of the format")
         XCTAssertNil(
-            StateBundle.decode(Data(#"{"v":2,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
-            "ownPredecessors is part of format 2")
+            StateBundle.decode(Data(#"{"v":3,"contacts":[],"pins":[],"knownGroupIdsB64":[]}"#.utf8)),
+            "ownPredecessors is part of the format")
     }
 
     // MARK: - The sending side
@@ -165,7 +167,7 @@ final class PairedAfterRotationTests: XCTestCase {
             ownPredecessors: InMemoryOwnPredecessorStore(),
             adoptions: PredecessorMailbox.AdoptionStore(defaults: defaults),
             provenStore: ProvenPredecessorStore(ownerAccountIdB64: account, defaults: defaults))
-        XCTAssertEqual(built.v, 2)
+        XCTAssertEqual(built.v, 3)
         XCTAssertEqual(built.ownPredecessors, [], "an account that never rotated sends an empty array")
     }
 
@@ -374,7 +376,7 @@ final class PairedAfterRotationTests: XCTestCase {
         try senderStore.add(seed(0xA0), accountIdB64: account)
 
         // Over the wire.
-        let sent = StateBundle.V2(
+        let sent = StateBundle.V3(
             contacts: [], pins: [], knownGroupIdsB64: [],
             ownPredecessors: StateBundle.carriedOwnPredecessors(
                 seeds: senderStore.load(accountIdB64: account)) { _ in 1_000 })
@@ -422,6 +424,141 @@ final class PairedAfterRotationTests: XCTestCase {
             accountIdB64: account, account: k1, predecessorSeeds: [seed(0xA0)], holdsConversations: false))
         XCTAssertEqual(reminted.accountPublicKey(), k0.signaturePublicKey())
         XCTAssertEqual(reminted.signaturePublicKey(), early.signaturePublicKey())
+    }
+
+    // MARK: - A device restored from the phrase (section 3.7)
+
+    private let accountBytes = Data(repeating: 0xB1, count: 16)
+
+    private func parsedBackup(predecessors: [BackupOwnPredecessor]) throws -> ParsedBackupPayload {
+        try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: accountBytes,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [],
+            knownGroupIdsHex: [],
+            syncedState: nil,
+            ownPredecessors: predecessors))
+    }
+
+    func testABackupCarriesTheOwnPredecessorsOldestFirstWithTheirAdoptionTimes() throws {
+        let times = [
+            base64Encode(try publicKey(seed(1))): Int64(111),
+            base64Encode(try publicKey(seed(2))): Int64(222),
+        ]
+        let records = BackupClient.ownPredecessorRecords(seeds: [seed(1), seed(2)]) { times[$0] ?? -1 }
+
+        let parsed = try parsedBackup(predecessors: records)
+
+        XCTAssertEqual(parsed.ownPredecessors.map(\.seed), [seed(1), seed(2)])
+        XCTAssertEqual(parsed.ownPredecessors.map(\.adoptedAtMs), [111, 222])
+        // An account that never rotated carries none.
+        XCTAssertEqual(try parsedBackup(predecessors: []).ownPredecessors.count, 0)
+        // More than the format holds keeps the oldest, the conversation key.
+        let ten = BackupClient.ownPredecessorRecords(seeds: (1...10).map { seed(UInt8($0)) }) { _ in 0 }
+        XCTAssertEqual(ten.count, StateBundle.maxPredecessors)
+        XCTAssertEqual(ten.first?.seed, seed(1))
+    }
+
+    /// A restored device stores the predecessors where a kept device does,
+    /// and its first binding names the key the conversations are bound to.
+    func testARestoredBackupMintsTheDeviceBindingUnderTheOldestPredecessor() throws {
+        let k0 = try Identity.fromSeed(seed: seed(0xA0))
+        let k2 = try Identity.fromSeed(seed: seed(0xA2))
+        let store = InMemoryOwnPredecessorStore()
+        let parsed = try parsedBackup(predecessors: [
+            BackupOwnPredecessor(seed: seed(0xA0), adoptedAtMs: 1_000),
+            BackupOwnPredecessor(seed: seed(0xA1), adoptedAtMs: 2_000),
+        ])
+
+        let applied = PhraseRestoreBackup.apply(
+            parsed, accountIdB64: account, context: "test", defaults: defaults, ownPredecessors: store)
+
+        XCTAssertEqual(applied.ownPredecessors, 2)
+        XCTAssertEqual(store.load(accountIdB64: account), [seed(0xA0), seed(0xA1)])
+        let adoptions = PredecessorMailbox.AdoptionStore(defaults: defaults)
+        XCTAssertEqual(
+            adoptions.adoptedAtMs(accountIdB64: account, keyB64: base64Encode(k0.signaturePublicKey())), 1_000,
+            "the mailbox of each is read for its own 30 days from the sender's time")
+
+        let device = try XCTUnwrap(ChatRepository.installDeviceIdentity(
+            accountIdB64: account, account: k2,
+            predecessorSeeds: store.load(accountIdB64: account), holdsConversations: false))
+        XCTAssertEqual(device.accountPublicKey(), k0.signaturePublicKey())
+        XCTAssertEqual(try keyPackageAccountKey(keyPackage: device.createKeyPackage()), k0.signaturePublicKey())
+    }
+
+    /// The retried restore: the session landed first and bound the device
+    /// under the only key it knew.
+    func testABackupWithPredecessorsReMintsABindingAlreadyMadeUnderTheNewestKey() throws {
+        let k0 = try Identity.fromSeed(seed: seed(0xA0))
+        let k2 = try Identity.fromSeed(seed: seed(0xA2))
+        let store = InMemoryOwnPredecessorStore()
+        let early = try XCTUnwrap(ChatRepository.installDeviceIdentity(
+            accountIdB64: account, account: k2, predecessorSeeds: [], holdsConversations: false))
+        XCTAssertEqual(early.accountPublicKey(), k2.signaturePublicKey())
+
+        // The chat layer is told, through what the pairing bundle posts.
+        let told = expectation(forNotification: .lakkoStateBundleApplied, object: nil) { note in
+            note.userInfo?[StateBundle.appliedAccountKey] as? String == self.account
+        }
+        PhraseRestoreBackup.apply(
+            try parsedBackup(predecessors: [BackupOwnPredecessor(seed: seed(0xA0), adoptedAtMs: 1_000)]),
+            accountIdB64: account, context: "test", defaults: defaults, ownPredecessors: store)
+        wait(for: [told], timeout: 1)
+
+        let reminted = try XCTUnwrap(ChatRepository.installDeviceIdentity(
+            accountIdB64: account, account: k2,
+            predecessorSeeds: store.load(accountIdB64: account), holdsConversations: false))
+        XCTAssertEqual(reminted.accountPublicKey(), k0.signaturePublicKey())
+        XCTAssertEqual(reminted.signaturePublicKey(), early.signaturePublicKey(), "the same device")
+    }
+
+    func testARestoreKeepsARotationThisDeviceAdoptedAfterTheBackupWasSealed() throws {
+        let store = InMemoryOwnPredecessorStore()
+        try store.add(seed(0xA3), accountIdB64: account)
+
+        PhraseRestoreBackup.apply(
+            try parsedBackup(predecessors: [BackupOwnPredecessor(seed: seed(0xA0), adoptedAtMs: 1)]),
+            accountIdB64: account, context: "test", defaults: defaults, ownPredecessors: store)
+
+        XCTAssertEqual(store.load(accountIdB64: account), [seed(0xA0), seed(0xA3)], "oldest first")
+    }
+
+    func testABackupWithoutPredecessorsLeavesTheSlotAndTellsNobody() throws {
+        let store = InMemoryOwnPredecessorStore()
+        let silent = expectation(forNotification: .lakkoStateBundleApplied, object: nil) { note in
+            note.userInfo?[StateBundle.appliedAccountKey] as? String == self.account
+        }
+        silent.isInverted = true
+
+        let applied = PhraseRestoreBackup.apply(
+            try parsedBackup(predecessors: []),
+            accountIdB64: account, context: "test", defaults: defaults, ownPredecessors: store)
+
+        XCTAssertEqual(applied.ownPredecessors, 0)
+        XCTAssertEqual(store.load(accountIdB64: account), [])
+        wait(for: [silent], timeout: 0.2)
+    }
+
+    /// A slot that cannot be written costs the binding, not the restore.
+    func testASlotThatCannotBeWrittenFailsNothingElseOfTheRestore() throws {
+        struct Refused: Error {}
+        let store = InMemoryOwnPredecessorStore()
+        store.addError = Refused()
+        let group = Data(repeating: 0x71, count: 32)
+        let parsed = try parseBackupPayload(wire: try BackupClient.composePayload(
+            accountId: accountBytes, createdAtMs: 1, ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [], knownGroupIdsHex: [PhraseRestoreBackup.hexString(fromBytes: group)],
+            syncedState: nil,
+            ownPredecessors: [BackupOwnPredecessor(seed: seed(0xA0), adoptedAtMs: 1)]))
+
+        let applied = PhraseRestoreBackup.apply(
+            parsed, accountIdB64: account, context: "test", defaults: defaults, ownPredecessors: store)
+
+        XCTAssertEqual(applied.ownPredecessors, 0)
+        XCTAssertEqual(applied.knownGroups, 1)
+        RestoredKnownGroupsStore.clear(accountIdB64: account, defaults: defaults)
     }
 
     // MARK: - Sent contact requests (section 3.5a rule 5)

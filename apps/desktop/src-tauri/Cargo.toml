@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# The Tauri host of the desktop client (ADR-0085).
+#
+# A workspace of its own, outside the root workspace, like the fuzz crates:
+# Tauri needs the platform webview's system libraries (WebKitGTK on Linux),
+# and `cargo check --workspace` must keep working on a machine without them.
+
+[package]
+name = "lakko-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Lakko desktop client host (Tauri 2)"
+
+[workspace]
+
+[[bin]]
+name = "lakko-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+url = "2"
+tokio = { version = "1", features = ["time", "macros", "rt-multi-thread", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+http = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+hkdf = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+zeroize = "1"
+getrandom = "0.2"
+base64 = "0.22"
+futures = "0.3"
+# Anti-censorship (ADR-0085 section 3): the same transports as the UniFFI
+# surface of iOS and Android.
+lakko-transport = { path = "../../../crates/lakko-transport" }
+lakko-crypto = { path = "../../../crates/lakko-crypto" }
+
+[dev-dependencies]
+lakko-svc-obfs-proxy = { path = "../../../services/obfs-proxy" }
+tokio = { version = "1", features = ["net", "io-util"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+mac-notification-sys = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString", "NSUserNotification"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+winreg = "0.56"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+notify-rust = "4"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+
+[lints.rust]
+unsafe_code = "forbid"

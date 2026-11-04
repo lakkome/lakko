@@ -789,6 +789,29 @@ public final class PushGroupRouting {
         }
     }
 
+    /// ADR-0087 section 9 — the group is gone from this device: retire its
+    /// subscription and drop the secret row, under the routing chain, so a
+    /// rotation still in flight cannot put the row back.
+    public func forgetGroup(accountIdB64: String, groupIdHex: String) async {
+        await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] in
+            guard let self else { return }
+            if let secret = self.store.getSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+                await self.retireOldPushGid(accountIdB64: accountIdB64, oldSecret: secret)
+            }
+            self.store.removeSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+    }
+
+    /// A Welcome replaced a group whose end had not reached this step: the
+    /// secret row goes now, before the new membership looks at it, and the
+    /// caller retires what it returns.
+    public func detachGroup(accountIdB64: String, groupIdHex: String) -> Data? {
+        let secret = store.getSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        store.removeSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        return secret
+    }
+
     /// ADR-0043 — retire a SUPERSEDED `push_gid`: drop this device's push-gw
     /// subscription under it, then delete its reverse-index row.
     ///

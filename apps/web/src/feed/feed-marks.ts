@@ -15,7 +15,8 @@
  * Pure: the codec and every rule are here and tested; the sealed store is
  * `feed-marks-store.ts`. Nothing here leaves the device.
  */
-import { currentLanguage, t } from "../l10n";
+import { t } from "../l10n";
+import { displayLocale } from "../l10n/display-locale";
 
 export const FEED_MARKS_VERSION = 1;
 /** Most item keys remembered per feed (chosen): well past a screenful, and
@@ -84,6 +85,18 @@ export function hideConversation(marks: FeedMarks, id: string): FeedMarks {
 export function showConversation(marks: FeedMarks, id: string): FeedMarks {
   if (!marks.hidden.includes(id)) return marks;
   return { ...marks, hidden: marks.hidden.filter((h) => h !== id) };
+}
+
+/** What a conversation gone from this device leaves behind here: its hidden
+ *  mark and, for a channel, its read position (ADR-0087 section 9). The same
+ *  object when it left nothing. */
+export function withoutConversation(marks: FeedMarks, id: string): FeedMarks {
+  const hidden = marks.hidden.includes(id);
+  const read = id in marks.channelRead;
+  if (!hidden && !read) return marks;
+  const channelRead = { ...marks.channelRead };
+  delete channelRead[id];
+  return { ...marks, hidden: marks.hidden.filter((h) => h !== id), channelRead };
 }
 
 /** The sources a feed may draw from: every one not hidden. Applied before
@@ -194,5 +207,5 @@ export function channelUnreadCount(
 
 /** The badge text a count draws, as the chat list does. */
 export function badgeText(count: number): string {
-  return count >= 100 ? t("chats.row.unread_overflow") : count.toLocaleString(currentLanguage());
+  return count >= 100 ? t("chats.row.unread_overflow") : count.toLocaleString(displayLocale());
 }

@@ -49,17 +49,29 @@ public enum PairingCodec {
     /// account id, so a fresh device needs no lookup before a session.
     /// `keyPackage` is the TLS-encoded `KeyPackage` from the joining
     /// device's DeviceIdentity. `rendezvousPseudonym` is the 32-byte slot
-    /// from [`generateRendezvousPseudonym`].
+    /// from [`generateRendezvousPseudonym`]. `deviceCardEnvelope` is the
+    /// joining device's own ADR-0080 card envelope (UX section 2.1,
+    /// ``DeviceCardCenter/pairingCardEnvelope(nowMs:)``), display only on the
+    /// confirming device; `nil` puts no card in the payload.
     public static func buildPairingQrPayload(
         loginHandle: Data,
         keyPackage: Data,
-        rendezvousPseudonym: Data
+        rendezvousPseudonym: Data,
+        deviceCardEnvelope: Data? = nil
     ) throws -> Data {
         return try buildPairingQr(
             loginHandle: loginHandle,
             keyPackage: keyPackage,
-            rendezvousPseudonym: rendezvousPseudonym
+            rendezvousPseudonym: rendezvousPseudonym,
+            deviceCardEnvelope: deviceCardEnvelope
         )
+    }
+
+    /// UX section 2.1 — the card the new device put in a decoded payload,
+    /// in this client's form; `nil` when absent or undecodable. What the new
+    /// device says about itself: display only, nothing trusts it.
+    public static func deviceCard(of decoded: DecodedPairingQr) -> StoredDeviceCard? {
+        decoded.deviceCard.map(DeviceCardCenter.stored)
     }
 
     /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload

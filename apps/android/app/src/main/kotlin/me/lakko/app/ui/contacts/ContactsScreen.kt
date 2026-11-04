@@ -65,6 +65,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -82,8 +84,6 @@ import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
 import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
-import java.text.DateFormat
-import java.util.Date
 
 /**
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
@@ -227,11 +227,10 @@ public fun ContactsScreen(
             key != null && onOpenContact != null -> onOpenContact(contactRouteKey(key))
         }
     }
-    // The contacts the filter lists above the People part, which leaves them out.
+    // The people the filter lists above the People part, contacts and pending
+    // contacts alike; the People part leaves them out.
     val listedKeys = remember(sections, byKey) {
-        sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row ->
-            byKey[row.key]?.let { base64Encode(it.request.fromPubkey) }
-        }
+        listedPersonKeys(sections) { rowKey -> byKey[rowKey]?.let { base64Encode(it.request.fromPubkey) } }
     }
     val pending = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
 
@@ -297,19 +296,25 @@ public fun ContactsScreen(
                     }
                 }
 
-                if (pending.isNotEmpty()) {
+                // who-can-find-me.md section 6.1, "One list": while a text is
+                // typed the field shows one list with no headings, so the
+                // request blocks and the letter headers step aside.
+                val oneList = query.isNotBlank()
+                if (pending.isNotEmpty() && !oneList) {
                     item(key = "requests-header") { SectionTitle(t("contacts.list.requests")) }
                     items(pending.distinctBy { it.messageId }, key = { "req-${it.messageId}" }) { req ->
                         RequestRow(
                             req = req,
                             name = nameVersion.let { directory.resolve(req.fromPubkey) },
+                            accepting = req.messageId in state.acceptingIds,
+                            acceptFailed = req.messageId in state.acceptFailedIds,
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
                         )
                     }
                 }
 
-                if (state.sent.isNotEmpty()) {
+                if (state.sent.isNotEmpty() && !oneList) {
                     item(key = "sent-header") {
                         SentHeader(
                             count = state.sent.size,
@@ -318,7 +323,9 @@ public fun ContactsScreen(
                         )
                     }
                     if (sentExpanded) {
-                        items(state.sent.distinctBy { it.messageId }, key = { "sent-${it.messageId}" }) { s -> SentRow(s) }
+                        items(state.sent.distinctBy { it.messageId }, key = { "sent-${it.messageId}" }) { s ->
+                            SentRow(s, onDismiss = { viewModel.onDismissSentClicked(s) })
+                        }
                     }
                 }
 
@@ -336,7 +343,7 @@ public fun ContactsScreen(
                                 conversationMatches = 0,
                                 onOpenChannel = { _, _ -> },
                                 onOpenContact = openPerson,
-                                noLocalMatchKey = "contacts.list.no_match",
+                                noLocalMatchKey = "search.nothing_found",
                                 excludeKeysB64 = listedKeys,
                             )
                         } else {
@@ -349,11 +356,11 @@ public fun ContactsScreen(
                         }
                     }
                 } else {
-                    if (pending.isNotEmpty() || state.sent.isNotEmpty()) {
+                    if ((pending.isNotEmpty() || state.sent.isNotEmpty()) && !oneList) {
                         item(key = "contacts-header") { SectionTitle(t("nav.contacts")) }
                     }
                     for (section in sections) {
-                        stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
+                        if (!oneList) stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
                         items(section.rows, key = { "c-${it.key}" }) { row ->
                             val contact = byKey[row.key]
                             ContactRow(
@@ -506,6 +513,8 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
 private fun RequestRow(
     req: IncomingContactRequest,
     name: ResolvedName,
+    accepting: Boolean,
+    acceptFailed: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
@@ -546,8 +555,17 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            Button(onClick = onAccept) { Text(t("contacts.request.accept")) }
-            OutlinedButton(onClick = onDecline) { Text(t("contacts.request.decline")) }
+            Button(onClick = onAccept, enabled = !accepting) { Text(t("contacts.request.accept")) }
+            OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }
+        }
+        if (acceptFailed) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = t("contacts.request.accept_failed"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(start = 52.dp),
+            )
         }
     }
 }
@@ -576,30 +594,41 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
 }
 
 @Composable
-private fun SentRow(s: SentContactRequest) {
+private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
+        val text = sentRowText(s.recipientName, s.recipientUsername)
         LakkoAvatar(
-            name = s.recipientUsername,
+            name = text.title.trimStart('@'),
             seed = s.recipientAccountIdB64,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
         )
         Spacer(Modifier.width(12.dp))
-        Text(
-            "@${s.recipientUsername}",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            t("contacts.list.sent_waiting"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text.title, style = MaterialTheme.typography.bodyLarge)
+            text.username?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                t("contacts.list.sent_waiting"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        val dismissLabel = t("contacts.list.sent_dismiss")
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.semantics { contentDescription = dismissLabel },
+        ) { Text(t("common.dismiss")) }
     }
 }
 
@@ -698,10 +727,8 @@ private fun InviteLinksSheet(
     }
     val now = remember(rows) { System.currentTimeMillis() }
     val language = me.lakko.app.l10n.LocalStrings.current.language
-    // The created fact carries the time too, in the interface language.
-    val dateFormat = remember(language) {
-        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, java.util.Locale.forLanguageTag(language))
-    }
+    // The created fact carries the time too: words in the interface
+    // language, order and clock from the device (localization.md 5).
     // The link whose terms are open (UX section 9), and the form's state.
     var editingSlug by remember { mutableStateOf<String?>(null) }
     var form by remember { mutableStateOf(InviteCreateForm()) }
@@ -793,7 +820,7 @@ private fun InviteLinksSheet(
                     val meta = joinFacts(
                         buildList {
                             row.createdAtMs?.let {
-                                add(t("invite.links.created", mapOf("date" to dateFormat.format(Date(it)))))
+                                add(t("invite.links.created", mapOf("date" to me.lakko.app.l10n.DeviceFormats.mediumDateTime(it, language))))
                             }
                             add(describeInviteExpiry(row.expiryMs, now).text())
                             add(describeInviteLimit(row.maxUses).text())

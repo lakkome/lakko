@@ -12,6 +12,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
+import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 import uniffi.lakko_ffi_uniffi.ParsedBackupPayload
 
 /**
@@ -40,6 +41,9 @@ class BackupRestoreTest {
         contacts: List<BackupContactRecord> = listOf(contact(1, "Alice"), contact(2, "Bob")),
         groups: List<String> = listOf(g1, g2),
         synced: ByteArray = byteArrayOf(7, 7, 7),
+        predecessors: List<BackupOwnPredecessor> = emptyList(),
+        ownProfile: ByteArray = ByteArray(0),
+        visibility: ByteArray = ByteArray(0),
     ) = ParsedBackupPayload(
         accountId = ByteArray(16) { 9 },
         createdAtMs = 1_700_000_000_000uL,
@@ -47,7 +51,12 @@ class BackupRestoreTest {
         acceptedContacts = contacts,
         knownGroupIds = groups.map { hex -> ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() } },
         syncedState = synced,
+        ownPredecessors = predecessors,
+        ownProfile = ownProfile,
+        visibility = visibility,
     )
+
+    private fun predecessor(tag: Int) = BackupOwnPredecessor(seed = ByteArray(64) { tag.toByte() }, adoptedAtMs = tag.toULong() * 1_000uL)
 
     /** Records everything the restore did. The fetch answers from a script. */
     private class FakePorts(private val script: MutableList<() -> GatedRestoreOutcome>) : BackupRestorePorts {
@@ -61,6 +70,12 @@ class BackupRestoreTest {
         val alerts = mutableListOf<RestoreReason>()
         val logs = mutableListOf<String>()
         var failContactMerge = false
+
+        /** The steps that touch the keys, in order. */
+        val steps = mutableListOf<String>()
+        val storedSeeds = mutableListOf<ByteArray>()
+        var storeAnswer: OwnPredecessorsStored? = OwnPredecessorsStored(conversationKeyChanged = true)
+        var rebindFails = false
 
         /** A stale head: the fetch asks, and refuses when the answer is no. */
         var staleReason: RestoreReason? = null
@@ -77,8 +92,20 @@ class BackupRestoreTest {
             return script.removeAt(0)()
         }
 
+        override fun storeOwnPredecessors(predecessors: List<BackupOwnPredecessor>): OwnPredecessorsStored? {
+            steps += "store"
+            predecessors.forEach { storedSeeds += it.seed.copyOf() }
+            return storeAnswer
+        }
+
+        override suspend fun rebindConversationKey() {
+            steps += "rebind"
+            if (rebindFails) throw IllegalStateException("chat layer busy")
+        }
+
         override fun mergeContacts(contacts: List<BackupContactRecord>, createdAtMs: ULong): Int {
             if (failContactMerge) throw IllegalStateException("store unavailable")
+            steps += "contacts"
             mergedContacts += contacts
             return contacts.size
         }
@@ -89,6 +116,29 @@ class BackupRestoreTest {
 
         override fun rememberRestoredGroups(groupIdsHex: List<String>) {
             rememberedGroups += groupIdsHex
+        }
+
+        val appliedProfiles = mutableListOf<ByteArray>()
+        val appliedVisibilities = mutableListOf<ByteArray>()
+        var everyoneUnknownNotes = 0
+        val restoredMarks = mutableListOf<Boolean>()
+        var failOwnProfile = false
+
+        override fun applyOwnProfile(envelope: ByteArray) {
+            if (failOwnProfile) throw IllegalStateException("does not decode")
+            appliedProfiles += envelope
+        }
+
+        override fun applyVisibility(envelope: ByteArray) {
+            appliedVisibilities += envelope
+        }
+
+        override fun noteEveryoneUnknown() {
+            everyoneUnknownNotes += 1
+        }
+
+        override fun markRestored(knewConversations: Boolean) {
+            restoredMarks += knewConversations
         }
 
         override fun markBackupDirty() {
@@ -120,6 +170,73 @@ class BackupRestoreTest {
     private fun ports(vararg outcomes: () -> GatedRestoreOutcome) = FakePorts(outcomes.toMutableList())
 
     private val neverAsked: suspend (RestoreReason) -> Boolean = { error("no stale head in this test") }
+
+    // ---- ADR-0074 section 3.7: the own predecessors -----------------------
+
+    @Test
+    fun `a backup's own predecessors are stored first and the key moves last`() = runTest {
+        val carried = listOf(predecessor(1), predecessor(2))
+        val p = ports({ GatedRestoreOutcome.Restored(payload(predecessors = carried)) })
+
+        assertEquals(BackupRestoreOutcome.APPLIED, restoreBackupAndApply("recover", p, neverAsked))
+
+        assertEquals(listOf("store", "contacts", "rebind"), p.steps)
+        assertEquals(listOf<Byte>(1, 2), p.storedSeeds.map { it[0] })
+        assertFalse(p.retry)
+        // Nothing is left in memory, and no line carries a seed.
+        assertTrue(carried.all { row -> row.seed.all { it == 0.toByte() } })
+        assertTrue(p.logs.none { line -> "seed" in line.lowercase() })
+    }
+
+    @Test
+    fun `an account that never rotated touches neither the store nor the binding`() = runTest {
+        val p = ports({ GatedRestoreOutcome.Restored(payload()) })
+        assertEquals(BackupRestoreOutcome.APPLIED, restoreBackupAndApply("recover", p, neverAsked))
+        assertEquals(listOf("contacts"), p.steps)
+    }
+
+    @Test
+    fun `keys this device already held change no binding`() = runTest {
+        val p = ports({ GatedRestoreOutcome.Restored(payload(predecessors = listOf(predecessor(1)))) })
+        p.storeAnswer = OwnPredecessorsStored(conversationKeyChanged = false)
+        assertEquals(BackupRestoreOutcome.APPLIED, restoreBackupAndApply("retry", p, neverAsked))
+        assertEquals(listOf("store", "contacts"), p.steps)
+    }
+
+    @Test
+    fun `predecessors that could not be stored keep the restore pending and uploads held`() = runTest {
+        val p = ports({ GatedRestoreOutcome.Restored(payload(predecessors = listOf(predecessor(1)))) })
+        p.storeAnswer = null
+
+        assertEquals(BackupRestoreOutcome.FETCH_FAILED, restoreBackupAndApply("recover", p, neverAsked))
+
+        // The rest of the backup still lands, and the next landing tries again.
+        assertEquals(1, p.mergedContacts.size)
+        assertTrue(p.retry)
+        assertEquals(0, p.dirtyMarks)
+        assertFalse("rebind" in p.steps)
+    }
+
+    @Test
+    fun `a rebind that fails does not fail the restore`() = runTest {
+        val p = ports({ GatedRestoreOutcome.Restored(payload(predecessors = listOf(predecessor(1)))) })
+        p.rebindFails = true
+        assertEquals(BackupRestoreOutcome.APPLIED, restoreBackupAndApply("recover", p, neverAsked))
+        assertFalse(p.retry)
+    }
+
+    @Test
+    fun `a backup carries the account's predecessors oldest first as copies`() {
+        val rows = listOf(
+            me.lakko.app.auth.OwnPredecessor(ByteArray(32) { 1 }, ByteArray(64) { 1 }, 1_000L),
+            me.lakko.app.auth.OwnPredecessor(ByteArray(32) { 2 }, ByteArray(64) { 2 }, 2_000L),
+        )
+        val carried = ownPredecessorsForBackup(rows)
+        assertEquals(listOf(1_000uL, 2_000uL), carried.map { it.adoptedAtMs })
+        assertTrue(carried[0].seed.contentEquals(rows[0].phraseSeed))
+        rows.forEach { it.zero() }
+        assertEquals(1.toByte(), carried[0].seed[0])
+    }
 
     // ---- A / B: what a restore applies ------------------------------------
 
@@ -167,8 +284,10 @@ class BackupRestoreTest {
         val portNames = BackupRestorePorts::class.java.declaredMethods.map { it.name.substringBefore('-') }.toSet()
         assertEquals(
             setOf(
-                "fetch", "mergeContacts", "mergeSyncedState", "rememberRestoredGroups", "markBackupDirty",
-                "setRetryPending", "retryPending", "raiseRollbackAlert", "log",
+                "fetch", "storeOwnPredecessors", "rebindConversationKey", "mergeContacts", "mergeSyncedState",
+                "rememberRestoredGroups", "markBackupDirty", "setRetryPending", "retryPending",
+                "raiseRollbackAlert", "log", "applyOwnProfile", "applyVisibility", "noteEveryoneUnknown",
+                "markRestored",
             ),
             portNames.filterNot { it.contains('$') }.toSet(),
         )
@@ -417,7 +536,10 @@ class BackupRestoreTest {
             .substringBefore("val envelope")
         val named = Regex("""^\s*(\w+) = """, RegexOption.MULTILINE).findAll(compose).map { it.groupValues[1] }.toList()
         assertEquals(
-            listOf("accountId", "createdAtMs", "ed25519Seed", "contacts", "knownGroupIds", "syncedState"),
+            listOf(
+                "accountId", "createdAtMs", "ed25519Seed", "contacts", "knownGroupIds", "syncedState",
+                "ownPredecessors", "ownProfile", "visibility",
+            ),
             named,
         )
     }
@@ -503,5 +625,46 @@ class BackupRestoreTest {
         // One shared function, and it is the only caller of the rule.
         assertEquals(1, Regex("restoreBackupAndApply\\(").findAll(auth).count())
         assertEquals(1, Regex("retryPendingBackupRestore\\(").findAll(auth).count())
+    }
+
+    // ---- the own profile and the setting ----------------------------------
+
+    private fun payloadWith(ownProfile: ByteArray, visibility: ByteArray, groups: List<String> = emptyList()) =
+        GatedRestoreOutcome.Restored(payload(ownProfile = ownProfile, visibility = visibility, groups = groups))
+
+    @Test
+    fun `a restore hands on the own profile and the setting, and marks the list`() = runTest {
+        val p = ports({ payloadWith(byteArrayOf(1), byteArrayOf(2), listOf(g1)) })
+        val outcome = restoreBackupAndApply("recover", p) { false }
+        assertEquals(BackupRestoreOutcome.APPLIED, outcome)
+        assertEquals(1, p.appliedProfiles.size)
+        assertEquals(1, p.appliedVisibilities.size)
+        assertEquals(1, p.everyoneUnknownNotes)
+        assertEquals(listOf(true), p.restoredMarks)
+    }
+
+    @Test
+    fun `an empty field changes nothing`() = runTest {
+        val p = ports({ payloadWith(ByteArray(0), ByteArray(0)) })
+        restoreBackupAndApply("recover", p) { false }
+        assertTrue(p.appliedProfiles.isEmpty())
+        assertTrue(p.appliedVisibilities.isEmpty())
+        assertEquals(listOf(false), p.restoredMarks)
+    }
+
+    @Test
+    fun `a profile that does not decode costs nothing else`() = runTest {
+        val p = ports({ payloadWith(byteArrayOf(1), byteArrayOf(2)) })
+        p.failOwnProfile = true
+        val outcome = restoreBackupAndApply("recover", p) { false }
+        assertEquals(BackupRestoreOutcome.APPLIED, outcome)
+        assertEquals(1, p.appliedVisibilities.size)
+    }
+
+    @Test
+    fun `no backup still ends the restore, with no conversation to speak of`() = runTest {
+        val p = ports({ GatedRestoreOutcome.NoBackup })
+        restoreBackupAndApply("recover", p) { false }
+        assertEquals(listOf(false), p.restoredMarks)
     }
 }

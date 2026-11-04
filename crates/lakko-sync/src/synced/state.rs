@@ -56,6 +56,15 @@
 //! [`SyncedState::apply_own_username_envelope`], persisted by
 //! [`SyncedState::to_bytes`], never in [`StateSnapshot`].
 //!
+//! ## The quick-reaction register (UX `reactions-and-emoji.md` D3)
+//!
+//! One register per account holding the emoji a double tap sends, the
+//! own-username register's shape: last-writer-wins, carried by
+//! [`SyncedState::quick_reaction_envelope`] /
+//! [`SyncedState::apply_quick_reaction_envelope`], persisted by
+//! [`SyncedState::to_bytes`], never in [`StateSnapshot`]. "Never chosen" is
+//! the absence of the register.
+//!
 //! ## The link-record register (ADR-0079 section 4)
 //!
 //! One register per invite link of the account, keyed by link id, carried by
@@ -69,6 +78,35 @@
 //! [`SyncedState::link_answer_verdict`] is the one rule every client asks
 //! when a contact request carries a link answer.
 //!
+//! ## The device-acknowledgement register (identity-recovery 17.5)
+//!
+//! One register per device signature key: the person has seen the
+//! "a device was added to your account" warning for that device on some
+//! device of the account, so no device warns about it any more. Write-once
+//! at the writer ([`SyncedState::acknowledge_device`]), folded by the rule
+//! above, carried by [`SyncedState::device_ack_envelopes`] /
+//! [`SyncedState::apply_device_ack_envelope`], persisted with the rest,
+//! never in [`StateSnapshot`]. Adding the register added a tag and changed
+//! no existing layout, so it did not change the persistence version.
+//!
+//! ## Own channel reactions (ADR-0087 section 13a)
+//!
+//! One register per `(channel, post, emoji)` the account reacted with or took
+//! off, folded by the rule above (a removal is a kept tombstone; on an exact
+//! stamp tie the removal wins). Carried by
+//! [`SyncedState::channel_reaction_envelopes`] /
+//! [`SyncedState::apply_channel_reaction_envelope`], persisted with the rest
+//! (so the backup carries it), never in [`StateSnapshot`]. The own-comments
+//! register (the nonce each comment's write key comes from) is carried and
+//! folded the same way, by [`SyncedState::channel_comment_envelopes`] /
+//! [`SyncedState::apply_channel_comment_envelope`]. Unlike the other
+//! registers both are **pruned**: [`SyncedState::prune_channel_activity`] drops
+//! every register whose post has left the channel service
+//! ([`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`]). That is safe
+//! where pruning a conversation end is not: once the post is gone there is
+//! nothing a stale register could show or take back, so a register a late
+//! envelope brings back changes nothing and goes at the next prune.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -77,14 +115,61 @@
 //! a removal is held as a tombstone, and a later save with a greater stamp
 //! saves the message again. It is not folder-scoped: no folder deletion
 //! touches it.
+//!
+//! ## Conversation ends (ADR-0087 section 9)
+//!
+//! One register per conversation an end has reached, holding "ended" or
+//! "joined again" with the MLS epoch of that event. Its order is `(epoch,
+//! stamp, canonical bytes)`: the rule above with the epoch in front, the
+//! link-record shape again, so the fold stays commutative, associative and
+//! idempotent. The stamp alone cannot decide this register. A device that was
+//! offline across a removal and a re-add applies the old removal when it comes
+//! back and writes "ended" with a stamp newer than the "joined" its account
+//! already holds; by stamps that would delete the conversation from every
+//! device that rejoined. An MLS group keeps its id through all of it and its
+//! epoch only ever rises, so the epoch says which event is the later one
+//! whatever the clocks say. A channel subscription has no epoch and writes `0`,
+//! so a channel's registers are ordered by stamps alone, and that is what
+//! "strictly newer stamp wins" comes to there. At a complete tie "joined" has
+//! the larger bytes: a tie must not delete a conversation.
+//!
+//! [`SyncedState::compose_conversation_ended`] and
+//! [`SyncedState::compose_conversation_joined`] are the only writers a client
+//! uses. Each answers with the register to send, or `None` when writing one
+//! would tell nobody anything: an end older than what is held, or at
+//! [`super::entry::CONVERSATION_ENDS_MAX_CLIENT`]; a join with no end held, so
+//! the state does not grow with every group the person ever joined.
+//!
+//! **A register is never dropped.** A tombstone could go only if no device can
+//! still need it, and no age shows that: the 30-day retention bounds what a
+//! device can read from a journal, not how long it can stay offline, and a
+//! device behind that horizon catches up from the snapshot, which is a re-send
+//! of this state. Dropping a register at 30 days, or at any other age, is
+//! exactly what leaves that device holding the conversation. The client-side
+//! limit bounds the state instead.
 
 use std::collections::BTreeMap;
 
+use super::channel_comment::{
+    compose_channel_comment_envelope, decode_channel_comment_envelope, ChannelCommentEntry,
+    ChannelCommentEnvelopeError, CHANNEL_COMMENTS_MAX_CLIENT, CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES,
+    CHANNEL_COMMENT_NONCE_LEN,
+};
+use super::channel_reaction::{
+    compose_channel_reaction_envelope, decode_channel_reaction_envelope, ChannelReactionEntry,
+    ChannelReactionEnvelopeError, CHANNEL_REACTIONS_MAX_CLIENT, CHANNEL_REACTIONS_PER_POST_MAX,
+    CHANNEL_REACTION_CHANNEL_ID_LEN, CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES,
+};
+use super::device_ack::{
+    compose_device_ack_envelope, decode_device_ack_envelope, DeviceAckEntry,
+    DeviceAckEnvelopeError, DEVICE_ACK_ENVELOPE_MAX_ENTRIES, DEVICE_ACK_KEY_LEN,
+};
 use super::entry::{
-    take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEntry,
-    ConversationOrderEntry, ConversationRef, DraftEntry, FlagsEntry, FolderChanges, FolderId,
-    FolderMeta, LineageEntry, MemberState, OwnUsernameEntry, ReadCursorEntry, RecoveryEmailEntry,
-    RegisterKey, SavedSnapshot, SavedValue, Stamped, StateSnapshot, SyncEntry,
+    take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEnd,
+    ConversationEndState, ConversationEntry, ConversationOrderEntry, ConversationRef, DraftEntry,
+    FlagsEntry, FolderChanges, FolderId, FolderMeta, LineageEntry, MemberState, OwnUsernameEntry,
+    ReadCursorEntry, RecoveryEmailEntry, RegisterKey, SavedSnapshot, SavedValue, Stamped,
+    StateSnapshot, SyncEntry, CONVERSATION_ENDS_MAX_CLIENT,
 };
 use super::lineage::{
     compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
@@ -97,6 +182,10 @@ use super::link_record::{
 };
 use super::own_username::{
     compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
+};
+use super::quick_reaction::{
+    compose_quick_reaction_envelope, decode_quick_reaction_envelope, QuickReactionEntry,
+    QuickReactionEnvelopeError,
 };
 
 use super::recovery_email::{
@@ -111,11 +200,15 @@ use super::recovery_email::{
 /// reworked 2026-10-17), `5` since a link record carries the `shared` flag
 /// (2026-10-26), `6` since a saved-message snapshot carries the message's
 /// own time (`SavedSnapshot::sent_at_ms`; the two branches that made the
-/// last two changes had each called theirs `5`). Older
+/// last two changes had each called theirs `5`), `7` since the
+/// conversation-end register (ADR-0087 section 9), `8` since the
+/// own channel-reaction register (ADR-0087 section 13a), `9` since the
+/// own channel-comment register (the same section, a key per write), `10`
+/// since the quick-reaction register (UX `reactions-and-emoji.md` D3). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 6;
+const STATE_VERSION: u8 = 10;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +271,9 @@ pub struct SyncedState {
 /// `true` when `(a_hlc, a_bytes)` beats `(b_hlc, b_bytes)`. Between two link
 /// records a revoked one beats a live one first (ADR-0079: a revocation is
 /// final), then a shared one beats an unshared one (a copied link never
-/// becomes editable again, 2026-10-26).
+/// becomes editable again, 2026-10-26). Between two conversation-end registers
+/// the greater MLS epoch wins first (ADR-0087 section 9: the epoch, not a
+/// clock, says which event came later).
 fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
     if let (SyncEntry::LinkRecord(x), SyncEntry::LinkRecord(y)) = (a, b) {
         if x.revoked != y.revoked {
@@ -186,6 +281,11 @@ fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
         }
         if x.shared != y.shared {
             return x.shared;
+        }
+    }
+    if let (SyncEntry::ConversationEnd(x), SyncEntry::ConversationEnd(y)) = (a, b) {
+        if x.epoch != y.epoch {
+            return x.epoch > y.epoch;
         }
     }
     match a_hlc.cmp(&b_hlc) {
@@ -325,7 +425,11 @@ impl SyncedState {
                 SyncEntry::Lineage(_)
                 | SyncEntry::RecoveryEmail(_)
                 | SyncEntry::OwnUsername(_)
-                | SyncEntry::LinkRecord(_) => {},
+                | SyncEntry::LinkRecord(_)
+                | SyncEntry::DeviceAck(_)
+                | SyncEntry::ChannelReaction(_)
+                | SyncEntry::ChannelComment(_)
+                | SyncEntry::QuickReaction(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -644,6 +748,547 @@ impl SyncedState {
         Ok(matches!(
             self.apply(register.hlc, SyncEntry::OwnUsername(register.value))?,
             ApplyOutcome::Applied
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // The quick reaction (UX reactions-and-emoji D3).
+    // -----------------------------------------------------------------
+
+    /// Write the account's quick reaction, stamped `hlc`: the emoji a double
+    /// tap sends, followed to the account's other devices.
+    ///
+    /// `emoji` is stored as given; the client offers only what passes the
+    /// one-emoji rule (`lakko_ui_rules::emoji::is_single_emoji`). An
+    /// ordinary last-writer-wins write: `Ok(true)` when the register now
+    /// holds this value (send [`Self::quick_reaction_envelope`] to the
+    /// account's other devices), `Ok(false)` when nothing changed.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::QuickReaction`] for an empty or
+    /// over-long value.
+    pub fn set_quick_reaction(
+        &mut self,
+        hlc: u64,
+        emoji: &str,
+    ) -> Result<bool, super::entry::BoundsError> {
+        let entry = QuickReactionEntry {
+            emoji: emoji.to_owned(),
+        };
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::QuickReaction(entry))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The quick-reaction register as held; `None` when it was never
+    /// written.
+    #[must_use]
+    pub fn quick_reaction_register(&self) -> Option<Stamped<QuickReactionEntry>> {
+        match self.registers.get(&RegisterKey::QuickReaction) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::QuickReaction(q),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: q.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The account's quick reaction, or `None` when never chosen (the client
+    /// then uses `lakko_ui_rules::reaction::DEFAULT_QUICK_REACTION`).
+    #[must_use]
+    pub fn quick_reaction(&self) -> Option<String> {
+        self.quick_reaction_register().map(|s| s.value.emoji)
+    }
+
+    /// The envelope carrying the held register with its original stamp: sent
+    /// after [`Self::set_quick_reaction`] returned `true`, and again as the
+    /// catch-up re-send after the DeviceGroup grew. `None` when the register
+    /// was never written.
+    #[must_use]
+    pub fn quick_reaction_envelope(&self) -> Option<Vec<u8>> {
+        compose_quick_reaction_envelope(&self.quick_reaction_register()?).ok()
+    }
+
+    /// Decode a quick-reaction envelope and fold the register in with its
+    /// original stamp. Fail closed: a malformed envelope changes nothing.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`QuickReactionEnvelopeError`].
+    pub fn apply_quick_reaction_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, QuickReactionEnvelopeError> {
+        let register = decode_quick_reaction_envelope(bytes)?;
+        Ok(matches!(
+            self.apply(register.hlc, SyncEntry::QuickReaction(register.value))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Device acknowledgements (identity-recovery 17.5).
+    // -----------------------------------------------------------------
+
+    /// Record that the person has seen the added-device warning for each of
+    /// `device_keys`, stamped `hlc`, at wall-clock `now_ms`. **Write-once**: a
+    /// key already acknowledged is not re-stamped. Returns the envelopes to
+    /// send to the account's other devices, carrying exactly the registers
+    /// this call wrote (empty when nothing was new).
+    pub fn acknowledge_devices(
+        &mut self,
+        hlc: u64,
+        device_keys: &[[u8; DEVICE_ACK_KEY_LEN]],
+        now_ms: u64,
+    ) -> Vec<Vec<u8>> {
+        let mut written: Vec<Stamped<DeviceAckEntry>> = Vec::new();
+        for key in device_keys {
+            if self.acknowledge_device(hlc, *key, now_ms) {
+                written.push(Stamped {
+                    hlc,
+                    value: DeviceAckEntry {
+                        device_key: *key,
+                        acknowledged_at_ms: now_ms,
+                    },
+                });
+            }
+        }
+        written.sort_by_key(|e| e.value.device_key);
+        written.dedup_by_key(|e| e.value.device_key);
+        written
+            .chunks(DEVICE_ACK_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_device_ack_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// One key of [`Self::acknowledge_devices`]: `true` when the register was
+    /// written now, `false` when it was already held.
+    pub fn acknowledge_device(
+        &mut self,
+        hlc: u64,
+        device_key: [u8; DEVICE_ACK_KEY_LEN],
+        now_ms: u64,
+    ) -> bool {
+        if self.is_device_acknowledged(&device_key) {
+            return false;
+        }
+        matches!(
+            self.apply(
+                hlc,
+                SyncEntry::DeviceAck(DeviceAckEntry {
+                    device_key,
+                    acknowledged_at_ms: now_ms,
+                }),
+            ),
+            Ok(ApplyOutcome::Applied)
+        )
+    }
+
+    /// Whether the warning for `device_key` was seen on some device.
+    #[must_use]
+    pub fn is_device_acknowledged(&self, device_key: &[u8; DEVICE_ACK_KEY_LEN]) -> bool {
+        self.registers
+            .contains_key(&RegisterKey::DeviceAck(*device_key))
+    }
+
+    /// Every acknowledged device key, ascending.
+    #[must_use]
+    pub fn acknowledged_devices(&self) -> Vec<[u8; DEVICE_ACK_KEY_LEN]> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::DeviceAck(a) => Some(a.device_key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held acknowledgement with its original stamp, as envelopes of
+    /// at most [`DEVICE_ACK_ENVELOPE_MAX_ENTRIES`] entries: the re-send a
+    /// device owes when a live send did not go out.
+    #[must_use]
+    pub fn device_ack_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<DeviceAckEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::DeviceAck(a) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: a.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(DEVICE_ACK_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_device_ack_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a device-acknowledgement envelope and fold every register in
+    /// with its original stamp. Fail closed. Returns whether anything
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`DeviceAckEnvelopeError`].
+    pub fn apply_device_ack_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, DeviceAckEnvelopeError> {
+        let entries = decode_device_ack_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::DeviceAck(s.value))),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel reactions (ADR-0087 section 13a).
+    // -----------------------------------------------------------------
+
+    /// Record that the account reacted to (`reacted`) or took its reaction
+    /// off (`!reacted`) the post at `post_cursor` in `channel_id` with
+    /// `emoji`, stamped `hlc`. `post_at_ms` is the post's server time.
+    ///
+    /// Returns the envelope to send to the account's other devices, or
+    /// `None` when nothing was written: the register already says so, or a
+    /// new reaction would pass [`CHANNEL_REACTIONS_MAX_CLIENT`] (a removal of
+    /// a held reaction is always written).
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::ChannelReactionEmoji`], or
+    /// [`super::entry::BoundsError::TooManyChannelReactions`] when the
+    /// account already stands with [`CHANNEL_REACTIONS_PER_POST_MAX`] other
+    /// reactions on the post (the client shows it and sends nothing).
+    pub fn set_channel_reaction(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
+        let value = ChannelReactionEntry {
+            channel_id,
+            post_cursor,
+            emoji: emoji.to_string(),
+            reacted,
+            post_at_ms,
+        };
+        value.validate()?;
+        let held = self.channel_reaction_register(&channel_id, post_cursor, emoji);
+        if reacted
+            && !held.as_ref().is_some_and(|h| h.value.reacted)
+            && self.channel_reactions_on(&channel_id, post_cursor).len()
+                >= CHANNEL_REACTIONS_PER_POST_MAX
+        {
+            return Err(super::entry::BoundsError::TooManyChannelReactions);
+        }
+        match &held {
+            Some(h) if h.value.reacted == reacted => return Ok(None),
+            None if !reacted => return Ok(None),
+            None if self.channel_reaction_count() >= CHANNEL_REACTIONS_MAX_CLIENT => {
+                return Ok(None);
+            },
+            _ => {},
+        }
+        if self.apply(hlc, SyncEntry::ChannelReaction(value.clone()))? != ApplyOutcome::Applied {
+            return Ok(None);
+        }
+        Ok(compose_channel_reaction_envelope(&[Stamped { hlc, value }]).ok())
+    }
+
+    fn channel_reaction_register(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> Option<Stamped<ChannelReactionEntry>> {
+        match self.registers.get(&RegisterKey::ChannelReaction(
+            *channel_id,
+            post_cursor,
+            emoji.to_string(),
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ChannelReaction(r),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: r.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn channel_reaction_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ChannelReaction(..)))
+            .count()
+    }
+
+    /// Whether the account's reaction `emoji` stands on the post.
+    #[must_use]
+    pub fn has_channel_reaction(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        emoji: &str,
+    ) -> bool {
+        self.channel_reaction_register(channel_id, post_cursor, emoji)
+            .is_some_and(|r| r.value.reacted)
+    }
+
+    /// The emoji the account's reactions on the post stand with, in byte
+    /// order of the emoji.
+    #[must_use]
+    pub fn channel_reactions_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+    ) -> Vec<String> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelReaction(r)
+                    if r.reacted && r.channel_id == *channel_id && r.post_cursor == post_cursor =>
+                {
+                    Some(r.emoji.clone())
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held own-reaction register (tombstones included) with its
+    /// original stamp, as envelopes of at most
+    /// [`CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES`] entries: the catch-up a
+    /// device sends on DeviceGroup growth, and the re-send it owes when a
+    /// live send did not go out.
+    #[must_use]
+    pub fn channel_reaction_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<ChannelReactionEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelReaction(r) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: r.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_reaction_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a channel-reaction envelope and fold every register in with
+    /// its original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelReactionEnvelopeError`].
+    pub fn apply_channel_reaction_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelReactionEnvelopeError> {
+        let entries = decode_channel_reaction_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelReaction(s.value))),
+        ))
+    }
+
+    /// Drop every own-reaction and own-comment register whose post has left
+    /// the channel service at `now_ms` (its time plus
+    /// [`super::channel_reaction::CHANNEL_REACTION_RETENTION_MS`] is in the
+    /// past). Returns how many went.
+    pub fn prune_channel_activity(&mut self, now_ms: u64) -> usize {
+        let before = self.registers.len();
+        self.registers.retain(|_, h| match &h.entry {
+            SyncEntry::ChannelReaction(r) => !r.expired_at(now_ms),
+            SyncEntry::ChannelComment(c) => !c.expired_at(now_ms),
+            _ => true,
+        });
+        before - self.registers.len()
+    }
+
+    // -----------------------------------------------------------------
+    // Own channel comments (ADR-0087 section 13a).
+    // -----------------------------------------------------------------
+
+    fn channel_comment_register(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: &[u8; CHANNEL_COMMENT_NONCE_LEN],
+    ) -> Option<Stamped<ChannelCommentEntry>> {
+        match self.registers.get(&RegisterKey::ChannelComment(
+            *channel_id,
+            post_cursor,
+            *comment_nonce,
+        )) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ChannelComment(c),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: c.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn write_channel_comment(&mut self, hlc: u64, value: ChannelCommentEntry) -> Option<Vec<u8>> {
+        match self.apply(hlc, SyncEntry::ChannelComment(value.clone())) {
+            Ok(ApplyOutcome::Applied) => {
+                compose_channel_comment_envelope(&[Stamped { hlc, value }]).ok()
+            },
+            _ => None,
+        }
+    }
+
+    /// Record a comment the account just wrote under the post at
+    /// `post_cursor` in `channel_id`, with the nonce its write key came from,
+    /// stamped `hlc`. `post_at_ms` is the post's server time. **Write-once**:
+    /// a nonce already held writes nothing. Returns the envelope to send, or
+    /// `None` when nothing was written (already held, or at
+    /// [`CHANNEL_COMMENTS_MAX_CLIENT`]).
+    pub fn record_channel_comment(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: [u8; CHANNEL_COMMENT_NONCE_LEN],
+        post_at_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self
+            .channel_comment_register(&channel_id, post_cursor, &comment_nonce)
+            .is_some()
+            || self.channel_comment_count() >= CHANNEL_COMMENTS_MAX_CLIENT
+        {
+            return None;
+        }
+        self.write_channel_comment(
+            hlc,
+            ChannelCommentEntry {
+                channel_id,
+                post_cursor,
+                comment_nonce,
+                deleted: false,
+                post_at_ms,
+            },
+        )
+    }
+
+    /// Record that the account deleted its comment `comment_nonce`, stamped
+    /// `hlc`. Returns the envelope to send, or `None` when the register
+    /// already says deleted. A deletion of a comment this device never held
+    /// is still written, so the other devices drop it too.
+    pub fn delete_channel_comment(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_nonce: [u8; CHANNEL_COMMENT_NONCE_LEN],
+        post_at_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if self
+            .channel_comment_register(&channel_id, post_cursor, &comment_nonce)
+            .is_some_and(|c| c.value.deleted)
+        {
+            return None;
+        }
+        self.write_channel_comment(
+            hlc,
+            ChannelCommentEntry {
+                channel_id,
+                post_cursor,
+                comment_nonce,
+                deleted: true,
+                post_at_ms,
+            },
+        )
+    }
+
+    fn channel_comment_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ChannelComment(..)))
+            .count()
+    }
+
+    /// The nonces of the account's comments on the post that are not deleted,
+    /// ascending: derive each one's write key to find the rows that are the
+    /// account's own.
+    #[must_use]
+    pub fn channel_comments_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+    ) -> Vec<[u8; CHANNEL_COMMENT_NONCE_LEN]> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelComment(c)
+                    if !c.deleted
+                        && c.channel_id == *channel_id
+                        && c.post_cursor == post_cursor =>
+                {
+                    Some(c.comment_nonce)
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every held own-comment register (tombstones included) with its
+    /// original stamp, as envelopes of at most
+    /// [`CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES`] entries.
+    #[must_use]
+    pub fn channel_comment_envelopes(&self) -> Vec<Vec<u8>> {
+        let held: Vec<Stamped<ChannelCommentEntry>> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ChannelComment(c) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: c.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        held.chunks(CHANNEL_COMMENT_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_channel_comment_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode an own-comments envelope and fold every register in with its
+    /// original stamp. Fail closed. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelCommentEnvelopeError`].
+    pub fn apply_channel_comment_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, ChannelCommentEnvelopeError> {
+        let entries = decode_channel_comment_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::ChannelComment(s.value))),
         ))
     }
 
@@ -1108,6 +1753,161 @@ impl SyncedState {
         ids.into_iter().collect()
     }
 
+    // -----------------------------------------------------------------
+    // Conversation ends (ADR-0087 section 9).
+    // -----------------------------------------------------------------
+
+    /// The register to write now that this account's membership of
+    /// `conversation` has ended, or `None` when there is nothing to tell the
+    /// other devices. `epoch` is the MLS epoch the group froze at; `0` for a
+    /// channel. Put the register in a change set, fold it with
+    /// [`Self::apply_all`] (or the FFI's `applyFolderChanges`), send the same
+    /// change set.
+    ///
+    /// `None` means: the register already says ended at this epoch or later;
+    /// or it says joined at a later epoch, so this device is applying an old
+    /// end and its account has rejoined since; or this conversation is new to
+    /// the register and [`CONVERSATION_ENDS_MAX_CLIENT`] are held. In every
+    /// case the device still ends the conversation on itself.
+    ///
+    /// The stamp is raised above a held one, so a write at an equal epoch,
+    /// which is the channel case, always takes effect.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`].
+    pub fn compose_conversation_ended(
+        &self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        epoch: u64,
+    ) -> Result<Option<Stamped<ConversationEnd>>, super::entry::BoundsError> {
+        conversation.validate()?;
+        let held = self.conversation_end(conversation);
+        let write = match &held {
+            None => self.conversation_end_count() < CONVERSATION_ENDS_MAX_CLIENT,
+            Some(h) => match h.value.state {
+                ConversationEndState::Ended => epoch > h.value.epoch,
+                ConversationEndState::Joined => epoch >= h.value.epoch,
+            },
+        };
+        Ok(write.then(|| {
+            Self::stamped_end(
+                hlc,
+                held.as_ref(),
+                conversation,
+                ConversationEndState::Ended,
+                epoch,
+            )
+        }))
+    }
+
+    /// The register to write now that this account has joined `conversation`,
+    /// or `None` when there is nothing to clear. `epoch` is the MLS epoch the
+    /// Welcome joined at; `0` for a channel.
+    ///
+    /// `None` means no end is held at or below this epoch: no register at
+    /// all, so a first join writes nothing and the state does not grow with
+    /// every group the person ever joined; or a join is already held; or the
+    /// held end is later than this join and stands.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::RefIdLength`].
+    pub fn compose_conversation_joined(
+        &self,
+        hlc: u64,
+        conversation: &ConversationRef,
+        epoch: u64,
+    ) -> Result<Option<Stamped<ConversationEnd>>, super::entry::BoundsError> {
+        conversation.validate()?;
+        let held = self.conversation_end(conversation);
+        let write = held.as_ref().is_some_and(|h| match h.value.state {
+            ConversationEndState::Ended => epoch >= h.value.epoch,
+            ConversationEndState::Joined => epoch > h.value.epoch,
+        });
+        Ok(write.then(|| {
+            Self::stamped_end(
+                hlc,
+                held.as_ref(),
+                conversation,
+                ConversationEndState::Joined,
+                epoch,
+            )
+        }))
+    }
+
+    fn stamped_end(
+        hlc: u64,
+        held: Option<&Stamped<ConversationEnd>>,
+        conversation: &ConversationRef,
+        state: ConversationEndState,
+        epoch: u64,
+    ) -> Stamped<ConversationEnd> {
+        Stamped {
+            hlc: held.map_or(hlc, |h| hlc.max(h.hlc.saturating_add(1))),
+            value: ConversationEnd {
+                conversation: conversation.clone(),
+                state,
+                epoch,
+            },
+        }
+    }
+
+    /// The register held for a conversation, a "joined" included.
+    #[must_use]
+    pub fn conversation_end(
+        &self,
+        conversation: &ConversationRef,
+    ) -> Option<Stamped<ConversationEnd>> {
+        match self
+            .registers
+            .get(&RegisterKey::ConversationEnd(conversation.clone()))
+        {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::ConversationEnd(e),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: e.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether this account's membership of a conversation has ended. `false`
+    /// for one never ended and for one joined again since.
+    #[must_use]
+    pub fn is_conversation_ended(&self, conversation: &ConversationRef) -> bool {
+        self.conversation_end(conversation)
+            .is_some_and(|e| e.value.state == ConversationEndState::Ended)
+    }
+
+    /// Every conversation whose register says ended, by `(kind, id)`.
+    #[must_use]
+    pub fn ended_conversations(&self) -> Vec<Stamped<ConversationEnd>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::ConversationEnd(e) if e.state == ConversationEndState::Ended => {
+                    Some(Stamped {
+                        hlc: h.hlc,
+                        value: e.clone(),
+                    })
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many conversation-end registers are held, "joined" ones included.
+    fn conversation_end_count(&self) -> usize {
+        self.registers
+            .keys()
+            .filter(|k| matches!(k, RegisterKey::ConversationEnd(_)))
+            .count()
+    }
+
     /// The greatest stamp held, or 0. A client seeds its clock above it
     /// after a restore so its next write is newer than anything restored.
     #[must_use]
@@ -1121,7 +1921,7 @@ impl SyncedState {
 
     /// Encode for local persistence and for the backup payload.
     ///
-    /// Layout: `version(1) = 2 ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
+    /// Layout: `version(1) ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
     /// len(u32 BE) ‖ canonical entry bytes }`, in register order. Only
     /// entries the fold holds are written, so [`Self::from_bytes`] of the
     /// result is the same state.
@@ -1629,15 +2429,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 6);
-        for version in [1u8, 2, 3, 4, 5] {
+        assert_eq!(old[0], 10);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![6, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![10, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -1918,6 +2718,260 @@ mod tests {
         );
     }
 
+    fn channel_reaction(c: u8, cursor: u64, emoji: &str, reacted: bool) -> SyncEntry {
+        SyncEntry::ChannelReaction(ChannelReactionEntry {
+            channel_id: [c; 16],
+            post_cursor: cursor,
+            emoji: emoji.to_string(),
+            reacted,
+            post_at_ms: 1_000_u64.saturating_add(cursor),
+        })
+    }
+
+    fn channel_comment(c: u8, cursor: u64, nonce: u8, deleted: bool) -> SyncEntry {
+        SyncEntry::ChannelComment(ChannelCommentEntry {
+            channel_id: [c; 16],
+            post_cursor: cursor,
+            comment_nonce: [nonce; 16],
+            deleted,
+            post_at_ms: 1_000_u64.saturating_add(cursor),
+        })
+    }
+
+    #[test]
+    fn an_own_comment_is_recorded_deleted_carried_and_pruned() {
+        use super::super::channel_comment::CHANNEL_COMMENT_RETENTION_MS;
+        let ch = [4u8; 16];
+        let mut a = SyncedState::new();
+        let sent = a.record_channel_comment(1, ch, 7, [1; 16], 500).unwrap();
+        // Write-once.
+        assert!(a.record_channel_comment(2, ch, 7, [1; 16], 500).is_none());
+        a.record_channel_comment(3, ch, 7, [2; 16], 500).unwrap();
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[1; 16], [2; 16]]);
+        assert!(a.channel_comments_on(&ch, 8).is_empty());
+        // Another device learns the nonce and can delete the comment.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_comment_envelope(&sent), Ok(true));
+        assert_eq!(b.apply_channel_comment_envelope(&sent), Ok(false));
+        let gone = b.delete_channel_comment(4, ch, 7, [1; 16], 500).unwrap();
+        assert!(b.delete_channel_comment(5, ch, 7, [1; 16], 500).is_none());
+        assert_eq!(a.apply_channel_comment_envelope(&gone), Ok(true));
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[2; 16]]);
+        // The older record arriving late does not bring it back.
+        assert_eq!(a.apply_channel_comment_envelope(&sent), Ok(false));
+        assert_eq!(a.channel_comments_on(&ch, 7), vec![[2; 16]]);
+        // Persisted, never in the snapshot, re-sent whole.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.entries(), a.entries());
+        assert_eq!(a.channel_comment_envelopes().len(), 1);
+        // Pruned with the post.
+        a.set_channel_reaction(6, ch, 7, "a", true, 500).ok();
+        assert_eq!(
+            a.prune_channel_activity(500 + CHANNEL_COMMENT_RETENTION_MS),
+            0
+        );
+        assert_eq!(
+            a.prune_channel_activity(501 + CHANNEL_COMMENT_RETENTION_MS),
+            3
+        );
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn on_an_equal_stamp_a_comment_deletion_wins_in_either_order() {
+        let live = channel_comment(1, 7, 3, false);
+        let gone = channel_comment(1, 7, 3, true);
+        let mut x = SyncedState::new();
+        x.apply(5, live.clone()).ok();
+        x.apply(5, gone.clone()).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, gone).ok();
+        y.apply(5, live).ok();
+        assert_eq!(x, y);
+        assert!(x.channel_comments_on(&[1; 16], 7).is_empty());
+    }
+
+    #[test]
+    fn an_own_reaction_is_set_taken_off_carried_and_persisted() {
+        let ch = [4u8; 16];
+        let thumbs = "\u{1F44D}";
+        let mut a = SyncedState::new();
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // Taking off a reaction never given writes nothing.
+        assert_eq!(
+            a.set_channel_reaction(1, ch, 7, thumbs, false, 500),
+            Ok(None)
+        );
+        let sent = a
+            .set_channel_reaction(2, ch, 7, thumbs, true, 500)
+            .unwrap()
+            .unwrap();
+        assert!(a.has_channel_reaction(&ch, 7, thumbs));
+        assert_eq!(a.channel_reactions_on(&ch, 7), vec![thumbs.to_string()]);
+        assert!(a.channel_reactions_on(&ch, 8).is_empty());
+        // The same state again writes nothing.
+        assert_eq!(
+            a.set_channel_reaction(3, ch, 7, thumbs, true, 500),
+            Ok(None)
+        );
+        // Another device folds it in, idempotently.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_reaction_envelope(&sent), Ok(true));
+        assert_eq!(b.apply_channel_reaction_envelope(&sent), Ok(false));
+        assert!(b.has_channel_reaction(&ch, 7, thumbs));
+        // Taken off on b; the tombstone reaches a and beats the older add.
+        let off = b
+            .set_channel_reaction(4, ch, 7, thumbs, false, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.apply_channel_reaction_envelope(&off), Ok(true));
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // The older add, arriving late, does not bring it back.
+        assert_eq!(a.apply_channel_reaction_envelope(&sent), Ok(false));
+        assert!(!a.has_channel_reaction(&ch, 7, thumbs));
+        // Never in the snapshot, but persisted and re-sent.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.entries(), a.entries());
+        assert_eq!(a.channel_reaction_envelopes(), vec![off]);
+        assert_eq!(
+            a.set_channel_reaction(5, ch, 7, "", true, 500),
+            Err(super::super::entry::BoundsError::ChannelReactionEmoji)
+        );
+    }
+
+    #[test]
+    fn a_fourth_reaction_on_one_post_is_refused_and_a_removal_makes_room() {
+        use super::super::entry::BoundsError;
+        let ch = [4u8; 16];
+        let mut s = SyncedState::new();
+        for (i, e) in ["a", "b", "c"].iter().enumerate() {
+            assert!(s
+                .set_channel_reaction(i as u64 + 1, ch, 7, e, true, 500)
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            s.set_channel_reaction(9, ch, 7, "d", true, 500),
+            Err(BoundsError::TooManyChannelReactions)
+        );
+        // Re-stating a held one is not a fourth, and another post is free.
+        assert_eq!(s.set_channel_reaction(10, ch, 7, "a", true, 500), Ok(None));
+        assert!(s
+            .set_channel_reaction(11, ch, 8, "d", true, 500)
+            .unwrap()
+            .is_some());
+        // Taking one off makes room.
+        assert!(s
+            .set_channel_reaction(12, ch, 7, "b", false, 500)
+            .unwrap()
+            .is_some());
+        assert!(s
+            .set_channel_reaction(13, ch, 7, "d", true, 500)
+            .unwrap()
+            .is_some());
+        // The fold itself never refuses a fourth (a concurrent device).
+        assert_eq!(
+            s.apply(14, channel_reaction(4, 7, "e", true)),
+            Ok(ApplyOutcome::Applied)
+        );
+    }
+
+    #[test]
+    fn on_an_equal_stamp_taking_a_reaction_off_wins_in_either_order() {
+        let add = channel_reaction(1, 7, "a", true);
+        let off = channel_reaction(1, 7, "a", false);
+        let mut x = SyncedState::new();
+        x.apply(5, add.clone()).ok();
+        x.apply(5, off.clone()).ok();
+        let mut y = SyncedState::new();
+        y.apply(5, off).ok();
+        y.apply(5, add).ok();
+        assert_eq!(x, y);
+        assert!(!x.has_channel_reaction(&[1; 16], 7, "a"));
+    }
+
+    #[test]
+    fn a_post_past_its_retention_takes_its_reactions_with_it() {
+        use super::super::channel_reaction::CHANNEL_REACTION_RETENTION_MS;
+        let mut s = SyncedState::new();
+        s.set_channel_reaction(1, [1; 16], 7, "a", true, 1_000).ok();
+        s.set_channel_reaction(2, [1; 16], 8, "a", true, 9_000).ok();
+        s.set_channel_reaction(3, [1; 16], 8, "b", false, 9_000)
+            .ok();
+        s.acknowledge_device(4, [9; 32], 0);
+        assert_eq!(
+            s.prune_channel_activity(1_000 + CHANNEL_REACTION_RETENTION_MS),
+            0
+        );
+        assert_eq!(
+            s.prune_channel_activity(1_001 + CHANNEL_REACTION_RETENTION_MS),
+            1
+        );
+        assert!(!s.has_channel_reaction(&[1; 16], 7, "a"));
+        assert!(s.has_channel_reaction(&[1; 16], 8, "a"));
+        assert_eq!(s.prune_channel_activity(u64::MAX), 1);
+        // Other registers are untouched.
+        assert!(s.is_device_acknowledged(&[9; 32]));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn the_client_limit_stops_a_new_reaction_and_never_a_removal() {
+        use super::super::channel_reaction::CHANNEL_REACTIONS_MAX_CLIENT;
+        let mut s = SyncedState::new();
+        for cursor in 0..CHANNEL_REACTIONS_MAX_CLIENT as u64 {
+            s.apply(1, channel_reaction(1, cursor, "a", true)).ok();
+        }
+        assert_eq!(
+            s.set_channel_reaction(2, [1; 16], u64::MAX, "a", true, 0),
+            Ok(None)
+        );
+        assert!(s
+            .set_channel_reaction(2, [1; 16], 0, "a", false, 0)
+            .unwrap()
+            .is_some());
+        // The fold itself never refuses.
+        assert_eq!(
+            s.apply(2, channel_reaction(1, u64::MAX, "a", true)),
+            Ok(ApplyOutcome::Applied)
+        );
+    }
+
+    #[test]
+    fn a_device_acknowledgement_is_write_once_carried_and_persisted() {
+        let mut a = SyncedState::new();
+        let k1 = [1u8; 32];
+        let k2 = [2u8; 32];
+        assert!(!a.is_device_acknowledged(&k1));
+        let sent = a.acknowledge_devices(10, &[k2, k1, k1], 1_000);
+        assert_eq!(sent.len(), 1);
+        assert!(a.is_device_acknowledged(&k1) && a.is_device_acknowledged(&k2));
+        // Write-once: a second acknowledgement writes and sends nothing.
+        assert!(a.acknowledge_devices(20, &[k1], 2_000).is_empty());
+        // Carried: another device folds it in, idempotently.
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_device_ack_envelope(&sent[0]), Ok(true));
+        assert_eq!(b.apply_device_ack_envelope(&sent[0]), Ok(false));
+        assert_eq!(b.acknowledged_devices(), vec![k1, k2]);
+        assert_eq!(b.device_ack_envelopes(), sent);
+        // Never in the snapshot, but persisted.
+        assert!(a.snapshot().folders.is_empty());
+        let back = SyncedState::from_bytes(&a.to_bytes()).unwrap_or_default();
+        assert_eq!(back.acknowledged_devices(), vec![k1, k2]);
+        // Two devices acknowledging concurrently converge.
+        let mut c = SyncedState::new();
+        let other = c.acknowledge_devices(10, &[k1], 5_000);
+        let mut ab = a.clone();
+        assert!(ab.apply_device_ack_envelope(&other[0]).is_ok());
+        assert!(c.apply_device_ack_envelope(&sent[0]).is_ok());
+        assert_eq!(ab.entries(), c.entries());
+        assert!(b
+            .apply_device_ack_envelope(b"lakko/sync/device-ack/v1\0\x02")
+            .is_err());
+    }
+
     #[test]
     fn the_own_username_is_a_last_writer_wins_register() {
         use super::super::entry::BoundsError;
@@ -2000,6 +3054,54 @@ mod tests {
         assert_eq!(x, fold_of(["", "alice", "bob"]));
         // The larger canonical bytes win: the longer length prefix first.
         assert_eq!(x.own_username().as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn the_quick_reaction_is_a_last_writer_wins_register_carried_by_its_envelope() {
+        let mut a = SyncedState::new();
+        assert_eq!(a.quick_reaction(), None);
+        assert_eq!(a.quick_reaction_envelope(), None);
+        assert_eq!(a.set_quick_reaction(5, "\u{1F525}"), Ok(true));
+        assert_eq!(a.set_quick_reaction(5, "\u{1F525}"), Ok(false));
+        assert_eq!(a.set_quick_reaction(4, "\u{1F602}"), Ok(false));
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F525}"));
+        for bad in ["", &"x".repeat(65)] {
+            assert_eq!(
+                a.set_quick_reaction(9, bad),
+                Err(super::super::entry::BoundsError::QuickReaction)
+            );
+        }
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F525}"));
+
+        // Never in the snapshot; by its envelope; persisted (so the backup).
+        a.apply(1, meta(1, "Work")).ok();
+        assert!(a
+            .snapshot()
+            .stamped_entries()
+            .iter()
+            .all(|(_, e)| !matches!(e, SyncEntry::QuickReaction(_))));
+        let live = a.quick_reaction_envelope().unwrap();
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_quick_reaction_envelope(&live), Ok(true));
+        assert_eq!(b.apply_quick_reaction_envelope(&live), Ok(false));
+        assert_eq!(b.quick_reaction_register(), a.quick_reaction_register());
+        assert_eq!(
+            b.apply_own_username_envelope(&live),
+            Err(OwnUsernameEnvelopeError::WrongDomain)
+        );
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(restored, a);
+        assert_eq!(restored.quick_reaction().as_deref(), Some("\u{1F525}"));
+
+        // A later choice on another device wins; an older re-send does not.
+        assert_eq!(b.set_quick_reaction(7, "\u{1F44D}"), Ok(true));
+        assert_eq!(
+            a.apply_quick_reaction_envelope(&b.quick_reaction_envelope().unwrap()),
+            Ok(true)
+        );
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F44D}"));
+        assert_eq!(a.apply_quick_reaction_envelope(&live), Ok(false));
+        assert_eq!(a.quick_reaction().as_deref(), Some("\u{1F44D}"));
     }
 
     #[test]
@@ -2172,7 +3274,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[7, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[0xFF, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;
@@ -2322,8 +3424,29 @@ mod tests {
             (hlc.clone(), c.clone(), 0u64..2).prop_map(|(h, c, m)| (h, unsave(c, m))),
             // Link records: two links, uses, a revocation, so live writes
             // meet revocations on every stamp order.
-            (hlc, 0u8..2, 0u32..3, any::<bool>(), c)
+            (hlc.clone(), 0u8..2, 0u32..3, any::<bool>(), c.clone())
                 .prop_map(|(h, id, uses, revoked, label)| (h, link(id, uses, revoked, label))),
+            // Conversation ends: few conversations and epochs, so ends and
+            // joins meet on one epoch and on one stamp often.
+            (hlc.clone(), c.clone(), 0u64..3, any::<bool>())
+                .prop_map(|(h, c, epoch, ended)| (h, conversation_end(c, epoch, ended))),
+            // Own channel reactions: two posts x two emoji, so a reaction and
+            // its removal meet on one stamp often.
+            (
+                hlc.clone(),
+                c.clone(),
+                0u64..2,
+                prop::sample::select(vec!["a", "b"]),
+                any::<bool>()
+            )
+                .prop_map(|(h, c, cursor, e, reacted)| (
+                    h,
+                    channel_reaction(c, cursor, e, reacted)
+                )),
+            // Own channel comments: two posts x two nonces, a comment and its
+            // deletion meeting on one stamp often.
+            (hlc, c, 0u64..2, 0u8..2, any::<bool>())
+                .prop_map(|(h, c, cursor, n, deleted)| (h, channel_comment(c, cursor, n, deleted))),
         ]
     }
 
@@ -2343,12 +3466,301 @@ mod tests {
         for envelope in from.link_record_envelopes() {
             into.apply_link_record_envelope(&envelope).unwrap();
         }
+        for envelope in from.channel_reaction_envelopes() {
+            into.apply_channel_reaction_envelope(&envelope).unwrap();
+        }
+        for envelope in from.channel_comment_envelopes() {
+            into.apply_channel_comment_envelope(&envelope).unwrap();
+        }
     }
 
     fn fold(entries: &[(u64, SyncEntry)]) -> SyncedState {
         let mut s = SyncedState::new();
         s.apply_all(entries.iter().cloned());
         s
+    }
+
+    fn end_value(c: u8, epoch: u64, ended: bool) -> ConversationEnd {
+        ConversationEnd {
+            conversation: cref(c),
+            state: if ended {
+                ConversationEndState::Ended
+            } else {
+                ConversationEndState::Joined
+            },
+            epoch,
+        }
+    }
+
+    fn conversation_end(c: u8, epoch: u64, ended: bool) -> SyncEntry {
+        SyncEntry::ConversationEnd(end_value(c, epoch, ended))
+    }
+
+    /// `n` distinct conversations, each ended at epoch 1.
+    fn with_ended_conversations(n: u32) -> SyncedState {
+        fold(
+            &(0..n)
+                .map(|i| {
+                    (
+                        1,
+                        SyncEntry::ConversationEnd(ConversationEnd {
+                            conversation: ConversationRef {
+                                kind: ConversationRefKind::Group,
+                                id: i.to_be_bytes().repeat(8),
+                            },
+                            state: ConversationEndState::Ended,
+                            epoch: 1,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The case that put the epoch in the register. A person is removed at
+    /// epoch 5 and added again at epoch 9, all while one device is offline.
+    /// That device comes back, applies the old removal, and only then writes
+    /// "ended", with the newest stamp of all. By stamps it would end the
+    /// conversation on every device that has rejoined.
+    #[test]
+    fn a_device_applying_an_old_removal_does_not_end_a_rejoined_conversation() {
+        let mut rejoined = fold(&[(10, conversation_end(1, 5, true))]);
+        let join = rejoined
+            .compose_conversation_joined(20, &cref(1), 9)
+            .unwrap()
+            .expect("an end is held, so the join writes");
+        assert_eq!(join.value.state, ConversationEndState::Joined);
+        rejoined.apply_all(vec![(
+            join.hlc,
+            SyncEntry::ConversationEnd(join.value.clone()),
+        )]);
+        assert!(!rejoined.is_conversation_ended(&cref(1)));
+
+        // The returning device has heard the join: it has nothing to tell.
+        assert_eq!(
+            rejoined.compose_conversation_ended(30, &cref(1), 5),
+            Ok(None)
+        );
+        // It has not heard it: its write arrives anyway, with a newer stamp.
+        let late = fold(&[(30, conversation_end(1, 5, true))]);
+        assert!(late.is_conversation_ended(&cref(1)));
+        let mut merged = rejoined.clone();
+        assert!(!merged.merge_from(&late));
+        assert_eq!(merged, rejoined);
+        assert!(!merged.is_conversation_ended(&cref(1)));
+        // And on the returning device the join wins too.
+        let mut there = late;
+        assert!(there.merge_from(&rejoined));
+        assert!(!there.is_conversation_ended(&cref(1)));
+    }
+
+    /// The other direction: a second removal is a real end whatever the
+    /// clocks say, and a device whose clock runs slow does not lose it.
+    #[test]
+    fn a_later_end_stands_against_a_newer_stamped_join() {
+        let s = fold(&[
+            (50, conversation_end(1, 9, false)),
+            (40, conversation_end(1, 12, true)),
+        ]);
+        assert!(s.is_conversation_ended(&cref(1)));
+        assert_eq!(
+            s.conversation_end(&cref(1)).map(|e| (e.hlc, e.value.epoch)),
+            Some((40, 12))
+        );
+        let written = s
+            .compose_conversation_joined(60, &cref(1), 14)
+            .unwrap()
+            .expect("a join after the end clears it");
+        assert_eq!(written.value.epoch, 14);
+        // A Welcome older than the end clears nothing.
+        assert_eq!(s.compose_conversation_joined(60, &cref(1), 11), Ok(None));
+    }
+
+    #[test]
+    fn writers_say_when_there_is_nothing_to_tell() {
+        let empty = SyncedState::new();
+        // A first join leaves no trace, so the state does not grow with
+        // every group the person ever joined.
+        assert_eq!(empty.compose_conversation_joined(1, &cref(1), 3), Ok(None));
+        let written = empty
+            .compose_conversation_ended(1, &cref(1), 3)
+            .unwrap()
+            .expect("the first end writes");
+        assert_eq!((written.hlc, written.value.epoch), (1, 3));
+
+        let s = fold(&[(5, conversation_end(1, 3, true))]);
+        // The same end from a second device of the account.
+        assert_eq!(s.compose_conversation_ended(9, &cref(1), 3), Ok(None));
+        assert_eq!(s.compose_conversation_ended(9, &cref(1), 2), Ok(None));
+        assert!(s
+            .compose_conversation_ended(9, &cref(1), 4)
+            .unwrap()
+            .is_some());
+
+        let s = fold(&[(5, conversation_end(1, 3, false))]);
+        assert_eq!(s.compose_conversation_joined(9, &cref(1), 3), Ok(None));
+
+        let no_id = ConversationRef {
+            kind: ConversationRefKind::Group,
+            id: vec![],
+        };
+        assert!(empty.compose_conversation_ended(1, &no_id, 0).is_err());
+        assert!(empty.compose_conversation_joined(1, &no_id, 0).is_err());
+    }
+
+    /// A channel has no epoch: its registers are ordered by stamps alone,
+    /// and a writer always lands above what it holds.
+    #[test]
+    fn a_channel_is_ordered_by_stamps_and_a_tie_keeps_the_conversation() {
+        let channel = ConversationRef {
+            kind: ConversationRefKind::Channel,
+            id: vec![9; 16],
+        };
+        let end = |ended: bool| {
+            SyncEntry::ConversationEnd(ConversationEnd {
+                conversation: channel.clone(),
+                state: if ended {
+                    ConversationEndState::Ended
+                } else {
+                    ConversationEndState::Joined
+                },
+                epoch: 0,
+            })
+        };
+        assert!(fold(&[(5, end(true)), (6, end(false))])
+            .conversation_end(&channel)
+            .is_some_and(|e| e.value.state == ConversationEndState::Joined));
+        assert!(fold(&[(7, end(true)), (6, end(false))]).is_conversation_ended(&channel));
+        // A complete tie, in either order.
+        assert!(!fold(&[(5, end(true)), (5, end(false))]).is_conversation_ended(&channel));
+        assert!(!fold(&[(5, end(false)), (5, end(true))]).is_conversation_ended(&channel));
+
+        // Re-subscribing on a device whose clock is behind still clears.
+        let s = fold(&[(50, end(true))]);
+        let join = s
+            .compose_conversation_joined(3, &channel, 0)
+            .unwrap()
+            .expect("a join clears the end");
+        assert_eq!(join.hlc, 51);
+        // And a later unsubscribe the same way.
+        let s = fold(&[(51, end(false))]);
+        let again = s
+            .compose_conversation_ended(3, &channel, 0)
+            .unwrap()
+            .expect("an end after a join writes");
+        assert_eq!(again.hlc, 52);
+    }
+
+    #[test]
+    fn conversation_end_reads() {
+        let s = fold(&[
+            (5, conversation_end(1, 3, true)),
+            (6, conversation_end(2, 4, false)),
+            (7, conversation_end(3, 2, true)),
+        ]);
+        assert!(s.is_conversation_ended(&cref(1)));
+        assert!(!s.is_conversation_ended(&cref(2)));
+        assert!(!s.is_conversation_ended(&cref(4)));
+        assert_eq!(
+            s.ended_conversations(),
+            vec![
+                Stamped {
+                    hlc: 5,
+                    value: end_value(1, 3, true),
+                },
+                Stamped {
+                    hlc: 7,
+                    value: end_value(3, 2, true),
+                },
+            ]
+        );
+        assert_eq!(s.max_hlc(), 7);
+    }
+
+    /// The register reaches every place a state travels: the snapshot a late
+    /// device gets, a restored backup, and the persisted bytes.
+    #[test]
+    fn a_conversation_end_travels_with_the_state() {
+        let s = fold(&[
+            (5, conversation_end(1, 3, true)),
+            (6, conversation_end(2, 4, false)),
+        ]);
+        let snap = s.snapshot();
+        assert_eq!(snap.folders.conversation_ends.len(), 2);
+        let mut late = SyncedState::new();
+        catch_up(&s, &mut late);
+        assert_eq!(late, s);
+
+        let restored = SyncedState::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(restored, s);
+        assert!(
+            crate::fuzz_api::decode_synced_and_check(&s.to_bytes()),
+            "the fuzz oracle holds on a state with ends in it"
+        );
+        let mut other = fold(&[(9, conversation_end(4, 1, true))]);
+        assert!(other.merge_from(&restored));
+        assert!(other.is_conversation_ended(&cref(1)));
+        assert!(other.is_conversation_ended(&cref(4)));
+    }
+
+    /// `CONVERSATION_ENDS_MAX_CLIENT` is the writer's limit. At it a new
+    /// conversation writes nothing, a held one still does, and the fold
+    /// refuses nothing, so two devices over the limit together still converge.
+    #[test]
+    fn the_client_limit_stops_the_writer_and_never_the_fold() {
+        let limit = u32::try_from(CONVERSATION_ENDS_MAX_CLIENT).unwrap();
+        let below = with_ended_conversations(limit - 1);
+        let fresh = cref(0xEE);
+        assert!(below
+            .compose_conversation_ended(9, &fresh, 1)
+            .unwrap()
+            .is_some());
+
+        let at = with_ended_conversations(limit);
+        assert_eq!(at.compose_conversation_ended(9, &fresh, 1), Ok(None));
+        // A conversation already held is no new register.
+        let held = at.ended_conversations()[0].value.conversation.clone();
+        assert!(at
+            .compose_conversation_ended(9, &held, 2)
+            .unwrap()
+            .is_some());
+        assert!(at
+            .compose_conversation_joined(9, &held, 2)
+            .unwrap()
+            .is_some());
+
+        let mut over = at;
+        assert_eq!(
+            over.apply(9, conversation_end(0xEE, 1, true)),
+            Ok(ApplyOutcome::Applied)
+        );
+        assert_eq!(over.ended_conversations().len(), limit as usize + 1);
+        assert_eq!(SyncedState::from_bytes(&over.to_bytes()), Ok(over));
+    }
+
+    /// The size [`CONVERSATION_ENDS_MAX_CLIENT`]'s documentation states.
+    /// Two registers landed from two branches with one tag number. They hold
+    /// their own tags now; a persisted state keeps both.
+    #[test]
+    fn a_conversation_end_and_a_device_ack_persist_side_by_side() {
+        let mut s = fold(&[(5, conversation_end(1, 3, true))]);
+        let device = [7u8; DEVICE_ACK_KEY_LEN];
+        assert!(s.acknowledge_device(6, device, 1_000));
+
+        let restored = SyncedState::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(restored, s);
+        assert!(restored.is_conversation_ended(&cref(1)));
+        assert!(restored.is_device_acknowledged(&device));
+    }
+
+    #[test]
+    fn a_conversation_end_is_56_bytes_at_rest() {
+        let empty = SyncedState::new().to_bytes().len();
+        assert_eq!(
+            with_ended_conversations(1).to_bytes().len() - empty,
+            56,
+            "hlc 8, length 4, tag 1, kind 1, id length 1, id 32, state 1, epoch 8"
+        );
     }
 
     proptest! {

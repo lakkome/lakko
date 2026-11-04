@@ -299,6 +299,9 @@ internal val MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK: Set<FfiRefusalReason> = 
     FfiRefusalReason.NOT_A_COMMITTER,
     FfiRefusalReason.PROPOSALS_PENDING,
     FfiRefusalReason.SWEEP_ALREADY_STAGED,
+    // ADR-0045: a Welcome for a group this device still holds. It answers no
+    // action of the person's.
+    FfiRefusalReason.GROUP_STILL_ACTIVE,
 )
 
 /**
@@ -348,6 +351,7 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.NOT_A_COMMITTER,
     FfiRefusalReason.PROPOSALS_PENDING,
     FfiRefusalReason.SWEEP_ALREADY_STAGED,
+    FfiRefusalReason.GROUP_STILL_ACTIVE,
     -> RefusalCopy(MEMBERSHIP_REFUSAL_FALLBACK)
 }
 
@@ -482,6 +486,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipOneToOneHasNoRoles ->
                     FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES
                 is FfiException.MembershipGroupKindChanged -> FfiRefusalReason.GROUP_KIND_CHANGED
+                is FfiException.MembershipGroupStillActive -> FfiRefusalReason.GROUP_STILL_ACTIVE
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
@@ -513,6 +518,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0061 - a localization catalog or bundle refusal; not a
                 // membership refusal.
                 is FfiException.L10n,
+                is FfiException.Circle,
                 // The local three-word check of the recovery phrase and the
                 // keys a passkey restores; not membership refusals.
                 is FfiException.PhraseCheck,

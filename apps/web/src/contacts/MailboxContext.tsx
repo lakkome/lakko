@@ -16,9 +16,8 @@
  * This provider owns both halves now:
  *
  *   * a long-poll loop (`ds/long-poll-loop.ts`) that runs while a session
- *     with identity secrets exists, paused while the tab is hidden (the web
- *     push service worker covers the background, as the native clients' push
- *     does), stopped on sign-out;
+ *     with identity secrets exists, parked only while the tab is hidden and a
+ *     push wake reaches it (`chat/receive-activity.ts`), stopped on sign-out;
  *   * the dispatch — requests into the shared pending list the Contacts route
  *     renders, acks into the local address book, Welcomes into joined groups —
  *     behind `mailbox-poller.ts`, which is what keeps the loop and the Refresh
@@ -33,6 +32,8 @@
  * and a failed attempt may have consumed it too. See
  * `chat/keypackage-publisher.ts`.
  */
+import { mayParkReceive } from "../chat/receive-activity";
+import { createPushWakeReach } from "../push/wake-reach";
 import {
   createContext,
   createEffect,
@@ -46,7 +47,7 @@ import {
 } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { useChats } from "../chat/ChatContext";
+import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { groupIdHex } from "../devices/sync/state";
 import { isDsNetworkFailure } from "../ds/client";
@@ -55,6 +56,7 @@ import { installAddressRecheck } from "../reach/mailbox-write";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { applyContactAck } from "./contact-ack";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
@@ -65,8 +67,8 @@ import {
   revokeMintedLink,
   type OwnLinkRevokeOutcome,
 } from "./own-links";
-import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
-import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
+import { loadSentRequests, recordSentRequest } from "./sent-requests";
+import { sentIntroFor } from "./sent-request-intros";
 import {
   installSpentRunners,
   requestsToResend,
@@ -91,6 +93,7 @@ import {
   type IncomingContactRequest,
   type MailboxRow,
   type IncomingMailboxEvent,
+  isAnswerUnreachable,
 } from "./client";
 import { useProfiles } from "../profile/ProfileContext";
 import { t } from "../l10n";
@@ -99,10 +102,9 @@ import {
   accountKeysOf,
   loadAccepted,
   readPin,
-  upsertAccepted,
-  type AcceptedContact,
 } from "./local-store";
 import {
+  contactSignedBy,
   establishedContactOfAccount,
   knownContactRequestVerdict,
   pinKeysOf,
@@ -125,6 +127,7 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
 import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
 import {
   restoreRemovedContact,
@@ -132,12 +135,15 @@ import {
   type AcceptedContact as AcceptedContactRow,
 } from "./local-store";
 import { readIsActive } from "../chat/membership-ended";
+import { runHeldWelcomePass, type HeldWelcomeOutcome } from "../chat/held-welcomes";
+import { useMembershipEnd } from "../chat/MembershipEndContext";
 import {
   handOverPendingContact,
   loadPendingContacts,
   moveHeldToConversation,
   pendingContactRefusedBy,
   pendingContacts,
+  pendingQueueKey,
   removePendingContact,
 } from "./pending-contacts";
 import {
@@ -151,6 +157,9 @@ import {
   linkRequestStep,
 } from "./link-claims";
 import { loadWasm } from "../wasm";
+
+/** How often held Welcomes are tried again (chosen). */
+const HELD_WELCOME_RETRY_MS = 30_000;
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
@@ -250,6 +259,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
+  const membershipEnd = useMembershipEnd();
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     // ADR-0050: requests, acks and the account mailbox are the person's;
@@ -460,10 +470,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // only from the peer's own profile establishes nothing, so a member who
     // claimed this account's id cannot make its request vanish.
     const fromAccountIdB64 = base64Encode(fromAccountId);
-    const known = establishedContactOfAccount(loadAccepted(accountIdB64), groupIdHex(fromAccountId), {
-      pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
-      bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
-    });
+    const accepted = loadAccepted(accountIdB64);
+    const known =
+      establishedContactOfAccount(accepted, groupIdHex(fromAccountId), {
+        pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
+        bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
+      }) ?? contactSignedBy(accepted, base64Encode(request.fromPubkey));
     if (known === undefined) return false;
     let check: KnownRequestCheck;
     try {
@@ -478,6 +490,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       requestKeyB64: base64Encode(request.fromPubkey),
       trustedKeyB64: readPin(base64Encode(fromAccountId), accountIdB64)?.pinnedSignaturePubkeyB64 ?? null,
     });
+    let answered = true;
     if (verdict === "answer") {
       // The ack is the whole of the answer on this path: the reset the check
       // just accepted (or accepted earlier) is what moves the conversation.
@@ -486,14 +499,22 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("silent ack to an existing contact failed", err instanceof Error ? err.name : "");
+        // Nothing opens their mailbox: asking again changes nothing. Any
+        // other failure keeps the request for the next pass.
+        answered = isAnswerUnreachable(err);
       }
-    } else if (verdict === "wait") {
+    }
+    if (verdict === "wait" || !answered) {
       // Kept on disk first: the cursor is about to move past this row.
       const kept = inbox?.holdWaiting(row) ?? false;
       if (kept && !waitingKnownRequests.some((w) => w.request.messageId === request.messageId)) {
         waitingKnownRequests.push({ request, row });
       }
       return true;
+    }
+    if (verdict === "drop") {
+      // eslint-disable-next-line no-console
+      console.warn("contacts inbox: a request from a contact's account was dropped", check);
     }
     // Answered or dropped: it waits no longer.
     inbox?.dropWaiting(request.messageId);
@@ -650,7 +671,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             base64Decode(founded.groupIdB64),
             base64Decode(founded.welcomeB64),
             founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
-            { replyGrantB64: request.replyGrantB64 },
+            { replyGrantB64: request.replyGrantB64, answersRequest: true },
           );
         },
         forward: async (note) => {
@@ -661,7 +682,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             base64Decode(note.groupIdB64),
             base64Decode(note.welcomeB64),
             [{ accountKey: request.fromPubkey, isRecipient: true }],
-            { replyGrantB64: request.replyGrantB64 },
+            { replyGrantB64: request.replyGrantB64, answersRequest: true },
           );
           return chats.get(note.groupIdB64)?.groupIdB64 ?? null;
         },
@@ -672,6 +693,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           } catch (err) {
             // eslint-disable-next-line no-console
             console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
+            // The Welcome landed. Nothing opening their mailbox ends it there;
+            // any other failure is taken up at the next pass.
+            if (!isAnswerUnreachable(err)) throw err;
           }
           await sync.recordLinkUse(answer.linkId, request.fromPubkey);
           setAcceptedVersion(acceptedVersion() + 1);
@@ -890,6 +914,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // it (a failed send keeps the rest for the next attempt).
           moveHeldToConversation(heldSends, contact, conversationHex, Date.now());
           await persistHeldSends(accountIdB64);
+          // State bundle v3: what was written to them on another device of
+          // this account, shown here as copies, follows into the chat (still
+          // display only; that device sends them).
+          await moveCarriedCopies(accountIdB64, pendingQueueKey(contact), conversationHex);
           return true;
         },
       );
@@ -898,6 +926,115 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("pending contact hand-over failed", err instanceof Error ? err.name : "");
     }
   }
+
+  /** Open one Welcome and put the group in the registry. Throws only when the
+   *  session it was opened for ended. */
+  async function openWelcome(
+    welcome: Uint8Array,
+    messageId: number,
+    current: () => boolean,
+  ): Promise<HeldWelcomeOutcome<ActiveGroup>> {
+    try {
+      const entry = await membershipEnd.joinAlone(async () => {
+        const group = await client.joinGroupFromWelcome(auth.identitySecrets(), welcome);
+        // Signed out during the join: the chat list is not this account's any
+        // more. Not added, not marked joined; the cursor is held (the catch
+        // below is skipped by the rethrow).
+        if (!current()) throw new StaleMailboxScope();
+        const prior = chats.get(base64Encode(group.groupId));
+        // ADR-0051 — a name this device already holds for the group (a second
+        // Welcome) titles it at once; otherwise the stand-in the title resolver
+        // reads as "unnamed". `rejoined`: a group replaced under the same id is
+        // a new conversation to a view that has it open.
+        const added = chats.add({
+          label: groupNames.nameOf(base64Encode(group.groupId)) ?? `Joined group (Welcome ${messageId})`,
+          group,
+          rejoined: true,
+        });
+        await membershipEnd.startOver(prior);
+        return added;
+      });
+      joinedWelcomeIds.add(messageId);
+      return { kind: "joined", entry };
+    } catch (err) {
+      if (err instanceof StaleMailboxScope) throw err;
+      const stillActive = membershipEnd.stillActiveGroupOf(err);
+      if (stillActive !== null) return { kind: "still-active", groupIdB64: stillActive };
+      // eslint-disable-next-line no-console
+      console.warn("joinGroupFromWelcome failed", messageId, err);
+      // ADR-0060 — every device of the account reads the one account mailbox,
+      // so a Welcome here may add ANOTHER device of ours, or be a channel
+      // co-publisher's (opened by that flow under the account identity).
+      // Neither holds a KeyPackage of this device, and that is not a failed
+      // join the user needs to hear about.
+      return isWelcomeForAnotherLeaf(err) ? { kind: "not-ours" } : { kind: "failed" };
+    }
+  }
+
+  /** What follows joins, once they are in the registry. */
+  async function settleJoins(accountIdB64: string, entries: readonly ActiveGroup[]): Promise<void> {
+    // The joined group lives only in memory until a snapshot lands, and the
+    // Welcome cannot be opened a second time in this page lifetime. A failed
+    // persist throws, which HOLDS the mailbox cursor. After a reload the
+    // durable snapshot still holds the unconsumed KeyPackage, so the
+    // re-fetched Welcome is opened then; if that snapshot still holds the
+    // group as active the core refuses it and it is held like any other
+    // (`retryHeldWelcomes`).
+    await chats.persistSnapshotDurable(accountIdB64);
+    for (const entry of entries) {
+      // ADR-0087 section 9 - an end still under way goes first, and a person
+      // back in a group this account's devices were told it left says so.
+      await membershipEnd.noteJoined(entry);
+      // ADR-0048 §2 — publish this device's profile into every group it just
+      // joined, once the join is durable. The members already there cannot
+      // learn the newcomer's name any other way.
+      profiles.groupJoined(entry.groupIdB64);
+      // ADR-0079 section 5 - a one-to-one with a person this account added
+      // through their link: what was written to them before their app
+      // answered goes out now, in order, through the held-send queue.
+      await handOverToConversation(accountIdB64, entry.groupIdB64);
+    }
+  }
+
+  /** One pass over the held Welcomes at a time. */
+  let heldWelcomePass: Promise<void> = Promise.resolve();
+
+  /** A pass over the Welcomes this device holds (`chat/held-welcomes.ts`). */
+  function retryHeldWelcomes(): Promise<void> {
+    const run = async (): Promise<void> => {
+      const polled = scope;
+      if (polled === null) return;
+      const current = (): boolean => scope === polled;
+      const joinedEntries = await runHeldWelcomePass<ActiveGroup>({
+        held: () => membershipEnd.heldWelcomes(),
+        open: (held) => openWelcome(base64Decode(held.welcomeB64), held.messageId, current),
+        readJournal: (groupIdB64) => membershipEnd.readJournal(groupIdB64),
+        settle: () => membershipEnd.settle(),
+        drop: (messageId) => membershipEnd.dropHeldWelcome(messageId),
+        noteFailed: () => setJoinFailure(JOIN_FAILURE_MESSAGE),
+        current,
+      });
+      if (joinedEntries.length > 0 && current()) await settleJoins(polled.accountIdB64, joinedEntries);
+    };
+    const pass = heldWelcomePass.then(run, run).catch((err: unknown) => {
+      if (err instanceof StaleMailboxScope) return;
+      // eslint-disable-next-line no-console
+      console.warn("held Welcomes not retried", err instanceof Error ? err.name : "");
+    });
+    heldWelcomePass = pass;
+    return pass;
+  }
+
+  // An end finishing is what a held Welcome waits for, and a pass that could
+  // not read the journal is tried again on a timer.
+  createEffect(() => {
+    membershipEnd.settledVersion();
+    void untrack(() => retryHeldWelcomes());
+  });
+  const heldWelcomeTimer = setInterval(() => {
+    if (membershipEnd.heldWelcomes().length > 0) void retryHeldWelcomes();
+  }, HELD_WELCOME_RETRY_MS);
+  onCleanup(() => clearInterval(heldWelcomeTimer));
 
   async function dispatch(
     events: readonly IncomingMailboxEvent[],
@@ -917,7 +1054,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     await retryWaitingKnownRequests();
     let welcomeAttempted = false;
     let joined = false;
-    const joinedGroupIds: string[] = [];
+    const joinedEntries: ActiveGroup[] = [];
     let failed = false;
     try {
       for (const ev of events) {
@@ -956,37 +1093,26 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         } else if (ev.kind === "welcome") {
           if (joinedWelcomeIds.has(ev.welcome.messageId)) continue;
           welcomeAttempted = true;
-          try {
-            const group = await client.joinGroupFromWelcome(
-              auth.identitySecrets(),
-              ev.welcome.welcomeBytes,
-            );
-            // Signed out during the join: the chat list is not this
-            // account's any more. Not added, not marked joined; the cursor
-            // is held (the catch below is skipped by the rethrow).
-            if (!current()) throw new StaleMailboxScope();
-            // ADR-0051 — a name this device already holds for the group (a
-            // re-join, a second Welcome) titles it at once; otherwise the
-            // stand-in the title resolver reads as "unnamed".
-            const active = chats.add({
-              label:
-                groupNames.nameOf(base64Encode(group.groupId)) ??
-                `Joined group (Welcome ${ev.welcome.messageId})`,
-              group,
-            });
-            joinedWelcomeIds.add(ev.welcome.messageId);
-            joinedGroupIds.push(active.groupIdB64);
+          // An end under way goes first: the Welcome may replace its group.
+          await membershipEnd.settle();
+          const opened = await openWelcome(ev.welcome.welcomeBytes, ev.welcome.messageId, current);
+          if (opened.kind === "joined") {
+            joinedEntries.push(opened.entry);
             joined = true;
-          } catch (err) {
-            if (err instanceof StaleMailboxScope) throw err;
-            // ADR-0060 — every device of the account reads the one account
-            // mailbox, so a Welcome here may add ANOTHER device of ours, or be
-            // a channel co-publisher's (opened by that flow under the account
-            // identity). Neither holds a KeyPackage of this device, and that
-            // is not a failed join the user needs to hear about.
-            if (!isWelcomeForAnotherLeaf(err)) failed = true;
-            // eslint-disable-next-line no-console
-            console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
+          } else if (opened.kind === "failed") {
+            failed = true;
+          } else if (opened.kind === "still-active") {
+            // ADR-0045 amendment (C-88) - this device still holds that group
+            // as active, so the core refused the Welcome and changed nothing.
+            // The cursor is about to move past the row, so it is kept first:
+            // a failed write throws here, which holds the cursor. Its group's
+            // journal is read after this batch.
+            await membershipEnd.holdWelcome({
+              messageId: ev.welcome.messageId,
+              groupIdB64: opened.groupIdB64,
+              welcomeB64: base64Encode(ev.welcome.welcomeBytes),
+              heldAtMs: Date.now(),
+            });
           }
         } else if (ev.kind === "link-refusal") {
           // ADR-0079 amendment of 2026-10-19 - the inviter's app refused the
@@ -1002,33 +1128,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           );
           if (refused === null) continue;
           await removePendingContact(accountIdB64, refused.accountIdHex);
+          await dropCarriedCopies(accountIdB64, refused.accountIdHex);
           void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
-          // Accept. The signature is verified, so even a stale ack is a
-          // legitimate accept by the holder of `accepterPubkey`.
-          const accepter: AcceptedContact = {
-            signaturePubkeyB64: base64Encode(ev.ack.accepterPubkey),
-            x25519PubkeyB64: base64Encode(ev.ack.accepterX25519Pubkey),
-            // ADR-0048 — the name comes from the resolver; a re-delivered ack
-            // must not wipe a rename the user already gave this contact.
-            displayName:
-              loadAccepted(accountIdB64).find(
-                (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
-              )?.displayName ?? "",
-            acceptedAtMs: Date.now(),
-            // The peer's account_id (hex), kept with the contact (founding a
-            // one-to-one, the backup).
-            accountIdHex: groupIdHex(ev.ack.accepterAccountId),
-          };
-          // Durable, and keyed by the captured account: recorded even when
-          // the session has ended since.
-          upsertAccepted(accepter, accountIdB64);
-          // Answered: the sent record and the intro kept for a re-send go
-          // (durable, keyed by the captured account).
-          const answeredHex = groupIdHex(ev.ack.accepterAccountId);
-          forgetSentRequest(accountIdB64, answeredHex);
-          void forgetSentIntro(accountIdB64, answeredHex);
+          // Accept.
+          applyContactAck(ev.ack, accountIdB64, {
+            current,
+            fileFoundName: (key, found) => profiles.fileFoundName(key, found),
+          });
           if (current()) setAcceptedVersion(acceptedVersion() + 1);
         }
       }
@@ -1039,23 +1147,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // `persistSnapshotDurable` writes the identity that is live NOW under
         // the id it is given: after a sign-out that pairing would be wrong.
         requireCurrent();
-        // The joined group lives only in memory until a snapshot lands, and
-        // the Welcome cannot be opened a second time in this page lifetime.
-        // A failed persist throws, which HOLDS the mailbox cursor: after a
-        // reload the durable snapshot still holds the unconsumed KeyPackage,
-        // so the re-fetched Welcome can be opened then.
-        await chats.persistSnapshotDurable(accountIdB64);
-        requireCurrent();
-        // ADR-0048 §2 — publish this device's profile into every group it just
-        // joined, once the join is durable. The members already there cannot
-        // learn the newcomer's name any other way.
-        for (const groupIdB64 of joinedGroupIds) profiles.groupJoined(groupIdB64);
-        // ADR-0079 section 5 - a one-to-one with a person this account added
-        // through their link: what was written to them before their app
-        // answered goes out now, in order, through the held-send queue.
-        for (const groupIdB64 of joinedGroupIds) await handOverToConversation(accountIdB64, groupIdB64);
+        await settleJoins(accountIdB64, joinedEntries);
       }
       if (fresh.some((f) => f.undecidedLink === true)) void decideLinkRequests();
+      void retryHeldWelcomes();
     } finally {
       // `stop()` cleared the banner when the session ended; a late failure of
       // the ended session must not put it back on the login screen or in the
@@ -1156,8 +1251,23 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // nothing claims or polls one (its old cursor key `lakko.contacts.device-
   // mailbox.v1` is only wiped).
 
-  function isHidden(): boolean {
-    return globalThis.document?.visibilityState === "hidden";
+  /** Whether a push wake can reach this tab at all (`push/wake-reach.ts`). */
+  const pushWakeReach = createPushWakeReach();
+
+  /**
+   * `chat/receive-activity.ts`: the loop sleeps only where a push wake reaches
+   * it. Parking on `hidden` alone meant a closed window of the desktop app, and
+   * a tab with notifications refused, took no contact request and no Welcome at
+   * all: nothing else could wake them. This provider sits above the call host,
+   * so it cannot see a call; a hidden tab push reaches parks during one as it
+   * did.
+   */
+  function mayPark(): boolean {
+    return mayParkReceive({
+      documentHidden: globalThis.document?.visibilityState === "hidden",
+      callInProgress: false,
+      pushWake: pushWakeReach.read(),
+    });
   }
 
   function start(accountIdB64: string): void {
@@ -1193,7 +1303,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     loopAbort = controller;
     void runLongPollLoop(controller.signal, {
       shouldContinue: () => true,
-      isPaused: isHidden,
+      isPaused: mayPark,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
         // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).

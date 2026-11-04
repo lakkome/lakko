@@ -97,8 +97,9 @@ class MembershipRefusalTest {
         // this file keeps, so a reason added to `lakko-mls` and regenerated
         // arrives here automatically.
         // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED;
-        // 23 since ADR-0062 appended the three conversation-kind reasons.
-        assertEquals(23, FfiRefusalReason.entries.size)
+        // 23 since ADR-0062 appended the three conversation-kind reasons, 24
+        // since ADR-0045 appended the Welcome for a group still held.
+        assertEquals(24, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
             assertTrue("$reason rendered an empty sentence", say(reason).isNotEmpty())
@@ -231,6 +232,7 @@ class MembershipRefusalTest {
                 FfiRefusalReason.NOT_A_COMMITTER,
                 FfiRefusalReason.PROPOSALS_PENDING,
                 FfiRefusalReason.SWEEP_ALREADY_STAGED,
+                FfiRefusalReason.GROUP_STILL_ACTIVE,
             ),
             MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK,
         )
@@ -342,6 +344,7 @@ class MembershipRefusalTest {
             FfiException.MembershipJoinerAlreadyAMember("x") to
                 FfiRefusalReason.JOINER_ALREADY_A_MEMBER,
             FfiException.SweepAlreadyStaged("x") to FfiRefusalReason.SWEEP_ALREADY_STAGED,
+            FfiException.MembershipGroupStillActive("x") to FfiRefusalReason.GROUP_STILL_ACTIVE,
             FfiException.MembershipDeviceBindingInvalid("x") to
                 FfiRefusalReason.DEVICE_BINDING_INVALID,
             FfiException.MembershipDeviceLimitReached("x") to

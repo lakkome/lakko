@@ -51,3 +51,17 @@ path = "fuzz_targets/backup_blob_parse.rs"
 test = false
 doc = false
 bench = false
+
+# The payload codec inside the AEAD. `envelope_v2_open` cannot forge a
+# tag, so it never reaches `BackupPayload::decode`; this target feeds it
+# directly. Hostile plaintext needs the recovery phrase or a rollback to
+# an older genuine blob, but the decoder is the first parser a restore
+# runs on it, and v8 added a received-profile list with its own count,
+# per-entry and total-size bounds and an ordering rule.
+
+[[bin]]
+name = "payload_decode"
+path = "fuzz_targets/payload_decode.rs"
+test = false
+doc = false
+bench = false

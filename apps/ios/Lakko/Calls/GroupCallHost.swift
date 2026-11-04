@@ -210,6 +210,9 @@ final class GroupCallHost: ObservableObject {
     /// starter ended it for everyone), so leaving it publishes no second one.
     private var endedForEveryoneCallId: Data?
     private var endedNoticeTask: Task<Void, Never>?
+    /// When this device's group call in each conversation last ended, for
+    /// ``suppressesCallWake(groupIdHex:)``.
+    private var wakeSuppression = CallWakeSuppression()
 
     init(ports: Ports) {
         self.ports = ports
@@ -224,6 +227,18 @@ final class GroupCallHost: ObservableObject {
             self?.groupMlsSettled(groupIdHex)
         }
         repository.groupCallEndSink = { [weak self] end in self?.receivedEnd(end) }
+        repository.onMembershipEndRecorded = { [weak self] groupIdHex, left in
+            self?.endForMembership(groupIdHex: groupIdHex, left: left)
+        }
+    }
+
+    /// UX 9.1 — this account is out of the group of the live call. Nothing can
+    /// be published any more, so the call ends here, with the line; the notice
+    /// of the group follows as anywhere else. A person who left asked for it.
+    func endForMembership(groupIdHex: String, left: Bool) {
+        guard liveGroupIdHex == groupIdHex else { return }
+        if !left { callNotice = .key("call.ended.no_longer_in_group") }
+        releaseSession()
     }
 
     // MARK: - Slot
@@ -526,7 +541,8 @@ final class GroupCallHost: ObservableObject {
         guard let call = releaseSession() else { return }
         let endedAtMs = SfuKeepalive.callEndedAtMs(nowMs: ports.nowMs(), lastInboundMs: lastInbound)
         if let row = GroupCallHostRules.transcriptRow(
-            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs) {
+            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs,
+            video: call.video) {
             ports.recordCall(FinishedCall(
                 groupIdHex: call.groupIdHex,
                 row: row,
@@ -693,6 +709,9 @@ final class GroupCallHost: ObservableObject {
     @discardableResult
     private func releaseSession() -> ActiveCall? {
         let call = activeCall
+        if let call {
+            wakeSuppression.noteEnded(groupIdHex: call.groupIdHex, atMs: ports.nowMs())
+        }
         activeCall = nil
         attempt = nil
         startingGroupIdHex = nil
@@ -736,6 +755,22 @@ final class GroupCallHost: ObservableObject {
         endedNoticeTask?.cancel()
         endedNoticeTask = nil
         endedForEveryoneNotice = nil
+        wakeSuppression.reset()
+    }
+
+    /// Does a call push wake for `groupIdHex` ring nothing here? This device
+    /// is starting or in the group call of that conversation, or left it
+    /// moments ago (``CallWakeSuppression``). Covers senders that still wake
+    /// for group-call frames. Read synchronously by ``VoipPushRegistrar``.
+    func suppressesCallWake(groupIdHex: String) -> Bool {
+        let group = groupIdHex.lowercased()
+        if activeCall?.groupIdHex.lowercased() == group
+            || startingGroupIdHex?.lowercased() == group {
+            return true
+        }
+        return wakeSuppression.suppresses(
+            groupIdHex: groupIdHex, activeGroupIdHex: nil, activeState: nil,
+            nowMs: ports.nowMs())
     }
 
     /// Resolves once every group-control publish queued so far was attempted.
@@ -920,6 +955,29 @@ final class GroupCallHost: ObservableObject {
 // MARK: - Production ports
 
 extension GroupCallHost {
+    /// The production publish port: the serialized application send, with NO
+    /// push wake for any group-call frame, its `end` included. A group call
+    /// never rings a closed device, and on iOS a call wake is a VoIP push the
+    /// receiver must report to CallKit as an incoming call, so a wake here
+    /// rang a phantom one-to-one call on every member's iPhone when a group
+    /// call ended. ``CallSignalingWake`` cannot tell a group `end` from a
+    /// one-to-one `end` by its bytes, so the port says it outright.
+    static func livePublish(
+        repository: ChatRepository
+    ) -> @MainActor (_ groupIdHex: String, _ bytes: Data) async -> Bool {
+        { [weak repository] groupIdHex, bytes in
+            guard let repository else { return false }
+            do {
+                try await repository.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: bytes, wake: nil)
+                return true
+            } catch {
+                NSLog("group call publish failed: %@", error.localizedDescription)
+                return false
+            }
+        }
+    }
+
     /// The composition root's ports over the live repository.
     static func live(
         repository: ChatRepository,
@@ -949,17 +1007,7 @@ extension GroupCallHost {
                     return false
                 }
             },
-            publish: { [weak repository] groupIdHex, bytes in
-                guard let repository else { return false }
-                do {
-                    try await repository.publishApplicationMessage(
-                        groupIdHex: groupIdHex, plaintextBytes: bytes)
-                    return true
-                } catch {
-                    NSLog("group call publish failed: %@", error.localizedDescription)
-                    return false
-                }
-            },
+            publish: livePublish(repository: repository),
             syncGroup: { [weak repository] groupIdHex in
                 try? await repository?.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
             },

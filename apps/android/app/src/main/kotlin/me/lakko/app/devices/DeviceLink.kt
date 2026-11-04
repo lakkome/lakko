@@ -147,10 +147,22 @@ public const val DEVICE_LINK_REQUEST_TTL_MS: Long = 600_000L
 public class NewDeviceLink(
     private val api: DeviceLinkApi,
     private val initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
-    private val pairingPayload: ByteArray,
+    /** The pairing payload, built when the code is sealed (after it is
+     *  typed), so the card's place has had time to arrive (UX
+     *  second-device.md section 2.1). */
+    private val payloadForSeal: suspend () -> ByteArray,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val pollIntervalMs: Long = DEFAULT_POLL_MS,
 ) {
+    /** A payload fixed in advance. */
+    public constructor(
+        api: DeviceLinkApi,
+        initiatorFor: (requestId: ByteArray) -> DeviceLinkInitiatorPort,
+        pairingPayload: ByteArray,
+        nowMs: () -> Long = System::currentTimeMillis,
+        pollIntervalMs: Long = DEFAULT_POLL_MS,
+    ) : this(api, initiatorFor, { pairingPayload }, nowMs, pollIntervalMs)
+
     private var requestId: ByteArray? = null
     private var initiator: DeviceLinkInitiatorPort? = null
     private var pakeB: ByteArray? = null
@@ -195,7 +207,7 @@ public class NewDeviceLink(
         val id = requireNotNull(requestId) { "start first" }
         val b = requireNotNull(pakeB) { "await the answer first" }
         val init = requireNotNull(initiator)
-        val sealed = init.finish(b, typedCode, pairingPayload)
+        val sealed = init.finish(b, typedCode, payloadForSeal())
         api.postPayload(id, sealed.pakeA, sealed.sealedPayload, sealed.confirmA)
         while (true) {
             if (expired()) return NewDeviceLinkState.Expired
@@ -244,7 +256,6 @@ public val DEVICE_LINK_OLD_WRONG_CODE_COPY: UiText = UiText("device_link.request
 public val DEVICE_LINK_OLD_DECLINED_COPY: UiText = UiText("device_link.request.declined")
 public val DEVICE_LINK_HANDLED_ELSEWHERE_COPY: UiText = UiText("device_link.request.handled_elsewhere")
 public val DEVICE_LINK_LIMIT_COPY: UiText = UiText("device_link.request.too_many")
-public val DEVICE_LINK_ADDED_COPY: UiText = UiText("device_link.request.added")
 public val DEVICE_LINK_ADD_FAILED_COPY: UiText = UiText("device_link.request.error.generic")
 public val DEVICE_LINK_REQUEST_EXPIRED_COPY: UiText = UiText("device_link.request.expired")
 
@@ -263,7 +274,8 @@ public sealed interface OldDeviceLinkState {
     /** The new device entered the right code; pairing runs. */
     public data object Adding : OldDeviceLinkState
 
-    /** A closing notice with one sentence (and Close). */
+    /** A closing notice with one sentence (and Close): a failure, a decline,
+     *  an expired or elsewhere-handled request. A device added shows none. */
     public data class Notice(val message: UiText) : OldDeviceLinkState
 
     /** The fresh-auth proof ran out between two steps of an answered request
@@ -276,23 +288,41 @@ public sealed interface OldDeviceLinkState {
  * Obligation of the brief — an old device answers at most [MAX_ANSWERS]
  * requests per [WINDOW_MS] (chosen, not measured), persisted per device, so a
  * stream of requests cannot farm one guess each out of it forever.
+ *
+ * An answer is given back ([refund]) when it bought no guess at the code (no
+ * code was shown) or when the code was RIGHT and the device was then not
+ * added for a reason on this side (the result or the pairing failed): a right
+ * code is not a guess, and the person must not run out of tries because of
+ * our own failure. A wrong code is never given back.
  */
 public class DeviceLinkAnswerLimit(
     private val load: () -> List<Long>,
     private val save: (List<Long>) -> Unit,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    /** `false` turns the limit off (every answer allowed): debug builds only,
+     *  so testing sign-ins on one phone does not run out of answers
+     *  (maintainer, 2026-10-29). A release build keeps it. */
+    private val enforced: Boolean = true,
 ) {
-    /** Record one answer if the budget allows; `false` when it is spent. */
+    /** Record one answer if the budget allows and return its time, or `null`
+     *  when the budget is spent. */
     @Synchronized
-    public fun tryConsume(): Boolean {
+    public fun tryConsume(): Long? {
         val now = nowMs()
         val recent = load().filter { now - it in 0 until WINDOW_MS }
-        if (recent.size >= MAX_ANSWERS) {
+        if (enforced && recent.size >= MAX_ANSWERS) {
             save(recent)
-            return false
+            return null
         }
         save(recent + now)
-        return true
+        return now
+    }
+
+    /** Give back the answer recorded at [at] (one entry, if still kept). */
+    @Synchronized
+    public fun refund(at: Long) {
+        val times = load().toMutableList()
+        if (times.remove(at)) save(times)
     }
 
     public companion object {
@@ -320,6 +350,10 @@ public class DeviceLinkAnswerLimit(
  *   account's own login handle (`parsePairingQr`); throws when it names
  *   another account or is malformed.
  * @param pair runs the unchanged add-device pairing with the parsed payload.
+ *
+ * A device added closes the prompt ([OldDeviceLinkState.Idle]) with no
+ * closing line (UX second-device.md section 2.1, decided 2026-10-29); only a
+ * failure keeps its notice.
  */
 public class OldDeviceLink<P>(
     private val api: DeviceLinkApi,
@@ -342,7 +376,20 @@ public class OldDeviceLink<P>(
 
     /** What is still owed for a request whose code was right when the proof
      *  ran out mid-flow: the result (unless already posted) and the pairing. */
-    private class Owed<P>(val requestId: ByteArray, val confirmB: ByteArray, val payload: P, var resultPosted: Boolean)
+    private class Owed<P>(
+        val requestId: ByteArray,
+        val confirmB: ByteArray,
+        val payload: P,
+        var resultPosted: Boolean,
+        /** When the answer was counted ([DeviceLinkAnswerLimit.refund]). */
+        val answeredAt: Long?,
+    )
+
+    /** When the answer to the request this device answered was counted. */
+    private var answeredAt: Long? = null
+
+    /** Requests consented to, with when their answer was counted. */
+    private val consentedAt = HashMap<String, Long>()
 
     private var owed: Owed<P>? = null
 
@@ -393,7 +440,7 @@ public class OldDeviceLink<P>(
             answeredId = null
             responder = null
             asking = null
-            consented.clear()
+            dropConsented()
             return state
         }
         val key = request.idKey
@@ -413,7 +460,7 @@ public class OldDeviceLink<P>(
                 // A new request (or a newer one replaced the asked one): ask,
                 // and send nothing.
                 asking = request
-                consented.clear()
+                dropConsented()
                 engaged = false
                 state = OldDeviceLinkState.AskConsent
             }
@@ -439,7 +486,8 @@ public class OldDeviceLink<P>(
             state = OldDeviceLinkState.Notice(DEVICE_LINK_OLD_WRONG_CODE_COPY)
             return state
         }
-        val pending = Owed(request.requestId, opened.first.confirmB, opened.second, resultPosted = false)
+        val pending = Owed(request.requestId, opened.first.confirmB, opened.second, resultPosted = false, answeredAt)
+        answeredAt = null
         return finish(pending)
     }
 
@@ -454,6 +502,13 @@ public class OldDeviceLink<P>(
                 owed = pending
                 state = OldDeviceLinkState.NeedsProof
                 return state
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (e: Exception) {
+                // The code was right; the device is not added because the
+                // result did not land. Not a guess: given back.
+                giveBack(pending)
+                throw e
             }
             pending.resultPosted = true
         }
@@ -461,7 +516,8 @@ public class OldDeviceLink<P>(
         state = try {
             pair(pending.payload)
             owed = null
-            OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY)
+            // Added: the prompt simply closes (UX second-device.md 2.1).
+            OldDeviceLinkState.Idle
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: me.lakko.app.auth.FreshAuthRequired) {
@@ -469,9 +525,22 @@ public class OldDeviceLink<P>(
             OldDeviceLinkState.NeedsProof
         } catch (_: Exception) {
             owed = null
+            giveBack(pending)
             OldDeviceLinkState.Notice(DEVICE_LINK_ADD_FAILED_COPY)
         }
         return state
+    }
+
+    /** Forget the consented, unanswered requests; no code was shown for
+     *  them, so their answers are given back. */
+    private fun dropConsented() {
+        consented.clear()
+        consentedAt.values.forEach(limit::refund)
+        consentedAt.clear()
+    }
+
+    private fun giveBack(pending: Owed<P>) {
+        pending.answeredAt?.let(limit::refund)
     }
 
     /** The proof block of [OldDeviceLinkState.NeedsProof] was satisfied:
@@ -493,13 +562,15 @@ public class OldDeviceLink<P>(
         asking = null
         engaged = false
         val key = request.idKey
-        if (!limit.tryConsume()) {
+        val at = limit.tryConsume()
+        if (at == null) {
             settled.add(key)
             runCatching { api.decline(request.requestId) }
             state = OldDeviceLinkState.Notice(DEVICE_LINK_LIMIT_COPY)
             return state
         }
         consented.add(key)
+        consentedAt[key] = at
         return answer(request)
     }
 
@@ -512,8 +583,9 @@ public class OldDeviceLink<P>(
             api.answer(request.requestId, r.pakeMessage)
         } catch (_: me.lakko.app.auth.FreshAuthRequired) {
             // No live proof (it ran out between the block and this call):
-            // nothing was sent; ask again, with the block.
+            // nothing was sent; ask again, with the block. "Yes" counts again.
             consented.remove(key)
+            consentedAt.remove(key)?.let(limit::refund)
             asking = request
             state = OldDeviceLinkState.AskConsent
             return state
@@ -521,17 +593,21 @@ public class OldDeviceLink<P>(
         when (answered) {
             DeviceLinkAnswer.ANSWERED -> {
                 consented.remove(key)
+                answeredAt = consentedAt.remove(key)
                 answeredId = key
                 responder = r
                 state = OldDeviceLinkState.ShowCode(formatCode(r.code))
             }
             DeviceLinkAnswer.ALREADY_ANSWERED -> {
+                // No code was shown: not a guess, given back.
                 consented.remove(key)
+                consentedAt.remove(key)?.let(limit::refund)
                 settled.add(key)
                 state = OldDeviceLinkState.Notice(DEVICE_LINK_HANDLED_ELSEWHERE_COPY)
             }
             DeviceLinkAnswer.NOT_FOUND -> {
                 consented.remove(key)
+                consentedAt.remove(key)?.let(limit::refund)
                 state = OldDeviceLinkState.Idle
             }
         }
@@ -561,7 +637,7 @@ public class OldDeviceLink<P>(
         }
         answeredId = null
         responder = null
-        consented.clear()
+        dropConsented()
         engaged = false
         state = OldDeviceLinkState.Notice(DEVICE_LINK_OLD_DECLINED_COPY)
         return state

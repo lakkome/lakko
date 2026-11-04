@@ -9,11 +9,12 @@
 //! ## The setting
 //!
 //! Three positions: **Nobody**, **Some people** (made of two parts that
-//! combine: contacts of my contacts; members of all, or of chosen, groups and
-//! channels) and **Everyone**. [`VisibilitySetting`] carries the position,
-//! the parts, the all/chosen form, the chosen groups and channels, and the
-//! "last parts" memory the UX restores when a person comes back to Some
-//! people. The transition rules that turn taps into a setting live in
+//! combine: contacts of all, or of chosen, contacts; members of all, or of
+//! chosen, groups and channels) and **Everyone**. [`VisibilitySetting`]
+//! carries the position, the parts, the all/chosen form of each, the chosen
+//! contacts, the chosen groups and channels, and the "last parts" memory the
+//! UX restores when a person comes back to Some people. The transition rules
+//! that turn taps into a setting live in
 //! `lakko_ui_rules::visibility`; this module owns the shape and its one
 //! validity rule.
 //!
@@ -25,10 +26,21 @@
 //!   means Nobody, and the UI says so rather than storing the contradiction);
 //! * Nobody and Everyone carry no parts — the memory is in `last_*`;
 //! * the chosen list is at most [`MAX_CHOSEN_SCOPES`] entries, has no
-//!   duplicate, and every id is 1 to [`MAX_SCOPE_ID_LEN`] bytes.
+//!   duplicate, and every id is 1 to [`MAX_SCOPE_ID_LEN`] bytes;
+//! * the chosen contacts are at most [`MAX_CHOSEN_CONTACTS`] account ids, with
+//!   no duplicate.
 //!
-//! The chosen list is kept whatever the form, so switching from "only the
-//! ones I choose" to "all" and back does not lose the person's choices.
+//! Both chosen lists are kept whatever the form, so switching from "only the
+//! ones I choose" to "all" and back does not lose the person's choices. The
+//! contacts form is kept the same way: it is not a part, it says what part 2.1
+//! means while part 2.1 is on, so it needs no `last_*` memory and comes back
+//! with the part. The groups form has one because `None` is how part 2.2 says
+//! it is off.
+//!
+//! The chosen contacts are account ids, not account keys: a key changes on a
+//! rotation and a reset, and the choice must not. They are a list of their
+//! own rather than scopes, because a contact is not something a person is a
+//! member of: nothing that walks the groups and channels may touch them.
 //!
 //! ## The reach state
 //!
@@ -42,14 +54,20 @@
 //! ([`visibility_is_newer`], [`reach_state_is_newer`]); a re-send carries its
 //! original stamp and is not an update (the ADR-0044 lesson).
 //!
-//! ## Wire (v1)
+//! ## Wire
+//!
+//! The setting is at version 2 (a flag day, ADR-0060 "Only the contacts I
+//! choose": version 1 is refused, no dual format). The domain stays: those
+//! bytes are the dispatcher's prefix, and the version byte is the knob.
 //!
 //! ```text
-//! visibility  = "lakko/visibility/v1\x00" || version(1)=0x01 || updated_at_ms(8, BE)
-//!               || mode(1) || flags(1) || groups(1) || last_groups(1)
+//! visibility  = "lakko/visibility/v1\x00" || version(1)=0x02 || updated_at_ms(8, BE)
+//!               || mode(1) || flags(1) || groups(1) || last_groups(1) || contacts_form(1)
 //!               || chosen_count(2, BE) || chosen_count x [ kind(1) || id_len(1) || id ]
+//!               || chosen_contacts_count(2, BE) || chosen_contacts_count x account_id(16)
 //!   flags: bit 0 contacts_of_contacts, bit 1 last_contacts_of_contacts, others 0
 //!   groups / last_groups: 0 none, 1 all, 2 chosen
+//!   contacts_form: 1 all, 2 chosen
 //!
 //! reach_state = "lakko/reach-state/v1\x00" || version(1)=0x01 || updated_at_ms(8, BE)
 //!               || count(2, BE) || count x [ class(1) || scope_len(1) || scope || version(4, BE) ]
@@ -64,8 +82,9 @@ use crate::reach::{ReachClass, ReachError};
 /// Domain separator of the setting envelope. Frozen.
 pub const VISIBILITY_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/visibility/v1\x00";
 
-/// Setting schema version.
-pub const VISIBILITY_VERSION_V1: u8 = 0x01;
+/// Setting schema version. The domain stays at `v1`: it is the dispatcher's
+/// frozen prefix, and this byte is what moves.
+pub const VISIBILITY_VERSION_V2: u8 = 0x02;
 
 /// Domain separator of the reach-state envelope. Frozen.
 pub const REACH_STATE_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/reach-state/v1\x00";
@@ -79,19 +98,28 @@ pub const MAX_SCOPE_ID_LEN: usize = 64;
 /// Most groups and channels the chosen list holds.
 pub const MAX_CHOSEN_SCOPES: usize = 1024;
 
+/// Length of a chosen contact's account id.
+pub const CONTACT_ACCOUNT_ID_LEN: usize = 16;
+
+/// Most contacts the chosen list holds. Chosen, not measured.
+pub const MAX_CHOSEN_CONTACTS: usize = 4096;
+
 /// Most entries a reach state holds. Chosen, not measured.
 pub const MAX_REACH_STATE_ENTRIES: usize = 4096;
 
-/// Longest setting envelope [`compose_visibility`] produces: the 35-byte
+/// Longest setting envelope [`compose_visibility`] produces: the 38-byte
 /// fixed part plus [`MAX_CHOSEN_SCOPES`] entries of `2 + MAX_SCOPE_ID_LEN`
-/// bytes (67 619 bytes). A carrier that bounds its payload (the ADR-0060
-/// DeviceGroup `ServiceEnvelope`) must admit at least this much.
+/// bytes and [`MAX_CHOSEN_CONTACTS`] account ids (133 158 bytes). A carrier
+/// that bounds its payload (the ADR-0060 DeviceGroup `ServiceEnvelope`) must
+/// admit at least this much.
 pub const MAX_VISIBILITY_ENVELOPE_LEN: usize = VISIBILITY_ENVELOPE_DOMAIN_V1.len()
     + 1
     + 8
-    + 4
+    + 5
     + 2
-    + MAX_CHOSEN_SCOPES * (2 + MAX_SCOPE_ID_LEN);
+    + MAX_CHOSEN_SCOPES * (2 + MAX_SCOPE_ID_LEN)
+    + 2
+    + MAX_CHOSEN_CONTACTS * CONTACT_ACCOUNT_ID_LEN;
 
 /// Longest reach-state envelope [`compose_reach_state`] produces: the
 /// 32-byte fixed part plus [`MAX_REACH_STATE_ENTRIES`] entries of
@@ -175,6 +203,54 @@ const fn groups_from_byte(byte: u8) -> CoreResult<Option<GroupsForm>, Visibility
     }
 }
 
+/// The contacts of all contacts, or only of the chosen ones (UX 2.1.1 /
+/// 2.1.2). Wire bytes frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContactsForm {
+    /// The contacts of every contact the person has.
+    All,
+    /// Only the contacts of the ones in the chosen list.
+    Chosen,
+}
+
+impl ContactsForm {
+    /// The frozen wire byte.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::All => 1,
+            Self::Chosen => 2,
+        }
+    }
+
+    /// Parse a wire byte, fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// [`VisibilityError::UnknownContactsForm`].
+    pub const fn from_byte(byte: u8) -> CoreResult<Self, VisibilityError> {
+        match byte {
+            1 => Ok(Self::All),
+            2 => Ok(Self::Chosen),
+            other => Err(VisibilityError::UnknownContactsForm(other)),
+        }
+    }
+}
+
+/// A chosen contact's account id from its bytes: the one place a boundary
+/// that carries ids as plain bytes checks their length.
+///
+/// # Errors
+///
+/// [`VisibilityError::ContactIdLength`].
+pub fn contact_account_id(
+    bytes: &[u8],
+) -> CoreResult<[u8; CONTACT_ACCOUNT_ID_LEN], VisibilityError> {
+    bytes
+        .try_into()
+        .map_err(|_| VisibilityError::ContactIdLength { len: bytes.len() })
+}
+
 /// Group or channel. Wire bytes frozen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScopeKind {
@@ -238,6 +314,12 @@ pub struct VisibilitySetting {
     pub mode: VisibilityMode,
     /// Part 2.1: contacts of my contacts. Only while `mode` is Some.
     pub contacts_of_contacts: bool,
+    /// Part 2.1's form. Meaningful only while part 2.1 is on, and kept
+    /// whatever the position, so it comes back with the part.
+    pub contacts_form: ContactsForm,
+    /// The account ids switched on under "only the ones I choose". Kept
+    /// whatever the form. Separate from `chosen`: a contact is not a scope.
+    pub chosen_contacts: Vec<[u8; CONTACT_ACCOUNT_ID_LEN]>,
     /// Part 2.2, and its form; `None` when off. Only while `mode` is Some.
     pub groups: Option<GroupsForm>,
     /// The groups and channels switched on under "only the ones I choose".
@@ -259,6 +341,8 @@ impl VisibilitySetting {
         Self {
             mode: VisibilityMode::Some,
             contacts_of_contacts: true,
+            contacts_form: ContactsForm::All,
+            chosen_contacts: Vec::new(),
             groups: Some(GroupsForm::All),
             chosen: Vec::new(),
             last_contacts_of_contacts: true,
@@ -273,7 +357,9 @@ impl VisibilitySetting {
     ///
     /// [`VisibilityError::SomeWithNoPart`], [`VisibilityError::PartsOutsideSome`],
     /// [`VisibilityError::TooManyChosen`], [`VisibilityError::DuplicateScope`],
-    /// [`VisibilityError::ScopeIdLength`].
+    /// [`VisibilityError::ScopeIdLength`],
+    /// [`VisibilityError::TooManyChosenContacts`],
+    /// [`VisibilityError::DuplicateContact`].
     pub fn validate(&self) -> CoreResult<(), VisibilityError> {
         match self.mode {
             VisibilityMode::Some => {
@@ -297,6 +383,17 @@ impl VisibilitySetting {
             scope.validate()?;
             if !seen.insert(scope) {
                 return Err(VisibilityError::DuplicateScope);
+            }
+        }
+        if self.chosen_contacts.len() > MAX_CHOSEN_CONTACTS {
+            return Err(VisibilityError::TooManyChosenContacts {
+                count: self.chosen_contacts.len(),
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for id in &self.chosen_contacts {
+            if !seen.insert(id) {
+                return Err(VisibilityError::DuplicateContact);
             }
         }
         Ok(())
@@ -323,12 +420,36 @@ impl VisibilitySetting {
 
     /// Whether contacts of contacts can find this person: Everyone, or Some
     /// people with part 2.1 on. The same caveat as [`Self::allows_scope`].
+    ///
+    /// This is the part as a whole; under "only the ones I choose" it stays
+    /// `true` with nobody chosen, and [`Self::allows_contact`] says which
+    /// contacts it reaches through.
     #[must_use]
     pub const fn allows_contacts_of_contacts(&self) -> bool {
         match self.mode {
             VisibilityMode::Nobody => false,
             VisibilityMode::Everyone => true,
             VisibilityMode::Some => self.contacts_of_contacts,
+        }
+    }
+
+    /// Whether the contacts of `account_id` can find this person: Everyone,
+    /// or Some people with part 2.1 on and either all contacts or this one
+    /// chosen.
+    ///
+    /// As in [`Self::allows_scope`], Everyone answers `true` whatever the
+    /// form, which only means something while part 2.1 is on, and the same
+    /// caveat holds.
+    #[must_use]
+    pub fn allows_contact(&self, account_id: &[u8; CONTACT_ACCOUNT_ID_LEN]) -> bool {
+        match self.mode {
+            VisibilityMode::Nobody => false,
+            VisibilityMode::Everyone => true,
+            VisibilityMode::Some => {
+                self.contacts_of_contacts
+                    && (self.contacts_form == ContactsForm::All
+                        || self.chosen_contacts.contains(account_id))
+            },
         }
     }
 }
@@ -349,7 +470,7 @@ pub fn compose_visibility(setting: &VisibilitySetting) -> CoreResult<Vec<u8>, Vi
     setting.validate()?;
     let mut out = Vec::new();
     out.extend_from_slice(VISIBILITY_ENVELOPE_DOMAIN_V1);
-    out.push(VISIBILITY_VERSION_V1);
+    out.push(VISIBILITY_VERSION_V2);
     out.extend_from_slice(&setting.updated_at_ms.to_be_bytes());
     out.push(setting.mode.to_byte());
     let mut flags = 0u8;
@@ -362,6 +483,7 @@ pub fn compose_visibility(setting: &VisibilitySetting) -> CoreResult<Vec<u8>, Vi
     out.push(flags);
     out.push(groups_to_byte(setting.groups));
     out.push(groups_to_byte(setting.last_groups));
+    out.push(setting.contacts_form.to_byte());
     let count =
         u16::try_from(setting.chosen.len()).map_err(|_| VisibilityError::TooManyChosen {
             count: setting.chosen.len(),
@@ -375,6 +497,15 @@ pub fn compose_visibility(setting: &VisibilitySetting) -> CoreResult<Vec<u8>, Vi
             })?,
         );
         out.extend_from_slice(&scope.id);
+    }
+    let contacts = u16::try_from(setting.chosen_contacts.len()).map_err(|_| {
+        VisibilityError::TooManyChosenContacts {
+            count: setting.chosen_contacts.len(),
+        }
+    })?;
+    out.extend_from_slice(&contacts.to_be_bytes());
+    for id in &setting.chosen_contacts {
+        out.extend_from_slice(id);
     }
     Ok(out)
 }
@@ -393,7 +524,7 @@ pub fn try_unwrap_visibility(
     };
     let mut cur = payload;
     let version = take_u8(&mut cur)?;
-    if version != VISIBILITY_VERSION_V1 {
+    if version != VISIBILITY_VERSION_V2 {
         return Err(VisibilityError::UnknownVersion(version));
     }
     let updated_at_ms = u64::from_be_bytes(take_array::<8>(&mut cur)?);
@@ -404,6 +535,7 @@ pub fn try_unwrap_visibility(
     }
     let groups = groups_from_byte(take_u8(&mut cur)?)?;
     let last_groups = groups_from_byte(take_u8(&mut cur)?)?;
+    let contacts_form = ContactsForm::from_byte(take_u8(&mut cur)?)?;
     let count = usize::from(u16::from_be_bytes(take_array::<2>(&mut cur)?));
     if count > MAX_CHOSEN_SCOPES {
         return Err(VisibilityError::TooManyChosen { count });
@@ -417,12 +549,22 @@ pub fn try_unwrap_visibility(
             id: take(&mut cur, len)?.to_vec(),
         });
     }
+    let contacts = usize::from(u16::from_be_bytes(take_array::<2>(&mut cur)?));
+    if contacts > MAX_CHOSEN_CONTACTS {
+        return Err(VisibilityError::TooManyChosenContacts { count: contacts });
+    }
+    let mut chosen_contacts = Vec::with_capacity(contacts);
+    for _ in 0..contacts {
+        chosen_contacts.push(take_array::<CONTACT_ACCOUNT_ID_LEN>(&mut cur)?);
+    }
     if !cur.is_empty() {
         return Err(VisibilityError::TrailingBytes { count: cur.len() });
     }
     let setting = VisibilitySetting {
         mode,
         contacts_of_contacts: flags & FLAG_CONTACTS_OF_CONTACTS != 0,
+        contacts_form,
+        chosen_contacts,
         groups,
         chosen,
         last_contacts_of_contacts: flags & FLAG_LAST_CONTACTS_OF_CONTACTS != 0,
@@ -745,6 +887,9 @@ pub enum VisibilityError {
     /// A scope-kind byte is neither group nor channel.
     #[error("unknown scope kind {0:#04x}")]
     UnknownScopeKind(u8),
+    /// A contacts-form byte is not a form.
+    #[error("unknown contacts form {0:#04x}")]
+    UnknownContactsForm(u8),
     /// A reserved flag bit is set.
     #[error("visibility flags {0:#04x} set a reserved bit")]
     ReservedFlags(u8),
@@ -766,6 +911,21 @@ pub enum VisibilityError {
     /// A scope id outside 1 to [`MAX_SCOPE_ID_LEN`] bytes.
     #[error("scope id is {len} bytes, expected 1 to {MAX_SCOPE_ID_LEN}")]
     ScopeIdLength {
+        /// The length.
+        len: usize,
+    },
+    /// More chosen contacts than [`MAX_CHOSEN_CONTACTS`].
+    #[error("{count} chosen contacts, at most {MAX_CHOSEN_CONTACTS} allowed")]
+    TooManyChosenContacts {
+        /// The count.
+        count: usize,
+    },
+    /// A contact chosen twice.
+    #[error("a contact is chosen twice")]
+    DuplicateContact,
+    /// A contact's account id that is not [`CONTACT_ACCOUNT_ID_LEN`] bytes.
+    #[error("contact account id is {len} bytes, expected {CONTACT_ACCOUNT_ID_LEN}")]
+    ContactIdLength {
         /// The length.
         len: usize,
     },
@@ -795,12 +955,16 @@ impl VisibilityError {
             Self::UnknownMode(_) => "unknownMode".to_string(),
             Self::UnknownGroupsForm(_) => "unknownGroupsForm".to_string(),
             Self::UnknownScopeKind(_) => "unknownScopeKind".to_string(),
+            Self::UnknownContactsForm(_) => "unknownContactsForm".to_string(),
             Self::ReservedFlags(_) => "reservedFlags".to_string(),
             Self::SomeWithNoPart => "someWithNoPart".to_string(),
             Self::PartsOutsideSome => "partsOutsideSome".to_string(),
             Self::TooManyChosen { .. } => "tooManyChosen".to_string(),
             Self::DuplicateScope => "duplicateScope".to_string(),
             Self::ScopeIdLength { .. } => "scopeIdLength".to_string(),
+            Self::TooManyChosenContacts { .. } => "tooManyChosenContacts".to_string(),
+            Self::DuplicateContact => "duplicateContact".to_string(),
+            Self::ContactIdLength { .. } => "contactIdLength".to_string(),
             Self::TooManyEntries { .. } => "tooManyEntries".to_string(),
             Self::DuplicateEntry => "duplicateEntry".to_string(),
             Self::Reach(e) => format!("reach.{}", e.code()),
@@ -857,18 +1021,22 @@ mod tests {
                 for groups in [None, Some(GroupsForm::All), Some(GroupsForm::Chosen)] {
                     for last_cofc in [false, true] {
                         for last_groups in [None, Some(GroupsForm::All), Some(GroupsForm::Chosen)] {
-                            out.push(VisibilitySetting {
-                                mode,
-                                contacts_of_contacts: cofc,
-                                groups,
-                                chosen: vec![
-                                    scope(ScopeKind::Group, 1, 32),
-                                    scope(ScopeKind::Channel, 2, 16),
-                                ],
-                                last_contacts_of_contacts: last_cofc,
-                                last_groups,
-                                updated_at_ms: 42,
-                            });
+                            for contacts_form in [ContactsForm::All, ContactsForm::Chosen] {
+                                out.push(VisibilitySetting {
+                                    mode,
+                                    contacts_of_contacts: cofc,
+                                    contacts_form,
+                                    chosen_contacts: vec![[7; 16], [8; 16]],
+                                    groups,
+                                    chosen: vec![
+                                        scope(ScopeKind::Group, 1, 32),
+                                        scope(ScopeKind::Channel, 2, 16),
+                                    ],
+                                    last_contacts_of_contacts: last_cofc,
+                                    last_groups,
+                                    updated_at_ms: 42,
+                                });
+                            }
                         }
                     }
                 }
@@ -902,24 +1070,33 @@ mod tests {
             }
         }
         // Some: 5 valid part combinations; Nobody / Everyone: 1 each; times
-        // 2 x 3 memory combinations.
-        assert_eq!(valid, (5 + 1 + 1) * 6);
+        // 2 x 3 memory combinations and the 2 contacts forms.
+        assert_eq!(valid, (5 + 1 + 1) * 6 * 2);
     }
 
     /// Encode past `validate`.
     fn raw_visibility(s: &VisibilitySetting) -> Vec<u8> {
         let mut out = VISIBILITY_ENVELOPE_DOMAIN_V1.to_vec();
-        out.push(VISIBILITY_VERSION_V1);
+        out.push(VISIBILITY_VERSION_V2);
         out.extend_from_slice(&s.updated_at_ms.to_be_bytes());
         out.push(s.mode.to_byte());
         out.push(u8::from(s.contacts_of_contacts) | (u8::from(s.last_contacts_of_contacts) << 1));
         out.push(groups_to_byte(s.groups));
         out.push(groups_to_byte(s.last_groups));
+        out.push(s.contacts_form.to_byte());
         out.extend_from_slice(&u16::try_from(s.chosen.len()).unwrap().to_be_bytes());
         for c in &s.chosen {
             out.push(c.kind.to_byte());
             out.push(u8::try_from(c.id.len()).unwrap());
             out.extend_from_slice(&c.id);
+        }
+        out.extend_from_slice(
+            &u16::try_from(s.chosen_contacts.len())
+                .unwrap()
+                .to_be_bytes(),
+        );
+        for id in &s.chosen_contacts {
+            out.extend_from_slice(id);
         }
         out
     }
@@ -931,7 +1108,10 @@ mod tests {
         assert_eq!(d.mode, VisibilityMode::Some);
         assert!(d.contacts_of_contacts);
         assert_eq!(d.groups, Some(GroupsForm::All));
+        assert_eq!(d.contacts_form, ContactsForm::All);
+        assert!(d.chosen_contacts.is_empty());
         assert!(d.allows_contacts_of_contacts());
+        assert!(d.allows_contact(&[9; 16]));
         assert!(d.allows_scope(&scope(ScopeKind::Group, 9, 8)));
     }
 
@@ -951,6 +1131,152 @@ mod tests {
         assert!(!s.allows_scope(&a) && !s.allows_contacts_of_contacts());
         s.mode = VisibilityMode::Everyone;
         assert!(s.allows_scope(&b) && s.allows_contacts_of_contacts());
+    }
+
+    #[test]
+    fn allows_contact_follows_the_form_and_the_list() {
+        let a = [1; 16];
+        let b = [2; 16];
+        let mut s = VisibilitySetting::default_for_new_account();
+        // All: every contact, listed or not.
+        assert!(s.allows_contact(&a));
+        s.chosen_contacts = vec![a];
+        assert!(s.allows_contact(&b));
+        // Chosen: only the list; an empty list reaches through nobody, while
+        // the part as a whole stays on.
+        s.contacts_form = ContactsForm::Chosen;
+        assert!(s.allows_contact(&a));
+        assert!(!s.allows_contact(&b));
+        s.chosen_contacts.clear();
+        assert!(!s.allows_contact(&a));
+        assert!(s.allows_contacts_of_contacts());
+        // The part off: a chosen contact does not reach past it.
+        s.chosen_contacts = vec![a];
+        s.contacts_of_contacts = false;
+        assert!(!s.allows_contact(&a));
+        // Nobody: the list means nothing, under either form.
+        s.mode = VisibilityMode::Nobody;
+        s.groups = None;
+        for form in [ContactsForm::All, ContactsForm::Chosen] {
+            s.contacts_form = form;
+            assert!(!s.allows_contact(&a));
+        }
+        // Everyone: anyone, whatever the form left over from Some people.
+        s.mode = VisibilityMode::Everyone;
+        s.contacts_form = ContactsForm::Chosen;
+        assert!(s.allows_contact(&b));
+    }
+
+    #[test]
+    fn the_chosen_contacts_are_no_scope_and_no_scope_is_a_contact() {
+        let id = [1; 16];
+        let mut s = VisibilitySetting::default_for_new_account();
+        s.groups = Some(GroupsForm::Chosen);
+        s.contacts_form = ContactsForm::Chosen;
+        s.chosen_contacts = vec![id];
+        assert!(!s.allows_scope(&ScopeId {
+            kind: ScopeKind::Group,
+            id: id.to_vec(),
+        }));
+        s.chosen_contacts.clear();
+        s.chosen = vec![ScopeId {
+            kind: ScopeKind::Group,
+            id: id.to_vec(),
+        }];
+        assert!(!s.allows_contact(&id));
+    }
+
+    #[test]
+    fn a_contact_id_is_exactly_sixteen_bytes() {
+        assert_eq!(contact_account_id(&[3; 16]), Ok([3; 16]));
+        for len in [0, 15, 17, 32] {
+            assert_eq!(
+                contact_account_id(&vec![3; len]),
+                Err(VisibilityError::ContactIdLength { len })
+            );
+        }
+    }
+
+    #[test]
+    fn chosen_contact_bounds_are_refused_by_compose_and_decode_alike() {
+        let ids = |n: usize| -> Vec<[u8; 16]> {
+            (0..n)
+                .map(|i| {
+                    let mut id = [0; 16];
+                    id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                    id
+                })
+                .collect()
+        };
+        let base = VisibilitySetting::default_for_new_account();
+        let cases = [
+            (
+                vec![[1; 16], [2; 16], [1; 16]],
+                VisibilityError::DuplicateContact,
+            ),
+            (
+                ids(MAX_CHOSEN_CONTACTS + 1),
+                VisibilityError::TooManyChosenContacts {
+                    count: MAX_CHOSEN_CONTACTS + 1,
+                },
+            ),
+        ];
+        for (chosen_contacts, why) in cases {
+            let mut s = base.clone();
+            s.chosen_contacts = chosen_contacts;
+            assert_eq!(compose_visibility(&s), Err(why));
+            assert_eq!(decode_visibility(&raw_visibility(&s)), Err(why));
+        }
+        // The full list fits, and the form does not change what is valid.
+        let mut full = base;
+        full.contacts_form = ContactsForm::Chosen;
+        full.chosen_contacts = ids(MAX_CHOSEN_CONTACTS);
+        let wire = compose_visibility(&full).unwrap();
+        assert_eq!(decode_visibility(&wire).unwrap(), full);
+    }
+
+    proptest::proptest! {
+        /// Any list, under either form, in any position that holds together,
+        /// survives the wire in its own order, and [`VisibilitySetting::allows_contact`]
+        /// answers from the form and the list alone.
+        #[test]
+        fn any_contact_list_round_trips_and_answers_for_itself(
+            ids in proptest::collection::hash_set(proptest::array::uniform16(proptest::num::u8::ANY), 0..32),
+            other in proptest::array::uniform16(proptest::num::u8::ANY),
+            chosen_form in proptest::bool::ANY,
+            cofc in proptest::bool::ANY,
+            mode in proptest::sample::select(vec![
+                VisibilityMode::Nobody,
+                VisibilityMode::Some,
+                VisibilityMode::Everyone,
+            ]),
+        ) {
+            let in_some = mode == VisibilityMode::Some;
+            let contacts_form = if chosen_form { ContactsForm::Chosen } else { ContactsForm::All };
+            let chosen_contacts: Vec<[u8; 16]> = ids.into_iter().collect();
+            let s = VisibilitySetting {
+                mode,
+                contacts_of_contacts: in_some && cofc,
+                contacts_form,
+                chosen_contacts: chosen_contacts.clone(),
+                groups: (in_some && !cofc).then_some(GroupsForm::All),
+                chosen: Vec::new(),
+                last_contacts_of_contacts: false,
+                last_groups: None,
+                updated_at_ms: 1,
+            };
+            proptest::prop_assert_eq!(decode_visibility(&compose_visibility(&s).unwrap()).unwrap(), s.clone());
+            for id in &chosen_contacts {
+                proptest::prop_assert_eq!(s.allows_contact(id), s.allows_contacts_of_contacts());
+            }
+            let listed = chosen_contacts.contains(&other);
+            let want = match mode {
+                VisibilityMode::Nobody => false,
+                VisibilityMode::Everyone => true,
+                VisibilityMode::Some => cofc && (!chosen_form || listed),
+            };
+            proptest::prop_assert_eq!(s.allows_contact(&other), want);
+        }
     }
 
     #[test]
@@ -1036,8 +1362,8 @@ mod tests {
             out
         };
         assert_eq!(
-            decode_visibility(&patch(dom, 2)),
-            Err(VisibilityError::UnknownVersion(2))
+            decode_visibility(&patch(dom, 3)),
+            Err(VisibilityError::UnknownVersion(3))
         );
         assert_eq!(
             decode_visibility(&patch(dom + 9, 3)),
@@ -1055,17 +1381,39 @@ mod tests {
             decode_visibility(&patch(dom + 12, 9)),
             Err(VisibilityError::UnknownGroupsForm(9))
         );
+        for byte in [0, 3] {
+            assert_eq!(
+                decode_visibility(&patch(dom + 13, byte)),
+                Err(VisibilityError::UnknownContactsForm(byte))
+            );
+        }
         assert_eq!(
-            decode_visibility(&patch(dom + 15, 0)),
+            decode_visibility(&patch(dom + 16, 0)),
             Err(VisibilityError::UnknownScopeKind(0))
         );
-        let mut huge = wire;
-        huge[dom + 13..dom + 15].copy_from_slice(&u16::MAX.to_be_bytes());
+        let mut huge = wire.clone();
+        huge[dom + 14..dom + 16].copy_from_slice(&u16::MAX.to_be_bytes());
         assert_eq!(
             decode_visibility(&huge),
             Err(VisibilityError::TooManyChosen {
                 count: usize::from(u16::MAX)
             })
+        );
+        // The contacts count sits before the two ids `all_shapes` chooses.
+        let at = wire.len() - 2 * CONTACT_ACCOUNT_ID_LEN - 2;
+        let mut huge = wire.clone();
+        huge[at..at + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(
+            decode_visibility(&huge),
+            Err(VisibilityError::TooManyChosenContacts {
+                count: usize::from(u16::MAX)
+            })
+        );
+        // Version 1 is refused outright (the flag day), and the refusal says
+        // so rather than looking like a truncation.
+        assert_eq!(
+            decode_visibility(&patch(dom, 1)),
+            Err(VisibilityError::UnknownVersion(1))
         );
         assert_eq!(try_unwrap_visibility(b"hello"), Ok(None));
         assert_eq!(
@@ -1079,11 +1427,14 @@ mod tests {
         let mut s = VisibilitySetting::default_for_new_account();
         s.updated_at_ms = 0x0102_0304_0506_0708;
         s.chosen = vec![scope(ScopeKind::Channel, 0xAA, 2)];
+        s.contacts_form = ContactsForm::Chosen;
+        s.chosen_contacts = vec![[0xBB; 16]];
         let wire = compose_visibility(&s).unwrap();
         let mut expected = b"lakko/visibility/v1\x00".to_vec();
         expected.extend_from_slice(&[
-            1, 1, 2, 3, 4, 5, 6, 7, 8, 1, 0b11, 1, 1, 0, 1, 2, 2, 0xAA, 0xAA,
+            2, 1, 2, 3, 4, 5, 6, 7, 8, 1, 0b11, 1, 1, 2, 0, 1, 2, 2, 0xAA, 0xAA, 0, 1,
         ]);
+        expected.extend_from_slice(&[0xBB; 16]);
         assert_eq!(wire, expected);
     }
 
@@ -1431,6 +1782,8 @@ mod tests {
             scope(ScopeKind::Group, 1, 3),
             scope(ScopeKind::Channel, 2, 2),
         ];
+        setting.contacts_form = ContactsForm::Chosen;
+        setting.chosen_contacts = vec![[3; 16], [4; 16]];
         let wire = compose_visibility(&setting).unwrap();
         for at in 0..wire.len() {
             for byte in 0..=u8::MAX {
@@ -1470,6 +1823,19 @@ mod tests {
             "reach.scopeIdEmpty"
         );
         assert_eq!(VisibilityError::DuplicateEntry.code(), "duplicateEntry");
+        assert_eq!(
+            VisibilityError::UnknownContactsForm(9).code(),
+            "unknownContactsForm"
+        );
+        assert_eq!(
+            VisibilityError::TooManyChosenContacts { count: 5000 }.code(),
+            "tooManyChosenContacts"
+        );
+        assert_eq!(VisibilityError::DuplicateContact.code(), "duplicateContact");
+        assert_eq!(
+            VisibilityError::ContactIdLength { len: 3 }.code(),
+            "contactIdLength"
+        );
     }
 
     #[test]
@@ -1484,6 +1850,7 @@ mod tests {
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::group_photo::GROUP_PHOTO_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
@@ -1523,9 +1890,18 @@ mod tests {
                 }
             })
             .collect();
+        let chosen_contacts: Vec<[u8; 16]> = (0..MAX_CHOSEN_CONTACTS)
+            .map(|i| {
+                let mut id = [0; 16];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                id
+            })
+            .collect();
         let setting = VisibilitySetting {
             mode: VisibilityMode::Some,
             contacts_of_contacts: true,
+            contacts_form: ContactsForm::Chosen,
+            chosen_contacts,
             groups: Some(GroupsForm::Chosen),
             chosen,
             last_contacts_of_contacts: true,
@@ -1536,7 +1912,7 @@ mod tests {
             compose_visibility(&setting).unwrap().len(),
             MAX_VISIBILITY_ENVELOPE_LEN
         );
-        assert_eq!(MAX_VISIBILITY_ENVELOPE_LEN, 67_619);
+        assert_eq!(MAX_VISIBILITY_ENVELOPE_LEN, 133_158);
 
         let entries: Vec<ReachStateEntry> = (0..MAX_REACH_STATE_ENTRIES)
             .map(|i| {

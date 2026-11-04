@@ -64,8 +64,8 @@ use openmls::extensions::{
 };
 use openmls::framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, Sender};
 use openmls::group::{
-    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, QueuedProposal, StagedCommit,
-    StagedWelcome,
+    GroupContext, GroupEpoch, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, QueuedProposal,
+    StagedCommit, StagedWelcome,
 };
 use openmls::messages::proposals::{Proposal, ProposalType};
 use openmls::prelude::{
@@ -73,6 +73,7 @@ use openmls::prelude::{
 };
 use openmls::treesync::EncryptionKey;
 use openmls_rust_crypto::MemoryStorage;
+use openmls_traits::storage::StorageProvider as _;
 use openmls_traits::types::VerifiableCiphersuite;
 use openmls_traits::OpenMlsProvider as _;
 use tls_codec::{Deserialize as _, Serialize as _};
@@ -301,6 +302,57 @@ fn pending_external_joins_row_key(group_id: &[u8]) -> Vec<u8> {
     key.extend_from_slice(PENDING_EXTERNAL_JOINS_ROW_DOMAIN);
     key.extend_from_slice(group_id);
     key
+}
+
+/// Remove an ended group from `identity`'s storage.
+///
+/// `MlsGroup::delete` removes the epoch key pairs of the group's CURRENT epoch
+/// only, and for an evicted group that is the wrong one. A commit that removes
+/// this device merges through OpenMLS's `PublicState` arm, which advances the
+/// context to N+1 and never touches the key pairs, so the leaf and path private
+/// keys stay filed under epoch N (`staged_commit.rs` `merge_commit`). They are
+/// deleted here first, or they would outlive the group in every snapshot.
+///
+/// The queued proposals go by hand as well. `clear_proposal_queue` in
+/// `openmls_memory_storage` 0.5.0 removes each row under a key with neither its
+/// label nor its version (`lib.rs:859-862`), so it clears the list and misses
+/// every row. They are public bytes, but they say who was added and removed,
+/// and a chat this device was removed from should not keep that.
+fn delete_stored_group(identity: &Identity, stored: &mut MlsGroup) -> Result<()> {
+    let storage = identity.provider.storage();
+    let group_id = stored.group_id().as_slice().to_vec();
+    if let Some(previous) = stored.epoch().as_u64().checked_sub(1) {
+        storage
+            .delete_encryption_epoch_key_pairs(
+                stored.group_id(),
+                &GroupEpoch::from(previous),
+                stored.own_leaf_index().u32(),
+            )
+            .map_err(|e| Error::Group(format!("delete epoch key pairs: {e:?}")))?;
+    }
+    stored
+        .delete(storage)
+        .map_err(|e| Error::Group(format!("delete group: {e:?}")))?;
+    let queued = queued_proposal_row_prefix(&group_id);
+    storage
+        .values
+        .write()
+        .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?
+        .retain(|key, _| !key.starts_with(&queued));
+    Group::drop_pending_external_joins_row(identity, &group_id)
+}
+
+/// How `MemoryStorage` starts the key of a queued proposal of `group_id`: its
+/// label, then the JSON of `(group_id, proposal_ref)` up to the comma. Pinned by
+/// `delete_leaves_no_row_of_an_ended_group`: a format change leaves rows behind
+/// and fails it.
+fn queued_proposal_row_prefix(group_id: &[u8]) -> Vec<u8> {
+    let bytes = group_id
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("QueuedProposal[{{\"value\":{{\"vec\":[{bytes}]}}}},").into_bytes()
 }
 
 /// Encode the retained requests as the row body. Only the KeyPackages are
@@ -555,6 +607,62 @@ pub enum Incoming {
     },
 }
 
+/// The most requests to join a group holds awaiting a decision (ADR-0027,
+/// ADR-0087 section 5). A reader of the knock queue reads at most this many
+/// rows at a time and stops its cursor while the queue is full, so the backlog
+/// stays on the Delivery Service instead of being lost.
+pub const MAX_PENDING_JOIN_REQUESTS: usize = MAX_PENDING_EXTERNAL_JOINS;
+
+/// What [`Group::retain_join_request`] did with one request to join
+/// ([ADR-0087] section 5).
+///
+/// A refusal that changes no state is data, not an error, as for
+/// [`Incoming::ExternalJoinProposal`]: the reader of the knock queue needs to
+/// tell "drop this row" from "stop reading", and only [`Self::QueueFull`] is
+/// the second.
+///
+/// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinRequestOutcome {
+    /// Kept. An approve can act on it.
+    Retained,
+    /// The same joiner (by leaf signature key) was already waiting. Nothing
+    /// changed and an approve can still act on the request held.
+    AlreadyPending,
+    /// The joiner's leaf is already in the group. Nothing kept.
+    AlreadyMember,
+    /// [`MAX_PENDING_JOIN_REQUESTS`] requests are already waiting. Nothing
+    /// kept: the reader stops its knock cursor before this row, so the row
+    /// stays on the Delivery Service and is read again once a request is
+    /// decided.
+    QueueFull,
+    /// The request can never join this group: the group is a one-to-one, the
+    /// leaf credential resolves to no account (ADR-0050), or the leaf cannot
+    /// live in this group (ciphersuite, capabilities, required extensions,
+    /// lifetime). Nothing kept; the row is dropped.
+    NotAdmissible,
+}
+
+impl JoinRequestOutcome {
+    /// `true` when an approve can act on the request: it was kept now or was
+    /// already held.
+    #[must_use]
+    pub const fn is_retained(self) -> bool {
+        matches!(self, Self::Retained | Self::AlreadyPending)
+    }
+}
+
+/// The answer of [`Group::retain_join_request`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinRequest {
+    /// The joiner's leaf signature public key: the handle
+    /// [`Group::approve_external_join`] and [`Group::reject_external_join`]
+    /// take, and what [`Group::pending_external_joins`] lists.
+    pub joiner_signature_key: Vec<u8>,
+    /// What was done with the request.
+    pub outcome: JoinRequestOutcome,
+}
+
 impl Group {
     /// Create a new MLS group with the given identity as the founding member.
     ///
@@ -740,8 +848,32 @@ impl Group {
     }
 
     /// The one Welcome join. Every check that can refuse runs on the STAGED
-    /// Welcome, before `into_group` writes anything, so a refused join leaves
-    /// no group in the identity's storage.
+    /// Welcome, before anything is written, so a refused join leaves the
+    /// identity's storage as it found it: no new group, the group stored under
+    /// that id untouched, and the KeyPackage that opened the Welcome still
+    /// usable. That last part rests on every KeyPackage Lakko mints being a
+    /// last-resort one ([`Identity::create_key_package`]): OpenMLS deletes a
+    /// one-time package while it decrypts a Welcome, before any check here.
+    ///
+    /// **A Welcome replaces an ended group and nothing else (C-88).** The
+    /// stored group is judged last, on an id read from the verified
+    /// `GroupContext`, so only a Welcome that passed every other check can
+    /// reach it:
+    ///
+    /// * none stored: the ordinary join;
+    /// * stored and active: refused, typed, and nothing changes. A Welcome
+    ///   proves that SOME group of that id invited this device, and anyone who
+    ///   knows the id can build one, so it can never overwrite a live chat;
+    /// * stored and ended, for a conversation: its rows go, then the join
+    ///   lands. This is how a person removed from a group comes back;
+    /// * stored and ended, for a [`crate::DeviceGroup`] or a
+    ///   [`crate::PublisherGroup`]: refused. Neither has a re-add path through
+    ///   this identity's provider (a DeviceGroup rejoin runs on a fresh
+    ///   [`Identity`]), so the refusal OpenMLS gave stays.
+    ///
+    /// `replace_old_group` only turns off OpenMLS's own refusal of a stored
+    /// group, which runs while staging and looks at no state beyond "a row
+    /// exists": staging writes nothing, and the decision is taken below.
     fn join_admitted(
         welcome_bytes: &[u8],
         identity: &Identity,
@@ -756,7 +888,10 @@ impl Group {
         let cfg = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
-        let staged = StagedWelcome::new_from_welcome(&identity.provider, &cfg, welcome, None)
+        let staged = StagedWelcome::build_from_welcome(&identity.provider, &cfg, welcome)
+            .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?
+            .replace_old_group()
+            .build()
             .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?;
         // ADR-0062 + ADR-0081 amendment: an ordinary group is a conversation,
         // so it carries the role table and its kind, readably, or it is not
@@ -788,10 +923,144 @@ impl Group {
                 "welcome refused: a member's device binding does not verify",
             ));
         }
+
+        let stored = MlsGroup::load(
+            identity.provider.storage(),
+            staged.group_context().group_id(),
+        )
+        .map_err(|e| Error::Group(format!("load stored group: {e:?}")))?;
+        if let Some(mut stored) = stored {
+            if stored.is_active() {
+                return Err(Error::GroupStillActive {
+                    group_id: stored.group_id().as_slice().to_vec(),
+                });
+            }
+            if admission == WelcomeAdmission::TableLess {
+                return Err(Error::Group(
+                    "welcome refused: an ended device or publisher group is not replaced".into(),
+                ));
+            }
+            delete_stored_group(identity, &mut stored)?;
+        }
+
         let inner = staged
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
         Ok(Self::from_mls_group(inner))
+    }
+
+    /// Delete this group's state from `identity`'s storage: every row OpenMLS
+    /// keeps under the group id, the retained external-join requests, and the
+    /// private keys an eviction leaves behind (`delete_stored_group`).
+    ///
+    /// For a group this device is out of. Deleting does not leave the group:
+    /// it says nothing to anyone, and it is how the device stops holding a
+    /// chat it was removed from. Repeating it changes nothing.
+    ///
+    /// Judged on what is STORED, not on this handle: a Welcome may have
+    /// replaced the ended group since this handle was read, and a stale handle
+    /// must not delete the group that took its place.
+    ///
+    /// **What stays, deliberately:** the KeyPackage bundle that opened this
+    /// group's Welcome. It is a last-resort package, keyed by nothing that
+    /// names a group, and it opens every Welcome sealed to it (ADR-0050 section
+    /// 2.6), so deleting it here would break a Welcome into another group still
+    /// on its way. Its init and leaf private keys live until the identity's
+    /// storage is wiped; that is the forward-secrecy cost ADR-0050 records.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::GroupStillActive`] when the stored group is active, and nothing
+    /// changes; [`Error::Group`] on a storage failure.
+    pub fn delete(&mut self, identity: &Identity) -> Result<()> {
+        self.delete_stored(identity, MlsGroup::is_active)
+    }
+
+    /// Delete this group's state on the word of this account's other devices,
+    /// without having applied the commit that ended it (ADR-0087 section 9,
+    /// C-88).
+    ///
+    /// [`Self::delete`] refuses an active group, and a device that hears of an
+    /// end from a `conversation_ended` register holds an active group: the
+    /// commit is still ahead of it in the journal, and past the journal's
+    /// 30-day retention it never arrives. This is the one way such a device
+    /// stops holding the group.
+    ///
+    /// **The caller holds a `conversation_ended` register from its own
+    /// account's synced state, and `ended_epoch` is that register's epoch.**
+    /// Nothing else may call this: the core cannot see the register, and a
+    /// caller that reaches here on anything else deletes a live membership.
+    /// The DeviceGroup carrying the register is what authenticates it, so what
+    /// this rests on is that the account's own devices do not lie to each
+    /// other. A server cannot reach this: a refused read is not a register.
+    ///
+    /// **`ended_epoch` is what keeps a stale register off a rejoined group.**
+    /// A Welcome stores the group under the same id at a later epoch, so an
+    /// active group ABOVE the epoch of the end is one this device came back
+    /// to, and it is refused like a live group is by [`Self::delete`], with
+    /// nothing changed. Such a device holds a later truth than the register:
+    /// the caller answers with a `joined` register. An active group at or
+    /// below `ended_epoch` is the one that ended. A group that is not active
+    /// is deleted at any epoch, exactly as [`Self::delete`] would.
+    ///
+    /// Judged on what is STORED, like [`Self::delete`], so a stale handle
+    /// cannot take a group that replaced it. Repeating it changes nothing. The
+    /// same rows go as for [`Self::delete`], a staged sweep's with them: a
+    /// commit this device had staged is dropped, its verdict moot, and the
+    /// caller drops the matching ADR-0040 outbox entry. It says nothing to
+    /// anyone and leaves no trace in the group: the leaf stays in the tree
+    /// until a commit removes it, and the people left never hear of this. The
+    /// KeyPackage bundle stays, for the reason [`Self::delete`] gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::GroupStillActive`] when the stored group is active at an epoch
+    /// above `ended_epoch`, and nothing changes; [`Error::Group`] on a storage
+    /// failure.
+    pub fn delete_after_ended_elsewhere(
+        &mut self,
+        identity: &Identity,
+        ended_epoch: u64,
+    ) -> Result<()> {
+        self.delete_stored(identity, |stored| {
+            stored.is_active() && stored.epoch().as_u64() > ended_epoch
+        })
+    }
+
+    /// The body of both deletes: the stored group goes unless `keep` says it
+    /// stays, in which case the answer is [`Error::GroupStillActive`] and
+    /// nothing changes. With no stored group only the retained requests of
+    /// this handle remain to clear.
+    fn delete_stored(
+        &mut self,
+        identity: &Identity,
+        keep: impl FnOnce(&MlsGroup) -> bool,
+    ) -> Result<()> {
+        let group_id = self.group_id();
+        let stored = MlsGroup::load(identity.provider.storage(), self.inner.group_id())
+            .map_err(|e| Error::Group(format!("load stored group: {e:?}")))?;
+        let Some(mut stored) = stored else {
+            self.pending_external_joins.clear();
+            return Self::drop_pending_external_joins_row(identity, &group_id);
+        };
+        if keep(&stored) {
+            return Err(Error::GroupStillActive { group_id });
+        }
+        delete_stored_group(identity, &mut stored)?;
+        self.pending_external_joins.clear();
+        Ok(())
+    }
+
+    /// Remove `group_id`'s retained-requests row from the provider.
+    fn drop_pending_external_joins_row(identity: &Identity, group_id: &[u8]) -> Result<()> {
+        identity
+            .provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?
+            .remove(&pending_external_joins_row_key(group_id));
+        Ok(())
     }
 
     /// **A direct commit must never carry a proposal it did not ask for.**
@@ -1563,6 +1832,117 @@ impl Group {
             joiner_signature_key,
             retained,
         })
+    }
+
+    /// Retain a request to join carried as a bare KeyPackage ([ADR-0087]
+    /// section 5), for an owner or admin to decide.
+    ///
+    /// The ADR-0087 knock row is a KeyPackage sealed to the group's knock key,
+    /// with no MLS message around it. A KeyPackage has no epoch, so a request
+    /// kept here survives every commit the group makes while it waits, unlike
+    /// the external proposal of ADR-0027, which OpenMLS accepts only at the
+    /// epoch it was framed for. Opening the sealed row is the caller's
+    /// (`lakko-contacts`); this takes the KeyPackage it carried.
+    ///
+    /// What is checked, in order:
+    ///
+    /// 1. `key_package` is exactly one wire KeyPackage (nothing after it) that
+    ///    validates: leaf and package signatures, protocol version, init key
+    ///    distinct from the encryption key, lifetime. Anything else is an
+    ///    error, so a commit, an application message, a Welcome or an external
+    ///    proposal written into a knock row is refused before any group state
+    ///    is read or written.
+    /// 2. It can join this group: not a one-to-one (ADR-0062), a leaf
+    ///    credential that resolves to an account (the ADR-0050 binding,
+    ///    verified), and a leaf the group can carry (the same check the sweep
+    ///    runs before it commits an `Add`). Otherwise
+    ///    [`JoinRequestOutcome::NotAdmissible`].
+    /// 3. The joiner is not already a member, is not already waiting, and the
+    ///    queue has room ([`MAX_PENDING_JOIN_REQUESTS`]).
+    ///
+    /// A kept request goes into the same quarantine an external proposal does,
+    /// persisted the same way, so [`Self::approve_external_join`] (ordinary
+    /// group, an `Add` proposal the admin authors) and
+    /// [`crate::PublisherGroup::approve_external_join`] (a direct commit)
+    /// approve it unchanged, and peers judge the admin's proposal as before.
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] when the bytes are not exactly one KeyPackage,
+    /// [`Error::KeyPackage`] when it does not validate, [`Error::Identity`]
+    /// when the storage lock is poisoned. Nothing is changed on any error.
+    pub fn retain_join_request(
+        &mut self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<JoinRequest> {
+        let key_package = crate::key_package::deserialize_exact(key_package)?
+            .validate(identity.provider.crypto(), GROUP_PROTOCOL_VERSION)
+            .map_err(|e| Error::KeyPackage(format!("join request validate: {e:?}")))?;
+        let leaf = key_package.leaf_node();
+        let joiner_signature_key = leaf.signature_key().as_slice().to_vec();
+        let answer = |outcome| JoinRequest {
+            joiner_signature_key: joiner_signature_key.clone(),
+            outcome,
+        };
+
+        let binding_resolves = crate::device_binding::account_key_of_credential(
+            leaf.credential().serialized_content(),
+            &joiner_signature_key,
+        )
+        .is_some();
+        if self.group_kind() == Some(GroupKind::OneToOne)
+            || !binding_resolves
+            || !leaf_fits_group(&self.admission_requirements(&[]), identity, &key_package)
+        {
+            return Ok(answer(JoinRequestOutcome::NotAdmissible));
+        }
+
+        let before = self.pending_external_joins.len();
+        self.reap_joined_external_joins();
+        let reaped = self.pending_external_joins.len() != before;
+
+        let outcome = if self.joiner_is_already_a_member(&joiner_signature_key) {
+            JoinRequestOutcome::AlreadyMember
+        } else if self
+            .pending_external_joins
+            .iter()
+            .any(|p| p.joiner_signature_key == joiner_signature_key)
+        {
+            JoinRequestOutcome::AlreadyPending
+        } else if self.pending_external_joins.len() >= MAX_PENDING_EXTERNAL_JOINS {
+            JoinRequestOutcome::QueueFull
+        } else {
+            self.pending_external_joins.push(PendingExternalJoin {
+                joiner_signature_key: joiner_signature_key.clone(),
+                key_package,
+            });
+            JoinRequestOutcome::Retained
+        };
+        if reaped || outcome == JoinRequestOutcome::Retained {
+            if let Err(e) = self.persist_pending_external_joins(identity) {
+                // Keep "nothing is changed on any error": the working copy
+                // must not hold what the durable copy does not.
+                if outcome == JoinRequestOutcome::Retained {
+                    self.pending_external_joins.pop();
+                }
+                return Err(e);
+            }
+        }
+        Ok(answer(outcome))
+    }
+
+    /// How many more requests to join this group can hold now
+    /// ([`MAX_PENDING_JOIN_REQUESTS`] minus those waiting). A reader of the
+    /// knock queue reads at most this many rows and reads none at zero
+    /// ([ADR-0087] section 5: the cursor stops while the queue is full).
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+    #[must_use]
+    pub fn join_request_room(&self) -> usize {
+        MAX_PENDING_EXTERNAL_JOINS.saturating_sub(self.pending_external_joins().len())
     }
 
     /// `true` when `signature_key` already sits in this group's roster.
@@ -4507,7 +4887,18 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
 ///   near-expiry KeyPackage and predates this filter; excluding an
 ///   already-expired one strictly narrows the window rather than opening it.
 fn added_leaf_can_join(ctx: &SweepContext<'_>, key_package: &KeyPackage) -> bool {
-    let admission = ctx.admission;
+    leaf_fits_group(ctx.admission, ctx.identity, key_package)
+}
+
+/// The body of [`added_leaf_can_join`], over the group's admission snapshot
+/// alone, so [`Group::retain_join_request`] asks the same question when it
+/// keeps a request that the sweep asks when it commits one (ADR-0087 section
+/// 5): a request no committer could ever carry is never shown for approval.
+fn leaf_fits_group(
+    admission: &GroupAdmission,
+    identity: &Identity,
+    key_package: &KeyPackage,
+) -> bool {
     // ValSem105, first half. The second half (protocol version) is not readable
     // from a `KeyPackage` — `KeyPackage::protocol_version` is `pub(crate)` — and
     // is covered by the re-validation below, which takes the version as its
@@ -4526,7 +4917,7 @@ fn added_leaf_can_join(ctx: &SweepContext<'_>, key_package: &KeyPackage) -> bool
         .ok()
         .and_then(|kp_in| {
             kp_in
-                .validate(ctx.identity.provider.crypto(), admission.protocol_version)
+                .validate(identity.provider.crypto(), admission.protocol_version)
                 .ok()
         });
     if revalidated.is_none() {
@@ -8374,5 +8765,102 @@ mod one_to_one_gate_tests {
                 proptest::prop_assert_eq!(reason, Some(RefusalReason::NoRoleTable));
             }
         }
+    }
+}
+
+/// C-88 against a forger who gets through every admission check: a conversation
+/// under the id of the victim's live group, with a role table, a kind and bound
+/// leaves. The public API cannot build one, so this lives here.
+#[cfg(test)]
+mod forged_welcome_tests {
+    use super::*;
+
+    fn wire(msg: &MlsMessageOut) -> Vec<u8> {
+        encode_message(msg).expect("encode")
+    }
+
+    fn kp_wire(id: &Identity) -> Vec<u8> {
+        crate::key_package::serialize(&id.create_key_package().expect("kp")).expect("serialize")
+    }
+
+    /// [`Group::create`] under a chosen id.
+    fn conversation_with_id(identity: &Identity, group_id: &[u8]) -> Group {
+        let owner = identity.account_public_key().expect("32-byte key");
+        let exts = Extensions::from_vec(vec![
+            conversation_required_capabilities(),
+            Extension::Unknown(
+                ROLE_EXTENSION_TYPE,
+                UnknownExtension(RoleTable::owner_only(owner).encode()),
+            ),
+            GroupKind::Group.extension(),
+        ])
+        .expect("extensions");
+        let cfg = MlsGroupCreateConfig::builder()
+            .ciphersuite(identity.ciphersuite())
+            .use_ratchet_tree_extension(true)
+            .capabilities(crate::device_group::lakko_leaf_capabilities(
+                identity.ciphersuite(),
+            ))
+            .with_group_context_extensions(exts)
+            .build();
+        Group::create_inner(identity, &cfg, group_id, "forged").expect("forged group")
+    }
+
+    fn sorted_rows(id: &Identity) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let map = id.provider.storage().values.read().expect("storage");
+        let mut rows: Vec<_> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// The full forgery reaches the stored-group decision, because everything
+    /// before it passes, and the decision refuses it: the live group is
+    /// untouched, byte for byte, and goes on working with its real peers.
+    #[test]
+    fn a_forged_welcome_never_overwrites_a_live_chat() {
+        let alice = Identity::from_seed(&[0x11; 64]).expect("alice");
+        let victim = Identity::from_seed(&[0x22; 64]).expect("victim");
+        let mallory = Identity::from_seed(&[0x33; 64]).expect("mallory");
+
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("group");
+        let add = alice_g
+            .add_member_from_wire(&alice, &kp_wire(&victim))
+            .expect("add");
+        let mut victim_g =
+            Group::join_from_welcome(&wire(&add.welcome), &victim).expect("victim joins");
+        let group_id = alice_g.group_id();
+
+        let mut forged_g = conversation_with_id(&mallory, &group_id);
+        let forged = forged_g
+            .add_member_from_wire(&mallory, &kp_wire(&victim))
+            .expect("mallory invites the victim");
+
+        let before = sorted_rows(&victim);
+        let refused = Group::join_from_welcome(&wire(&forged.welcome), &victim)
+            .err()
+            .expect("refused");
+        assert_eq!(
+            refused.refusal_reason(),
+            Some(RefusalReason::GroupStillActive),
+            "the admission checks passed and the stored group refused it, got {refused}"
+        );
+        assert!(
+            matches!(&refused, Error::GroupStillActive { group_id: named } if *named == group_id)
+        );
+        assert_eq!(sorted_rows(&victim), before, "nothing was written");
+
+        let loaded = Group::load(&victim, &group_id)
+            .expect("load")
+            .expect("the group is still there");
+        assert!(loaded.is_active());
+        assert_eq!(loaded.epoch(), alice_g.epoch());
+
+        let out = victim_g
+            .create_application_message(&victim, b"still mine")
+            .expect("the victim sends");
+        let got = alice_g
+            .process_incoming_verifying_roles(&alice, &wire(&out))
+            .expect("alice reads the victim");
+        assert!(matches!(got, Incoming::Application { .. }));
     }
 }

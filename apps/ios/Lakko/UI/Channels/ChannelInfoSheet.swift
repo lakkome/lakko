@@ -4,8 +4,9 @@
 import LakkoCore
 import SwiftUI
 
-/// A channel's info layer, opened by tapping its name
-/// (`docs/ux/conversation-info.md` sections 1 and 2.3).
+/// A channel's info, opened by tapping its name
+/// (`docs/ux/conversation-info.md` sections 1 and 2.3): a screen pushed over
+/// the channel, with the system back returning to it (section 3.1).
 ///
 /// A channel used to have no info layer on iOS at all. The argument for that
 /// was that ``ChannelDetailScreen`` is "both its conversation and its info",
@@ -31,9 +32,8 @@ struct ChannelInfoSheet: View {
     /// The handle the channel was found by when it is not listed yet.
     var foundHandle: String = ""
     /// The channel has left this device's list and the screen behind this
-    /// layer has nothing left to show.
+    /// one has nothing left to show.
     let onUnsubscribed: () -> Void
-    let onDone: () -> Void
 
     @State private var confirmingStopFollowing = false
 
@@ -81,8 +81,7 @@ struct ChannelInfoSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
+        List {
                 Section {
                     VStack(spacing: 8) {
                         InitialsAvatar(
@@ -154,11 +153,6 @@ struct ChannelInfoSheet: View {
             .listStyle(.insetGrouped)
             .navigationTitle(l10n.t("chat.info.channel"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(l10n.t("common.done"), action: onDone)
-                }
-            }
             .lakkoDialog(
                 isPresented: $confirmingStopFollowing,
                 title: l10n.t("channels.unsubscribe.title_named", texts: ["name": title]),
@@ -166,7 +160,6 @@ struct ChannelInfoSheet: View {
             ) {
                 [.danger(l10n.t("channels.unsubscribe.action")) { stopFollowing() }, .cancel()]
             }
-        }
     }
 
     /// The same two calls web's `confirmStopFollowing` makes, in the same
@@ -174,19 +167,10 @@ struct ChannelInfoSheet: View {
     /// the channel from the local list.
     private func stopFollowing() {
         // ADR-0060 section 3 — leave on the server too (the subscriber row,
-        // its seed envelopes and its member card). Signed by the subscriber
-        // key, so the keys are captured before they are forgotten; the local
-        // state goes whatever the network does (a failure is logged).
-        if let keys = state.subscriberKeysByChannel[channelId] {
-            let id = channelId
-            Task { await ChannelUnsubscribe.run(keys: keys, channelId: id) }
-        }
-        ChannelMemberCards.forgetUploads(channelId: channelId)
-        state.clearSubscriberKeys(channelId)
-        state.removeChannel(channelId)
-        // ADR-0078 section 9 — the channel's members hold this account's one
-        // `channel` key: the registration sees the channel gone and rotates it.
-        ReachCenter.shared.sync()
+        // its seed envelopes and its member card).
+        ChannelUnsubscribe.stopFollowing(state: state, channelId: channelId)
+        // ADR-0087 section 9 — and on the account's other devices.
+        state.onUnsubscribedHere?(channelId)
         onUnsubscribed()
     }
 }

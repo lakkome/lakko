@@ -44,6 +44,8 @@ final class NseCallAlertTests: XCTestCase {
     }
 
     private final class FakeDeps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         let account: NseResolvedAccount
         let group: FakeGroup
         let rows: [NseFetchedRow]

@@ -335,7 +335,7 @@ final class OwnEchoRegistryTests: XCTestCase {
     /// peer connection is ever built.
     private func makeHost() -> CallHost {
         CallHost(ports: CallHost.Ports(
-            publish: { _, _ in true },
+            publish: { _, _, _ in true },
             deriveCallKey: { _, _ in (Data(repeating: 0x42, count: 32), 0) },
             nowMs: { [nowMs] in nowMs },
             schedule: { _, _ in NoopTimer() },

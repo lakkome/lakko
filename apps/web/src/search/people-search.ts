@@ -35,7 +35,9 @@
  * does not open or fails either check is ignored. A name this device already
  * holds (a contact, a profile from a shared group or channel) wins over the
  * record's. A name hit nothing names is dropped; a username match without a
- * usable record is shown under its username.
+ * usable record is shown under its username. The record also states the
+ * person's username and its certificate: a name hit shows the username once
+ * the certificate proves it, as an introduction's does, and never before.
  *
  * Every dependency is an argument, so the whole decision is testable.
  */
@@ -64,7 +66,8 @@ export interface KnownPerson {
   readonly contactFallbackName: string | null;
   readonly verifiedUsername: string | null;
   readonly isContact: boolean;
-  readonly keptGrantWireB64: string | null;
+  /** Every grant kept for them, in the order they are tried. */
+  readonly keptGrantWires: readonly string[];
 }
 
 /** One lookup hit: an account in Everyone and its public record (standard
@@ -79,6 +82,10 @@ export interface OpenedPublicRecord {
   readonly identityPk: Uint8Array;
   readonly accountId: Uint8Array;
   readonly displayName: string | null;
+  /** The username the record states, and the discovery certificate for it. A
+   *  claim until {@link PeopleSearchDeps.verifyUsername} says otherwise. */
+  readonly username?: string | null;
+  readonly usernameCertificate?: Uint8Array | null;
   /** ADR-0078 - the person's 97-byte mailbox binding, the core verified
    *  against `identityPk`. Absent from a fake that does not model it. */
   readonly mailboxBinding?: Uint8Array | null;
@@ -96,6 +103,9 @@ export interface PeopleSearchDeps {
   lookupChannel?(handle: string): Promise<string | null>;
   /** One OPRF round over a username (one anonymous token). */
   usernameOprf(username: string): Promise<OprfPair>;
+  /** The lookup key of a username a record states, kept once it is known so a
+   *  person found again costs no token. Absent: one {@link usernameOprf}. */
+  usernameLookupKey?(username: string): Promise<Uint8Array>;
   /** `/discovery/lookup` by the username's LOOKUP KEY: the account id and
    *  its public record, or `null`. */
   accountOfUsernameLookupKey(lookupKey: Uint8Array): Promise<LookupHit | null>;
@@ -127,17 +137,65 @@ export interface PeopleSearchDeps {
   /** Standard base64 of a grant wire. */
   encodeGrant(wire: Uint8Array): string;
   readonly ownKeyHex: string | null;
+  /** How many introduction records {@link openIntroductions} went through;
+   *  0 when it was not called. Absent: not counted. */
+  introductionRecordsHeld?(): number;
+  /** Called once when a search finishes. */
+  logCounts?(counts: SearchCounts): void;
+  /** ADR-0087 section 4 — the sealed record of a public group or channel the
+   *  exact `@name` names, or `null` (`/discovery/lookup` answering `handle`).
+   *  Absent: groups are not asked. */
+  conversationRecordOfLookupKey?(lookupKey: Uint8Array): Promise<Uint8Array | null>;
+  /** The sealed records of public groups and channels carrying a name term. */
+  conversationRecordsOfTermLookupKey?(lookupKey: Uint8Array): Promise<Uint8Array[]>;
+  /** `openSearchRecord` for a conversation, with the OUTPUT of the round that
+   *  found it; `null` when it does not open. Never throws. */
+  openConversationRecord?(record: Uint8Array, oprfOutput: Uint8Array): FoundConversation | null;
+}
+
+/** ADR-0087 section 5 — a public group or channel found by search. */
+export interface FoundConversation {
+  readonly kind: "group" | "channel";
+  /** The group id (32 bytes) or channel id (16), base64. */
+  readonly idB64: string;
+  readonly handle: string;
+  readonly name: string;
+  readonly description: string;
+  /** The ADR-0059 band, 0..5. */
+  readonly sizeBand: number;
+  /** A group's knock public key, a channel's read key. */
+  readonly key: Uint8Array;
+  /** The version of a group's knock key: the request names it (ADR-0087
+   *  section 5). 0 for a channel. */
+  readonly knockVersion: number;
+  readonly avatar: import("../profile/avatar-model").AvatarData | null;
+}
+
+/** What one finished search went through: counts only, never a name, key,
+ *  query or grant, so they are safe to log. */
+export interface SearchCounts {
+  readonly recordsHeld: number;
+  readonly recordsOpened: number;
+  /** Opened records the whole query matched. */
+  readonly keptAfterMatch: number;
+  /** Results dropped because the reach check said no. */
+  readonly refusedByReachCheck: number;
+  /** People in the answer. */
+  readonly people: number;
 }
 
 export interface PeopleSearchOutcome {
   readonly people: readonly PersonResult[];
   readonly channel: { readonly idHex: string; readonly handle: string } | null;
   readonly state: PeopleSearchState;
+  /** ADR-0087 section 5 — public groups and channels (absent: not asked). */
+  readonly conversations?: readonly FoundConversation[];
 }
 
-/** At most this many usernames of introduction results are verified per
- *  search beyond the typed one: each verification costs an OPRF evaluation,
- *  i.e. one anonymous token. The rest show their name without a username. */
+/** At most this many usernames that a public record or an introduction states
+ *  are verified per search beyond the typed one: each verification costs an
+ *  OPRF evaluation, i.e. one anonymous token. The rest show their name without
+ *  a username. */
 export const MAX_EXTRA_USERNAME_CHECKS = 3;
 
 /**
@@ -153,6 +211,18 @@ export function acceptPublicRecord(
   oprfOutput: Uint8Array,
   bundleKey: Uint8Array,
 ): string | null {
+  const name = acceptedRecord(deps, hit, oprfOutput, bundleKey)?.displayName?.trim() ?? "";
+  return name.length === 0 ? null : name;
+}
+
+/** The record of a lookup hit, under the checks of {@link acceptPublicRecord},
+ *  or `null`. Never throws. */
+function acceptedRecord(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): OpenedPublicRecord | null {
   if (hit.publicRecord === null) return null;
   let opened: OpenedPublicRecord | null;
   try {
@@ -163,8 +233,28 @@ export function acceptPublicRecord(
   if (opened === null) return null;
   if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
   if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
-  const name = opened.displayName?.trim() ?? "";
-  return name.length === 0 ? null : name;
+  return opened;
+}
+
+/** A username a record states, to be proven before it is shown. */
+interface UsernameClaim {
+  readonly username: string;
+  readonly certificate: Uint8Array;
+  readonly accountId: Uint8Array;
+}
+
+/** The username claim of a lookup hit's record, or `null`. Never throws. */
+function publicRecordClaim(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): UsernameClaim | null {
+  const opened = acceptedRecord(deps, hit, oprfOutput, bundleKey);
+  const username = opened?.username ?? null;
+  const certificate = opened?.usernameCertificate ?? null;
+  if (username === null || certificate === null) return null;
+  return { username, certificate, accountId: hit.accountId };
 }
 
 /**
@@ -179,17 +269,7 @@ export function publicRecordBinding(
   oprfOutput: Uint8Array,
   bundleKey: Uint8Array,
 ): string | null {
-  if (hit.publicRecord === null) return null;
-  let opened: OpenedPublicRecord | null;
-  try {
-    opened = deps.openPublicRecord(hit.publicRecord, oprfOutput);
-  } catch {
-    return null;
-  }
-  if (opened === null) return null;
-  if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
-  if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
-  const binding = opened.mailboxBinding ?? null;
+  const binding = acceptedRecord(deps, hit, oprfOutput, bundleKey)?.mailboxBinding ?? null;
   return binding === null ? null : deps.encodeGrant(binding);
 }
 
@@ -231,6 +311,8 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   const username = deps.canonicalUsername(query);
   const term = deps.queryTerm(query);
   const probes: IntroductionProbe[] = [];
+  /** What the people found by name state about their username, by key. */
+  const nameClaims = new Map<string, UsernameClaim>();
 
   // ---- the channel namespace ------------------------------------------
   const channelLeg = (async (): Promise<{ idHex: string; handle: string } | null> => {
@@ -247,7 +329,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
 
   // ---- the username ---------------------------------------------------
   // Written by the username question, read after all questions settled.
-  const rounds: { username: OprfPair | null } = { username: null };
+  const rounds: { username: OprfPair | null; term: OprfPair | null } = { username: null, term: null };
   const usernameLeg = (async (): Promise<PersonResult[]> => {
     if (username === null) return [];
     try {
@@ -293,6 +375,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     if (term === null) return [];
     try {
       const round = await deps.nameTermOprf(term);
+      rounds.term = round;
       probes.push({ oprfOutput: round.output, via: "term" });
       const hits = await deps.accountsOfNameTermLookupKey(round.lookupKey);
       const out: PersonResult[] = [];
@@ -316,7 +399,11 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
           null,
           publicRecordBinding(deps, hit, round.output, key.bytes),
         );
-        if (r !== null) out.push(r);
+        if (r !== null) {
+          out.push(r);
+          const claim = publicRecordClaim(deps, hit, round.output, key.bytes);
+          if (r.username === null && claim !== null) nameClaims.set(r.keyHex, claim);
+        }
       }
       legs.push("answered");
       return out;
@@ -326,11 +413,67 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     }
   })();
 
-  const [channel, byUsername, byName] = await Promise.all([channelLeg, usernameLeg, nameLeg]);
+  const [channel, byUsername, byNameOnly] = await Promise.all([channelLeg, usernameLeg, nameLeg]);
+
+  // ---- public groups and channels (ADR-0087 section 5) ----------------
+  // The same OPRF rounds: a search costs no token more than before. Matched
+  // by `@name` exactly, or by the whole query against the name.
+  const conversations: FoundConversation[] = [];
+  if (deps.openConversationRecord !== undefined) {
+    const seen = new Set<string>();
+    const keep = (found: FoundConversation | null, byHandle: boolean): void => {
+      if (found === null || seen.has(found.idB64)) return;
+      if (byHandle ? found.handle !== username : !deps.nameMatches(found.name, query)) return;
+      seen.add(found.idB64);
+      conversations.push(found);
+    };
+    try {
+      if (rounds.username !== null && deps.conversationRecordOfLookupKey !== undefined) {
+        const rec = await deps.conversationRecordOfLookupKey(rounds.username.lookupKey);
+        if (rec !== null) keep(deps.openConversationRecord(rec, rounds.username.output), true);
+      }
+      if (rounds.term !== null && deps.conversationRecordsOfTermLookupKey !== undefined) {
+        for (const rec of await deps.conversationRecordsOfTermLookupKey(rounds.term.lookupKey)) {
+          keep(deps.openConversationRecord(rec, rounds.term.output), false);
+        }
+      }
+    } catch {
+      // A failed conversation question costs only the conversations.
+    }
+  }
+
+  // ---- usernames a record states ------------------------------------
+  let extraChecks = 0;
+  const lookupKeyOf =
+    deps.usernameLookupKey ?? (async (u: string) => (await deps.usernameOprf(u)).lookupKey);
+  /** `claim.username` once its certificate proves it, else `null`. */
+  const provenUsername = async (claim: UsernameClaim): Promise<string | null> => {
+    let lookupKey: Uint8Array | null = null;
+    if (claim.username === username && rounds.username !== null) {
+      lookupKey = rounds.username.lookupKey;
+    } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
+      extraChecks += 1;
+      try {
+        lookupKey = await lookupKeyOf(claim.username);
+      } catch {
+        lookupKey = null;
+      }
+    }
+    if (lookupKey === null) return null;
+    return (await deps.verifyUsername(claim.certificate, lookupKey, claim.accountId)) ? claim.username : null;
+  };
+  const byName: PersonResult[] = [];
+  for (const p of byNameOnly) {
+    const claim = nameClaims.get(p.keyHex);
+    const proven = claim === undefined ? null : await provenUsername(claim);
+    byName.push(proven === null ? p : { ...p, username: shownUsername(proven, p.reach) });
+  }
 
   // ---- contacts of contacts ------------------------------------------
   const byIntroduction: PersonResult[] = [];
   let introFailed = false;
+  let recordsOpened = 0;
+  let keptAfterMatch = 0;
   if (probes.length > 0) {
     let opened: OpenedIntroduction[] = [];
     try {
@@ -338,13 +481,14 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     } catch {
       opened = [];
     }
-    let extraChecks = 0;
+    recordsOpened = opened.length;
     for (const intro of opened) {
       const matches =
         intro.via === "username"
           ? username !== null && intro.username === username
           : intro.displayName !== null && deps.nameMatches(intro.displayName, query);
       if (!matches) continue;
+      keptAfterMatch += 1;
       // The record is the introduced person's own claim: its account id must
       // be the account the identity bundle publishes this key for, or a
       // record could pair its author's key with someone else's account id -
@@ -358,26 +502,14 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
         continue;
       }
       if (!bound) continue;
-      let verified: string | null = null;
-      if (intro.username !== null && intro.usernameCertificate !== null) {
-        let lookupKey: Uint8Array | null = null;
-        if (intro.username === username && rounds.username !== null) {
-          lookupKey = rounds.username.lookupKey;
-        } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
-          extraChecks += 1;
-          try {
-            lookupKey = (await deps.usernameOprf(intro.username)).lookupKey;
-          } catch {
-            lookupKey = null;
-          }
-        }
-        if (
-          lookupKey !== null &&
-          (await deps.verifyUsername(intro.usernameCertificate, lookupKey, intro.accountId))
-        ) {
-          verified = intro.username;
-        }
-      }
+      const verified =
+        intro.username !== null && intro.usernameCertificate !== null
+          ? await provenUsername({
+              username: intro.username,
+              certificate: intro.usernameCertificate,
+              accountId: intro.accountId,
+            })
+          : null;
       const keyB64 = keyB64Of(intro.identityPk);
       const name = intro.displayName ?? (verified !== null ? `@${verified}` : fingerprintLabel(intro.identityPk));
       const r = resultFor(
@@ -398,6 +530,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   const merged = mergePeople([byUsername, byName, byIntroduction], deps.ownKeyHex);
   const people: PersonResult[] = [];
   let checkFailed = false;
+  let refusedByReachCheck = 0;
   for (const p of merged) {
     if (p.reach !== "grant") {
       people.push(p);
@@ -406,14 +539,27 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     if (p.grantWireB64 === null) continue;
     try {
       const pk = base64Decode(p.keyB64);
-      if (await deps.reachCheck(pk, p.grantWireB64)) people.push(p);
+      if (await deps.reachCheck(pk, p.grantWireB64)) people.push({ ...p, grantChecked: true });
+      else refusedByReachCheck += 1;
     } catch {
       checkFailed = true;
     }
   }
   if (checkFailed || introFailed) legs.push("failed");
-  const found = people.length + (channel === null ? 0 : 1);
-  return { people, channel, state: foldSearch(found, legs) };
+  deps.logCounts?.({
+    recordsHeld: deps.introductionRecordsHeld?.() ?? 0,
+    recordsOpened,
+    keptAfterMatch,
+    refusedByReachCheck,
+    people: people.length,
+  });
+  const found = people.length + (channel === null ? 0 : 1) + conversations.length;
+  return {
+    people,
+    channel,
+    state: foldSearch(found, legs),
+    ...(deps.openConversationRecord === undefined ? {} : { conversations }),
+  };
 }
 
 /**

@@ -16,6 +16,9 @@
 pub mod api;
 pub mod config;
 pub mod directory;
+pub mod feedback;
+pub mod feedback_api;
+mod feedback_sql;
 pub mod internal;
 pub mod owner_auth;
 pub mod sql_store;
@@ -23,10 +26,12 @@ pub mod storage;
 
 pub use api::{router, AppState};
 pub use config::{Config, ConfigError};
+pub use feedback::{PostReactionCounts, StoredComment};
 pub use sql_store::SqlChannelStore;
 pub use storage::{
-    ChannelId, ChannelStore, DirectoryQuery, InMemoryChannelStore, ModerationAction, StorageError,
-    StoredListing, StoredPost, SubscriberId,
+    ChannelId, ChannelStore, DirectoryQuery, InMemoryChannelStore, InviteKeyRow, ModerationAction,
+    PublicSeedOutcome, SealedTicket, StorageError, StoredListing, StoredPost, SubscriberEntry,
+    SubscriberId, INVITE_USES_UNLIMITED, PUBLIC_SEED_LEN, SEALED_TICKET_LEN,
 };
 
 /// The service's migrations, for `main` and the DB-gated tests.

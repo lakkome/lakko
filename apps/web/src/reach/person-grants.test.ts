@@ -14,6 +14,7 @@ import { EMPTY_REACH_BOOK, bindReachBook, decodeReachBook, encodeReachBook, reac
 import {
   EMPTY_RECEIVED_GRANTS,
   bestGrantForPerson,
+  contactGrantsForPerson,
   delegationsForPerson,
   fileContactGrant,
   fileDelegations,
@@ -26,6 +27,23 @@ const K0 = "a0";
 const K1 = "a1";
 const GROUP = "99";
 const grant = (wireB64: string, version = 0) => ({ wireB64, version, receivedAtMs: 1 });
+
+describe("the contact grants of a person", () => {
+  it("are found under every key they have had, and hold no other class", () => {
+    let store = fileContactGrant(EMPTY_RECEIVED_GRANTS, K1, grant("new"));
+    store = fileContactGrant(store, K0, grant("old"));
+    store = fileScopedGrant(store, K1, GROUP, "group", grant("group"));
+    store = fileScopedGrant(store, K1, GROUP, "member", grant("member"));
+    expect(contactGrantsForPerson(store, [K1, K0]).map((g) => g.wireB64)).toEqual(["new", "old"]);
+  });
+
+  it("offer the grant of before a rotation last, only while its address stands", () => {
+    let store = fileContactGrant(EMPTY_RECEIVED_GRANTS, K0, grant("old"), K0);
+    store = fileContactGrant(store, K0, grant("new"), K0);
+    expect(contactGrantsForPerson(store, [K0]).map((g) => g.wireB64)).toEqual(["new", "old"]);
+    expect(contactGrantsForPerson(store, [K1, K0]).map((g) => g.wireB64)).toEqual(["new"]);
+  });
+});
 
 describe("grant lookup across a proven rotation", () => {
   const alice: AccountKeys = afterProvenRotation({ currentKeyB64: K0, provenPredecessorsB64: [] }, K1);

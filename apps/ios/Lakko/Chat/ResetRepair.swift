@@ -186,9 +186,17 @@ public enum ResetRepair {
     /// the PAIR is unchanged. This judges one commit with the memory of the
     /// halves seen before it, and returns the memory to keep.
     ///
+    /// The inputs are PERSON keys (ADR-0050 account keys, one per person), so
+    /// a commit that only adds or retires DEVICE leaves of the people already
+    /// there (a new device admitted, a removed device retired) leaves the key
+    /// set equal: the people did not change, and no row is shown for it. (The
+    /// table used to keep the row for "changes no key"; written before person
+    /// keys, it put three "Members changed" rows into a one-to-one whose two
+    /// people never changed.)
+    ///
     /// | the commit ...                                                  | row        | memory                 |
     /// |-----------------------------------------------------------------|------------|------------------------|
-    /// | changes no key                                                  | kept       | unchanged              |
+    /// | changes no person key (devices only)                            | suppressed | unchanged              |
     /// | changes keys, not people (one batch)                            | suppressed | unchanged              |
     /// | only REMOVES people, each present through superseded keys alone | suppressed | those people are added |
     /// | only ADDS people, each one awaited                              | suppressed | those people leave it  |
@@ -208,8 +216,9 @@ public enum ResetRepair {
         guard let before = personKeysBefore, let after = personKeysAfter else {
             return SwapVerdict(suppress: false, awaited: live)
         }
-        // No key changed at all: not a membership change of this kind.
-        if Set(before) == Set(after) { return SwapVerdict(suppress: false, awaited: live) }
+        // No person key changed: only devices did. The people are the same,
+        // so there is nothing to tell.
+        if Set(before) == Set(after) { return SwapVerdict(suppress: true, awaited: live) }
         let peopleBefore = peopleByAccount(before, accountOfKey: accountOfKey)
         let peopleAfter = peopleByAccount(after, accountOfKey: accountOfKey)
         let gone = peopleBefore.filter { !peopleAfter.contains($0) }
@@ -457,6 +466,12 @@ extension DeviceReadmission {
     /// current key or one a reset retired), else from the member's own
     /// profile. The id is a CLAIM in the second case; what it is worth is
     /// decided by ``lookupStanding(rosterKeyB64:pin:proven:binding:)``.
+    ///
+    /// A contact row answers to every key of its person: pass the retired
+    /// keys and the proven chain together (``keysARowAnswersTo(contactKeyB64:previousKeysB64:proven:)``).
+    /// A contact first met after a rotation holds the newest key on its row
+    /// while the roster names the oldest, and only the proven chain joins them
+    /// (ADR-0074 section 3.7).
     public static func readmissionCandidates(
         rosterPersonKeysB64: [String],
         ownPersonKeyB64: String,
@@ -476,6 +491,18 @@ extension DeviceReadmission {
             out.append(LookupCandidate(rosterKeyB64: rosterKeyB64, accountId: accountId))
         }
         return out
+    }
+
+    /// The keys besides its own a contact row is matched on: the ones a reset
+    /// retired (kept on the row) and its proven predecessors. Each once.
+    public static func keysARowAnswersTo(
+        contactKeyB64: String, previousKeysB64: [String], proven: ProvenPredecessors
+    ) -> [String] {
+        var keys = previousKeysB64
+        for key in proven.predecessors(of: contactKeyB64) where !keys.contains(key) {
+            keys.append(key)
+        }
+        return keys
     }
 
     public enum LookupStanding: Equatable {

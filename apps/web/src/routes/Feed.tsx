@@ -40,7 +40,7 @@
  * Not yet here: unpinning a preset.
  */
 
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -65,7 +65,7 @@ import { channelTitle } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import type { ChannelPostSlot } from "../feed/channel-post-log";
 import { loadChannelPostLog, subscribeChannelPostLogChanged } from "../feed/channel-post-log-store";
-import { attachmentLine, FEED_PRESETS, repliesLabel, whyLine, type FeedPresetKey } from "../feed/feed-copy";
+import { attachmentLine, cardBody, FEED_PRESETS, repliesLabel, whyLine, type FeedPresetKey } from "../feed/feed-copy";
 import {
   buildFeedInput,
   feedRefLogKey,
@@ -104,6 +104,9 @@ import { recordFeedSeen } from "../feed/feed-seen-writer";
 import { memberNameOf } from "../profile/member-label";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
+import { MediaAttachment } from "../media/MediaBubbles";
+import { createMediaHub, mediaKey } from "../media/media-hub";
+import { ownAvatarLabel } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon } from "../ui/icons";
 import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
@@ -141,28 +144,12 @@ import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
 import { screenAnchor } from "../ui/screen-anchor";
 import { durableSnapshotHook } from "../chat/persist-hooks";
+import { publicOrigin } from "../platform";
 
-const BANNER_STORAGE_KEY = "lakko.feed.device-banner-dismissed";
 /** Within this many pixels of the top, new items are shown at once;
  *  further down they wait behind the pill so the list does not move under
  *  the reader. */
 const TOP_SLACK_PX = 40;
-
-function readStorage(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function writeStorage(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // A convenience only; the feed works without it.
-  }
-}
 
 /** The selected feed: a preset key, Discover (ADR-0059), or `custom:<id>`
  *  for a saved feed. */
@@ -299,9 +286,6 @@ export default function Feed(): JSX.Element {
     }
   }
 
-  const [bannerDismissed, setBannerDismissed] = createSignal(
-    readStorage(BANNER_STORAGE_KEY) === "1",
-  );
 
   // The message log, reloaded on every write (the open chat, the
   // background receive, another tab), as the conversation list does.
@@ -377,7 +361,7 @@ export default function Feed(): JSX.Element {
       sharedName: groupNames.nameOf(g.groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => profiles.resolve(k).name,
+      nameOf: (k) => memberNameOf(profiles.resolve(k)),
       groupTitle,
     });
 
@@ -622,6 +606,14 @@ export default function Feed(): JSX.Element {
     if (ref.source.kind === "channel") return ref.source.title;
     if (ref.message.direction === "outgoing") return t("chat.author.you");
     return knownAuthorOf(ref) ?? t("chat.members.unnamed");
+  };
+
+  /** The initials beside the author: "You" is a label, not a name. */
+  const authorAvatarLabelOf = (ref: FeedCandidateRef): string => {
+    if (ref.message.direction !== "outgoing" || ref.source.kind !== "group") return authorOf(ref);
+    const session = auth.state();
+    const username = session.kind === "session" ? session.account.username : "";
+    return ownAvatarLabel(profiles.ownProfile().displayName, username);
   };
 
   const open = (ref: FeedCandidateRef): void => {
@@ -986,8 +978,21 @@ export default function Feed(): JSX.Element {
     openTarget();
   }
 
+  // ADR-0047 - the same bubbles as the chat, with no upload: a feed item is
+  // always something already sent or received.
+  const mediaHub = createMediaHub({ voiceQueue: () => [] });
+  onCleanup(() => mediaHub.dispose());
+  const mediaRefsOf = (ref: FeedCandidateRef): AttachmentRefBytes[] =>
+    ref.message.attachments
+      .map((a) => attachmentRefFromPersisted(a).ref)
+      .filter((a) => mediaHub.decision(a).bubble !== "file");
+
+  /** A one-line text for a place that draws no bubble: a reply, a preview. */
   const bodyOf = (ref: FeedCandidateRef): string =>
     ref.message.text.trim() !== "" ? ref.message.text : (attachmentLine(ref.message) ?? "");
+
+  const cardBodyOf = (ref: FeedCandidateRef): string =>
+    cardBody(ref.message, (a) => mediaHub.decision(attachmentRefFromPersisted(a).ref).bubble !== "file");
 
   /** The top of the feed a draft would build, for the editor's preview. */
   const previewFor = (draft: FeedDraft): readonly PreviewLine[] | null => {
@@ -1022,7 +1027,7 @@ export default function Feed(): JSX.Element {
     if (c === null) return null;
     try {
       const bytes = exportDraft(c, v.draft);
-      return { link: shareLink(window.location.origin, bytes), bytes };
+      return { link: shareLink(publicOrigin(), bytes), bytes };
     } catch {
       return null;
     }
@@ -1195,23 +1200,6 @@ export default function Feed(): JSX.Element {
         </Show>
       </header>
 
-      <Show when={selection() !== "discover" && !bannerDismissed() && (input()?.candidates.length ?? 0) > 0}>
-        <div class="lk-feed-banner" role="note">
-          <Icon name="info" size={18} />
-          <span>{t("feed.banner.local")}</span>
-          <button
-            type="button"
-            class="ghost"
-            onClick={() => {
-              setBannerDismissed(true);
-              writeStorage(BANNER_STORAGE_KEY, "1");
-            }}
-          >
-            {t("feed.banner.dismiss")}
-          </button>
-        </div>
-      </Show>
-
       <Show when={selection() !== "discover" && feedRefreshFailed()}>
         <div class="lk-feed-banner" role="alert">
           <Icon name="info" size={18} />
@@ -1324,6 +1312,13 @@ export default function Feed(): JSX.Element {
                       >
                         <Icon name="more" size={18} />
                       </button>
+                      <div class="lk-feed-source-avatar" aria-hidden="true">
+                        <Avatar
+                          label={item.ref.source.title}
+                          id={item.ref.source.conversationHex ?? item.ref.source.idHex}
+                        />
+                      </div>
+                      <div class="lk-feed-body">
                       <button type="button" class="lk-feed-open" onClick={() => open(item.ref)}>
                         <div class="lk-feed-meta">
                           <span class="lk-feed-source">{item.ref.source.title}</span>
@@ -1335,7 +1330,7 @@ export default function Feed(): JSX.Element {
                         <Show when={item.ref.source.kind === "group"}>
                           <div class="lk-feed-author lk-person-line">
                             <Avatar
-                              label={authorOf(item.ref)}
+                              label={authorAvatarLabelOf(item.ref)}
                               id={authorKeyOf(item.ref) ?? ""}
                               size="sm"
                               personKey={authorKeyOf(item.ref)}
@@ -1346,14 +1341,32 @@ export default function Feed(): JSX.Element {
                         <Show when={item.ref.message.forward?.author}>
                           {(name) => <div class="lk-feed-forwarded">{t("chat.forward.from", { name: name() })}</div>}
                         </Show>
-                        <p class="lk-feed-text">
-                          {bodyOf(item.ref)}
-                          <Show when={item.ref.message.edited === true}>
-                            <span class="lk-feed-edited"> {t("chat.message.edited")}</span>
-                          </Show>
-                        </p>
-                        <Show when={why()}>{(line) => <div class="lk-feed-why">{line()}</div>}</Show>
+                        <Show when={cardBodyOf(item.ref) !== "" || item.ref.message.edited === true}>
+                          <p class="lk-feed-text">
+                            {cardBodyOf(item.ref)}
+                            <Show when={item.ref.message.edited === true}>
+                              <span class="lk-feed-edited"> {t("chat.message.edited")}</span>
+                            </Show>
+                          </p>
+                        </Show>
                       </button>
+                      <Show when={mediaRefsOf(item.ref).length > 0}>
+                        <div class="lk-feed-media">
+                          <Index each={mediaRefsOf(item.ref)}>
+                            {(ref) => (
+                              <MediaAttachment
+                                attachment={ref()}
+                                hub={mediaHub}
+                                mediaKey={mediaKey(ref().blobId)}
+                                incoming={item.ref.message.direction !== "outgoing"}
+                                upload={undefined}
+                                onRetry={() => undefined}
+                              />
+                            )}
+                          </Index>
+                        </div>
+                      </Show>
+                      <Show when={why()}>{(line) => <div class="lk-feed-why">{line()}</div>}</Show>
                       <Show when={reactionSummary(item.ref.message).length > 0}>
                         <div class="lk-feed-reactions" aria-label={t("feed.item.reactions_a11y")}>
                           <For each={reactionSummary(item.ref.message)}>
@@ -1396,7 +1409,7 @@ export default function Feed(): JSX.Element {
                                   >
                                     <span class="lk-feed-author lk-person-line">
                                       <Avatar
-                                        label={authorOf(reply)}
+                                        label={authorAvatarLabelOf(reply)}
                                         id={authorKeyOf(reply) ?? ""}
                                         size="sm"
                                         personKey={authorKeyOf(reply)}
@@ -1411,6 +1424,7 @@ export default function Feed(): JSX.Element {
                           </ol>
                         </Show>
                       </Show>
+                      </div>
                     </article>
                     <Show when={suggestion() !== undefined ? discover.cards()[suggestion() as number] : undefined}>
                       {(card) => <DiscoverCardView card={card()} model={discover} />}

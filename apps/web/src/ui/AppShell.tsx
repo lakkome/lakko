@@ -18,12 +18,17 @@ import { Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
+import { contactsBadge } from "../contacts/contact-list-model";
+import { useMailbox } from "../contacts/MailboxContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
-import { DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
+import { AttentionBadge, DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
+import { addedNotice, badgeVisible } from "../devices/added-notice";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
+import { ownAvatarLabel } from "../profile/member-label";
+import { useProfiles } from "../profile/ProfileContext";
 import { Icon, type IconName } from "./icons";
 import { t } from "../l10n";
 
@@ -63,6 +68,10 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   const sync = useDeviceGroupSync();
   const navigate = useNavigate();
   const location = useLocation();
+  const mailbox = useMailbox();
+  const profiles = useProfiles();
+  /** The incoming contact requests waiting, on the Contacts item. */
+  const requestsBadge = (): string | null => contactsBadge(mailbox.pending().length);
 
   const username = (): string => {
     const s = auth.state();
@@ -79,6 +88,11 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
     return p === item.href || p.startsWith(`${item.href}/`) || item.prefix.some((x) => p.startsWith(x));
   };
 
+  // docs/ux/identity-recovery.md 17.5: a device joined the account and no
+  // device of it has looked at Settings > Devices since.
+  const attention = (item: (typeof ITEMS)[number]): boolean =>
+    item.href === paths.settings && badgeVisible(addedNotice());
+
   // docs/ux/second-device.md section 3.1: another device removed this one.
   // The removed screen replaces the whole app, rail and prompts included.
   return (
@@ -94,9 +108,18 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             inactiveClass=""
             activeClass=""
             aria-current={isActive(item) ? "page" : undefined}
+            aria-label={attention(item) ? t("nav.settings.attention_a11y") : undefined}
           >
-            <Icon name={item.icon} size={22} />
+            <span class="lk-rail-icon">
+              <Icon name={item.icon} size={22} />
+              <Show when={attention(item)}>
+                <AttentionBadge />
+              </Show>
+            </span>
             <span>{t(item.labelKey)}</span>
+            <Show when={item.href === paths.contacts ? requestsBadge() : null}>
+              {(text) => <span class="lk-badge lk-rail-badge">{text()}</span>}
+            </Show>
           </A>
         ))}
         <div class="lk-rail-spacer" />
@@ -106,7 +129,12 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
           title={username().length > 0 ? `@${username()} · ${t("nav.settings")}` : t("nav.settings")}
           onClick={() => navigate(paths.settingsSection("profile"))}
         >
-          <Avatar label={username().length > 0 ? username() : "?"} id={username()} size="sm" personKey={OWN_AVATAR_KEY} />
+          <Avatar
+            label={ownAvatarLabel(profiles.ownProfile().displayName, username())}
+            id={username()}
+            size="sm"
+            personKey={OWN_AVATAR_KEY}
+          />
         </button>
       </nav>
       <main>{props.children}</main>

@@ -72,6 +72,18 @@ final class KnownContactRequestTests: XCTestCase {
         XCTAssertNil(established(rows, "aabb", none))
     }
 
+    func testARowUnderTheKeyThatSignedIsThatContactWhateverItSaysOfTheAccount() {
+        XCTAssertTrue(KnownContactRequest.isContactKey("signer", in: ["other", "signer"]))
+        let rows = [Row(signaturePubkeyB64: "signer", accountIdHex: nil)]
+        XCTAssertNil(established(rows, "aabb", none))
+        XCTAssertTrue(KnownContactRequest.isContactKey("signer", in: rows.map(\.signaturePubkeyB64)))
+    }
+
+    func testAnotherKeyFindsNothingSoAClaimedAccountIdSwallowsNoRequest() {
+        XCTAssertFalse(KnownContactRequest.isContactKey("victim-key", in: ["member-key"]))
+        XCTAssertFalse(KnownContactRequest.isContactKey("", in: ["", "member-key"]))
+    }
+
     func testIsNilForAnUnknownOrMissingId() {
         let rows = [Row(signaturePubkeyB64: "k", accountIdHex: "aabb")]
         let pinned = Verified(pinKeysB64: ["k"], bindingKeyB64: nil)

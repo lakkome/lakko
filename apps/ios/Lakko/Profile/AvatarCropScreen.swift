@@ -39,6 +39,33 @@ struct AvatarCropScreen: View {
     @State private var failed = false
 
     var body: some View {
+        // The black ground fills the screen; the controls keep to the safe
+        // area. Found on an iPhone Air: the bar was drawn under the clock and
+        // the Dynamic Island and `Use` took no tap. The bar's top inset is
+        // now read and applied explicitly, the bar is drawn above the crop
+        // area, and the crop area's gesture is confined to its own frame.
+        let insets = Self.windowSafeArea()
+        content()
+            .padding(.top, insets.top)
+            .padding(.bottom, insets.bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .ignoresSafeArea()
+            .task { await loadInitialFrame() }
+    }
+
+    /// The key window's safe-area insets: the cover lays itself out over the
+    /// whole screen and keeps its controls out of these by its own padding,
+    /// whatever the presenting view did with its safe area.
+    private static func windowSafeArea() -> UIEdgeInsets {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        return window?.safeAreaInsets ?? UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
+    }
+
+    private func content() -> some View {
         VStack(spacing: 0) {
             HStack {
                 Button(l10n.t("profile.crop.cancel"), action: onCancel)
@@ -54,6 +81,8 @@ struct AvatarCropScreen: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 52)
+            .contentShape(Rectangle())
+            .zIndex(1)
 
             GeometryReader { proxy in
                 let viewport = max(1, min(proxy.size.width, proxy.size.height) - 32)
@@ -75,6 +104,7 @@ struct AvatarCropScreen: View {
                 .onAppear { setUp(viewport: viewport) }
                 .onChange(of: viewport) { _, value in setUp(viewport: value) }
             }
+            .clipped()
 
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
@@ -98,8 +128,7 @@ struct AvatarCropScreen: View {
             }
             .padding(16)
         }
-        .background(Color.black.ignoresSafeArea())
-        .task { await loadInitialFrame() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Gestures
