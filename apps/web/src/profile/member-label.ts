@@ -18,9 +18,30 @@ import type { ResolvedName } from "./resolver";
 /** The generic label for a person the device cannot name. */
 export const UNNAMED_MEMBER = (): string => t("chat.members.unnamed");
 
-/** One-string surfaces (sender lines, typing, reactions, notices). */
-export function memberNameOf(resolved: ResolvedName): string {
-  return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.name;
+/** The people already reported by {@link reportUnnamedPerson} this session,
+ *  by the resolver's fingerprint label (kept here, never logged). */
+const reportedUnnamed = new Set<string>();
+
+/**
+ * A person always has a name on this device (2026-11-04): a surface that
+ * reaches the placeholder word is a defect. Logged once per person per
+ * session, as one plain line that names the surface and nobody, so the next
+ * route that misses shows up in the log. `marker` tells people apart and is
+ * never printed; `""` stands for a sender nobody could attribute.
+ */
+export function reportUnnamedPerson(marker: string, surface: string): void {
+  if (reportedUnnamed.has(marker)) return;
+  reportedUnnamed.add(marker);
+  // eslint-disable-next-line no-console
+  console.error(`[names] a person has no name on this device; ${surface} shows the placeholder`);
+}
+
+/** One-string surfaces (sender lines, typing, reactions, notices): the real
+ *  name, else the placeholder word, reported ({@link reportUnnamedPerson}). */
+export function memberNameOf(resolved: ResolvedName, surface = "a label"): string {
+  if (resolved.source !== "fingerprint") return resolved.name;
+  reportUnnamedPerson(resolved.name, surface);
+  return UNNAMED_MEMBER();
 }
 
 /**
@@ -35,9 +56,28 @@ export function realNameOf(resolved: ResolvedName): string | null {
   return resolved.source === "fingerprint" ? null : resolved.name;
 }
 
-/** Roster rows: `Name · @username` when there is one, never a fingerprint. */
-export function memberListLabelOf(resolved: ResolvedName): string {
-  return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.listLabel;
+/**
+ * The name line of a message bubble. A sender always has a name on this
+ * device (the profile in the same batch is filed first, an owed profile goes
+ * out before the sender's next message): reaching the placeholder here is a
+ * defect, so it is logged once per sender per session, as one plain line
+ * naming nobody, and the placeholder word is kept rather than a name made
+ * up. `keyB64` undefined is a sender the receive path could not attribute.
+ */
+export function bubbleSenderLabelOf(resolved: ResolvedName | null, keyB64: string | undefined): string {
+  if (resolved === null || keyB64 === undefined) {
+    reportUnnamedPerson("", "a message bubble (no attributable sender)");
+    return UNNAMED_MEMBER();
+  }
+  return memberNameOf(resolved, "a message bubble");
+}
+
+/** Roster rows: `Name · @username` when there is one, never a fingerprint;
+ *  the placeholder word is reported as in {@link memberNameOf}. */
+export function memberListLabelOf(resolved: ResolvedName, surface = "a list row"): string {
+  if (resolved.source !== "fingerprint") return resolved.listLabel;
+  reportUnnamedPerson(resolved.name, surface);
+  return UNNAMED_MEMBER();
 }
 
 /** One roster entry, as the label mirror reads it. */

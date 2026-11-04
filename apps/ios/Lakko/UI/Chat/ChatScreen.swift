@@ -928,7 +928,8 @@ public struct ChatScreen: View {
                                 // mode with this message; while in it the
                                 // menu does not open.
                                 selecting: selection != nil,
-                                onSelect: { enterSelection(with: entry.message.messageId) }
+                                onSelect: { enterSelection(with: entry.message.messageId) },
+                                quotesOwnMessage: viewModel.quotesOwnMessage(entry.message)
                             )
                             }
                             // Tighter inside a run, a clear gap between runs.
@@ -1537,7 +1538,7 @@ public struct ChatScreen: View {
             // ADR-0052 / `docs/ux/message-actions.md` section 3.1 — the reply
             // strip: what the recipient will see, taken when Reply was chosen.
             if let armed = viewModel.replyingTo {
-                ReplyStrip(reply: armed.snapshot) { viewModel.cancelReply() }
+                ReplyStrip(reply: armed.shown) { viewModel.cancelReply() }
             }
             // UX spec section 5.2: attach, the growing field, the emoji / GIF
             // picker, then a trailing button that is the microphone with an
@@ -2069,6 +2070,10 @@ struct MessageRow: View {
     var selecting: Bool = false
     /// Section 8 — the menu's `Select`: enter the mode with this message.
     var onSelect: () -> Void = {}
+    /// The reply's quoted message is this account's own (held here): the
+    /// quote names it "You" on this device, whatever name the snapshot
+    /// carries (`docs/ux/message-actions.md` section 3.1).
+    var quotesOwnMessage: Bool = false
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -2548,7 +2553,10 @@ struct MessageRow: View {
                     // drawn from the snapshot the envelope carried and never
                     // from the quoted message itself.
                     if let reply = message.reply {
-                        ReplyQuoteBlock(reply: reply, outgoing: isOutgoing) {
+                        ReplyQuoteBlock(
+                            reply: quotesOwnMessage ? ReplySnapshot.shownAsOwn(reply) : reply,
+                            outgoing: isOutgoing
+                        ) {
                             onQuoteTap(reply.target)
                         }
                     }

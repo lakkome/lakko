@@ -498,6 +498,47 @@ final class ProfilePublisherTests: XCTestCase {
         }
     }
 
+    /// An owed profile (growth seen) goes out at once before this device's
+    /// next message, with no jitter, and the scheduled republish does not
+    /// send a second copy.
+    func testAnOwedProfileGoesOutBeforeTheNextMessageWithNoJitter() async {
+        let h = Harness()
+        h.jitter = 9_000
+        let publisher = ProfilePublisher(ports: h.ports(holdSleeps: true))
+        let scheduled = publisher.noteGrowth(groupIdHex: "g1")
+        await h.waitForHeldSleeps(1)
+        XCTAssertTrue(publisher.isOwed(groupIdHex: "g1"))
+        await publisher.publishOwedBeforeSend(groupIdHex: "g1")
+        XCTAssertEqual(h.sent.map(\.group), ["g1"], "the profile went out before the message")
+        XCTAssertFalse(publisher.isOwed(groupIdHex: "g1"))
+        h.releaseSleeps()
+        await scheduled?.value
+        XCTAssertEqual(h.sent.map(\.group), ["g1"], "the jittered republish did not send again")
+    }
+
+    /// A failed publish is owed; the next message carries it first.
+    func testAFailedJoinPublishIsOwedToTheNextMessage() async {
+        let h = Harness()
+        let publisher = ProfilePublisher(ports: h.ports())
+        h.failSends = true
+        await publisher.publishNow(groupIdHex: "g1")
+        XCTAssertTrue(publisher.isOwed(groupIdHex: "g1"))
+        h.failSends = false
+        await publisher.publishOwedBeforeSend(groupIdHex: "g1")
+        XCTAssertEqual(h.sent.map(\.group), ["g1"])
+        XCTAssertTrue(h.sleeps.isEmpty, "an owed profile is never delayed")
+    }
+
+    /// Nothing owed, nothing sent ahead of a message.
+    func testNothingOwedSendsNothingAheadOfAMessage() async {
+        let h = Harness()
+        let publisher = ProfilePublisher(ports: h.ports())
+        await publisher.publishNow(groupIdHex: "g1")
+        await publisher.publishOwedBeforeSend(groupIdHex: "g1")
+        await publisher.publishOwedBeforeSend(groupIdHex: "g2")
+        XCTAssertEqual(h.sent.map(\.group), ["g1"])
+    }
+
     func testJoinAndChangePublishNow() async {
         let h = Harness()
         let publisher = ProfilePublisher(ports: h.ports())
@@ -633,6 +674,53 @@ final class ProfileDirectoryTests: XCTestCase {
         directory.setRenames(from: [])
         directory.activate(accountIdB64: "acct", username: "valentin")
         return (directory, verifier)
+    }
+
+    // MARK: - Backup received names (2026-11-04)
+
+    /// A backup carries received names: contacts first, then by recent use,
+    /// then the rest; never this account's own keys.
+    func testABackupCarriesReceivedNamesContactsFirstThenRecentNeverOwn() {
+        let contact = base64Encode(Data(repeating: 0x01, count: 32))
+        let recent = base64Encode(Data(repeating: 0x02, count: 32))
+        let other = base64Encode(Data(repeating: 0x03, count: 32))
+        let own = base64Encode(Data(repeating: 0x04, count: 32))
+        let profiles: [String: ProfileClaim] = [
+            other: ProfileClaim(displayName: "Other", username: nil, updatedAtMs: 1),
+            recent: ProfileClaim(displayName: "Recent", username: nil, updatedAtMs: 1),
+            contact: ProfileClaim(displayName: "Contact", username: nil, updatedAtMs: 1),
+            own: ProfileClaim(displayName: "Me", username: nil, updatedAtMs: 1),
+        ]
+        let records = OwnBackupEnvelopes.receivedProfileRecords(
+            profiles: profiles, contactKeysB64: [contact], recentPeopleB64: [recent, own],
+            ownKeysB64: [own])
+        XCTAssertEqual(records.map { base64Encode($0.personKey) }, [contact, recent, other])
+        let names = records.compactMap { (try? decodeProfileEnvelope(plaintext: $0.envelope))?.displayName }
+        XCTAssertEqual(names, ["Contact", "Recent", "Other"])
+    }
+
+    /// Restore feeds each carried name through the receive gate: a key with
+    /// nothing held takes it, a held newer stamp is kept, an own key is
+    /// skipped.
+    func testARestoredBackupNamesPeopleThroughTheReceiveGate() throws {
+        let (directory, _) = makeDirectory { _ in .notRegistered }
+        let fresh = Data(repeating: 0x11, count: 32)
+        let newerHeld = Data(repeating: 0x22, count: 32)
+        let own = Data(repeating: 0x33, count: 32)
+        directory.acceptReceived(
+            ProfileClaim(displayName: "Kept", username: nil, updatedAtMs: 9),
+            signatureKeyB64: base64Encode(newerHeld), accountIdB64: directory.accountIdB64)
+        func record(_ key: Data, _ name: String, _ stamp: UInt64) throws -> BackupReceivedProfile {
+            BackupReceivedProfile(personKey: key, envelope: try XCTUnwrap(
+                StateBundle.profileEnvelope(ProfileClaim(displayName: name, username: nil, updatedAtMs: stamp))))
+        }
+        let stored = PhraseRestoreBackup.applyReceivedProfiles(
+            [try record(fresh, "VG3", 5), try record(newerHeld, "Older", 3), try record(own, "Me", 5)],
+            accountIdB64: "acct", context: "test", profiles: directory, ownKeysB64: [base64Encode(own)])
+        XCTAssertEqual(stored, 1)
+        XCTAssertEqual(directory.resolve(signatureKey: fresh).name, "VG3")
+        XCTAssertEqual(directory.resolve(signatureKey: newerHeld).name, "Kept")
+        XCTAssertTrue(directory.resolve(signatureKey: own).isPlaceholder)
     }
 
     func testAReceivedProfileNamesThePersonAndItsUsernameAppearsOnlyAfterVerifying() async {

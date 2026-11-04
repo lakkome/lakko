@@ -19,12 +19,16 @@
 //! ## Scope: DECODE + the length bounds, nothing else
 //!
 //! [`decode_profile_envelope`] answers "is this a profile envelope I must not
-//! render?" and **deliberately returns nothing else** — not the name, not the
-//! username. The NSE is read-only-throwaway (C-59): it must never store a
-//! profile, and ADR-0048's open question is answered "it only reads what the
-//! app already stored". Handing it the decoded fields would be the first step
-//! toward it acting on them. Compose, the newer-than order and display-name
-//! preparation are absent for the same reason.
+//! render?" and returns nothing else.
+//!
+//! [`profile_envelope_display_name`] returns the display name alone (amended
+//! 2026-11-04, maintainer: a notification always names the sender). A new
+//! member's profile and first message often arrive in one wake, before the
+//! app has stored the profile, so the NSE reads the name from the profile row
+//! in the same batch and uses it, in memory, for the rest of that batch. It
+//! still stores nothing (C-59): the app files the same row when it polls.
+//! The username, the account id, the certificate and the grants stay
+//! withheld, and compose and the newer-than order stay absent.
 //!
 //! [`profile_envelope_min_len`] / [`profile_envelope_max_len`] are what the
 //! NSE's cheap pre-filter needs. Unlike the two fixed-length siblings the
@@ -67,6 +71,21 @@ pub fn decode_profile_envelope(plaintext: Vec<u8>) -> Result<(), FfiError> {
         .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
+/// The display name of a strictly decoded profile envelope (ADR-0048), or
+/// `None` when the profile carries none. Read by the NSE for the rest of one
+/// wake's batch and never stored (see the module docs).
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] when `plaintext` is not a valid profile envelope,
+/// as for [`decode_profile_envelope`].
+#[uniffi::export]
+pub fn profile_envelope_display_name(plaintext: Vec<u8>) -> Result<Option<String>, FfiError> {
+    rust_decode_profile(&plaintext)
+        .map(|profile| profile.display_name)
+        .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
 /// Shortest well-formed profile envelope in bytes (no name, no username, no
 /// account id, no certificate, no grants).
 ///
@@ -95,6 +114,18 @@ mod tests {
     use super::*;
     use lakko_contacts::profile::{compose_profile, Profile, PROFILE_ENVELOPE_DOMAIN_V1};
     use lakko_contacts::reach::{ReachClass, ReachGrant};
+
+    #[test]
+    fn the_display_name_is_read_and_nothing_else_is_needed() {
+        let wire = compose_profile(&profile(Some("VG3"), Some("vg3_user"))).expect("compose");
+        assert_eq!(
+            profile_envelope_display_name(wire).expect("decode"),
+            Some("VG3".to_string())
+        );
+        let unnamed = compose_profile(&profile(None, Some("vg3_user"))).expect("compose");
+        assert_eq!(profile_envelope_display_name(unnamed).expect("decode"), None);
+        assert!(profile_envelope_display_name(b"hello".to_vec()).is_err());
+    }
 
     fn profile(name: Option<&str>, username: Option<&str>) -> Profile {
         Profile {

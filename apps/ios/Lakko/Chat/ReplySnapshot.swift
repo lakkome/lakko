@@ -64,6 +64,14 @@ public enum ReplySnapshot {
         return (name: name, excerpt: excerpt.isEmpty ? missingExcerpt : excerpt)
     }
 
+    /// The quote as this device draws it when the quoted message is this
+    /// account's own: the name line reads "You". The snapshot on the wire
+    /// carries the author's real name (maintainer, 2026-11-04); only the
+    /// author's own devices say "You".
+    public static func shownAsOwn(_ reply: ReplyRef) -> ReplyRef {
+        ReplyRef(target: reply.target, author: Localization.text("chat.author.you"), excerpt: reply.excerpt)
+    }
+
     /// Trim, then fold every line break and run of whitespace into one space.
     static func oneLine(_ text: String) -> String {
         text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })

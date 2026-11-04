@@ -32,17 +32,32 @@ class SnapshotAuthorTest {
     @Test
     fun `the author carried is the name, the one-to-one peer, or none`() {
         val incoming = message(Direction.Incoming)
-        assertEquals("Anna", snapshotAuthorOf(incoming, "You", isOneToOne = false, authorName = "Anna", peerName = null))
-        assertEquals("Bob", snapshotAuthorOf(incoming, "You", isOneToOne = true, authorName = null, peerName = "Bob"))
-        assertNull(snapshotAuthorOf(incoming, "You", isOneToOne = false, authorName = null, peerName = "Bob"))
-        assertNull(snapshotAuthorOf(incoming, "You", isOneToOne = true, authorName = null, peerName = null))
-        assertEquals("You", snapshotAuthorOf(message(Direction.Outgoing), "You", false, null, null))
+        assertEquals("Anna", snapshotAuthorOf(incoming, "Vera", isOneToOne = false, authorName = "Anna", peerName = null))
+        assertEquals("Bob", snapshotAuthorOf(incoming, "Vera", isOneToOne = true, authorName = null, peerName = "Bob"))
+        assertNull(snapshotAuthorOf(incoming, "Vera", isOneToOne = false, authorName = null, peerName = "Bob"))
+        assertNull(snapshotAuthorOf(incoming, "Vera", isOneToOne = true, authorName = null, peerName = null))
+    }
+
+    @Test
+    fun `a reply to one's own message carries the own name and reads You on the own devices`() {
+        me.lakko.app.l10n.EnglishForTests.install()
+        val own = message(Direction.Outgoing)
+        val author = snapshotAuthorOf(own, "Vera", isOneToOne = false, authorName = null, peerName = null)
+        assertEquals("Vera", author)
+        val snapshot = replySnapshotFor(own, author.orEmpty())
+        assertEquals("Vera", snapshot.author)
+        assertEquals("Vera", forwardPayloadOf(own, author, "ab".repeat(32)).second.author)
+        // Every other device draws the carried name; this account's own draw "You".
+        assertEquals("Vera", replyQuoteLines(snapshot).first)
+        assertEquals(me.lakko.app.l10n.EnglishForTests.strings["chat.author.you"], replyQuoteLines(snapshot, quotesOwnAccount = true).first)
+        // An own message with no own name set carries none, never "You".
+        assertNull(snapshotAuthorOf(own, null, isOneToOne = false, authorName = null, peerName = null))
     }
 
     @Test
     fun `an unnamed author leaves the reply and the forward with no name`() {
         val incoming = message(Direction.Incoming)
-        val author = snapshotAuthorOf(incoming, "You", isOneToOne = false, authorName = null, peerName = null)
+        val author = snapshotAuthorOf(incoming, "Vera", isOneToOne = false, authorName = null, peerName = null)
         assertNull(replySnapshotFor(incoming, author.orEmpty()).author)
         assertNull(forwardPayloadOf(incoming, author, "ab".repeat(32)).second.author)
     }

@@ -73,6 +73,7 @@ function restored(overrides: Partial<Extract<RestoreResult, { kind: "restored" }
     ownPredecessors: [],
     ownProfile: new Uint8Array(0),
     visibility: new Uint8Array(0),
+    receivedProfiles: [],
     ...overrides,
   };
 }
@@ -93,6 +94,7 @@ interface Harness {
   readonly contacts: AcceptedContact[];
   readonly synced: Uint8Array[];
   readonly ownState: { ownProfile: Uint8Array; visibility: Uint8Array }[];
+  readonly received: { accountIdB64: string; profiles: readonly unknown[] }[];
   alerts: number;
 }
 
@@ -108,6 +110,7 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
     contacts: [],
     synced: [],
     ownState: [],
+    received: [],
     alerts: 0,
     deps: {
       fetch: async (phraseBytes, sessionToken, gate) => {
@@ -130,6 +133,9 @@ function harness(answer: () => Promise<RestoreResult>): Harness {
       applyOwnState: async (accountIdB64, own) => {
         h.calls.push(`applyOwnState ${accountIdB64}`);
         h.ownState.push(own);
+      },
+      applyReceivedProfiles: async (accountIdB64, profiles) => {
+        h.received.push({ accountIdB64, profiles });
       },
       applyOwnPredecessors: async (accountIdB64) => {
         h.calls.push(`applyOwnPredecessors ${accountIdB64}`);
@@ -336,6 +342,7 @@ describe("restoreAccountBackup", () => {
       "applyContacts",
       "applyOwnPredecessors",
       "applyOwnState",
+      "applyReceivedProfiles",
       "applySyncedState",
       "clearOwed",
       "fetch",
@@ -352,6 +359,7 @@ describe("restoreAccountBackup", () => {
       "knownGroupIds",
       "ownPredecessors",
       "ownProfile",
+      "receivedProfiles",
       "syncedState",
       "visibility",
     ]);

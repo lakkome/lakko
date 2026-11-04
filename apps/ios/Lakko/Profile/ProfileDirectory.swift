@@ -523,6 +523,12 @@ public final class ProfileDirectory: ObservableObject {
         received.all()
     }
 
+    /// Every received profile kept for `accountIdB64`, active or not (a
+    /// backup can be built before the session lands).
+    func receivedProfiles(accountIdB64: String) -> [String: ProfileClaim] {
+        received.all(accountIdB64: accountIdB64)
+    }
+
     func storedProfile(signatureKeyB64: String) -> ProfileClaim? {
         received.profile(signatureKeyB64: signatureKeyB64)
     }

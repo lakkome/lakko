@@ -216,3 +216,21 @@ public fun requestSenderLabel(name: ResolvedName): String =
 /** The incoming request card title (UX §5): `Alice Petrova · @alice wants to
  *  connect`, `@alice wants to connect`, or `Someone wants to connect`. */
 public fun requestCardTitle(name: ResolvedName): String = "${requestSenderLabel(name)} wants to connect"
+
+/** The keys already reported by [reportUnnamedPerson] in this process. */
+private val reportedUnnamed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+/**
+ * A person is drawn with the placeholder in the app. Every sender is a
+ * contact, a group member or a channel member whose name is stored on this
+ * device, so this is a defect: logged once per person per process, as one
+ * plain line with no identifier.
+ */
+public fun reportUnnamedPerson(personKeyB64: String) {
+    if (!reportedUnnamed.add(personKeyB64)) return
+    try {
+        android.util.Log.e("LakkoNames", "a person is shown without a name in the app")
+    } catch (_: RuntimeException) {
+        // Host unit tests: android.util.Log is a stub.
+    }
+}

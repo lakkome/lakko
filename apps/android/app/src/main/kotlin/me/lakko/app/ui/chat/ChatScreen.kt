@@ -445,13 +445,18 @@ public fun ChatScreen(
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
     }
+    // Whether the message a reply quotes is this account's own (sent from
+    // this device or another of the account's): its quote reads "You" here.
+    val replyTargetIsOwn: (Long) -> Boolean = { target ->
+        state.messages.firstOrNull { it.messageId == target }?.direction == Direction.Outgoing
+    }
     // The author a reply quote or a forward attribution CARRIES: the same
     // person, but never a placeholder (every receiver would show it forever);
     // with no real name the snapshot carries none.
     val snapshotAuthorLabel: (ChatMessage) -> String? = { msg ->
         me.lakko.app.chat.snapshotAuthorOf(
             message = msg,
-            youLabel = strings["chat.author.you"],
+            ownName = viewModel.ownSnapshotName(),
             isOneToOne = !isGroupChat,
             authorName = viewModel.snapshotNameOf(msg.authorKey),
             peerName = viewModel.oneToOnePeerSnapshotName(),
@@ -1175,6 +1180,7 @@ public fun ChatScreen(
                                 viewModel.onReplyToMessage(msg, snapshotAuthorLabel(msg).orEmpty())
                             },
                             onJumpToReply = jumpToMessage,
+                            replyTargetIsOwn = replyTargetIsOwn,
                             // ADR-0052 decision 2 / UX 5.1 — Forward hands the
                             // row, with the name the timeline shows for its
                             // author, to the picker. The name is decided HERE
@@ -1344,6 +1350,7 @@ public fun ChatScreen(
                 onSendClicked = viewModel::onSendClicked,
                 onFocusChanged = viewModel::onComposerFocusChanged,
                 replyStrip = replyingTo,
+                replyStripIsOwn = replyingTo?.let { replyTargetIsOwn(it.messageId) } == true,
                 onCancelReply = viewModel::onCancelReply,
                 onPickMedia = {
                     pickVisualLauncher.launch(
@@ -1640,6 +1647,8 @@ private fun MessageRow(
     onReply: () -> Unit = {},
     /** UX 3.1 — this row's quote was tapped; the argument is the target id. */
     onJumpToReply: (Long) -> Unit = {},
+    /** Whether a reply's quoted message is this account's own. */
+    replyTargetIsOwn: (Long) -> Boolean = { false },
     /** UX 3.1 — this row is the one a tapped quote just scrolled to. */
     highlighted: Boolean = false,
     /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on this message. */
@@ -1692,6 +1701,7 @@ private fun MessageRow(
                 isOwn = true,
                 onReply = onReply,
                 onJumpToReply = onJumpToReply,
+                replyTargetIsOwn = replyTargetIsOwn,
                 onForward = onForward,
                 onJumpToForward = onJumpToForward,
                 onPin = onPin,
@@ -1763,6 +1773,7 @@ private fun MessageRow(
                     isOwn = false,
                     onReply = onReply,
                     onJumpToReply = onJumpToReply,
+                    replyTargetIsOwn = replyTargetIsOwn,
                     onForward = onForward,
                     onJumpToForward = onJumpToForward,
                     onPin = onPin,
@@ -2026,6 +2037,9 @@ internal fun Bubble(
     onReply: () -> Unit = {},
     /** UX 3.1 — the quote block was tapped; the argument is the target id. */
     onJumpToReply: (Long) -> Unit = {},
+    /** Whether a reply's quoted message is this account's own: then the
+     *  quote reads "You" here, whatever name the snapshot carries. */
+    replyTargetIsOwn: (Long) -> Boolean = { false },
     /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on this message. */
     onForward: () -> Unit = {},
     /** UX 5.1 — the "Forwarded from" line was tapped. */
@@ -2226,6 +2240,7 @@ internal fun Bubble(
                         if (reply != null) {
                             ReplyQuote(
                                 reply = reply,
+                                quotesOwnAccount = replyTargetIsOwn(reply.target),
                                 contentColor = contentColor,
                                 onClick = { onJumpToReply(reply.target) },
                             )
@@ -2504,8 +2519,9 @@ internal fun ReplyStrip(
     reply: ReplyRef,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    quotesOwnAccount: Boolean = false,
 ) {
-    val (name, excerpt) = replyQuoteLines(reply)
+    val (name, excerpt) = replyQuoteLines(reply, quotesOwnAccount = quotesOwnAccount)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -2612,9 +2628,10 @@ internal fun ReplyQuote(
     contentColor: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    quotesOwnAccount: Boolean = false,
 ) {
     val strings = LocalStrings.current
-    val (name, excerpt) = replyQuoteLines(reply, strings)
+    val (name, excerpt) = replyQuoteLines(reply, strings, quotesOwnAccount)
     val label = if (name.isEmpty()) strings["chat.reply.quote"] else strings.format("chat.reply.quote_to", mapOf("name" to name))
     Row(
         modifier = modifier
@@ -3202,6 +3219,8 @@ internal fun Composer(
     onRemoveAttachment: (Int) -> Unit,
     /** ADR-0052 / UX 3.1 — the armed reply the strip shows, or `null`. */
     replyStrip: ReplyArmed? = null,
+    /** The armed reply quotes this account's own message ("You" here). */
+    replyStripIsOwn: Boolean = false,
     /** The strip's close control. */
     onCancelReply: () -> Unit = {},
     /** reactions-and-emoji section 13 — the emoji matching a `:word`, Recent
@@ -3281,7 +3300,7 @@ internal fun Composer(
         }
         // ADR-0052 / UX 3.1 — the reply strip, above the tray and the field.
         if (replyStrip != null && !recording) {
-            ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply)
+            ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply, quotesOwnAccount = replyStripIsOwn)
         }
         // reactions-and-emoji section 13 — the `:` suggestions strip.
         val colonQuery = me.lakko.app.chat.colonQueryAt(

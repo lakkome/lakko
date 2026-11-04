@@ -100,6 +100,7 @@ import { deleteBlobs } from "../storage/blob-deletes";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
+  replyQuoteLines,
   replySnapshotFor,
   type ReplySnapshot,
 } from "../chat/reply-snapshot";
@@ -115,7 +116,13 @@ import {
   type RosterLeaf as RosterLeafView,
 } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
-import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf, realNameOf as realNameOfResolved } from "../profile/member-label";
+import {
+  UNNAMED_MEMBER,
+  memberListLabelOf,
+  memberNameOf,
+  realNameOf as realNameOfResolved,
+  reportUnnamedPerson,
+} from "../profile/member-label";
 import { pendingJoinLabel, pendingJoinName, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
@@ -982,13 +989,25 @@ function ChatView(props: {
     const original = row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
     const attachments = row.kind === "outgoing" ? row.attachments : row.event.kind === "application" ? row.event.attachments : [];
     const text = msgOps().get(messageId)?.editedText ?? original;
-    // The name is whatever the timeline already calls that person: "You" for
-    // an own message (this device's or this person's other device, ADR-0050),
-    // else the one display resolver, else the same fallback the bubble draws.
-    const snapshot = replySnapshotFor({ text, attachments }, authorLabelOf(row), (a) => hub.decision(a).bubble);
+    // The snapshot carries the author's REAL name, the account's own for an
+    // own message (decided 2026-11-04): it goes on the wire, and "You" is the
+    // viewer's word, drawn locally by the author's own devices.
+    const snapshot = replySnapshotFor({ text, attachments }, forwardAuthorLabelOf(row), (a) => hub.decision(a).bubble);
     setEditingId(null);
     setReplyingTo({ target: messageId, ...snapshot });
     composerInput?.focus();
+  }
+  /** The strip's name line: "You" for an own message (the snapshot itself
+   *  carries the account's name), else the snapshot's name. */
+  function replyStripName(armed: { readonly target: number; readonly author?: string }): string {
+    return replyQuoteLines(
+      armed.author === undefined ? {} : { author: armed.author },
+      isAuthoredByViewer(armed.target),
+    ).name;
+  }
+  function replyStripLabel(armed: { readonly target: number; readonly author?: string }): string {
+    const name = replyStripName(armed);
+    return name.length === 0 ? t("chat.reply.quote") : t("chat.reply.strip_label", { name });
   }
   /** Take the armed reply for a send and clear the strip in the same step, so
    *  two sends can never carry one reply. */
@@ -1111,6 +1130,12 @@ function ChatView(props: {
         : undefined;
     }
     return author.kind === "named" ? author.name : undefined;
+  }
+  /** Whether this timeline holds the message `messageId` and it is this
+   *  account's own: the reply quote draws "You" for it. */
+  function isAuthoredByViewer(messageId: number): boolean {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    return row !== undefined && authorOf(row).kind === "self";
   }
   /** Section 5.1 — the href of another conversation, routed by ITS kind the
    *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
@@ -2091,9 +2116,10 @@ function ChatView(props: {
   // reactions), `listLabel` (`Name · @username`) for roster rows.
   // A person the device cannot name is "Member", never a key fingerprint
   // (docs/ux/client-redesign.md section 6).
-  const memberName = (keyB64: string): string => memberNameOf(profiles.resolve(keyB64));
+  const memberName = (keyB64: string, surface = "a conversation label"): string =>
+    memberNameOf(profiles.resolve(keyB64), surface);
   const memberListLabel = (keyB64: string): string =>
-    memberListLabelOf(profiles.resolve(keyB64));
+    memberListLabelOf(profiles.resolve(keyB64), "a member list row");
   // ADR-0050 — one row per PERSON: `sigPubkey` is the member's account key
   // (what roles, names and authorship key on), `leafIndex` its first leaf,
   // `deviceCount` how many leaves the person holds. Removing the row removes
@@ -3372,7 +3398,10 @@ function ChatView(props: {
    *  rows have left the pending set, so they no longer have a
    *  {@link PendingRequest} to carry it. */
   function labelForSignatureKey(keyB64: string | undefined): string {
-    if (keyB64 === undefined) return UNNAMED_MEMBER();
+    if (keyB64 === undefined) {
+      reportUnnamedPerson("", "a join request row (no key)");
+      return UNNAMED_MEMBER();
+    }
     return memberListLabel(keyB64);
   }
 
@@ -3484,7 +3513,7 @@ function ChatView(props: {
    *  cannot be relabelled with the name of whoever took their slot. */
   const labelForIdentity = (identity: MemberIdentity): string => {
     if (identity === OWN_REACTION_SENTINEL) return t("chat.author.a_member");
-    return memberName(identity);
+    return memberName(identity, "a typing, reaction or read line");
   };
 
   // -------------------------------------------------------------------------
@@ -7961,6 +7990,7 @@ function ChatView(props: {
                 readByOthers={(id) =>
                   isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }
+                isAuthoredByViewer={isAuthoredByViewer}
                 readersOf={(id) => {
                   const own = ownSignatureKeyB64();
                   const out: MemberIdentity[] = [];
@@ -8432,15 +8462,11 @@ function ChatView(props: {
           <div
             class="lk-reply-strip"
             role="status"
-            aria-label={
-              armed().author === undefined
-                ? t("chat.reply.quote")
-                : t("chat.reply.strip_label", { name: armed().author ?? "" })
-            }
+            aria-label={replyStripLabel(armed())}
           >
             <span class="lk-reply-strip-rule" aria-hidden="true" />
             <span class="lk-reply-strip-body">
-              <span class="lk-reply-strip-name">{armed().author ?? ""}</span>
+              <span class="lk-reply-strip-name">{replyStripName(armed())}</span>
               <span class="lk-reply-strip-excerpt">{armed().excerpt}</span>
             </span>
             <button
@@ -9013,8 +9039,8 @@ function ChatView(props: {
                             const line =
                               issuer !== null
                                 ? when !== null
-                                  ? t("chat.members.join.invited_by", { name: memberName(issuer), when })
-                                  : t("chat.members.join.invited_by_name", { name: memberName(issuer) })
+                                  ? t("chat.members.join.invited_by", { name: memberName(issuer, "an invited-by line"), when })
+                                  : t("chat.members.join.invited_by_name", { name: memberName(issuer, "an invited-by line") })
                                 : when !== null
                                   ? t("chat.members.join.asked", { when })
                                   : null;

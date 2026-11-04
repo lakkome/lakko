@@ -33,10 +33,11 @@ import { t } from "../l10n";
 
 /** What the strip shows and the envelope carries. */
 export interface ReplySnapshot {
-  /** The quoted author, as the timeline names them ("You" for an own
-   *  message); absent when the device has no real name for them (never a
-   *  placeholder word or a fingerprint, since the snapshot goes on the
-   *  wire). */
+  /** The quoted author's real name, the account's own for an own message
+   *  (never "You": the snapshot goes on the wire, and the author's own
+   *  devices draw "You" for it, {@link replyQuoteLines}); absent when the
+   *  device has no real name for them (never a placeholder word or a
+   *  fingerprint). */
   readonly author?: string;
   /** The quoted message's text on one line, or the kind of its first
    *  attachment when it has no text. */
@@ -106,9 +107,15 @@ export interface ReplyQuoteLines {
  * gets the same fallback for that half, since the core never carries an
  * empty string.
  */
-export function replyQuoteLines(reply: Pick<ReplyRef, "author" | "excerpt">): ReplyQuoteLines {
+export function replyQuoteLines(
+  reply: Pick<ReplyRef, "author" | "excerpt">,
+  /** The quoted message is this account's own (this device's or another
+   *  device of this person's, ADR-0050): the snapshot carries the account's
+   *  real name, and this device draws "You" for it (decided 2026-11-04). */
+  authoredByViewer = false,
+): ReplyQuoteLines {
   return {
-    name: reply.author ?? "",
+    name: authoredByViewer ? t("chat.author.you") : (reply.author ?? ""),
     excerpt: reply.excerpt ?? REPLY_EXCERPT_FALLBACK(),
   };
 }

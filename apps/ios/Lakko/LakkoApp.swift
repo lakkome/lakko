@@ -1937,6 +1937,11 @@ private struct SessionRoot: View, Equatable {
                 // filing before the first one ends.
                 CallHistoryStore.shared.bind(accountIdB64: account.accountIdB64)
                 chatRepository.bootstrap(secrets: secrets)
+                // A backup keeps received names in recent-use order after
+                // contacts (`OwnBackupEnvelopes.receivedProfileRecords`).
+                BackupPeopleOrder.source = { [weak chatRepository] in
+                    chatRepository?.peopleByRecentUse() ?? []
+                }
                 // ADR-0053 point 2 — claim the account and device mailboxes on
                 // every session start (signup, login, restore). Fire and forget.
                 chatRepository.claimOwnMailboxes()

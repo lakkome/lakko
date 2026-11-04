@@ -5367,6 +5367,16 @@ public class ChatRepository(
 
     /** This account's own profile name, or `null` when none is set. The call
      *  host puts it on the user's own tile (`docs/ux/calls.md` section 4.4). */
+    /** The name others see for this account, as a reply quote or a forward
+     *  attribution carries it: the own display name, else `@username`; `null`
+     *  when neither is set. */
+    public fun ownSnapshotName(): String? {
+        val accountId = keyPackageAccount.get()?.accountId ?: return null
+        val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId) ?: return null
+        return own.displayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: own.username?.trim()?.takeIf { it.isNotEmpty() }?.let { "@$it" }
+    }
+
     public fun ownDisplayName(): String? {
         val accountId = keyPackageAccount.get()?.accountId ?: return null
         return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.displayName

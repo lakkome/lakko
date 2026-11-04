@@ -107,6 +107,7 @@ public class BackupClient(
             ownPredecessors = ownPredecessors.takeIf { it.isNotEmpty() },
             ownProfile = personal.ownProfile,
             visibility = personal.visibility,
+            receivedProfiles = personal.receivedProfiles.takeIf { it.isNotEmpty() },
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -297,22 +298,41 @@ public class BackupClient(
  * ([ownProfile] and [visibility] `null` when never set). Opaque here; a restore
  * decodes them and fails closed.
  */
-public data class BackupPersonal(val ownProfile: ByteArray?, val visibility: ByteArray?) {
-    /** A short value that changes with either envelope. */
+public data class BackupPersonal(
+    val ownProfile: ByteArray?,
+    val visibility: ByteArray?,
+    /** ADR-0048 / `lakko-backup` v8 — the names this device learned of
+     *  other people ([receivedProfilesOnDevice]), so a restore with no other
+     *  device alive names them at once. */
+    val receivedProfiles: List<uniffi.lakko_ffi_uniffi.BackupReceivedProfile> = emptyList(),
+) {
+    /** A short value that changes with any envelope. */
     public fun changeKey(): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         ownProfile?.let(digest::update)
         digest.update(0)
         visibility?.let(digest::update)
+        for (r in receivedProfiles) {
+            digest.update(1)
+            digest.update(r.personKey)
+            digest.update(r.envelope)
+        }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     override fun equals(other: Any?): Boolean =
         other is BackupPersonal &&
             ownProfile.contentEqualsOrNull(other.ownProfile) &&
-            visibility.contentEqualsOrNull(other.visibility)
+            visibility.contentEqualsOrNull(other.visibility) &&
+            receivedProfiles.size == other.receivedProfiles.size &&
+            receivedProfiles.indices.all { i ->
+                receivedProfiles[i].personKey.contentEquals(other.receivedProfiles[i].personKey) &&
+                    receivedProfiles[i].envelope.contentEquals(other.receivedProfiles[i].envelope)
+            }
 
-    override fun hashCode(): Int = (ownProfile?.contentHashCode() ?: 0) * 31 + (visibility?.contentHashCode() ?: 0)
+    override fun hashCode(): Int =
+        ((ownProfile?.contentHashCode() ?: 0) * 31 + (visibility?.contentHashCode() ?: 0)) * 31 +
+            receivedProfiles.sumOf { it.personKey.contentHashCode() }
 
     public companion object {
         public val NONE: BackupPersonal = BackupPersonal(null, null)
@@ -330,7 +350,8 @@ public data class BackupPersonal(val ownProfile: ByteArray?, val visibility: Byt
             val visibility = runCatching {
                 me.lakko.app.reach.ReachManager.get(context).visibilityEnvelopeFor(accountIdB64)
             }.getOrNull()
-            return BackupPersonal(ownProfile, visibility)
+            val received = runCatching { receivedProfilesOnDevice(context, accountIdB64) }.getOrDefault(emptyList())
+            return BackupPersonal(ownProfile, visibility, received)
         }
 
         private fun ByteArray?.contentEqualsOrNull(other: ByteArray?): Boolean =

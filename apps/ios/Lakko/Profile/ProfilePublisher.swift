@@ -62,6 +62,10 @@ final class ProfilePublisher {
     private var publishSequence: UInt64 = 0
     private var lastPublishSequence: [String: UInt64] = [:]
     private var scheduled: [String: Task<Void, Never>] = [:]
+    /// Groups where this device owes its profile to someone who cannot have
+    /// it yet: a growth was seen and the republish has not gone out, or a
+    /// publish failed. Cleared by the next publish that lands.
+    private var owed: Set<String> = []
 
     init(ports: Ports) {
         self.ports = ports
@@ -90,9 +94,13 @@ final class ProfilePublisher {
             publishSequence &+= 1
             lastPublishSequence[groupIdHex] = publishSequence
             lastPublishedAtMs[groupIdHex] = ports.nowMs()
+            owed.remove(groupIdHex)
             return .sent
         } catch {
             NSLog("ADR-0048 profile publish failed: \(error)")
+            // Owed: the next message this device sends in the group carries
+            // the profile ahead of it (``publishOwedBeforeSend(groupIdHex:)``).
+            owed.insert(groupIdHex)
             return .failed
         }
     }
@@ -122,6 +130,7 @@ final class ProfilePublisher {
     /// so a caller (a test) can await it.
     @discardableResult
     func noteGrowth(groupIdHex: String) -> Task<Void, Never>? {
+        owed.insert(groupIdHex)
         if let pending = scheduled[groupIdHex] { return pending }
         let delay = Self.growthDelayMs(
             nowMs: ports.nowMs(),
@@ -132,8 +141,10 @@ final class ProfilePublisher {
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.ports.sleep(delay)
-            self.scheduled[groupIdHex] = nil
+            // A cancelled republish (an owed profile went out ahead of a
+            // message) leaves the slot alone: a newer one may hold it.
             guard !Task.isCancelled else { return }
+            self.scheduled[groupIdHex] = nil
             if (self.lastPublishSequence[groupIdHex] ?? 0) > sequenceAtNote { return }
             await self.publishNow(groupIdHex: groupIdHex)
         }
@@ -141,10 +152,27 @@ final class ProfilePublisher {
         return task
     }
 
+    /// Whether this device owes `groupIdHex` its profile (a growth not yet
+    /// answered, or a publish that failed).
+    func isOwed(groupIdHex: String) -> Bool { owed.contains(groupIdHex) }
+
+    /// Called before this device sends its own message into `groupIdHex`: if
+    /// the profile is owed there, publish it now, with no throttle and no
+    /// jitter, so the newcomer has the name before the message that needs
+    /// it. The scheduled republish is cancelled (this publish answers it). A
+    /// failed publish stays owed and does not stop the message. The jittered
+    /// republish stays the path when this device sends nothing.
+    func publishOwedBeforeSend(groupIdHex: String) async {
+        guard owed.contains(groupIdHex) else { return }
+        scheduled.removeValue(forKey: groupIdHex)?.cancel()
+        await publishNow(groupIdHex: groupIdHex)
+    }
+
     /// Cancel everything scheduled and forget all timing (account switch).
     func reset() {
         scheduled.values.forEach { $0.cancel() }
         scheduled = [:]
+        owed = []
         lastPublishedAtMs = [:]
         lastPublishSequence = [:]
     }

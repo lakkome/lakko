@@ -175,7 +175,14 @@ private struct MessageActionsFixture: View {
             onPreview: { _ in },
             onEdit: { edited = true },
             onDelete: { deleted = true },
-            onReact: { reacted = $0 }
+            onReact: { reacted = $0 },
+            // The row production draws (`ChatViewModel.reactionRow(for:)`):
+            // the shared rule over a conversation that takes any reaction,
+            // with no quick reaction chosen and no recent ones, so the row is
+            // the six defaults. Left out, the row is empty and the menu shows
+            // no reactions at all.
+            reactionRow: ReactionRules.row(
+                message: message, own: "me", quick: nil, recent: [], allowed: .all)
         )
     }
 }

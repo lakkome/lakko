@@ -218,6 +218,33 @@ enum PhraseRestoreBackup {
         return applied
     }
 
+    /// The names a backup carried for other people, fed through the profile
+    /// receive gate: each is kept only when this device holds nothing for
+    /// that key or holds an older stamp, exactly as a profile received in a
+    /// group (``ProfileDirectory/adoptCarriedProfiles(_:accountIdB64:)``).
+    /// An entry that does not decode, or that names one of this account's
+    /// own keys, is skipped alone. Returns how many were stored.
+    @MainActor
+    @discardableResult
+    static func applyReceivedProfiles(
+        _ entries: [BackupReceivedProfile],
+        accountIdB64: String,
+        context: String,
+        profiles: ProfileDirectory = .shared,
+        ownKeysB64: Set<String>? = nil
+    ) -> Int {
+        guard !entries.isEmpty else { return 0 }
+        let carried = entries.map {
+            StateBundle.CarriedProfile(
+                personKeyB64: base64Encode($0.personKey), envelopeB64: base64Encode($0.envelope))
+        }
+        let claims = StateBundle.carriedProfileClaims(
+            carried, ownKeysB64: ownKeysB64 ?? StateBundle.ownKeysB64(accountIdB64: accountIdB64))
+        let stored = profiles.adoptCarriedProfiles(claims, accountIdB64: accountIdB64)
+        NSLog("backup restore (\(context)): \(stored) of \(entries.count) received names kept")
+        return stored
+    }
+
     /// Lowercase hex, the form ``KnownGroupsStore`` and
     /// ``RestoredKnownGroupsStore`` hold.
     static func hexString(fromBytes bytes: Data) -> String {

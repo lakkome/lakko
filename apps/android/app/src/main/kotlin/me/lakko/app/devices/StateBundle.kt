@@ -1369,7 +1369,7 @@ public object StateBundle {
     /** This account's own keys as this device knows them: the current key
      *  (when its seed is held), the earlier keys it holds, and the earlier
      *  keys the bundle carried. Each part best-effort. */
-    private fun ownKeysOnDevice(context: Context, owner: String, carried: List<CarriedOwnPredecessor>): Set<String> {
+    internal fun ownKeysOnDevice(context: Context, owner: String, carried: List<CarriedOwnPredecessor>): Set<String> {
         val enc = Base64.getEncoder()
         val out = HashSet<String>()
         currentAccountKeyB64(context, owner)?.let { out += it }

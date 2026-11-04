@@ -8122,6 +8122,10 @@ public class AuthRepository(
             me.lakko.app.reach.ReachManager.get(applicationContext).noteRestoredFromBackup(accountIdB64)
         }
 
+        override fun applyReceivedProfiles(
+            entries: List<uniffi.lakko_ffi_uniffi.BackupReceivedProfile>,
+        ): Int = me.lakko.app.backup.restoreReceivedProfilesOnDevice(applicationContext, accountIdB64, entries)
+
         override fun markRestored(knewConversations: Boolean) {
             me.lakko.app.backup.BackupRestoreStore.markRestoredChats(
                 applicationContext,

@@ -48,7 +48,7 @@
  * structured fields for that function to apply.
  */
 import type { DeviceCipher } from "../auth/device-cipher";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
 import { currentSyncedStateBytes } from "../devices/sync/synced-state-source";
@@ -70,6 +70,17 @@ import { getPhrase } from "./phrase-store";
 import { mintBackupHead } from "./head-mint";
 import { evaluateRestoreBlob } from "./head-restore";
 import { ownProfileForBackup, visibilityForBackup } from "./own-state";
+import {
+  lastWrittenByAuthor,
+  orderReceivedProfiles,
+  restoredProfilesFor,
+  withRestoredProfiles,
+} from "./received-profiles";
+import { carriedProfilesFromRow } from "../devices/carried-state-io";
+import type { CarriedProfile } from "../devices/state-bundle";
+import { IdbProfileBackend } from "../profile/profile-idb";
+import type { ProfileRow } from "../profile/profile-store";
+import { loadMessageLog, type MessageLogPayload } from "../chat/message-log-store";
 import { putFloor, type BackupFloor } from "./floor-store";
 import type { BackupContact as WasmBackupContact } from "../../wasm/lakko_ffi_wasm";
 
@@ -135,6 +146,9 @@ export type RestoreResult =
       readonly ownProfile: Uint8Array;
       /** The "who can find me" envelope; empty when none was held. */
       readonly visibility: Uint8Array;
+      /** Payload v8 — the profile envelopes of the other people the device
+       *  knew, under the person key each was filed under; empty when none. */
+      readonly receivedProfiles: readonly CarriedProfile[];
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -495,6 +509,7 @@ export class BackupClient {
       ),
       ownProfile: parsed.ownProfile,
       visibility: parsed.visibility,
+      receivedProfiles: receivedProfilesOfParsed(parsed.receivedProfiles),
     };
   }
 
@@ -561,7 +576,22 @@ export class BackupClient {
     // and the default "who can find me".
     const ownProfile = ownProfileForBackup(wasm, base64Encode(accountId), accountId);
     const visibility = await visibilityForBackup(base64Encode(accountId));
+    // Payload v8 — the names of the people this device knows. Read from the
+    // stores under the device key; a store that cannot be read fails this
+    // upload, as the own predecessors do: a blob without the names would
+    // replace one that has them.
+    const receivedProfiles =
+      deviceKey === undefined
+        ? []
+        : await receivedProfilesForBackup(wasm, base64Encode(accountId), deviceKey, {
+            contactKeysB64: accepted.map((c) => c.signaturePubkeyB64),
+            ownEd25519Seed: ed25519Seed,
+            ownPredecessorSeeds: own.map((p) => base64Decode(p.seedB64)),
+          });
     try {
+      const receivedEntries = receivedProfiles.map(
+        (p) => new wasm.BackupReceivedProfile(base64Decode(p.personKeyB64), base64Decode(p.envelopeB64)),
+      );
       const payload = wasm.buildBackupPayload(
         accountId,
         BigInt(Date.now()),
@@ -578,6 +608,8 @@ export class BackupClient {
         own.length === 0 ? undefined : adoptedAtMs,
         ownProfile ?? undefined,
         visibility ?? undefined,
+        // Payload v8 — the objects are consumed by the call.
+        receivedEntries,
       );
       return wasm.sealBackup(phraseBytes, payload);
     } finally {
@@ -627,4 +659,84 @@ export function applyRestoredContacts(
   for (const c of contacts) {
     upsertAccepted(c, accountIdB64);
   }
+}
+
+/** The parsed payload's received profiles in the bundle's base64 form; the
+ *  wasm objects are freed. */
+export function receivedProfilesOfParsed(
+  entries: readonly { readonly personKey: Uint8Array; readonly envelope: Uint8Array; free?(): void }[],
+): CarriedProfile[] {
+  const out: CarriedProfile[] = [];
+  for (const e of entries) {
+    try {
+      if (e.personKey.length === 32 && e.envelope.length > 0) {
+        out.push({ personKeyB64: base64Encode(e.personKey), envelopeB64: base64Encode(e.envelope) });
+      }
+    } finally {
+      try {
+        e.free?.();
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  return out;
+}
+
+/** What a backup lists of the people this device knows
+ *  (`backup/received-profiles.ts`): the profile row read under the device
+ *  key, composed as envelopes, ordered, the account's own keys left out.
+ *  `loadRow` and `loadLog` are injectable for tests. A row that cannot be
+ *  READ (an IndexedDB error) throws; one that cannot be opened is none. */
+export async function receivedProfilesForBackup(
+  wasm: Wasm,
+  accountIdB64: string,
+  deviceKey: DeviceCipher,
+  people: {
+    readonly contactKeysB64: readonly string[];
+    /** The account identity's 32-byte Ed25519 seed. */
+    readonly ownEd25519Seed: Uint8Array;
+    /** The own predecessors' 64-byte identity seeds (ADR-0074 section 3.7). */
+    readonly ownPredecessorSeeds: readonly Uint8Array[];
+  },
+  loadRow: (accountIdB64: string, deviceKey: DeviceCipher) => Promise<ProfileRow | null> = (a, k) =>
+    new IdbProfileBackend(async () => k, () => new Map()).load(a),
+  loadLog: (accountIdB64: string, deviceKey: DeviceCipher) => Promise<MessageLogPayload | null> = loadMessageLog,
+): Promise<CarriedProfile[]> {
+  const own = new Set<string>();
+  try {
+    // The account key is the plain Ed25519 public key of its 32-byte seed;
+    // `linkRevocationPublicKey` is that derivation (pinned against
+    // `Identity.signaturePublicKey` by `received-profiles.test.ts`).
+    own.add(base64Encode(wasm.linkRevocationPublicKey(people.ownEd25519Seed)));
+  } catch {
+    /* a seed the core refuses names no key */
+  }
+  for (const seed of people.ownPredecessorSeeds) {
+    try {
+      own.add(base64Encode(hexBytes(accountKeyHexOfSeed(wasm, seed))));
+    } catch {
+      /* a seed the core refuses names no key */
+    }
+  }
+  const row = await loadRow(accountIdB64, deviceKey);
+  let log: MessageLogPayload | null = null;
+  try {
+    log = await loadLog(accountIdB64, deviceKey);
+  } catch {
+    // Only the order needs the log.
+    log = null;
+  }
+  return orderReceivedProfiles(
+    withRestoredProfiles(carriedProfilesFromRow(wasm, row, [...own]), restoredProfilesFor(accountIdB64)),
+    new Set(people.contactKeysB64),
+    lastWrittenByAuthor(log),
+    own,
+  );
+}
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }

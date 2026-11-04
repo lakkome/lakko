@@ -93,8 +93,11 @@ this is the flow the three clients implement.
 **Choosing Reply** puts a strip above the composer and focuses the composer.
 The strip is one line: a vertical rule in the accent colour, the quoted
 author's name, then the excerpt, and a close control at the trailing end. The
-name is whatever the timeline already calls that person (contact name, profile
-name, the fingerprint fallback, "You" for an own message). The excerpt is the
+name is the person's real name: the contact name or the profile name they
+sent (decided 2026-11-04 by the maintainer). The snapshot never carries a
+placeholder, a key fingerprint or "You": a reply to one's own message carries
+the author's own name, and the author's devices draw "You" in place of it when
+the snapshot's author is this account. The excerpt is the
 message's text, trimmed to one line; a message with no text shows the kind of
 its first attachment instead ("Voice message", "Video message", "Photo",
 "Video", "GIF", "File"). The strip is what the recipient will see, and it is

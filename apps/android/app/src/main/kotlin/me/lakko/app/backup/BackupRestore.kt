@@ -91,6 +91,10 @@ internal interface BackupRestorePorts {
      *  the path an incoming DeviceGroup envelope takes. */
     fun applyVisibility(envelope: ByteArray)
 
+    /** ADR-0048 / `lakko-backup` v8 — the received profiles, each through
+     *  the profile store's receive gate. Returns how many were stored. */
+    fun applyReceivedProfiles(entries: List<uniffi.lakko_ffi_uniffi.BackupReceivedProfile>): Int = 0
+
     /** What this device noted about the Everyone publication is out of date. */
     fun noteEveryoneUnknown()
 
@@ -224,6 +228,12 @@ internal suspend fun restoreBackupAndApply(
         if (parsed.visibility.isNotEmpty()) ports.applyVisibility(parsed.visibility)
     } catch (cause: Throwable) {
         ports.log("backup restore ($route): visibility not restored", cause)
+    }
+    try {
+        val names = ports.applyReceivedProfiles(parsed.receivedProfiles)
+        ports.log("backup restore ($route): ${parsed.receivedProfiles.size} name(s) in the backup, $names stored")
+    } catch (cause: Throwable) {
+        ports.log("backup restore ($route): names not restored", cause)
     }
     try {
         ports.markRestored(knewConversations = parsed.knownGroupIds.isNotEmpty())
