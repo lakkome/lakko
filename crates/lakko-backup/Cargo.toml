@@ -33,6 +33,11 @@ lakko-attest.workspace = true
 # ADR-0058: the synced-state tail is validated through the fold's decoder.
 lakko-sync.workspace = true
 
+# The bound on a received profile envelope in the backup is the profile
+# codec's own `PROFILE_ENVELOPE_MAX_LEN`, read rather than copied so the two
+# cannot drift. Already in the tree through `lakko-sync`: no new crate.
+lakko-contacts.workspace = true
+
 # CSPRNG for the Argon2 salt + AEAD nonce. Same `rand` major as
 # `lakko-attachments` so the workspace pulls one version.
 rand = "0.8"
@@ -42,3 +47,6 @@ rand = "0.8"
 # `crypto.getRandomValues`. Host targets pick `/dev/urandom`
 # automatically via `rand::OsRng`.
 getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1"

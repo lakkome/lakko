@@ -2096,6 +2096,9 @@ public class ChatRepository(
         }
         val id = publishWelcomeToMailbox(mailbox, bytes, groupIdHex, requireGrant = true).id
         sweepWelcomesWritten[key] = id
+        // The reply grant stays until it expires (7 days): a Welcome re-sent
+        // after a crash, or after a refused write and an address re-check,
+        // needs it. It is withdrawn only when the request is refused.
         return id
     }
 
@@ -2295,6 +2298,8 @@ public class ChatRepository(
             // resolves to); one that does not is not kept.
             if (!me.lakko.app.contacts.grantBindsTo(attr.replyGrant, account, mailboxCrypto)) continue
             reach.keepHeld(account, attr.replyGrant, scopeHex = "")
+            // Recorded per group, so it is cleared when the request is refused.
+            recordKnockReply(DsClient.pseudonymHex(groupId), account, attr.replyGrant)
         }
     }
 
@@ -4036,6 +4041,8 @@ public class ChatRepository(
                 // this device's own pending store, and a refused persist
                 // publishes nothing ([persistProposalOrThrow]).
                 persistProposalOrThrow()
+                // Section 5 — the approved row is behind the knock position.
+                saveKnockCursorBestEffort(groupIdHex, record.knockCursor)
                 Pair(record.groupId, bytes)
             }
             val publish = try {
@@ -4090,6 +4097,7 @@ public class ChatRepository(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
         // G-37 — local-only (no DS call): provider work start to finish.
+        var refusedAccount: ByteArray? = null
         groupLock(groupIdHex).sessionLock {
             providerLock.sessionLock {
                 val record = groups[groupIdHex]
@@ -4097,14 +4105,31 @@ public class ChatRepository(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
+                // The account behind the request, read before it goes, for
+                // its reply grant.
+                refusedAccount = try {
+                    record.group.pendingExternalJoinAccountKey(proposalRef)
+                } catch (_: Throwable) {
+                    null
+                } ?: proposalRef
                 try {
                     record.group.rejectExternalJoin(identity, proposalRef)
                 } catch (e: FfiException) {
                     throw ChatError("rejectExternalJoin failed", e)
                 }
-                persistSnapshotBestEffort()
+                // Section 5 — durably refused, then the knock position: the
+                // refused row is behind it, so a restart does not keep it again.
+                val durable = try {
+                    persistSnapshotDurableOrThrow()
+                    true
+                } catch (cause: Throwable) {
+                    persistSnapshotBestEffort()
+                    false
+                }
+                if (durable) saveKnockCursorBestEffort(groupIdHex, record.knockCursor)
             }
         }
+        refusedAccount?.let { releaseKnockReply(groupIdHex, it) }
     }
 
     /** ADR-0087 section 5 — more requests wait on the server than the pending
@@ -4122,6 +4147,7 @@ public class ChatRepository(
         val through = maxOf(record.lastSeenKnockId, record.knockCursor)
         if (through > 0) dsClient.deleteKnocks(record.groupId, through)
         record.knockCursor = through
+        saveKnockCursorBestEffort(groupIdHex, through)
         record.knockQueueFull = false
         record.sawUnkeptExternalJoin = false
     }
@@ -4780,6 +4806,7 @@ public class ChatRepository(
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
     ) {
+        flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
             // 1.19c4: build the JSON envelope before
             // encrypting. `composeEnvelopeBytes` routes through
@@ -5076,6 +5103,7 @@ public class ChatRepository(
         // An add wakes the conversation like a message; taking one off stays
         // quiet.
         val wake = if (add) sealedWakeFor(groupIdHex, DsWakeKind.MESSAGE) else null
+        flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReactionEnvelope(
                 target = targetMessageId,
@@ -5319,6 +5347,23 @@ public class ChatRepository(
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             publish = { groupIdHex -> publishOwnProfile(groupIdHex) },
         )
+
+    /**
+     * ADR-0048 §2 — the own profile goes before this device's next message
+     * into [groupIdHex] when one is owed there (a newcomer this device has
+     * not yet named itself to, or a join publish that failed): published at
+     * once and awaited, with no jitter, OUTSIDE the group lock it takes
+     * itself. A failure does not hold the message back; it stays owed.
+     */
+    private suspend fun flushOwedProfileBeforeSend(groupIdHex: String) {
+        try {
+            profileRepublish.flushBeforeSend(groupIdHex)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0048 owed profile not flushed before a send")
+        }
+    }
 
     /** This account's own profile name, or `null` when none is set. The call
      *  host puts it on the user's own tile (`docs/ux/calls.md` section 4.4). */
@@ -6538,6 +6583,7 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0051 group name not stored", cause)
         }
+        owePublicRecordRepublish(groupIdHex)
     }
 
     /**
@@ -6573,6 +6619,7 @@ public class ChatRepository(
             )
         }
         if (!storeFirst) GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, row)
+        owePublicRecordRepublish(groupIdHex)
         publishThreadList()
     }
 
@@ -6804,6 +6851,8 @@ public class ChatRepository(
                 }
                 GroupSettingsStore.savePhoto(applicationContext, accountIdB64, groupIdHex, incoming)
                 deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, incoming.avatar)
+                // 4.5.4 — an admin's photo reaches the owner's device here.
+                owePublicRecordRepublish(groupIdHex)
             }
             GroupSettingKind.REACTIONS -> {
                 if (!groupNameAppliesTo(groupKind)) return
@@ -6969,6 +7018,7 @@ public class ChatRepository(
             GroupSettingsStore.saveOwedDeletes(applicationContext, accountIdB64, groupIdHex, own + mine)
         }
         deleteReplacedOwnGroupPhotoBlobs(accountIdB64, groupIdHex, avatar)
+        owePublicRecordRepublish(groupIdHex)
         publishThreadList()
     }
 
@@ -7362,8 +7412,11 @@ public class ChatRepository(
     }
 
     /** ADR-0060 section 6 — keep the reply key a knock carried for the
-     *  joiner's account, so the sweep can write the Welcome into its mailbox. */
-    private fun keepKnockReplyGrant(opened: OpenedKnock) {
+     *  joiner's account, so the sweep can write the Welcome into its closed
+     *  mailbox. Awaited: the knock position is saved only after it is kept.
+     *  The grant is also recorded per group, so it is cleared when the
+     *  request is refused ([releaseKnockReply]). */
+    private suspend fun keepKnockReplyGrant(groupIdHex: String, opened: OpenedKnock) {
         if (opened.replyGrant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) return
         val account = try {
             uniffi.lakko_ffi_uniffi.keyPackageAccountKey(opened.keyPackage)
@@ -7371,10 +7424,59 @@ public class ChatRepository(
             null
         } ?: opened.joinerSignatureKey
         if (!me.lakko.app.contacts.grantBindsTo(opened.replyGrant, account, mailboxCrypto)) return
+        me.lakko.app.reach.ReachManager.get(applicationContext).fileHeld(account, opened.replyGrant, scopeHex = "")
+        recordKnockReply(groupIdHex, account, opened.replyGrant)
+    }
+
+    /** Record a join request's reply grant for [account] in [groupIdHex], so
+     *  it is cleared when the request is refused. */
+    private fun recordKnockReply(groupIdHex: String, account: ByteArray, grant: uniffi.lakko_ffi_uniffi.FfiReachGrant) {
+        val acct = currentAccountIdB64.get() ?: return
         try {
-            me.lakko.app.reach.ReachManager.get(applicationContext).keepHeld(account, opened.replyGrant, scopeHex = "")
+            GroupSettingsStore.saveKnockReply(
+                applicationContext,
+                acct,
+                groupIdHex,
+                me.lakko.app.ds.hexOf(account),
+                me.lakko.app.reach.reachHex(uniffi.lakko_ffi_uniffi.encodeReachGrant(grant)),
+            )
         } catch (_: Throwable) {
-            // Best effort: the Welcome waits owed until a grant arrives.
+            // The grant is kept; only its release on refuse is lost.
+        }
+    }
+
+    /**
+     * group-and-channel-privacy.md section 8 / ADR-0060 §6 — the person who
+     * asked to join [groupIdHex] was refused: the reply grant their request
+     * carried is no longer needed and is dropped. Best effort. An admitted
+     * person's grant is kept until it expires, for a Welcome re-sent later.
+     */
+    private suspend fun releaseKnockReply(groupIdHex: String, account: ByteArray) {
+        val acct = currentAccountIdB64.get() ?: return
+        val accountHex = me.lakko.app.ds.hexOf(account)
+        try {
+            val wireHex = GroupSettingsStore.knockReply(applicationContext, acct, groupIdHex, accountHex) ?: return
+            val wire = me.lakko.app.reach.reachUnhex(wireHex)
+            if (wire != null) {
+                me.lakko.app.reach.ReachManager.get(applicationContext)
+                    .withdrawHeldGrant(account, me.lakko.app.reach.ReachKind.REPLY, wire)
+            }
+            GroupSettingsStore.saveKnockReply(applicationContext, acct, groupIdHex, accountHex, null)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 a join reply grant not released: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** Section 5 — save the knock position once everything read up to it is
+     *  saved (the MLS snapshot with the retained requests is durable). */
+    private fun saveKnockCursorBestEffort(groupIdHex: String, cursor: Long) {
+        val acct = currentAccountIdB64.get() ?: return
+        try {
+            GroupSettingsStore.saveKnockCursor(applicationContext, acct, groupIdHex, cursor)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 knock position not saved: ${cause.javaClass.simpleName}")
         }
     }
 
@@ -7401,6 +7503,27 @@ public class ChatRepository(
     // ADR-0087 sections 2-5, 8 and 11 — the group's @name and type, and a
     // request to join from search
     // -----------------------------------------------------------------
+
+    /**
+     * group-and-channel-privacy.md 4.5.4 — the public record carries the
+     * group's name and photo, so a change to either, whoever made it, owes a
+     * republish of the record. Recorded durably here and sent by
+     * [maintainGroupHandleIfDue] at the tail of the group's polls, until it
+     * lands; only the owner's device (it holds the handle key) acts on it.
+     * A type change already owed carries the same republish and is kept.
+     */
+    private fun owePublicRecordRepublish(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            val handle = GroupSettingsStore.handle(applicationContext, accountIdB64, groupIdHex)
+                ?.takeIf { it.public } ?: return
+            if (GroupSettingsStore.owedTypeChange(applicationContext, accountIdB64, groupIdHex) == null) {
+                GroupSettingsStore.saveOwedTypeChange(applicationContext, accountIdB64, groupIdHex, true to handle.handle)
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0087 4.5.4 record republish not recorded", cause)
+        }
+    }
 
     /** What a public record of [groupIdHex] says, or `null` when the group
      *  has no name (a public group needs one) or no knock key. */
@@ -10424,6 +10547,15 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return
         val now = System.currentTimeMillis()
         if (now - record.lastKnockPollMs < KNOCK_POLL_MIN_INTERVAL_MS) return
+        // Section 5 — resume from the saved position, so a decided request
+        // is not read (and kept) again after a restart.
+        if (!record.knockCursorLoaded) {
+            record.knockCursor = maxOf(
+                record.knockCursor,
+                GroupSettingsStore.knockCursor(applicationContext, currentAccountIdB64.get(), groupIdHex),
+            )
+            record.knockCursorLoaded = true
+        }
         val ownerOrAdmin = providerLock.sessionLock {
             try {
                 readsKnocks(record.group.ownRole(identity))
@@ -10436,6 +10568,9 @@ public class ChatRepository(
         val after = record.knockCursor
         val raw = dsClient.fetchKnocks(record.groupId, after = after, waitSecs = 0)
         if (raw.messages.isEmpty()) return
+        // What the pass kept, filed after the locks, then the position saved.
+        var keptKnocks: List<OpenedKnock> = emptyList()
+        var savedThrough: Long? = null
         groupLock(groupIdHex).sessionLock {
             providerLock.sessionLock {
                 // Another pass moved the cursor while this one fetched.
@@ -10461,9 +10596,9 @@ public class ChatRepository(
                 }
                 record.consumeEvents(events = events)
                 // ADR-0060 §6 — the knock carries the joiner's reply key: kept
-                // for the joiner's account, so the sweep that admits it can
-                // write the Welcome into its closed mailbox.
-                for ((_, opened) in drained.accepted) keepKnockReplyGrant(opened)
+                // for the joiner's account (after the locks), so the sweep that
+                // admits it can write the Welcome into its closed mailbox.
+                keptKnocks = drained.accepted.map { it.second }
                 // Section 8 — where each request came from, for the line
                 // under it: the row's stamp, and the link's issuer.
                 currentAccountIdB64.get()?.let { acct ->
@@ -10486,11 +10621,33 @@ public class ChatRepository(
                 }
                 record.knockQueueFull = drained.cursor < (raw.messages.lastOrNull()?.id ?: drained.cursor)
                 record.lastSeenKnockId = maxOf(record.lastSeenKnockId, raw.messages.lastOrNull()?.id ?: 0L)
-                // The retained request set lives in the provider (ADR-0027).
-                if (drained.accepted.isNotEmpty()) persistSnapshotBestEffort()
+                // The retained request set lives in the provider (ADR-0027),
+                // durably before the position may be saved past its rows.
+                val durable = drained.accepted.isEmpty() || try {
+                    persistSnapshotDurableOrThrow()
+                    true
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0087 retained requests not saved: ${cause.javaClass.simpleName}")
+                    false
+                }
                 record.knockCursor = drained.cursor
+                if (durable) savedThrough = drained.cursor
             }
         }
+        // The reply grants, then the position: a restart before either reads
+        // the rows again and keeps them again.
+        var grantsKept = true
+        for (opened in keptKnocks) {
+            try {
+                keepKnockReplyGrant(groupIdHex, opened)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                grantsKept = false
+                android.util.Log.w("ChatRepository", "ADR-0060 a join reply grant not kept: ${cause.javaClass.simpleName}")
+            }
+        }
+        savedThrough?.takeIf { grantsKept }?.let { saveKnockCursorBestEffort(groupIdHex, it) }
         publishThreadList()
     }
 
@@ -16032,6 +16189,10 @@ private class GroupRecord(
      *  last read. In memory: see `pollKnocksIfOwnerOrAdmin`. */
     @Volatile
     var knockCursor: Long = 0L
+
+    /** Whether [knockCursor] was raised to the saved position yet. */
+    @Volatile
+    var knockCursorLoaded: Boolean = false
 
     @Volatile
     var lastKnockPollMs: Long = 0L

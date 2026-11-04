@@ -418,6 +418,33 @@ public suspend fun claimChannelHandle(
     handle: String,
     name: String,
     description: String,
+): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, name, description, update = false)
+
+/**
+ * group-and-channel-privacy.md 4.5.4 — republish a channel's public record
+ * after its name or description changed: the same record as the claim, under
+ * the `update` route (no token). The owner's device only: it holds the
+ * PublisherGroup journal root the write key comes from.
+ */
+public suspend fun updateChannelHandle(
+    discovery: DiscoveryClient,
+    accountSeed: ByteArray,
+    journalId: ByteArray,
+    channelId: ByteArray,
+    handle: String,
+    name: String,
+    description: String,
+): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, name, description, update = true)
+
+private suspend fun writeChannelHandle(
+    discovery: DiscoveryClient,
+    accountSeed: ByteArray,
+    journalId: ByteArray,
+    channelId: ByteArray,
+    handle: String,
+    name: String,
+    description: String,
+    update: Boolean,
 ): SignedGroupHandle {
     val canonical = canonicalHandleInput(handle)
     val own = evaluateOwnHandleTerms(discovery, listOf(canonical), name)
@@ -444,13 +471,14 @@ public suspend fun claimChannelHandle(
         )
         val record = uniffi.lakko_ffi_uniffi.composeHandleRecord(payload, outputs, now)
         val hash = uniffi.lakko_ffi_uniffi.handleContentHash(record, terms)
-        val statement = uniffi.lakko_ffi_uniffi.signHandleStatement(
-            seed,
-            pair.lookupKey,
-            FfiHandleStatementBody.Claim(FfiHandleVisibility.PUBLIC, hash),
-        )
-        val cert = discovery.handleWrite(HandleRoute.CLAIM, statement, record, terms)
-            ?: throw IllegalStateException("handle claim answered no certificate")
+        val body = if (update) {
+            FfiHandleStatementBody.Update(FfiHandleVisibility.PUBLIC, hash)
+        } else {
+            FfiHandleStatementBody.Claim(FfiHandleVisibility.PUBLIC, hash)
+        }
+        val statement = uniffi.lakko_ffi_uniffi.signHandleStatement(seed, pair.lookupKey, body)
+        val cert = discovery.handleWrite(if (update) HandleRoute.UPDATE else HandleRoute.CLAIM, statement, record, terms)
+            ?: throw IllegalStateException("handle write answered no certificate")
         return signedEnvelope(seed, journalId, canonical, true, cert, discovery.lastLeaseUntilMs)
     } finally {
         seed.fill(0)

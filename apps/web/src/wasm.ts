@@ -14,9 +14,27 @@
  * Rust core can produce an Identity from inside the browser. Phase
  * 1.16b adds the rest of the surface (signup / login / chat).
  */
+import { createSignal } from "solid-js";
+
 import init, * as wasm from "../wasm/lakko_ffi_wasm";
 
 let cached: Promise<typeof wasm> | null = null;
+
+/** Bumped when the module finished loading, so a synchronous reader
+ *  ({@link wasmSync}) re-runs once the exports are usable. */
+const [loadedVersion, setLoadedVersion] = createSignal(0);
+
+/**
+ * The exports namespace for a synchronous reader (a render), or `null`
+ * while the module is not loaded yet. Reactive: a caller inside a tracking
+ * scope runs again when the load completes. A module initialised another way
+ * (a test calling `init` itself) is usable too: the caller's call simply
+ * succeeds.
+ */
+export function wasmSync(): typeof wasm {
+  loadedVersion();
+  return wasm;
+}
 
 /**
  * Initialise the WASM module on first call; return the cached
@@ -27,7 +45,10 @@ let cached: Promise<typeof wasm> | null = null;
  */
 export function loadWasm(): Promise<typeof wasm> {
   if (cached === null) {
-    cached = init().then(() => wasm);
+    cached = init().then(() => {
+      setLoadedVersion((v) => v + 1);
+      return wasm;
+    });
   }
   return cached;
 }

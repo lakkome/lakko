@@ -267,6 +267,10 @@ public final class ChannelsUiState: ObservableObject {
     /// other devices.
     public var onUnsubscribedHere: ((String) -> Void)?
     public var onSubscribedHere: ((String) -> Void)?
+    /// A newer shared record (name, description) was accepted for a channel:
+    /// the owner's device republishes the channel's public record
+    /// (`group-and-channel-privacy.md` 4.5.4).
+    public var onSharedMetaAccepted: ((_ channelId: String, _ meta: SharedChannelMeta) -> Void)?
 
     public func addChannel(_ handle: ChannelHandle) {
         // Id-idempotent: re-adding refreshes the local
@@ -352,6 +356,7 @@ public final class ChannelsUiState: ObservableObject {
             sharedListed: meta.listed
         )
         persistChannelLog()
+        onSharedMetaAccepted?(channelId, meta)
         return true
     }
 

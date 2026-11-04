@@ -48,6 +48,9 @@ export interface NotificationWords {
    *  U+0001 where the name goes and U+0002 where the emoji goes (the worker
    *  cannot run the formatter). */
   reactedToYourMessage: string;
+  /** A group message's body, "{name}: {text}" (the list preview's rule),
+   *  U+0001 = sender name, U+0002 = text. */
+  senderPrefixed: string;
   /** The `Reactions` switch is off on this device. */
   reactionsOff: boolean;
 }
@@ -68,6 +71,7 @@ export function renderNotificationStrings(): NotificationWords {
     unsupportedMessage: t("chat.message.unsupported"),
     attachments,
     reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
+    senderPrefixed: t("chats.preview.sender", { name: "\u0001", text: "\u0002" }),
     reactionsOff: !reactionNotificationsOn(),
   };
 }

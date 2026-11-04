@@ -30,7 +30,12 @@ import kotlinx.coroutines.launch
  *    pending one covers every member added before it fires.
  *
  * A growth republish is only ever DELAYED, never dropped: the newcomer still
- * learns the name, a few seconds later.
+ * learns the name, a few seconds later. And never later than this device's
+ * next message into the group: a publish still owed there (a pending growth
+ * republish, or a join / change publish that failed) goes out, at once and
+ * awaited, before that message ([flushBeforeSend]), so the newcomer never
+ * reads this device's words before its name. The jitter is kept for the idle
+ * republish only.
  *
  * Pure decisions ([growthRepublishDelayMs], [membershipGrew]) plus a small
  * scheduler over an injected scope, clock and jitter source, so a host test
@@ -96,17 +101,53 @@ public class ProfileRepublishScheduler(
     private val lastPublishedAt = HashMap<String, Long>()
     private val scheduled = HashSet<String>()
 
+    /** Groups where a publish is owed: growth seen and not yet answered, or a
+     *  publish that failed. Cleared by the publish that answers it. */
+    private val owed = HashSet<String>()
+
     /** Publish into [groupIdHex] now (join / founding / profile change). */
     public fun publishNow(groupIdHex: String) {
-        scope.launch { runPublish(groupIdHex) }
+        synchronized(lock) { owed += groupIdHex }
+        scope.launch { publishAlways(groupIdHex) }
     }
 
     /** Publish into every group in [groupIdHexes] now (profile change). */
     public fun publishNowToAll(groupIdHexes: Collection<String>) {
         val targets = groupIdHexes.toList()
+        synchronized(lock) { owed += targets }
         scope.launch {
-            for (groupIdHex in targets) runPublish(groupIdHex)
+            for (groupIdHex in targets) publishAlways(groupIdHex)
         }
+    }
+
+    /** A join / change publish: always sent (each change is its own), and
+     *  it answers what is owed; a failure stays owed. */
+    private suspend fun publishAlways(groupIdHex: String) {
+        synchronized(lock) { owed.remove(groupIdHex) }
+        if (!runPublish(groupIdHex)) synchronized(lock) { owed += groupIdHex }
+    }
+
+    /**
+     * Before this device sends a message into [groupIdHex]: when a publish is
+     * owed there, send it now and wait for it. A failure stays owed (the send
+     * is not held back by it).
+     * @return whether a publish was attempted.
+     */
+    public suspend fun flushBeforeSend(groupIdHex: String): Boolean {
+        if (synchronized(lock) { groupIdHex !in owed }) return false
+        publishOwed(groupIdHex)
+        return true
+    }
+
+    /** Whether a publish is owed in [groupIdHex]. */
+    public fun isOwed(groupIdHex: String): Boolean = synchronized(lock) { groupIdHex in owed }
+
+    /** Take the owed publish for [groupIdHex] (so two callers never both
+     *  send it) and send it; a failure puts it back. */
+    private suspend fun publishOwed(groupIdHex: String) {
+        val due = synchronized(lock) { owed.remove(groupIdHex) }
+        if (!due) return
+        if (!runPublish(groupIdHex)) synchronized(lock) { owed += groupIdHex }
     }
 
     /**
@@ -115,6 +156,7 @@ public class ProfileRepublishScheduler(
      */
     public fun onGrowth(groupIdHex: String): Long? {
         val delayMs = synchronized(lock) {
+            owed += groupIdHex
             val d = growthRepublishDelayMs(
                 nowMs = nowMs(),
                 lastPublishedAtMs = lastPublishedAt[groupIdHex],
@@ -130,7 +172,8 @@ public class ProfileRepublishScheduler(
             } finally {
                 synchronized(lock) { scheduled -= groupIdHex }
             }
-            runPublish(groupIdHex)
+            // A send may have published it meanwhile ([flushBeforeSend]).
+            publishOwed(groupIdHex)
         }
         return delayMs
     }
@@ -160,13 +203,15 @@ public class ProfileRepublishScheduler(
         synchronized(lock) {
             lastPublishedAt.clear()
             scheduled.clear()
+            owed.clear()
         }
     }
 
-    private suspend fun runPublish(groupIdHex: String) {
+    private suspend fun runPublish(groupIdHex: String): Boolean {
         val sent = try {
             publish(groupIdHex)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
+            synchronized(lock) { owed += groupIdHex }
             throw cancel
         } catch (_: Throwable) {
             false
@@ -174,5 +219,6 @@ public class ProfileRepublishScheduler(
         if (sent) {
             synchronized(lock) { lastPublishedAt[groupIdHex] = nowMs() }
         }
+        return sent
     }
 }

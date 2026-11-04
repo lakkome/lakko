@@ -1595,13 +1595,20 @@ public class ContactsClient(
 
         val events = mutableListOf<IncomingMailboxEvent>()
         var cursor = after
+        var unopened = 0
+        var welcomeRows = 0
         for (message in raw.messages) {
             cursor = message.id
 
             // ADR-0078: open the sealed row; one that does not open (garbage,
             // a row for another mailbox, an unknown kind) is dropped and the
             // cursor still advances.
-            val env = own.open(message.payload) ?: continue
+            val env = own.open(message.payload)
+            if (env == null) {
+                unopened += 1
+                continue
+            }
+            if (env.kind == MailboxRowKind.WELCOME) welcomeRows += 1
             when (env.kind) {
                 MailboxRowKind.WELCOME_RENDEZVOUS -> {
                     // The channel co-publisher join reads its own rows
@@ -1716,6 +1723,18 @@ public class ContactsClient(
             }
         }
 
+        if (raw.messages.isNotEmpty()) {
+            // Counts only: a row that did not open (sealed to another mailbox
+            // key, or damaged) is otherwise dropped without a trace.
+            try {
+                android.util.Log.i(
+                    "ContactsClient",
+                    "mailbox poll: ${raw.messages.size} row(s), $welcomeRows Welcome(s), $unopened not opened",
+                )
+            } catch (_: RuntimeException) {
+                // The host JVM test suite has no android.util.Log.
+            }
+        }
         return PollResult(events = events, cursor = cursor, hasMore = raw.hasMore)
     }
 }

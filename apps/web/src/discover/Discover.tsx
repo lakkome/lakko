@@ -15,6 +15,7 @@
  * used where a feed mixes suggestions in.
  */
 
+import { initialsOf } from "../ui/Avatar";
 import { createMemo, createSignal, For, onMount, Show, type Accessor, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
@@ -482,7 +483,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
       <div class="lk-discover-card-body">
         <div class="lk-discover-card-head">
           <span class="lk-discover-avatar" aria-hidden="true">
-            {c().name.trim().charAt(0).toUpperCase() || "#"}
+            {initialsOf(c().name, "#")}
           </span>
           <div class="lk-discover-card-title">
             <strong>{c().name}</strong>

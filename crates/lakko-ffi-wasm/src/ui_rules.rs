@@ -355,6 +355,16 @@ pub fn guest_name(random: u32) -> String {
     lakko_ui_rules::guest_name::guest_name(u64::from(random))
 }
 
+/// The letters drawn in an avatar without a photo: the first letter of each
+/// of the first two words, or the first two letters of a one-word name, in
+/// upper case; at most two grapheme clusters; empty when nothing in the name
+/// is a letter, digit or emoji (the client then draws its placeholder).
+#[wasm_bindgen(js_name = avatarInitials)]
+#[must_use]
+pub fn avatar_initials(name: &str) -> String {
+    lakko_ui_rules::initials::avatar_initials(name)
+}
+
 /// One run of a message's text: `docs/ux/message-links.md`.
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
@@ -2043,6 +2053,13 @@ pub fn speaking_floor_onset_ms() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_avatar_initials_cross_the_boundary_intact() {
+        assert_eq!(avatar_initials("QA Phase A"), "QP");
+        assert_eq!(avatar_initials("VG3"), "VG");
+        assert_eq!(avatar_initials(""), "");
+    }
 
     #[test]
     fn the_av_alignment_crosses_the_boundary_intact() {

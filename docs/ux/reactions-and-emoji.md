@@ -382,6 +382,18 @@ not hold the conversation's messages. Settings > Notifications gets a
 reaction that is taken back within a few seconds is not notified if the device
 learns of the removal before showing it. Channels: no reaction notifications.
 
+The notification always names the person who reacted, the same way the chat
+names them (decided 2026-11-04, maintainer): the contact's name, the profile
+name they sent in the group, or their channel member card. A sender is always
+one of these, so the name is always on the device: there is no placeholder
+word ("Someone", "Member") and never the conversation's name. Each device
+writes, for its background process, the name of every member of every
+conversation and every contact under every key that process can be handed (the
+person's account key and each of their device keys). A group message
+notification follows the same rule in its "Name: text" body. A background
+process that still finds no name has hit a defect: it logs it and shows the
+generic "New message" banner, never a made-up name.
+
 Cost to say plainly: today a reaction wakes nobody. A notified reaction wakes
 every device in the conversation, the same as a message does, and every device
 but the author's decides to stay silent.

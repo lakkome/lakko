@@ -73,6 +73,7 @@
  *     see `chat/durable-cursor.ts` for the mechanism and why holding (rather
  *     than aborting) is the right shape on the receive side.
  */
+import { runBeforeSend } from "./before-send";
 import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -910,6 +911,11 @@ export class ChatClient {
       throw new ChatError("group.groupId unavailable", err);
     }
 
+    // ADR-0048 §2 — a profile this device owes the group goes out first, so
+    // nobody reads this message before this device's name. Before the lock:
+    // the profile is published under the same lock.
+    await runBeforeSend(base64Encode(groupId));
+
     return withGroupMlsLock(base64Encode(groupId), async () =>
       this.sealAndPublish(myIdentity, group, groupId, plaintext, "message"),
     );
@@ -1420,7 +1426,9 @@ export class ChatClient {
           accountKey = undefined;
         }
         if (session !== null && joinReplyBindingVerifies(reply, accountKey)) {
-          rememberJoinReply(joinerKey, session.encodeGrant(reply));
+          // Durable before the knock cursor moves past this row: a sealed
+          // knock is read once (`reach/join-replies.ts`).
+          await rememberJoinReply(group.groupId, joinerKey, session.encodeGrant(reply));
         }
       } finally {
         reply.free();
@@ -1431,7 +1439,7 @@ export class ChatClient {
         rememberKnockName(base64Encode(joinerKey), name);
         profile.free();
       }
-      await rememberKnockOrigin(base64Encode(joinerKey), {
+      await rememberKnockOrigin(groupIdB64, base64Encode(joinerKey), {
         askedAtMs: rowStampMs(row.createdAt),
         issuerKeyB64,
       });

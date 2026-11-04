@@ -114,6 +114,69 @@ public object ChannelDiscovery {
         }
     }
 
+    /** group-and-channel-privacy.md 4.5.4 — republish the channel's public
+     *  record (its name and description) under its @name. The owner only. */
+    public suspend fun updateChannelHandle(
+        identity: uniffi.lakko_ffi_uniffi.Identity,
+        handle: String,
+        channelIdHex: String,
+        name: String,
+        description: String,
+    ) {
+        val channelId = ChannelsComposer.channelIdFromHex(channelIdHex)
+        val journalId = CoPublisher.openPublisherGroup(identity, channelIdHex).use { it.groupId() }
+        DiscoveryClient().use { client ->
+            me.lakko.app.chat.updateChannelHandle(
+                discovery = client,
+                accountSeed = identity.ed25519Seed(),
+                journalId = journalId,
+                channelId = channelId,
+                handle = handle,
+                name = name,
+                description = description,
+            )
+        }
+    }
+
+    /**
+     * 4.5.4 — the owed republish of [channelIdHex]'s record, when one is
+     * recorded: sent, and cleared once it lands. A failure keeps it owed for
+     * the next try (the channel's heartbeat, the next edit). Returns whether
+     * nothing is owed any more.
+     */
+    public suspend fun sendOwedRecordIfAny(
+        context: android.content.Context,
+        publisher: ChannelPublisherIdentity,
+        accountIdB64: String,
+        channel: ChannelHandle,
+    ): Boolean {
+        val store = me.lakko.app.chat.GroupSettingsStore
+        if (!store.owedChannelRecord(context, accountIdB64, channel.id)) return true
+        val handle = channel.handle.trim().removePrefix("@")
+        if (handle.isEmpty()) {
+            store.saveOwedChannelRecord(context, accountIdB64, channel.id, false)
+            return true
+        }
+        return try {
+            publisher.withIdentity { identity ->
+                updateChannelHandle(
+                    identity = identity,
+                    handle = handle,
+                    channelIdHex = channel.id,
+                    name = channel.sharedName.ifEmpty { channel.localName },
+                    description = channel.sharedDescription.ifEmpty { channel.localDescription },
+                )
+            }
+            store.saveOwedChannelRecord(context, accountIdB64, channel.id, false)
+            true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.i("ChannelDiscovery", "ADR-0087 4.5.4 channel record republish not sent yet")
+            false
+        }
+    }
+
     public suspend fun resolveChannelHandle(handle: String): String? =
         DiscoveryClient().use { it.lookupChannel(handle) }
 

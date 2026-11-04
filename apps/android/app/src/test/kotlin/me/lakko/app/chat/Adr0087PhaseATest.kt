@@ -223,4 +223,11 @@ class Adr0087PhaseATest {
         assertEquals(KnockOrigin(null, null), decodeKnockOrigin(encodeKnockOrigin(KnockOrigin(null, null))))
         assertNull(decodeKnockOrigin("garbage"))
     }
+
+    @Test
+    fun `the knock position only moves forward`() {
+        assertEquals(12L, knockCursorToSave(10, 12))
+        assertNull(knockCursorToSave(12, 12))
+        assertNull(knockCursorToSave(12, 5))
+    }
 }

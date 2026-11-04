@@ -320,3 +320,33 @@ public const val ADDRESS_RECHECK_INTERVAL_MS: Long = 5L * 60 * 1000
  *  is re-checked again at [nowMs]. A clock that went backwards re-checks. */
 public fun addressRecheckDue(lastMs: Long?, nowMs: Long): Boolean =
     lastMs == null || nowMs < lastMs || nowMs - lastMs >= ADDRESS_RECHECK_INTERVAL_MS
+
+/**
+ * The held grants with the one grant [grantHex] of [kind] for [personKeys]
+ * taken out: when it is an entry's current grant, the grant it replaced (if
+ * any) takes its place, else the entry goes; when it is the replaced one,
+ * only that is dropped. The list itself when nothing matches.
+ */
+internal fun withoutHeldGrant(
+    held: List<StoredHeld>,
+    personKeys: List<String>,
+    kind: String,
+    grantHex: String,
+): List<StoredHeld> {
+    var changed = false
+    val out = held.mapNotNull { h ->
+        if (h.ownerKeyHex !in personKeys || h.kind != kind) return@mapNotNull h
+        when (grantHex) {
+            h.grantHex -> {
+                changed = true
+                h.previousGrantHex?.let { h.copy(grantHex = it, previousGrantHex = null) }
+            }
+            h.previousGrantHex -> {
+                changed = true
+                h.copy(previousGrantHex = null)
+            }
+            else -> h
+        }
+    }
+    return if (changed) out else held
+}

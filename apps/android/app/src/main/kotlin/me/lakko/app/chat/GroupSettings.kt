@@ -276,6 +276,9 @@ public object GroupSettingsStore {
     private const val KNOCK_VERSION = "knock-version:"
     private const val KNOCK_ADMINS = "knock-admins:"
     private const val KNOCK_ORIGIN = "knock-origin:"
+    private const val OWED_CHANNEL_RECORD = "owed-channel-record:"
+    private const val KNOCK_CURSOR = "knock-cursor:"
+    private const val KNOCK_REPLY = "knock-reply:"
 
     private val mutableVersion = MutableStateFlow(0L)
 
@@ -319,6 +322,38 @@ public object GroupSettingsStore {
             e.apply()
             mutableVersion.value += 1
         }
+    }
+
+    /** Section 5 — how far this device has handled the group's knock queue,
+     *  saved only once every request read up to it (and its reply grant) is
+     *  saved: a restart neither drops an unhandled request nor revives a
+     *  decided one. 0 when nothing is saved. */
+    public fun knockCursor(context: Context, accountIdB64: String?, groupIdHex: String): Long =
+        accountIdB64?.let { read(context, key(KNOCK_CURSOR, it, groupIdHex))?.toLongOrNull() } ?: 0L
+
+    /** Save [cursor] when it moves forward (never backwards). */
+    public fun saveKnockCursor(context: Context, accountIdB64: String, groupIdHex: String, cursor: Long) {
+        val next = knockCursorToSave(knockCursor(context, accountIdB64, groupIdHex), cursor) ?: return
+        write(context, accountIdB64, key(KNOCK_CURSOR, accountIdB64, groupIdHex), next.toString())
+    }
+
+    /** Section 5 / ADR-0060 §6 — the reply grant (wire hex) a request to join
+     *  this group carried for [accountHex], so it is cleared when the request
+     *  is refused (an admitted person's grant stays until it expires). */
+    public fun knockReply(context: Context, accountIdB64: String?, groupIdHex: String, accountHex: String): String? =
+        accountIdB64?.let { read(context, key(KNOCK_REPLY + accountHex.lowercase() + ":", it, groupIdHex)) }
+
+    public fun saveKnockReply(context: Context, accountIdB64: String, groupIdHex: String, accountHex: String, grantHex: String?) {
+        write(context, accountIdB64, key(KNOCK_REPLY + accountHex.lowercase() + ":", accountIdB64, groupIdHex), grantHex)
+    }
+
+    /** 4.5.4 — whether the channel [channelIdHex]'s public record owes a
+     *  republish (its name or description changed). */
+    public fun owedChannelRecord(context: Context, accountIdB64: String?, channelIdHex: String): Boolean =
+        accountIdB64 != null && read(context, key(OWED_CHANNEL_RECORD, accountIdB64, channelIdHex)) == "1"
+
+    public fun saveOwedChannelRecord(context: Context, accountIdB64: String, channelIdHex: String, owed: Boolean) {
+        write(context, accountIdB64, key(OWED_CHANNEL_RECORD, accountIdB64, channelIdHex), if (owed) "1" else null)
     }
 
     /** Section 8 — where a waiting request came from, by the joiner's key
@@ -585,3 +620,7 @@ public fun joinRequestLine(
         else -> null
     }
 }
+
+/** The knock position to save: [next] when it moves past [saved], else
+ *  `null` (a position never moves backwards). */
+public fun knockCursorToSave(saved: Long, next: Long): Long? = next.takeIf { it > saved }

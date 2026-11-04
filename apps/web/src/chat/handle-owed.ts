@@ -273,11 +273,29 @@ export async function forgetHandle(kind: HandleSubjectKind, id: string): Promise
  * holds no name, has nothing to publish.
  */
 export async function noteKnockKeyChanged(accountId: string, groupIdB64: string): Promise<void> {
+  await notePublicRecordChanged(accountId, "group", groupIdB64);
+}
+
+/**
+ * `docs/ux/group-and-channel-privacy.md` 4.5.4 — the public record of a group
+ * or channel carries its name, description and photo, so the owner's device
+ * (the one holding the handle key) owes a republish whenever it applies a
+ * change to any of them, whoever made it (an admin's photo arrives as a
+ * group-photo envelope). Recorded durably before the change is kept, retried
+ * by the handle runtime until it lands. The name is read when the write runs
+ * (`handle` empty): a subject that is private by then, or holds no name, has
+ * nothing to publish.
+ */
+export async function notePublicRecordChanged(
+  accountId: string,
+  kind: HandleSubjectKind,
+  id: string,
+): Promise<void> {
   await openHandleOwed(accountId);
   if (account !== accountId) throw new Error("signed out");
   await recordOwedHandle({
-    kind: "group",
-    id: groupIdB64,
+    kind,
+    id,
     op: "update",
     handle: "",
     oldHandle: null,
@@ -285,6 +303,16 @@ export async function noteKnockKeyChanged(accountId: string, groupIdB64: string)
     sinceMs: Date.now(),
     reason: "republish",
   });
+}
+
+/** {@link notePublicRecordChanged} for the account this device has open,
+ *  for a caller that holds no account id (the channel metadata path).
+ *  Nothing when no account is open. */
+export async function notePublicRecordChangedHere(kind: HandleSubjectKind, id: string): Promise<void> {
+  await opened;
+  const acct = account;
+  if (acct === null) return;
+  await notePublicRecordChanged(acct, kind, id);
 }
 
 registerAccountMemory("handle-owed", (ids) => {

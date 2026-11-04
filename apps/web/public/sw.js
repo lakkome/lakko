@@ -741,13 +741,13 @@ function buildDecryptDeps(wasm, core) {
     // ADR-0048 — the name this device already knows for a sender, from the
     // encrypted profile row the app wrote. READ-ONLY: the SW never stores a
     // profile and never looks a username up (C-59).
-    lookupSenderName: async (accountId, deviceKey, senderKeyB64) => {
+    lookupSenderName: async (accountId, deviceKey, senderKeyB64, batchProfile) => {
       const row = await idbGet("lakko-profiles", "rows", accountId);
       if (row === undefined || row.ciphertext === undefined) return null;
       try {
         const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
         const payload = JSON.parse(new TextDecoder().decode(plain));
-        return core.senderNameFromProfileRow(payload, senderKeyB64);
+        return core.senderNameFromProfileRow(payload, senderKeyB64, batchProfile);
       } catch {
         return null;
       }
@@ -788,6 +788,26 @@ function buildDecryptDeps(wasm, core) {
     // ADR-0073 R.5 — which conversation a group belongs to, from the same
     // row. READ-ONLY; `null` on every miss (the notification is then grouped
     // under the group id).
+    // ADR-0048 UX §5 — the group's shared name for the notification title,
+    // from the encrypted group-name row the app wrote
+    // (`src/chat/group-name-idb.ts`). READ-ONLY; `null` on every miss.
+    lookupGroupName: async (accountId, deviceKey, groupHex) => {
+      // Only a database the app created: a version-less open of one that does
+      // not exist would create it empty at version 1, and the app's own open
+      // at that version would then never create its store.
+      if (typeof indexedDB.databases !== "function") return null;
+      const dbs = await indexedDB.databases();
+      if (!dbs.some((d) => d.name === "lakko-group-names")) return null;
+      const row = await idbGet("lakko-group-names", "rows", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.groupNameFromRow(payload, groupHex);
+      } catch {
+        return null;
+      }
+    },
     lookupConversation: async (accountId, deviceKey, groupHex) => {
       const row = await idbGet("lakko-device-sync", "rows", accountId);
       if (row === undefined || row.ciphertext === undefined) return null;

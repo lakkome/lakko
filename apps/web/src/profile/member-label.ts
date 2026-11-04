@@ -23,9 +23,70 @@ export function memberNameOf(resolved: ResolvedName): string {
   return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.name;
 }
 
+/**
+ * The person's REAL name as the resolver gives it, or `null` when it could
+ * only show a key fingerprint. For everything that outlives the moment it is
+ * drawn or leaves the device: a reply or forward snapshot, a saved message,
+ * a notification label. Those never carry a placeholder word or a
+ * fingerprint (2026-11-04: a sender always has a name on this device, and a
+ * missing one is a defect, not a word to bake in).
+ */
+export function realNameOf(resolved: ResolvedName): string | null {
+  return resolved.source === "fingerprint" ? null : resolved.name;
+}
+
 /** Roster rows: `Name · @username` when there is one, never a fingerprint. */
 export function memberListLabelOf(resolved: ResolvedName): string {
   return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.listLabel;
+}
+
+/** One roster entry, as the label mirror reads it. */
+export interface LabelledMember {
+  readonly signaturePublicKey: Uint8Array;
+  /** ADR-0050 — the account the leaf is bound to, when known. */
+  readonly accountKey?: Uint8Array | undefined;
+}
+
+/**
+ * The names the app holds for each member of the given rosters and for each
+ * further person key (`otherKeys`: contacts, a contact's retired keys), under
+ * every key a background reader can be handed for that person: the account
+ * key a leaf is bound to (the person key) and the leaf's own signature key.
+ * `nameOf` is the app's own rule (the resolver); it answers `null` for a
+ * person whose name the app does not know, and such a person is LEFT OUT: a
+ * notification never carries a placeholder word. A key it throws on is left
+ * out too. Pure.
+ */
+export function conversationLabelsOf(
+  rosters: Iterable<readonly LabelledMember[]>,
+  nameOf: (personKeyB64: string) => string | null,
+  encode: (bytes: Uint8Array) => string,
+  otherKeys: Iterable<string> = [],
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const named = (key: string): string | null => {
+    try {
+      const name = nameOf(key)?.trim() ?? "";
+      return name.length > 0 ? name : null;
+    } catch {
+      return null;
+    }
+  };
+  for (const roster of rosters) {
+    for (const m of roster) {
+      const person = encode(m.accountKey ?? m.signaturePublicKey);
+      const name = named(person);
+      if (name === null) continue;
+      out.set(person, name);
+      out.set(encode(m.signaturePublicKey), name);
+    }
+  }
+  for (const key of otherKeys) {
+    if (out.has(key)) continue;
+    const name = named(key);
+    if (name !== null) out.set(key, name);
+  }
+  return out;
 }
 
 /** What the viewer's own avatar is lettered from when it has no photo: their

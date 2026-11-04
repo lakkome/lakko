@@ -67,6 +67,7 @@ import {
 import { forwardLineLabel } from "./forward";
 import { MessageText } from "./MessageText";
 import { membershipSentences } from "./membership-rows";
+import { realNameOf } from "../profile/member-label";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { canSelectRow, selectionMarkName } from "./selection";
@@ -241,12 +242,14 @@ export function TimelineBubble(
           membershipSentences(
             change,
             (key, name) => t(key, { name }),
-            (k) => profiles.resolve(k).name,
+            (k) => realNameOf(profiles.resolve(k)),
           );
         return (
-          <li class="lk-system-row lk-system-row--membership">
-            <For each={sentences()}>{(line) => <span>{line}</span>}</For>
-          </li>
+          <Show when={sentences().length > 0}>
+            <li class="lk-system-row lk-system-row--membership">
+              <For each={sentences()}>{(line) => <span>{line}</span>}</For>
+            </li>
+          </Show>
         );
       }
       return (

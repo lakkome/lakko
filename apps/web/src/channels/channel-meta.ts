@@ -30,6 +30,7 @@ import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { channelsActions, channelsState } from "../state/channels-state";
+import { notePublicRecordChangedHere } from "../chat/handle-owed";
 import { loadWasm } from "../wasm";
 
 /** UX spec §4 — an empty channel name is refused. */
@@ -80,12 +81,49 @@ export async function foldChannelMeta(
     const isNewer: ChannelMetaIsNewer = (a, b) => wasm.channelMetaIsNewer(a, b);
     const newest = newestChannelMeta(decodes, isNewer);
     if (newest === null) return;
-    if (channelMetaSupersedes(newest, channelsState.metaByChannel().get(channelIdHex), isNewer)) {
+    const held = channelsState.metaByChannel().get(channelIdHex);
+    if (channelMetaSupersedes(newest, held, isNewer)) {
+      // Owed before the change is kept (no crash loses it) and after (a
+      // republish that ran in between published the old value).
+      await owePublicChannelRecord(channelIdHex, held, newest);
       channelsActions.setSharedMeta(channelIdHex, newest);
+      await owePublicChannelRecord(channelIdHex, held, newest);
     }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("channel meta fold failed", err);
+  }
+}
+
+/**
+ * UX 4.5.4 — a public channel's record carries its name and description: the
+ * owner's device (it holds the handle key; a co-publisher does not) owes a
+ * republish when it keeps a change to either, whoever made it. Never throws.
+ */
+/** Whether keeping `after` over `before` changes what a channel's public
+ *  record carries (its name or description). Pure. */
+export function channelRecordChanged(
+  before: Pick<ChannelSharedMeta, "name" | "description"> | undefined,
+  after: Pick<ChannelSharedMeta, "name" | "description">,
+): boolean {
+  return before === undefined || before.name !== after.name || before.description !== after.description;
+}
+
+async function owePublicChannelRecord(
+  channelIdHex: string,
+  before: ChannelSharedMeta | undefined,
+  after: ChannelSharedMeta,
+): Promise<void> {
+  if (!channelRecordChanged(before, after)) return;
+  const channel = channelsState.channels().find((c) => c.id === channelIdHex);
+  if (channel === undefined || (channel.localHandle ?? "").length === 0) return;
+  if (!channelsState.keysByChannel().has(channelIdHex)) return;
+  if (channelsActions.coPublisherGroupIdOf(channelIdHex) !== undefined) return;
+  try {
+    await notePublicRecordChangedHere("channel", channelIdHex);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[channel-handle] republish not recorded", err instanceof Error ? err.name : "");
   }
 }
 
@@ -160,9 +198,11 @@ export async function publishChannelMeta(
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
-  await publishPost(channelIdHex, wire, identity);
   const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs, topic, language, listed };
+  await owePublicChannelRecord(channelIdHex, held, meta);
+  await publishPost(channelIdHex, wire, identity);
   channelsActions.setSharedMeta(channelIdHex, meta);
+  await owePublicChannelRecord(channelIdHex, held, meta);
   return meta;
 }
 

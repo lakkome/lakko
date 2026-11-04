@@ -48,15 +48,15 @@ final class MembershipActionNoticeTests: XCTestCase {
             profile: ProfileClaim(displayName: "VG2", username: "vg2", updatedAtMs: 1),
             verification: .verified)
         XCTAssertEqual(resolved.listLabel, "VG2 · @vg2")
-        XCTAssertEqual(InitialsAvatar.initials(of: resolved.name), "V")
+        XCTAssertEqual(avatarInitials(name: resolved.name), "VG")
         XCTAssertNotEqual(
-            InitialsAvatar.initials(of: resolved.listLabel), InitialsAvatar.initials(of: resolved.name),
+            avatarInitials(name: resolved.listLabel), avatarInitials(name: resolved.name),
             "the label would give a second initial")
         let twoWords = resolveDisplayName(
             signatureKey: Data(repeating: 0x45, count: 32),
             localRename: nil,
             profile: ProfileClaim(displayName: "Anna Petrova", username: "anna", updatedAtMs: 1),
             verification: .verified)
-        XCTAssertEqual(InitialsAvatar.initials(of: twoWords.name), "AP")
+        XCTAssertEqual(avatarInitials(name: twoWords.name), "AP")
     }
 }

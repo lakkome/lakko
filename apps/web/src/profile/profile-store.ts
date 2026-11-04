@@ -245,6 +245,9 @@ export class ProfileStore {
   private verifications = new Map<string, StoredVerification>();
   private ready: Promise<void> = Promise.resolve();
   private loadedAccount: string | null = null;
+  /** The account whose row has finished loading; an ingest for it is filed
+   *  in the same turn (see `ingest`). */
+  private settledAccount: string | null = null;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<() => void>();
 
@@ -259,6 +262,7 @@ export class ProfileStore {
   open(accountId: string): Promise<void> {
     if (this.loadedAccount === accountId) return this.ready;
     this.loadedAccount = accountId;
+    this.settledAccount = null;
     this.profiles = new Map();
     this.verifications = new Map();
     this.notify();
@@ -283,6 +287,7 @@ export class ProfileStore {
         }
         this.notify();
       }
+      if (this.loadedAccount === accountId) this.settledAccount = accountId;
     })();
     return this.ready;
   }
@@ -290,6 +295,7 @@ export class ProfileStore {
   /** Forget the bound account's in-memory state (sign-out). */
   close(): void {
     this.loadedAccount = null;
+    this.settledAccount = null;
     this.profiles = new Map();
     this.verifications = new Map();
     this.ready = Promise.resolve();
@@ -307,7 +313,11 @@ export class ProfileStore {
    * held.
    */
   async ingest(accountId: string, senderKeyB64: string, profile: IncomingProfile): Promise<boolean> {
-    await this.open(accountId);
+    // Filed in the SAME turn once the row is loaded: the receive loop files a
+    // profile and then draws the rows of its batch, and a message after the
+    // profile must be drawn under the name, not under a placeholder for a
+    // microtask (rows are applied in journal order).
+    if (this.settledAccount !== accountId) await this.open(accountId);
     if (this.loadedAccount !== accountId) return false;
     const incoming = toStored(profile);
     const held = this.profiles.get(senderKeyB64);

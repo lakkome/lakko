@@ -111,10 +111,24 @@ public enum PersonNameMirror {
         defer { gate.leave() }
         if (defaults.dictionary(forKey: key(accountIdB64)) as? [String: String]) == names { return }
         defaults.set(names, forKey: key(accountIdB64))
+        // The app may be suspended right after this write (it is also made
+        // when the app goes to the background): hand it to cfprefsd now so
+        // the extension, a separate process, reads it.
+        CFPreferencesAppSynchronize(SharedStorage.appGroupIdentifier as CFString)
     }
 
     public static func clear(accountIdB64: String) {
         SharedStorage.sharedDefaults()?.removeObject(forKey: key(accountIdB64))
+    }
+
+    /// DEBUG diagnostics for the extension's trace: how many keys the mirror
+    /// dictionary held as this process read it, or what was there instead.
+    public static func debugShape(accountIdB64: String) -> String {
+        guard let raw = SharedStorage.sharedDefaults()?.object(forKey: key(accountIdB64)) else {
+            return "mirror=absent"
+        }
+        if let map = raw as? [String: String] { return "mirror=\(map.count) keys" }
+        return "mirror=wrong type \(type(of: raw))"
     }
 }
 

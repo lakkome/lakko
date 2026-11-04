@@ -76,6 +76,7 @@ pub use head_frame::{
     frame_backup_blob, parse_backup_blob, BackupBlob, HeadFrameError, BACKUP_CONTAINER_TAG,
 };
 pub use payload::{
-    AcceptedContactRecord, BackupPayload, OwnPredecessor, MAX_OWN_ENVELOPE_LEN,
-    MAX_OWN_PREDECESSORS, PAYLOAD_VERSION, PREDECESSOR_SEED_LEN,
+    fit_received_profiles, AcceptedContactRecord, BackupPayload, OwnPredecessor, ReceivedProfile,
+    MAX_OWN_ENVELOPE_LEN, MAX_OWN_PREDECESSORS, MAX_RECEIVED_PROFILES, MAX_RECEIVED_PROFILES_BYTES,
+    MAX_RECEIVED_PROFILE_LEN, PAYLOAD_VERSION, PREDECESSOR_SEED_LEN, RECEIVED_PROFILE_KEY_LEN,
 };

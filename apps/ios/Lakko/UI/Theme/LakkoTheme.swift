@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 // MARK: - Colour tokens
@@ -139,21 +140,12 @@ struct InitialsAvatar: View {
         .accessibilityHidden(true)
     }
 
-    /// Up to two initials: the first letter of the first two words, or the
-    /// first letter alone. Empty for a name that carries no letter or digit.
+    /// The shared initials rule (`lakko_ui_rules::avatar_initials`, the
+    /// design-system Avatar bullet): written once in Rust so the four clients
+    /// cannot disagree. Empty for a name with nothing to show; the circle then
+    /// shows its placeholder.
     var initials: String {
-        Self.initials(of: name)
-    }
-
-    static func initials(of name: String) -> String {
-        let words = name
-            .split(whereSeparator: { $0.isWhitespace })
-            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
-            .filter { !$0.isEmpty }
-        let letters = words.prefix(2).compactMap { word -> Character? in
-            word.first { $0.isLetter || $0.isNumber }
-        }
-        return String(letters).uppercased()
+        avatarInitials(name: name)
     }
 
     /// Four tints (indigo, teal, slate, sand), light and dark, per the design

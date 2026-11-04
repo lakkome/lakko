@@ -17,6 +17,8 @@ import {
   type MembershipChange,
 } from "./membership-rows";
 import type { PersistedMessage } from "./message-log-store";
+import { realNameOf } from "../profile/member-label";
+import { resolveDisplay } from "../profile/resolver";
 
 type SystemEvent = Extract<IncomingChatEvent, { kind: "system" }>;
 
@@ -59,7 +61,7 @@ const sentencesOf = (change: MembershipChange, names: Record<string, string> = {
   membershipSentences(
     change,
     (key, name) => t(key, { name }),
-    (k) => names[k] ?? "Member",
+    (k) => names[k] ?? null,
   );
 
 describe("membershipChangeOfBatch", () => {
@@ -143,9 +145,26 @@ describe("drawing a membership row", () => {
     ]);
   });
 
-  it("draws a person who is gone as '{name} is no longer in the group', and an unknown one as Member", () => {
+  it("draws a person who is gone as '{name} is no longer in the group'; one with no name yet is not drawn", () => {
     const change = judge(["ME", "A", "B"], ["ME"]).change as MembershipChange;
-    expect(sentencesOf(change, { A: "VG2" })).toEqual(["VG2 is no longer in the group", "Member is no longer in the group"]);
+    const lines = sentencesOf(change, { A: "VG2" });
+    expect(lines).toEqual(["VG2 is no longer in the group"]);
+    expect(lines.join(" ")).not.toMatch(/Member|Someone/);
+    // A blank name is no name.
+    expect(sentencesOf(change, { A: "VG2", B: "  " })).toEqual(["VG2 is no longer in the group"]);
+  });
+
+  it("names the person at draw time from the stored key, through the real resolver", () => {
+    const change: MembershipChange = { joined: ["B"], left: [] };
+    const key = new Uint8Array(32).fill(0xb3);
+    const resolveB = (profile?: { displayName: string | null; username: string | null }) =>
+      realNameOf(resolveDisplay({ signatureKey: key, ...(profile === undefined ? {} : { profile }) }));
+    // Before the profile lands: no sentence, no placeholder.
+    expect(membershipSentences(change, (k, name) => t(k, { name }), () => resolveB())).toEqual([]);
+    // After it lands, the same stored row reads the name.
+    expect(
+      membershipSentences(change, (k, name) => t(k, { name }), () => resolveB({ displayName: "VG3", username: null })),
+    ).toEqual(["VG3 joined"]);
   });
 
   it("puts every joined sentence before every left one", () => {

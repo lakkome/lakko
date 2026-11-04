@@ -16,6 +16,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import me.lakko.app.l10n.EnglishForTests
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -28,6 +30,11 @@ import org.junit.Test
  * no write method, like the interface.
  */
 class SilentWakeTest {
+
+    @Before
+    fun english() {
+        EnglishForTests.install()
+    }
     private val accountId = "acct-1"
     private val oldHex = "0a".repeat(32)
     private val newHex = "0b".repeat(32)
@@ -89,7 +96,7 @@ class SilentWakeTest {
         WakeGroupFacts(ConversationKind.Group, listOf(me) + people, owner, me)
 
     private fun chat(text: String, sender: String?, resend: ResendOrigin? = null) =
-        ProcessedRow(ProcessedKind.CHAT, text, 0, senderAccountB64 = sender, resendOrigin = resend)
+        ProcessedRow(ProcessedKind.CHAT, text, 0, senderName = "Anna", senderAccountB64 = sender, resendOrigin = resend)
 
     private fun offer(sender: String?) = ProcessedRow(
         ProcessedKind.CALL_SIGNALING,
@@ -163,7 +170,7 @@ class SilentWakeTest {
         val outcome = wake(
             deps(group(owner = peer, retired, peer), listOf(chat("real", peer), chat("fake", retired)), setOf(retired)),
         )
-        assertEquals("real", outcome.preview?.body)
+        assertEquals("Anna: real", outcome.preview?.body)
         assertFalse(outcome.suppressed)
     }
 

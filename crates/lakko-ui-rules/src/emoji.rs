@@ -77,7 +77,7 @@ const fn is_tag(c: char) -> bool {
 }
 
 /// Whether one grapheme cluster is an emoji, by the rule in the module docs.
-fn is_emoji_cluster(cluster: &str) -> bool {
+pub(crate) fn is_emoji_cluster(cluster: &str) -> bool {
     let mut chars = cluster.chars();
     let Some(first) = chars.next() else {
         return false;

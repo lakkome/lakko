@@ -140,7 +140,13 @@ names; iOS / Android use the same names.
   radius-pill.
 - **Avatar**: circle, initials on an accent-soft / secondary tint chosen
   by hash of the id, image when a profile photo exists. Sizes 28 / 40 /
-  56 / 96.
+  56 / 96. Initials (maintainer, 2026-11-04): two or more words give the
+  first letter of each of the first two words ("QA Phase A" -> "QP"); one
+  word gives its first two letters ("VG3" -> "VG", "Анна" -> "АН"); upper
+  case; letters are grapheme clusters, so an emoji or a combined letter
+  counts as one. Written once in `lakko_ui_rules::avatar_initials` on both
+  FFI surfaces; no client computes initials itself. This applies to every
+  avatar: people, groups, channels, reaction chips, the own avatar.
 - **List row**: 64px (chat list) or 52px (settings), 12px horizontal
   padding, hover `--surface-hover`, selected `--surface-selected`, no
   dividers between rows (whitespace does the work), a hairline only

@@ -85,7 +85,7 @@ class OwnWakeTest {
     private fun row(id: Long, tag: Int) = FetchedRow(id, byteArrayOf(tag.toByte()))
 
     private fun chat(text: String, sender: String?) =
-        ProcessedRow(ProcessedKind.CHAT, text, 0, senderAccountB64 = sender)
+        ProcessedRow(ProcessedKind.CHAT, text, 0, senderName = "Anna", senderAccountB64 = sender)
 
     private suspend fun wake(deps: Deps): PushWakeOutcome =
         decryptPushWake(
@@ -151,6 +151,31 @@ class OwnWakeTest {
 
         assertNull(outcome.preview)
         assertFalse(outcome.genericBannerWanted(appOnScreen = false))
+    }
+
+    @Test
+    fun `a sender with no stored name gets the generic banner, never a placeholder word`() = runTest {
+        me.lakko.app.l10n.EnglishForTests.install()
+        val unnamedChat = ProcessedRow(ProcessedKind.CHAT, "hello", 0, senderName = null, senderAccountB64 = "peer==")
+        val unnamedReaction = ProcessedRow(
+            ProcessedKind.REACTION, "", 0,
+            senderName = null,
+            senderAccountB64 = "peer==",
+            reactionAdd = true,
+            reactionEmoji = "\uD83D\uDC4D",
+            reactionTargetAuthorB64 = ownPersonKey,
+        )
+        for (processed in listOf(unnamedChat, unnamedReaction)) {
+            val outcome = wake(Deps(Group(decode = { processed }, throwOn = emptySet(), ownPersonKey = ownPersonKey), listOf(row(20, 1))))
+            assertEquals("Lakko", outcome.preview?.title)
+            assertEquals(me.lakko.app.l10n.EnglishForTests.strings["notification.message.new"], outcome.preview?.body)
+            assertNoPlaceholderWord(outcome.preview?.title, outcome.preview?.body)
+        }
+        // Named, the same rows read as the person and their words.
+        val named = wake(Deps(Group(decode = { chat("hello", sender = "peer==") }, throwOn = emptySet(), ownPersonKey = ownPersonKey), listOf(row(20, 1))))
+        assertEquals("Anna", named.preview?.title)
+        assertEquals("hello", named.preview?.body)
+        assertNoPlaceholderWord(named.preview?.title, named.preview?.body)
     }
 
     @Test

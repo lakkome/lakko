@@ -43,6 +43,8 @@ import { ProfilePublishScheduler } from "../profile/publish-scheduler";
 import { readPushRotationRole, withRoutingRowLock, type PushRotationRole } from "../push/group-routing";
 import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
+import { ownsGroup } from "./group-owner";
+import { notePublicRecordChanged } from "./handle-owed";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import { IdbGroupNameBackend } from "./group-name-idb";
 import {
@@ -210,6 +212,40 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
   }
 
   /** Seal + publish one envelope into a group. */
+  /**
+   * UX 4.5.4 — a public group's record carries its name and photo: the owner's
+   * device owes its republish when it applies a change to either, whoever
+   * made it. Nothing for a private group or a device that does not own it
+   * (only the owner holds the handle key). Recorded before the change is kept
+   * (no crash loses it) and again after (a republish that ran in between
+   * published the old value, and this one carries the new).
+   */
+  async function owePublicRecord(account: string, entry: ActiveGroup): Promise<void> {
+    await settingsOpened;
+    const held = handles.get(entry.groupIdB64);
+    if (held === undefined || !held.isPublic) return;
+    if (
+      !ownsGroup(entry.group, [
+        chats.conversationAccountIdentity()?.signaturePublicKey,
+        chats.accountIdentity()?.signaturePublicKey,
+      ])
+    ) {
+      return;
+    }
+    await notePublicRecordChanged(account, "group", entry.groupIdB64);
+  }
+
+  /** {@link owePublicRecord} on a receive path: a failure is logged and the
+   *  change still kept (the next change, or the lease renewal, republishes). */
+  async function owePublicRecordQuietly(account: string, entry: ActiveGroup): Promise<void> {
+    try {
+      await owePublicRecord(account, entry);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[group-handle] republish not recorded", err instanceof Error ? err.name : "");
+    }
+  }
+
   async function send(entry: ActiveGroup, envelope: Uint8Array): Promise<void> {
     const secrets = auth.identitySecrets();
     if (secrets === null || chats.identity() === null) throw new Error("Sign in again.");
@@ -446,8 +482,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
           isNewer: (a, b) => (isPhoto ? wasm.groupPhotoIsNewer(a, b) : wasm.groupReactionsIsNewer(a, b)),
         });
         if (!groupNameVerdictAccepts(verdict) || verdict === "accept-identical") return;
-        if (setting.kind === "photo") await photos.set(account, groupIdB64, setting.value);
-        else await reactionSettings.set(account, groupIdB64, setting.value);
+        if (setting.kind === "photo") {
+          await owePublicRecordQuietly(account, entry);
+          await photos.set(account, groupIdB64, setting.value);
+          await owePublicRecordQuietly(account, entry);
+        } else await reactionSettings.set(account, groupIdB64, setting.value);
       });
     },
     async setPhoto(entry, avatar) {
@@ -460,8 +499,10 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
         const now = BigInt(Date.now());
         const stamp = held !== undefined && held.updatedAtMs >= now ? held.updatedAtMs + 1n : now;
         const value: StoredGroupPhoto = { avatar, updatedAtMs: stamp };
+        await owePublicRecord(account, entry);
         await send(entry, composePhotoEnvelope(wasm, value));
         await photos.set(account, entry.groupIdB64, value);
+        await owePublicRecordQuietly(account, entry);
         // ADR-0087 section 18.5 — the replaced photo is deleted by the
         // devices of whoever set it: durable (owed until the server answers),
         // and a photo another account uploaded answers 403, which ends it.
@@ -547,7 +588,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
             console.warn("group name REFUSED (ADR-0051 role gate / order)", verdict, "senderLeaf", event.senderLeaf);
             return verdict;
           }
-          if (verdict !== "accept-identical") await store.set(account, groupIdB64, incoming);
+          if (verdict !== "accept-identical") {
+            await owePublicRecordQuietly(account, entry);
+            await store.set(account, groupIdB64, incoming);
+            await owePublicRecordQuietly(account, entry);
+          }
           return verdict;
         });
       } catch (err) {
@@ -562,8 +607,10 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
       await withRoutingRowLock(account, entry.groupIdB64, async () => {
         await opened;
         const { envelope, value } = await compose(name, freshStamp(entry.groupIdB64));
+        await owePublicRecord(account, entry);
         await send(entry, envelope);
         await store.set(account, entry.groupIdB64, value);
+        await owePublicRecordQuietly(account, entry);
       });
     },
     async recordCreated(entry, name) {

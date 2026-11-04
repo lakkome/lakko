@@ -2060,14 +2060,36 @@ public final class ChatRepository: ObservableObject {
         }
         // Reactions-and-emoji spec section 12 — the people in these
         // conversations, by account key, for the reaction notification.
-        var names: [String: String] = [:]
-        for record in groups.values {
-            for key in PersonKey.people((try? record.group.members()) ?? []) {
+        let names = Self.personNameMap(
+            rosters: groups.values.map { (try? $0.group.members()) ?? [] },
+            resolve: { key in
                 let resolved = ProfileDirectory.shared.resolve(signatureKey: key)
-                if resolved.source != .placeholder { names[key.base64EncodedString()] = resolved.name }
+                return resolved.source == .placeholder ? nil : resolved.name
+            })
+        PersonNameMirror.replace(accountIdB64: accountIdB64, names: names)
+    }
+
+    /// The names a notification may use, keyed by every key the extension
+    /// can be handed for a member: the PERSON key (the account key the core
+    /// resolves the sender to, else the leaf key) and each of the member's
+    /// leaf keys, all mapped to the one name the app shows for that person.
+    /// Every member of every loaded group, not only contacts: a group
+    /// member's profile arrived in the group and is stored under that same
+    /// person key. A member with no known name is left out; the extension
+    /// then says the chat's own word for an unnamed member.
+    nonisolated static func personNameMap(
+        rosters: [[GroupMember]], resolve: (Data) -> String?
+    ) -> [String: String] {
+        var names: [String: String] = [:]
+        for roster in rosters {
+            for member in roster {
+                let person = PersonKey.of(member)
+                guard let name = resolve(person) else { continue }
+                names[person.base64EncodedString()] = name
+                names[member.signaturePublicKey.base64EncodedString()] = name
             }
         }
-        PersonNameMirror.replace(accountIdB64: accountIdB64, names: names)
+        return names
     }
 
     /// `docs/ux/calls.md` section 6 — write a finished call's row into the
@@ -2262,6 +2284,7 @@ public final class ChatRepository: ObservableObject {
             guard bound.isCurrent else { return }
             groupNamePublisher.notePublished(groupIdHex: groupIdHex)
             groupNameRevision &+= 1
+            notePublicRecordChanged(groupIdHex: groupIdHex)
         }
     }
 
@@ -2326,6 +2349,8 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 value: StoredGroupName(name: name, updatedAtMs: updatedAtMs))
             groupNameRevision &+= 1
+            // An admin's rename reaches the owner as this envelope.
+            notePublicRecordChanged(groupIdHex: groupIdHex)
         case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
             NSLog("ADR-0051 group name for \(groupIdHex) dropped: \(verdict)")
         }
@@ -3744,7 +3769,13 @@ public final class ChatRepository: ObservableObject {
     /// handle for the id).
     public func pendingExternalJoins(groupIdHex: String) -> [Data] {
         guard let record = groups[groupIdHex] else { return [] }
-        return (try? record.group.pendingExternalJoins()) ?? []
+        let all = (try? record.group.pendingExternalJoins()) ?? []
+        // A request rejected here whose reject did not reach the snapshot is
+        // not shown again (UX section 8).
+        guard let accountIdB64 = currentAccountIdB64 else { return all }
+        let rejected = groupSettingsStore.rejected(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        guard !rejected.isEmpty else { return all }
+        return all.filter { rejected[base64Encode($0)] == nil }
     }
 
     /// ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
@@ -3956,12 +3987,27 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // UX section 8 — the reject is remembered durably before the core
+        // drops the request, so neither the knock row (it stays on the DS)
+        // nor a snapshot that missed the reject brings it back after a
+        // restart; the joiner's reply grant goes with it.
+        let joinerB64 = base64Encode(proposalRef)
+        let accountKey = try? record.group.pendingExternalJoinAccountKey(joinerSignatureKey: proposalRef)
+        if let accountIdB64 = currentAccountIdB64 {
+            let meta = groupSettingsStore.requestMeta(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[joinerB64]
+            groupSettingsStore.noteRejected(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, joinerKeyB64: joinerB64,
+                throughRowId: max(meta?.knockRowId ?? 0, record.knockCursor))
+        }
         do {
             try record.group.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
         } catch {
             throw ChatError.wrapped("rejectExternalJoin failed", underlying: error)
         }
         persistSnapshotBestEffort()
+        if let accountKey = accountKey ?? nil {
+            ReachCenter.shared.withdrawReplyGrants(ofAccountKeyB64: base64Encode(accountKey))
+        }
     }
 
     /// ADR-0028 (G-3) — mint a group invite-link (owner/admin side). Signs a
@@ -5463,6 +5509,9 @@ public final class ChatRepository: ObservableObject {
         if let epochBeforeBatch, let epochAfter = try? record.group.epoch(),
            epochAfter != epochBeforeBatch {
             reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+            // The roster may have changed: the notification extension's
+            // person-name mirror follows it (it writes only on a change).
+            mirrorCallPeerNames()
         }
         // ADR-0052 decision 3 — a delete that landed in this batch takes its
         // shared pin record with it. Only spawns a `Task` on the pin chain.
@@ -8853,7 +8902,8 @@ public final class ChatRepository: ObservableObject {
     /// as a request to join; the joiner's reply grant is kept for its account
     /// so the sweep can write the Welcome into its mailbox.
     private func openSealedKnock(
-        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data, createdAt: String
+        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data, createdAt: String,
+        rowId: Int64 = 0
     ) -> SealedKnockStep {
         guard let version = knockRowVersion(row: row),
               var seed = knockSeed(record: record, groupIdHex: groupIdHex, version: version) else { return .drop }
@@ -8869,6 +8919,15 @@ public final class ChatRepository: ObservableObject {
         // A public group (ADR-0087 section 1) also takes a row with no link;
         // a private one only a row carrying a capability of this group.
         guard byLink || groupHandle(groupIdHex: groupIdHex)?.isPublic == true else { return .drop }
+        // UX section 8 — a request rejected here is not read back: the knock
+        // row stays on the DS after a Reject.
+        if rowId > 0, let accountIdB64 = currentAccountIdB64,
+           let joiner = try? keyPackageSignatureKey(keyPackage: request.keyPackage),
+           let through = groupSettingsStore.rejected(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[
+               base64Encode(joiner)],
+           rowId <= through {
+            return .drop
+        }
         guard let kept = try? record.group.retainJoinRequest(identity: identity, keyPackage: request.keyPackage)
         else { return .drop }
         switch kept.outcome {
@@ -8881,7 +8940,8 @@ public final class ChatRepository: ObservableObject {
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                     joinerKeyB64: base64Encode(kept.joinerSignatureKey),
                     askedAtMs: Self.parseDsTimestampMs(createdAt) ?? Self.nowMs(),
-                    inviterKey: linkCap?.issuerSignaturePubkey())
+                    inviterKey: linkCap?.issuerSignaturePubkey(),
+                    knockRowId: rowId > 0 ? rowId : nil)
             }
             // UX section 8 — the name the request carries, shown unverified.
             if let accountIdB64 = currentAccountIdB64,
@@ -9413,7 +9473,7 @@ public final class ChatRepository: ObservableObject {
             for row in raw.messages {
                 let step = openSealedKnock(
                     record: record, groupIdHex: groupIdHex, identity: identity, row: row.payload,
-                    createdAt: row.createdAt)
+                    createdAt: row.createdAt, rowId: row.id)
                 if step == .stop {
                     record.sawUnkeptExternalJoin = true
                     break

@@ -107,6 +107,8 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   unsupportedMessage: "This message needs a newer version of Lakko.",
   /** "{name} reacted {emoji} to your message", U+0001 = name, U+0002 = emoji. */
   reactedToYourMessage: "\u0001 reacted \u0002 to your message",
+  /** A group message's body, "{name}: {text}", U+0001 = name, U+0002 = text. */
+  senderPrefixed: "\u0001: \u0002",
   /** @type {readonly string[]} */
   attachments: Object.freeze([]),
 });
@@ -151,12 +153,12 @@ const MAX_NOTIFICATION_STRING = 200;
  * `attachments` is kept entry by entry: a malformed entry is dropped to an
  * empty string, which {@link attachmentsLine} reads as English.
  *
- * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, reactedToYourMessage: string, reactionsOff: boolean, attachments: string[] }}
+ * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, reactedToYourMessage: string, senderPrefixed: string, reactionsOff: boolean, attachments: string[] }}
  */
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
-  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage" | "reactedToYourMessage"} key */
+  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage" | "reactedToYourMessage" | "senderPrefixed"} key */
   const pick = (key) => {
     const v = source[key];
     return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING
@@ -175,6 +177,10 @@ export function notificationStrings(raw) {
       const v = pick("reactedToYourMessage");
       // A stored template must carry both places, or it is not ours.
       return v.includes("\u0001") && v.includes("\u0002") ? v : NOTIFICATION_STRINGS_EN.reactedToYourMessage;
+    })(),
+    senderPrefixed: (() => {
+      const v = pick("senderPrefixed");
+      return v.includes("\u0001") && v.includes("\u0002") ? v : NOTIFICATION_STRINGS_EN.senderPrefixed;
     })(),
     reactionsOff: source.reactionsOff === true,
     attachments: Array.isArray(source.attachments)

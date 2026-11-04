@@ -128,6 +128,7 @@ final class BackupPayloadShapeTests: XCTestCase {
         XCTAssertEqual(fields, [
             "accountId", "createdAtMs", "ed25519Seed", "acceptedContacts",
             "knownGroupIds", "syncedState", "ownPredecessors", "ownProfile", "visibility",
+            "receivedProfiles",
         ])
         XCTAssertFalse(fields.contains { $0.lowercased().contains("snapshot") })
     }

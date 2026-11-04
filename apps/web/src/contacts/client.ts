@@ -155,6 +155,7 @@ import {
 } from "../reach/mailbox-write";
 import {
   forgetJoinReply,
+  joinRepliesOpened,
   joinReplyBindingVerifies,
   joinReplyFor,
   rememberJoinReply,
@@ -1031,7 +1032,8 @@ function sweepPortsFor(
         const accountHex = journalHex(resolveAccountKey(accountKey));
         const done = welcomedAccounts.get(accountHex);
         if (done !== undefined) return done;
-        const explicit = joinReplyFor(leafKey);
+        await joinRepliesOpened();
+        const explicit = joinReplyFor(groupIdBytes, leafKey);
         // ADR-0050 section 2.5a item 7 — never unsigned: every grant held for
         // the account is tried in order (next on 401); with none left nothing
         // is written, `null` tells the sweep, and the Welcome stays owed
@@ -1050,12 +1052,20 @@ function sweepPortsFor(
           );
         } catch (err) {
           if (!(err instanceof MailboxUnreachableError)) throw err;
+          // Said, not silent: a Welcome with no grant waits until one arrives
+          // (a contact grant, a new request), which may be never.
           // eslint-disable-next-line no-console
-          console.info("ADR-0050: a Welcome is kept owed; no grant reaches the added account's mailbox");
+          console.warn(
+            explicit === null
+              ? "ADR-0050: a Welcome is kept owed; no reply grant is kept for the added joiner and no other grant reaches their mailbox"
+              : "ADR-0050: a Welcome is kept owed; no grant reaches the added account's mailbox",
+          );
           return null;
         }
         welcomedAccounts.set(accountHex, id);
-        if (explicit !== null) forgetJoinReply(leafKey);
+        // The grant stays (it expires with the reply key, 7 days): a Welcome
+        // re-sent from the commit outbox after a crash, or after a refused
+        // write and an address re-check, needs it again.
         return id;
       },
     },
@@ -4459,6 +4469,8 @@ export class ContactsClient {
         throw ContactsError.wrap(err);
       }
       await this.persistBestEffort();
+      // Refused: the kept reply grant has nothing left to carry.
+      await forgetJoinReply(group.groupId, proposalRef);
     });
   }
 
@@ -4535,7 +4547,7 @@ export class ContactsClient {
           // ADR-0078 - checked against the joiner's account key resolved from
           // the proposal's leaf; a grant naming another mailbox is not kept.
           if (joinReplyBindingVerifies(reply, accountKey)) {
-            rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+            await rememberJoinReply(groupId, attr.joinerSignatureKey, session.encodeGrant(reply));
           }
         } finally {
           reply.free();

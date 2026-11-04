@@ -293,6 +293,30 @@ final class SealedMailboxRowTests: XCTestCase {
         XCTAssertEqual(plan.candidates.map(\.reachSeed), [reply.seed])
     }
 
+    /// A joiner's reply grant read from a knock or an attribution survives an
+    /// app restart between reading the request and approving it: the
+    /// Welcome the approve sends is addressed through it, so a grant held in
+    /// memory only would leave the joiner a member nobody told.
+    func testAJoinReplyGrantSurvivesAReopenOfTheApp() throws {
+        let persistence = InMemoryReachPersistence()
+        let admin = try identity(0x31), joiner = try identity(0x75)
+        let first = ReachCenter(persistence: persistence, ds: Offline.ds())
+        first.activate(accountIdB64: "sealed-rows", accountIdentity: admin)
+        let reply = try deriveReachGrant(
+            accountSeed: joiner.ed25519Seed(), class: .reply, scopeId: Data(repeating: 2, count: 16), version: 0)
+        XCTAssertTrue(first.keep(
+            reply, carrier: .request,
+            fromAccountKeyB64: joiner.signaturePublicKey().base64EncodedString(), scopeHex: nil))
+
+        // The app is closed and opened again: a fresh centre over the same
+        // store, as at launch.
+        let reopened = ReachCenter(persistence: persistence, ds: Offline.ds())
+        reopened.activate(accountIdB64: "sealed-rows", accountIdentity: admin)
+        let plan = try XCTUnwrap(reopened.writePlan(toAccountKey: joiner.signaturePublicKey()))
+        XCTAssertEqual(plan.target.address, MailboxKey.fromAccountIdentity(accountIdentity: joiner).address())
+        XCTAssertEqual(plan.candidates.map(\.reachSeed), [reply.seed])
+    }
+
     /// A profile grant is kept only from the sender resolved at receipt whose
     /// key its binding verifies under.
     func testAProfileGrantIsCheckedAgainstTheSenderResolvedAtReceipt() throws {

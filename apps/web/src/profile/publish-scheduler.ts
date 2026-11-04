@@ -23,6 +23,15 @@
  * join, change or growth — cancels a pending growth republish for it, because
  * it was sealed at the current epoch and the newcomer can read it.
  *
+ * ## Before a send
+ *
+ * A newcomer reads a member's messages only under that member's name, so a
+ * profile this device owes a group goes out BEFORE this device's next message
+ * there: {@link ProfilePublishScheduler.beforeSend} publishes a waiting growth
+ * or retry republish at once (no throttle, no jitter) and waits for a publish
+ * already on its way. The jitter stays for the republish nothing is waiting
+ * on.
+ *
  * ## Failures
  *
  * A failed publish is retried through the throttled growth path, up to
@@ -62,6 +71,8 @@ interface Pending<Timer> {
 export class ProfilePublishScheduler<Timer = unknown> {
   private readonly lastPublishAt = new Map<string, number>();
   private readonly pending = new Map<string, Pending<Timer>>();
+  /** The publish under way for a group, if any. */
+  private readonly inFlight = new Map<string, Promise<boolean>>();
   private stopped = false;
 
   constructor(private readonly deps: PublishSchedulerDeps<Timer>) {}
@@ -94,6 +105,24 @@ export class ProfilePublishScheduler<Timer = unknown> {
     this.schedule(groupIdB64, "growth", 0);
   }
 
+  /**
+   * Called before this device sends a message into `groupIdB64`: a profile
+   * owed to the group goes out first. A waiting growth / retry republish is
+   * published now, a publish under way is waited for. Never rejects; a
+   * failed publish is retried as any other, and the send goes on.
+   */
+  async beforeSend(groupIdB64: string): Promise<void> {
+    if (this.stopped) return;
+    const running = this.inFlight.get(groupIdB64);
+    const waiting = this.pending.get(groupIdB64);
+    if (waiting !== undefined) {
+      // `publishNow` clears the timer; the retry count carries over.
+      await this.publishNow(groupIdB64, waiting.retries > 0 ? "retry" : "growth", waiting.retries);
+      return;
+    }
+    if (running !== undefined) await running;
+  }
+
   /** Whether a growth republish is waiting for `groupIdB64`. */
   hasPending(groupIdB64: string): boolean {
     return this.pending.has(groupIdB64);
@@ -104,6 +133,7 @@ export class ProfilePublishScheduler<Timer = unknown> {
     this.stopped = true;
     for (const p of this.pending.values()) this.deps.clearTimer(p.timer);
     this.pending.clear();
+    this.inFlight.clear();
     this.lastPublishAt.clear();
   }
 
@@ -143,13 +173,21 @@ export class ProfilePublishScheduler<Timer = unknown> {
       this.pending.delete(groupIdB64);
     }
     this.lastPublishAt.set(groupIdB64, this.deps.now());
+    const run = (async (): Promise<boolean> => {
+      try {
+        await this.deps.publish(groupIdB64, reason);
+        return true;
+      } catch (err) {
+        this.deps.onError?.(groupIdB64, err);
+        if (retries < MAX_RETRIES) this.schedule(groupIdB64, "retry", retries + 1);
+        return false;
+      }
+    })();
+    this.inFlight.set(groupIdB64, run);
     try {
-      await this.deps.publish(groupIdB64, reason);
-      return true;
-    } catch (err) {
-      this.deps.onError?.(groupIdB64, err);
-      if (retries < MAX_RETRIES) this.schedule(groupIdB64, "retry", retries + 1);
-      return false;
+      return await run;
+    } finally {
+      if (this.inFlight.get(groupIdB64) === run) this.inFlight.delete(groupIdB64);
     }
   }
 }

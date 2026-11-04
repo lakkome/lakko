@@ -123,14 +123,16 @@ public enum ChannelPublisherCommits {
             },
             appoint: { joinerKey in
                 let (_, group) = try context.open()
+                let groupId = try group.groupId()
                 guard let key = await CoPublisherKeyBook.shared.key(
-                    groupId: try group.groupId(), joinerKey: joinerKey) else {
+                    groupId: groupId, joinerKey: joinerKey, accountIdB64: account) else {
                     NSLog("ADR-0059: no co-publisher binding read for the approved joiner; not appointed")
                     return
                 }
                 try await context.channelsClient.setCoPublisherAppointment(
                     appoint: true, channelIdHex: context.channelIdHex,
                     accountIdentity: try context.ownerIdentity(), copublisherKey: key)
+                await CoPublisherKeyBook.shared.forget(groupId: groupId, joinerKey: joinerKey, accountIdB64: account)
             },
             save: { entry in try PublisherCommitStore.shared.put(accountIdB64: account, entry) },
             finish: { entry in PublisherCommitStore.shared.remove(accountIdB64: account, id: entry.id) }

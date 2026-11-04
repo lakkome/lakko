@@ -37,12 +37,13 @@ import {
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { conversationLabelsOf, realNameOf } from "./member-label";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import type { FoundName } from "../contacts/contact-list-model";
-import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import { loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadPendingContacts, pendingContacts, type PendingContact } from "../contacts/pending-contacts";
 import { loadWasm, type Wasm } from "../wasm";
 import {
@@ -63,6 +64,7 @@ import {
   awaitsOwnProfile,
   type IncomingProfile,
 } from "./profile-store";
+import { installBeforeSend } from "../chat/before-send";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
 import { resolveDisplay, resolvePerson, type ResolvedName } from "./resolver";
 import type { ReceivedGrantWire } from "./profile-envelope";
@@ -242,7 +244,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   };
 
   const store = new ProfileStore(
-    new IdbProfileBackend(getDeviceKey, () => untrack(renames)),
+    new IdbProfileBackend(getDeviceKey, () => untrack(renames), () => untrack(conversationLabels)),
     (incoming, stored) => (wasm !== null ? wasm.profileIsNewer(incoming, stored) : incoming > stored),
     (err) => {
       // eslint-disable-next-line no-console
@@ -581,6 +583,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     return owedConversations()?.length ?? null;
   });
   onCleanup(() => installProfileResend(null));
+  // ADR-0048 §2 — a profile owed to a group leaves before this device's next
+  // message there (`chat/before-send.ts`).
+  onCleanup(installBeforeSend((groupIdB64) => scheduler.beforeSend(groupIdB64)));
 
   // ADR-0048 section 4a — a name set on another device of this account was
   // adopted: re-read the own profile. Not republished into groups (the device
@@ -663,7 +668,23 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   });
   const unsubscribeCarried = subscribeCarriedNames(takeCarriedProfilesNow);
 
+  // The service worker names a person with what the app shows for them in a
+  // conversation (`conversationLabels`): the row is written again when the
+  // groups, the renames or the key aliases move, not only on a new profile.
+  let labelsTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    chats.groups();
+    renames();
+    aliases();
+    pendingContacts();
+    const account = accountId();
+    if (account === null) return;
+    if (labelsTimer !== null) clearTimeout(labelsTimer);
+    labelsTimer = setTimeout(() => store.resave(account), 1000);
+  });
+
   onCleanup(() => {
+    if (labelsTimer !== null) clearTimeout(labelsTimer);
     unsubscribeStore();
     unsubscribeRenames();
     unsubscribeOwnAdopted();
@@ -671,6 +692,32 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     unsubscribeCarried();
     scheduler.stop();
   });
+
+  /**
+   * The label the app shows for each member of each conversation this device
+   * holds (a real name only; a person the app cannot name is left out),
+   * under every key the service worker can be handed for that person: the
+   * account key a leaf is bound to and the leaf's own key. Mirrored into the
+   * row for the worker, so a notification names a person exactly as the chat
+   * does, a group member who is not a contact included.
+   */
+  function conversationLabels(): Map<string, string> {
+    // Every contact, every received profile, and every retired key of a
+    // contact, beside the rosters: a sender is always one of these.
+    const others = new Set<string>();
+    for (const c of loadAccepted()) others.add(c.signaturePubkeyB64);
+    for (const c of pendingContacts()) others.add(c.signaturePubkeyB64);
+    for (const [key] of store.entries()) others.add(key);
+    for (const key of renames().keys()) others.add(key);
+    for (const key of aliases().keys()) others.add(key);
+    return conversationLabelsOf(
+      chats.groups().map((g) => rosterOf(g.group)),
+      // A name the app does not know is not written: no placeholder word.
+      (person) => realNameOf(api.resolve(person)),
+      base64Encode,
+      others,
+    );
+  }
 
   const api: ProfileApi = {
     version,

@@ -76,6 +76,8 @@ final class SilentContinuityAlignmentTests: XCTestCase {
     private struct DecryptFailed: Error {}
 
     private final class Deps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         var group: Group?
         var rows: [NseFetchedRow] = []
         var superseded: Set<String> = []
@@ -201,6 +203,8 @@ final class SilentContinuityAlignmentTests: XCTestCase {
 
     func testTheDefaultDependencyObjectDropsNothing() {
         final class Plain: NsePushDecryptDeps {
+            func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+            func reactionNotificationsOn() -> Bool { true }
             func boundAccount(wakeSubscriptionIdHex: String?) -> String? { nil }
             func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? { nil }
             func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool { false }

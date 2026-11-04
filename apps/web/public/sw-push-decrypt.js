@@ -297,11 +297,14 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {(accountId: string, groupHex: string) => Promise<number | null>} [startCursor]
  *   The app's last-persisted per-group cursor (READ-ONLY), if available. Used as
  *   the fetch start so intervening commits are replayed and the epoch stays right.
- * @property {(accountId: string, deviceKey: any, senderKeyB64: string) => Promise<string | null>} [lookupSenderName]
+ * @property {(accountId: string, deviceKey: any, senderKeyB64: string, batchProfile?: BatchProfile) => Promise<string | null>} [lookupSenderName]
  *   ADR-0048 — READ-ONLY: the name this device ALREADY resolves for a sender
  *   (local rename, profile name, verified username), from the encrypted
- *   profile row the app wrote. `null` when nothing is known. Never fetches or
- *   verifies anything. Optional; any throw is treated as unknown.
+ *   profile row the app wrote. `batchProfile` is the sender's profile when
+ *   the wake's own rows carried one the app has not filed yet (see
+ *   {@link BatchProfile}); the reader weighs it as the app would. `null` when
+ *   nothing is known. Never fetches or verifies anything. Optional; any throw
+ *   is treated as unknown.
  * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<boolean | null>} [lookupMuted]
  *   READ-ONLY: is this conversation muted? From the encrypted cross-device
  *   sync row the app wrote (`src/devices/sync/sync-state-idb.ts`), the same
@@ -313,6 +316,10 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   absent dep or a throw all mean "not muted", so a call is never silenced
  *   because a database did not open. Silently swallowing calls is a far worse
  *   defect than an unwanted ring.
+ * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<string | null>} [lookupGroupName]
+ *   READ-ONLY: the group's shared name (ADR-0051) as the app stored it, for
+ *   the notification title of a group. `null` when unknown: the title is
+ *   then "Lakko". Optional; a throw is treated as unknown.
  * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<string | null>} [lookupConversation]
  *   ADR-0073 R.5 — READ-ONLY: the conversation `groupHex` belongs to (hex of
  *   the lineage's first group), from the same sync row as the mute flag.
@@ -626,6 +633,18 @@ export async function decryptPushWake(wake, deps) {
     freeQuietly(identity);
     return READ_DID_NOT_RUN;
   }
+  // The notification's shape (title, sender prefix) follows the kind: read
+  // once, now; unreadable is `null` (`messageNotificationText`).
+  /** @type {boolean | null} `null`: the kind could not be read. */
+  let oneToOne = null;
+  try {
+    const kind = group.groupKind();
+    const kinds = deps.wasm.GroupKind;
+    if (kinds !== undefined && kind === kinds.OneToOne) oneToOne = true;
+    else if (kinds !== undefined && kind === kinds.Group) oneToOne = false;
+  } catch {
+    oneToOne = null;
+  }
 
   try {
     // 7. Fetch DS rows after a READ-ONLY start cursor. Prefer the app's
@@ -701,6 +720,24 @@ export async function decryptPushWake(wake, deps) {
     let latestReaction = null;
     /** @type {{ notice: CallNotice, senderKeyB64: string | null } | null} */
     let latestCall = null;
+    /** ADR-0048 — profiles the batch's own rows carried (in memory only). */
+    /** @type {Map<string, BatchProfile>} */
+    const batchProfiles = new Map();
+    /** The name of `keyB64`: the app's row, weighed against a profile this
+     *  batch carried; then the batch profile alone. */
+    const nameOfSender = async (keyB64) => {
+      const fromBatch = batchProfiles.get(keyB64);
+      let name = null;
+      if (typeof deps.lookupSenderName === "function") {
+        try {
+          name = await deps.lookupSenderName(accountId, deviceKey, keyB64, fromBatch);
+        } catch {
+          name = null;
+        }
+      }
+      if (typeof name === "string" && name.trim().length > 0) return name;
+      return batchProfileName(fromBatch);
+    };
     // One reading for the whole batch, so two rows a millisecond apart cannot
     // be judged stale differently.
     const now = typeof deps.nowMs === "function" ? deps.nowMs() : Date.now();
@@ -736,6 +773,20 @@ export async function decryptPushWake(wake, deps) {
       if (retired.size > 0) {
         const senderPerson = personKeyAtLeaf(group, processed?.senderLeaf);
         if (senderPerson !== null && retired.has(senderPerson)) continue;
+      }
+      // ADR-0048 — a profile is never a preview, but it names its sender for
+      // the rest of the batch, as it will in the app (rows are applied in
+      // journal order). Filed under the person key resolved against THIS
+      // epoch's roster and the leaf key.
+      const carried = profileFromProcessed(deps.wasm, processed);
+      if (carried !== null) {
+        for (const key of [
+          personKeyAtLeaf(group, processed?.senderLeaf),
+          leafKeyAtLeaf(group, processed?.senderLeaf),
+        ]) {
+          if (key !== null) rememberBatchProfile(batchProfiles, key, carried);
+        }
+        continue;
       }
       const call = callNoticeFrom(deps.wasm, processed, message, groupHex, now);
       if (call !== null) {
@@ -797,21 +848,8 @@ export async function decryptPushWake(wake, deps) {
     // expected to answer within seconds, the other waits. The ring's title is
     // the caller's name by the same read the message path uses.
     if (latestCall !== null) {
-      let callerName = null;
-      if (
-        latestCall.senderKeyB64 !== null &&
-        typeof deps.lookupSenderName === "function"
-      ) {
-        try {
-          callerName = await deps.lookupSenderName(
-            accountId,
-            deviceKey,
-            latestCall.senderKeyB64,
-          );
-        } catch {
-          callerName = null;
-        }
-      }
+      const callerName =
+        latestCall.senderKeyB64 === null ? null : await nameOfSender(latestCall.senderKeyB64);
       // `docs/ux/calls.md` section 2.1 — "a muted chat never rings". Read
       // ONCE per wake, for the one call the batch settled on, and only for a
       // ring: an `end` takes a notification down, which mute has no say over.
@@ -828,6 +866,10 @@ export async function decryptPushWake(wake, deps) {
         } catch {
           muted = false;
         }
+      }
+      if (typeof callerName !== "string" || callerName.length === 0) {
+        // eslint-disable-next-line no-console
+        console.error("[push] the caller of a ring has no name on this device; the ring shows the generic title");
       }
       const notice = {
         ...latestCall.notice,
@@ -866,34 +908,39 @@ export async function decryptPushWake(wake, deps) {
       }
     }
 
-    // ADR-0048 UX §5 — title the notification with a name this device
-    // already knows. A read of what the app stored; never a lookup.
-    if (
-      latest !== null &&
-      latestSenderKeyB64 !== null &&
-      typeof deps.lookupSenderName === "function"
-    ) {
-      let name = null;
-      try {
-        name = await deps.lookupSenderName(accountId, deviceKey, latestSenderKeyB64);
-      } catch {
-        name = null;
+    // ADR-0048 UX §5 — the notification names the conversation, with names
+    // this device already knows (reads of what the app stored; never a
+    // lookup): a one-to-one is titled with the person and shows the text; a
+    // group is titled with its name and the body reads "Sender: text". A
+    // sender with no name on this device gets the generic banner.
+    if (latest !== null) {
+      const senderName = latestSenderKeyB64 === null ? null : await nameOfSender(latestSenderKeyB64);
+      let groupName = null;
+      if (oneToOne !== true && typeof deps.lookupGroupName === "function") {
+        try {
+          groupName = await deps.lookupGroupName(accountId, deviceKey, groupHex);
+        } catch {
+          groupName = null;
+        }
       }
-      if (typeof name === "string" && name.length > 0) {
-        latest = { ...latest, title: name };
+      const shaped = messageNotificationText({
+        oneToOne,
+        groupName,
+        senderName,
+        text: latest.body,
+        reactionEmoji: latestReaction === null ? null : latestReaction.emoji,
+        words,
+      });
+      if (shaped === null) {
+        // A sender is always a contact or a member whose name is on this
+        // device; none found is a defect. Never a made-up name, never a body
+        // without its sender: the generic banner.
+        // eslint-disable-next-line no-console
+        console.error("[push] the sender of a notification has no name on this device; showing the generic banner");
+        latest = genericMessageBanner(words, latest.tag);
+      } else {
+        latest = { ...latest, title: shaped.title, body: shaped.body };
       }
-      if (latestReaction !== null) {
-        const who = typeof name === "string" && name.length > 0 ? name : "Lakko";
-        latest = {
-          ...latest,
-          body: words.reactedToYourMessage.replace("\u0001", who).replace("\u0002", latestReaction.emoji),
-        };
-      }
-    } else if (latest !== null && latestReaction !== null) {
-      latest = {
-        ...latest,
-        body: words.reactedToYourMessage.replace("\u0001", "Lakko").replace("\u0002", latestReaction.emoji),
-      };
     }
     return { preview: latest, readRan: true, unreadableRows };
   } finally {
@@ -1525,6 +1572,30 @@ function isProfileEnvelope(wasm, bytes) {
  */
 
 /**
+ * Base64 of the leaf's own signature key at `leaf` in the throwaway group's
+ * roster, or `null`.
+ *
+ * @param {any} group
+ * @param {unknown} leaf
+ * @returns {string | null}
+ */
+function leafKeyAtLeaf(group, leaf) {
+  if (typeof leaf !== "number") return null;
+  let members;
+  try {
+    members = group.members();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(members)) return null;
+  for (const m of members) {
+    if (m?.leafIndex !== leaf) continue;
+    return m.signaturePublicKey instanceof Uint8Array ? bytesToBase64(m.signaturePublicKey) : null;
+  }
+  return null;
+}
+
+/**
  * ADR-0050 — base64 of the PERSON key (the account key, else the legacy leaf
  * key) of the member at `leaf` in the throwaway group's roster, or `null`.
  *
@@ -1794,50 +1865,196 @@ export function resendHeldFromRows(logPayload, syncPayload, question, wasm) {
 }
 
 /**
- * ADR-0048 / C-68 — the base64 signature key of a processed frame's sender,
- * read from the throwaway group's roster, or `null`.
+ * ADR-0048 / C-68 / ADR-0050 — the base64 PERSON key of a processed frame's
+ * sender (the account key the leaf is bound to, else the leaf's own key),
+ * read from the throwaway group's roster, or `null`. The app files every
+ * profile it received, a group member's as a contact's, under that key
+ * (`chat/author-identity.ts` `resolveMemberIdentity`), so a lookup by the
+ * leaf key of a bound device would miss every member but the founders.
  *
  * @param {any} group
  * @param {any} processed
  * @returns {string | null}
  */
 function senderKeyOf(group, processed) {
-  const leaf = processed?.senderLeaf;
-  if (typeof leaf !== "number") return null;
-  let members;
+  return personKeyAtLeaf(group, processed?.senderLeaf);
+}
+
+/**
+ * The title and body of a message notification (ADR-0048 UX §5), the same
+ * shape on every client: the title is the conversation's name (the person in
+ * a one-to-one, the group's name in a group, "Lakko" for a group with none);
+ * in a group the body reads "Sender: text", in a one-to-one just the text. A
+ * reaction to the person's own message reads "Anna reacted ❤️ to your
+ * message". Media previews ("Sent a photo") are `text` like any other.
+ *
+ * A person is named only by their name as this device holds it (`senderName`,
+ * from the mirror the app writes); there is no placeholder word and a person
+ * is never named by the conversation. A sender is always a contact or a
+ * member whose name is on this device, so no name is a defect: the answer is
+ * `null`, and the caller shows the generic banner. Pure; exported for the
+ * tests.
+ *
+ * @param {{ oneToOne: boolean | null, groupName: string | null, senderName: string | null, text: string, reactionEmoji: string | null, words: { senderPrefixed?: string, reactedToYourMessage: string } }} input
+ * @returns {{ title: string, body: string } | null}
+ */
+export function messageNotificationText(input) {
+  const known = (v) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+  const sender = known(input.senderName);
+  if (sender === null) return null;
+  const group = known(input.groupName);
+  // `oneToOne === null`: the kind could not be read. With no group name the
+  // title is then the sender, and the body does not name them a second time.
+  const titledBySender = input.oneToOne === true || (input.oneToOne === null && group === null);
+  const title = titledBySender ? sender : (group ?? "Lakko");
+  if (input.reactionEmoji !== null) {
+    return {
+      title,
+      body: input.words.reactedToYourMessage.replace("\u0001", sender).replace("\u0002", input.reactionEmoji),
+    };
+  }
+  if (titledBySender) return { title, body: input.text };
+  return {
+    title,
+    body: (input.words.senderPrefixed ?? "\u0001: \u0002").replace("\u0001", sender).replace("\u0002", input.text),
+  };
+}
+
+/**
+ * A profile envelope met in the wake's own rows (ADR-0048). The app files a
+ * received profile under the sender's person key resolved at receipt (C-68);
+ * the worker keeps it IN MEMORY for the rest of the batch under that key and
+ * the sender's leaf key, so a profile and a message in one wake name the
+ * sender. Never persisted (C-59): the app files it when it reads the row.
+ *
+ * @typedef {object} BatchProfile
+ * @property {string | null} displayName
+ * @property {string | null} username   a claim; shown only when the app's row
+ *                                      holds a verified verdict for it.
+ * @property {bigint} updatedAtMs
+ */
+
+/**
+ * The profile a processed frame carries, or `null`. Classification and the
+ * fields only; nothing is kept beyond the batch. Pure; never throws.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @returns {BatchProfile | null}
+ */
+function profileFromProcessed(wasm, processed) {
+  if (processed === null || processed === undefined || processed.kind !== "Application") return null;
+  const bytes = processed.applicationData;
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0 || bytes[0] !== PROFILE_ENVELOPE_FIRST_BYTE) {
+    return null;
+  }
+  if (typeof wasm.decodeProfileEnvelope !== "function") return null;
+  let decoded;
   try {
-    members = group.members();
+    decoded = wasm.decodeProfileEnvelope(bytes);
   } catch {
     return null;
   }
-  if (!Array.isArray(members)) return null;
-  for (const m of members) {
-    if (m?.leafIndex === leaf && m.signaturePublicKey instanceof Uint8Array) {
-      return bytesToBase64(m.signaturePublicKey);
-    }
+  try {
+    const text = (v) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+    const stamp = typeof decoded.updatedAtMs === "bigint" ? decoded.updatedAtMs : BigInt(decoded.updatedAtMs ?? 0);
+    return { displayName: text(decoded.displayName), username: text(decoded.username), updatedAtMs: stamp };
+  } catch {
+    return null;
+  } finally {
+    freeQuietly(decoded);
   }
-  return null;
+}
+
+/**
+ * File `profile` under `keyB64` in the batch's map, a strictly newer stamp
+ * winning (the app's rule for one key). Pure.
+ *
+ * @param {Map<string, BatchProfile>} map
+ * @param {string} keyB64
+ * @param {BatchProfile} profile
+ */
+function rememberBatchProfile(map, keyB64, profile) {
+  const held = map.get(keyB64);
+  if (held === undefined || profile.updatedAtMs > held.updatedAtMs) map.set(keyB64, profile);
+}
+
+/**
+ * The name the app's display rule gives a batch profile with nothing else to
+ * go on: its display name. A username alone is a claim the worker cannot
+ * check, so it is not a name here (the reader checks it against the app's
+ * verified verdicts). Pure.
+ *
+ * @param {BatchProfile | undefined} profile
+ * @returns {string | null}
+ */
+function batchProfileName(profile) {
+  return profile === undefined ? null : profile.displayName;
+}
+
+/** The banner shown when a sender has no name on this device: the worker's
+ *  generic one, the same as for a wake it cannot read. Pure. */
+export function genericMessageBanner(words, tag) {
+  const word = typeof words?.newMessage === "string" && words.newMessage.length > 0 ? words.newMessage : "New message";
+  return { title: "Lakko", body: word, tag };
+}
+
+/**
+ * The shared name of `groupHex` from the decrypted group-name row the app
+ * wrote (`src/chat/group-name-store.ts`: `{ v: 1, g: { <base64 id>: { n } } }`),
+ * or `null`. Pure; exported for `sw.js` and the tests.
+ *
+ * @param {any} payload
+ * @param {string} groupHex
+ * @returns {string | null}
+ */
+export function groupNameFromRow(payload, groupHex) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 1) return null;
+  if (typeof groupHex !== "string" || !/^([0-9a-f]{2})+$/.test(groupHex)) return null;
+  const bytes = new Uint8Array(groupHex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
+  const entry = payload.g?.[bytesToBase64(bytes)];
+  if (entry === null || typeof entry !== "object") return null;
+  return typeof entry.n === "string" && entry.n.trim().length > 0 ? entry.n.trim() : null;
 }
 
 /**
  * ADR-0048 §5 — the name a notification may show for `senderKeyB64`, from the
  * decrypted profile-row payload the app wrote (`src/profile/profile-idb.ts`),
  * or `null`. The same precedence as `src/profile/resolver.ts` minus its last
- * step: local rename → profile name → VERIFIED username. There is no
- * fingerprint fallback here — an unknown sender keeps the generic title.
+ * step: local rename → profile name → VERIFIED username, then the label mirror
+ * the app writes (`n`). There is no fingerprint and no placeholder word: a
+ * sender with no name here gets the generic banner.
+ *
+ * `batchProfile` is a profile the wake's own rows carried for this key
+ * (`BatchProfile`): it takes the place of the stored profile unless the
+ * stored one is at least as new, exactly as the app would file it.
  *
  * Pure; exported for `sw.js` and the tests.
  *
  * @param {any} payload
  * @param {string} senderKeyB64
+ * @param {BatchProfile} [batchProfile]
  * @returns {string | null}
  */
-export function senderNameFromProfileRow(payload, senderKeyB64) {
+export function senderNameFromProfileRow(payload, senderKeyB64, batchProfile) {
   if (payload === null || typeof payload !== "object" || payload.v !== 1) return null;
   const rename = payload.r?.[senderKeyB64];
   if (typeof rename === "string" && rename.trim().length > 0) return rename.trim();
-  const profile = payload.p?.[senderKeyB64];
-  if (profile === null || typeof profile !== "object") return null;
+  let profile = payload.p?.[senderKeyB64];
+  if (profile === null || typeof profile !== "object") profile = undefined;
+  if (batchProfile !== undefined && batchProfile !== null) {
+    let storedStamp = null;
+    try {
+      storedStamp = profile !== undefined && profile.t !== undefined ? BigInt(profile.t) : null;
+    } catch {
+      storedStamp = null;
+    }
+    if (storedStamp === null || storedStamp < batchProfile.updatedAtMs) {
+      profile = { d: batchProfile.displayName, u: batchProfile.username };
+    }
+  }
+  if (profile === undefined) return mirroredLabel(payload, senderKeyB64);
   if (typeof profile.d === "string" && profile.d.length > 0) return profile.d;
   if (typeof profile.u === "string" && profile.u.length > 0) {
     const verdict = payload.vf?.[`${senderKeyB64}|${profile.u}`];
@@ -1845,7 +2062,15 @@ export function senderNameFromProfileRow(payload, senderKeyB64) {
       return `@${profile.u}`;
     }
   }
-  return null;
+  return mirroredLabel(payload, senderKeyB64);
+}
+
+/** The label the app shows for `keyB64` in a conversation, from the mirror
+ *  it writes into the row (`n`, under a member's account key and each leaf
+ *  key), or `null`. */
+function mirroredLabel(payload, keyB64) {
+  const label = payload.n?.[keyB64];
+  return typeof label === "string" && label.trim().length > 0 ? label.trim() : null;
 }
 
 /**

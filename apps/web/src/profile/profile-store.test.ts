@@ -62,6 +62,23 @@ describe("decideIngest", () => {
 });
 
 describe("ProfileStore", () => {
+  it("once the row is loaded, a profile is filed in the same turn (a message after it is drawn under the name)", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    await store.open(ACCOUNT);
+    const filing = store.ingest(ACCOUNT, KEY_A, profile("VG3", null, 5n));
+    // No microtask has run: the receive loop draws the batch's next row now.
+    expect(store.get(KEY_A)?.displayName).toBe("VG3");
+    expect(await filing).toBe(true);
+  });
+
+  it("before the row is loaded, an ingest still waits for it and the newer one wins", async () => {
+    const backend = new MemoryProfileBackend();
+    backend.rows.set(ACCOUNT, { profiles: new Map([[KEY_A, profile("Newer", null, 9n)]]), verifications: new Map() });
+    const store = new ProfileStore(backend, isNewer);
+    expect(await store.ingest(ACCOUNT, KEY_A, profile("Older", null, 5n))).toBe(false);
+    expect(store.get(KEY_A)?.displayName).toBe("Newer");
+  });
+
   it("a newer profile replaces, an older one does not", async () => {
     const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
     expect(await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n))).toBe(true);

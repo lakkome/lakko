@@ -1802,6 +1802,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
     // "Saved." after a successful post, cleared by the next edit or save (web ManagePanel).
     var saved by remember(channel.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
     val dirty = name.trim() != channelTitle(channel, LocalStrings.current) || description.trim() != channelDescription(channel).orEmpty()
 
     SectionCard(
@@ -1865,6 +1866,17 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             updatedAtMs = System.currentTimeMillis().toULong(),
                         )
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
+                        // group-and-channel-privacy.md 4.5.4 — a channel with
+                        // an @name publishes its name and description in its
+                        // public record: owed now, durably, sent at once and
+                        // retried by the heartbeat until it lands.
+                        val acct = state.boundAccount
+                        val owner = state.publisher
+                        if (acct != null && owner != null && channel.handle.isNotBlank()) {
+                            me.lakko.app.chat.GroupSettingsStore.saveOwedChannelRecord(context, acct, channel.id, true)
+                            val current = state.channels.value.firstOrNull { it.id == channel.id } ?: channel
+                            ChannelDiscovery.sendOwedRecordIfAny(context, owner, acct, current)
+                        }
                         // ADR-0059 — a listed channel's listing carries the name
                         // and description too; editing them updates it (UX 6.4).
                         var listingOk = true
@@ -2223,6 +2235,7 @@ private fun KeysCard(
         state.saveRotationState(channelId, next.toStored())
     }
 
+    val heartbeatContext = LocalContext.current.applicationContext
     // The rotation heartbeat, armed once the publisher handle is open,
     // cancelled when this card leaves the composition. One pass at once, then
     // one per interval, the [RotationCron.start] cadence — driven here rather
@@ -2232,6 +2245,12 @@ private fun KeysCard(
         val pub = publisher ?: return@LaunchedEffect
         val pg = publisherGroup ?: return@LaunchedEffect
         while (true) {
+            // 4.5.4 — an owed republish of the channel's public record.
+            state.boundAccount?.let { acct ->
+                state.channels.value.firstOrNull { it.id == channelId }?.let { ch ->
+                    ChannelDiscovery.sendOwedRecordIfAny(heartbeatContext, pub, acct, ch)
+                }
+            }
             try {
                 val result = rotateOnce(
                     pub, pg, channelId, client, state,

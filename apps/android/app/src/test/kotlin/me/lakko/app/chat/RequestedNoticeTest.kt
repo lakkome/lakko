@@ -85,16 +85,28 @@ class RequestedNoticeTest {
             signatureKey = ByteArray(32) { 7 },
         )
         // The list label carries the username; its initials were the defect.
+        // The letters themselves are the shared core rule (lakko_ui_rules,
+        // asserted in Rust); here only what it is handed, through the seam.
         assertEquals("VG2 · @vg2", resolved.listLabel)
-        assertEquals("V·", initialsOf(resolved.listLabel))
         assertEquals("VG2", avatarName(resolved))
-        assertEquals("V", initialsOf(avatarName(resolved)))
+        val asked = mutableListOf<String>()
+        val previous = me.lakko.app.ui.chat.AvatarInitials.rule
+        me.lakko.app.ui.chat.AvatarInitials.rule = { name -> asked += name; "VG" }
+        try {
+            assertEquals("VG", initialsOf(avatarName(resolved)))
+            assertEquals(listOf("VG2"), asked)
+            // Nothing the rule can draw: the placeholder.
+            me.lakko.app.ui.chat.AvatarInitials.rule = { "" }
+            assertEquals("?", initialsOf("…"))
+        } finally {
+            me.lakko.app.ui.chat.AvatarInitials.rule = previous
+        }
         val twoWords = resolveName(
             localRename = null,
             profile = PeerProfile("Anna Petrova", "anna", 1uL),
             verificationOf = { UsernameVerification.VERIFIED },
             signatureKey = ByteArray(32) { 8 },
         )
-        assertEquals("AP", initialsOf(avatarName(twoWords)))
+        assertEquals("Anna Petrova", avatarName(twoWords))
     }
 }

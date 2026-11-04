@@ -259,12 +259,20 @@ export function GroupHandleRuntime(): JSX.Element {
     }),
   );
 
-  async function runChannel(o: OwedHandle): Promise<OwedOutcome> {
+  async function runChannel(owed: OwedHandle): Promise<OwedOutcome> {
+    let o = owed;
     if (!ownsChannel(o.id)) return { dropped: "not-owner" };
     const owner = chats.conversationAccountIdentity();
     if (owner === null) return "retry";
     const channel = channelsState.channels().find((c) => c.id === o.id);
     if (channel === undefined) return { dropped: "no-channel" };
+    // A republish (a name or description change) reads the name now: a
+    // channel that holds none has nothing to publish.
+    if (o.reason === "republish" && o.handle.length === 0) {
+      const held = (channel.localHandle || handleWriteFor("channel", o.id)?.handle || "").replace(/^@/, "");
+      if (held.length === 0) return "done";
+      o = { ...o, handle: held };
+    }
     const meta = channelsState.metaByChannel().get(o.id);
     const wasm = await loadWasm();
     const written = await updateChannelHandle({

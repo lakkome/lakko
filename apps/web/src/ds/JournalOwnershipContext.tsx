@@ -98,6 +98,7 @@ import { durableSnapshotHook } from "../chat/persist-hooks";
 import { noteKnockKeyChanged } from "../chat/handle-owed";
 import { ownsGroup } from "../chat/group-owner";
 import { openKnockOrigins } from "../chat/knock-origins";
+import { openJoinReplies } from "../reach/join-replies";
 
 /** How long a reconcile that left members pending waits before trying the
  *  unresolved ones again (chosen, not measured: a member's profile, which
@@ -810,6 +811,8 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
         await knockSeeds.open(account);
         // UX section 8: where each request to join came from.
         await openKnockOrigins(account);
+        // A joiner's reply grant, kept until the Welcome is written (C-69).
+        await openJoinReplies(account);
         if (accountId() !== account) return;
         dsAccess.setAuthorityFactory(
           wasmJournalAuthorityFactory(wasm, accountIdentityNow, registrarSeeds, {

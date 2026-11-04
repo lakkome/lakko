@@ -1687,7 +1687,10 @@ private fun SessionRoot(
                     contactsRepository.refreshInbox(waitSecs = APP_LONG_POLL_SECS)
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     endPassUnlessCancelled(cancel)
-                } catch (_: Throwable) {
+                } catch (cause: Throwable) {
+                    // A failure outside the inbox's own error handling stopped
+                    // this pass: said once per pass, by kind only.
+                    android.util.Log.w("MainActivity", "inbox pass failed: ${cause.javaClass.simpleName}")
                     kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                 }
                 // A poll that returns at once (no session yet, a refused

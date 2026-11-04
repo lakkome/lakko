@@ -36,6 +36,7 @@ pub mod folder;
 pub mod guest_name;
 pub mod handle;
 pub mod info;
+pub mod initials;
 pub mod layer_display;
 pub mod lookup;
 pub mod message_links;

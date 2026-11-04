@@ -368,6 +368,28 @@ public enum HeldHandleStore {
     }
 
     /// Record a republish as owed for this journal's name (durable).
+    /// `group-and-channel-privacy.md` 4.5.4 — a channel's name or
+    /// description changed (its owner's edit or a co-publisher's record read
+    /// here): the held entry takes the new text and a republish is owed.
+    /// `true` when this account holds the channel's name and it is public.
+    @discardableResult
+    static func noteChannelMeta(
+        channelIdHex: String, name: String, description: String, _ accountIdB64: String
+    ) -> Bool {
+        var all = load(accountIdB64)
+        guard let index = all.firstIndex(where: {
+            $0.kind == "channel" && $0.channelIdHex?.lowercased() == channelIdHex.lowercased()
+        }), all[index].isPublic else { return false }
+        let old = all[index]
+        guard old.name != name || old.description != description || old.owed == true else { return false }
+        all[index] = Entry(
+            kind: old.kind, handle: old.handle, isPublic: old.isPublic, journalIdHex: old.journalIdHex,
+            channelIdHex: old.channelIdHex, name: name, description: description,
+            leaseUntilMs: old.leaseUntilMs, owed: true, rekeyFromB64: old.rekeyFromB64)
+        save(all, accountIdB64)
+        return true
+    }
+
     static func markOwed(journalIdHex: String, _ accountIdB64: String) {
         var all = load(accountIdB64)
         guard let index = all.firstIndex(where: { $0.journalIdHex == journalIdHex }) else { return }

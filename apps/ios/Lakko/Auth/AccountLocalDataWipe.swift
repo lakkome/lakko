@@ -241,6 +241,7 @@ enum AccountLocalDataWipe {
             AnonTokenPool.shared.forget(accountKey: accountIdB64)
         }
         step("reach") { ReachCenter.shared.forget(accountIdB64: accountIdB64) }
+        step("copublisher-keys") { CoPublisherKeyBook.clear(accountIdB64: accountIdB64) }
 
         // 3. The DeviceGroup and the cross-device synced state. The founding
         //    mark of the account's DeviceGroup journal goes too; the id is

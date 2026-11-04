@@ -82,6 +82,9 @@ public final class NotificationService: UNNotificationServiceExtension {
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
         self.contentHandler = contentHandler
+        #if DEBUG
+        NseTraceFile.install()
+        #endif
         self.bestAttemptContent =
             request.content.mutableCopy() as? UNMutableNotificationContent
         // The notification words in the interface language the app stored
@@ -118,9 +121,11 @@ public final class NotificationService: UNNotificationServiceExtension {
         // in this slice. Anything else (a Wakeup / MailboxMessage wake) stays
         // generic.
         guard let wake = Self.parseWake(userInfo) else {
+            nseTrace("didReceive: not a decryptable wake, generic")
             deliver(best)
             return
         }
+        nseTrace("didReceive: wake parsed")
 
         // ADR-0073 R.5 — the stack is the CONVERSATION, not the wake's
         // routing id: `g` is per group and changes when the routing secret
@@ -136,6 +141,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         // Budget deadline: if the decrypt has not delivered by the budget,
         // ship the generic content. Cancelled on first delivery.
         let deadline = DispatchWorkItem { [weak self] in
+            nseTrace("budget deadline reached: generic delivered")
             self?.deliver(best)
         }
         budgetDeadline = deadline
@@ -148,9 +154,14 @@ public final class NotificationService: UNNotificationServiceExtension {
         // deliver exactly once.
         decryptTask = Task { [weak self] in
             let outcome = await decryptPushOutcome(wake, NseRealDecryptDeps())
+            nseTrace("didReceive: outcome \(Self.traceName(of: outcome))")
             guard let self else { return }
             switch outcome {
             case .preview(let preview):
+                // The conversation's name (else "Lakko"), for a message as
+                // for a reaction; the body already carries "Sender: " in a
+                // group (``nseMessageNotification``).
+                best.title = preview.title
                 best.body = preview.body
                 var info = best.userInfo
                 info.removeValue(forKey: LakkoGenericNotification.userInfoKey)
@@ -158,7 +169,6 @@ public final class NotificationService: UNNotificationServiceExtension {
                 // identity so a later removal can withdraw it, and its title.
                 if let reactionKey = preview.reactionKey {
                     info[LakkoReactionNotification.userInfoKey] = reactionKey
-                    best.title = preview.title
                 }
                 best.userInfo = info
                 // ADR-0073 R.5 — the wake is grouped by its routing id, which
@@ -181,6 +191,19 @@ public final class NotificationService: UNNotificationServiceExtension {
             case .none:
                 self.deliver(best)
             }
+        }
+    }
+
+    /// DEBUG trace: the outcome's case, without its content.
+    private static func traceName(of outcome: NsePushOutcome) -> String {
+        switch outcome {
+        case .preview: return "preview"
+        case .callOffer: return "callOffer"
+        case .callSilent: return "callSilent"
+        case .callEnded: return "callEnded"
+        case .quiet: return "quiet"
+        case .withdrawReactions: return "withdrawReactions"
+        case .none: return "generic"
         }
     }
 

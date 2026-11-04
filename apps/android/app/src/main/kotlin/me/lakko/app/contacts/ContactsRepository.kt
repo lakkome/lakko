@@ -597,11 +597,7 @@ public class ContactsRepository(
         // ADR-0074 section 3.5 - and from a proven successor key to the key
         // the person was first known by: a proven rotation is the same
         // person, with nothing shown.
-        val rows = resetLedgerRows()
-        val retired = retiredKeyAliases(rows, ::pinnedKeyOf)
-        val inherited = LinkedHashMap<String, String>()
-        for ((old, current) in retired) if (current !in inherited) inherited[current] = old
-        directory.setAliases(provenAliases(provenLinks()) + inherited + retired)
+        directory.setAliases(nameAliases(provenLinks(), resetLedgerRows(), ::pinnedKeyOf))
     }
 
     /** The proven steps recorded for the bound account. */
@@ -1695,11 +1691,15 @@ public class ContactsRepository(
                     // stays behind the cursor, or it is lost.
                     var welcomeNotKept = false
                     val answeredBy = HashMap<String, String>()
+                    if (welcomes.isNotEmpty()) {
+                        Log.i(TAG, "inbox: ${welcomes.size} Welcome row(s) received")
+                    }
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
                         if (chatRepo != null) {
                             try {
                                 val joinedHex = chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
+                                Log.i(TAG, "inbox: Welcome ${me.lakko.app.chat.WelcomeOutcome.JOINED}")
                                 // ADR-0060 §6 — the answer to a request of this
                                 // device's arrived: retire its reply key for
                                 // that person.
@@ -1714,6 +1714,10 @@ public class ContactsRepository(
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
+                                Log.i(
+                                    TAG,
+                                    "inbox: Welcome ${me.lakko.app.chat.welcomeOutcomeOf(e)} (${e.javaClass.simpleName})",
+                                )
                                 // ADR-0060 — every device of the account reads
                                 // the one account mailbox, so a Welcome sealed
                                 // to another of its devices lands here too and
@@ -1860,7 +1864,7 @@ public class ContactsRepository(
                 // transport's own message (endpoint paths and pseudonyms are
                 // not user copy). The raw error goes to the log; the caller
                 // (a `LaunchedEffect` loop) retries on the next iteration.
-                Log.w(TAG, "contacts inbox: poll failed", e)
+                Log.w(TAG, "contacts inbox: poll failed (${e.javaClass.simpleName})", e)
                 mutableState.update {
                     it.copy(refreshing = false, lastError = InboxError.POLL_FAILED)
                 }

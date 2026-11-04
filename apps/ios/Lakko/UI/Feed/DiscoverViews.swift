@@ -148,7 +148,7 @@ struct DiscoverCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text(String(card.name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
+                Text(avatarInitials(name: card.name))
                     .font(.headline)
                     .frame(width: 40, height: 40)
                     .background(Circle().fill(Color.lakkoSurfaceSunken))

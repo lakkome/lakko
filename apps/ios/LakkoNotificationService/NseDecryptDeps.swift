@@ -255,6 +255,19 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         }
         return out
     }
+
+    /// The reactor's name, from the App Group mirror the app writes
+    /// (``PersonNameMirror``). READ-ONLY (C-59).
+    func personName(accountIdB64: String, keyB64: String) -> String? {
+        let name = PersonNameMirror.name(accountIdB64: accountIdB64, keyB64: keyB64)
+        nseTrace("mirror lookup key=\(keyB64) \(name != nil ? "hit" : "miss") \(PersonNameMirror.debugShape(accountIdB64: accountIdB64))")
+        return name
+    }
+
+    /// The Settings > Notifications > Reactions switch (App Group mirror).
+    func reactionNotificationsOn() -> Bool {
+        ReactionNotificationMirror.isOn
+    }
 }
 
 /// A THROWAWAY MLS group backed by a temporary `Identity` + `Group` restored
@@ -277,6 +290,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         self.identity = identity
         self.group = group
     }
+
+    var isGroupConversation: Bool { ((try? group.groupKind()) ?? nil) == .group }
 
     /// ADR-0053 point 9 — the throwaway group's access signer at its restored
     /// epoch. An exporter read over the throwaway provider, never persisted.
@@ -398,17 +413,6 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             resendOrigin: Self.resendOrigin(of: body),
             reaction: reaction
         )
-    }
-
-    /// The reactor's name, from the App Group mirror the app writes
-    /// (``PersonNameMirror``). READ-ONLY (C-59).
-    func personName(accountIdB64: String, keyB64: String) -> String? {
-        PersonNameMirror.name(accountIdB64: accountIdB64, keyB64: keyB64)
-    }
-
-    /// The Settings > Notifications > Reactions switch (App Group mirror).
-    func reactionNotificationsOn() -> Bool {
-        ReactionNotificationMirror.isOn
     }
 
     /// ADR-0073 R.7 case 1 — the re-send marker of a chat body.
@@ -812,3 +816,41 @@ enum NseConfig {
         return ApiEndpoints.baseURL(for: .ds)
     }
 }
+
+#if DEBUG
+/// DEBUG builds only: the extension's trace file, one line per step of a
+/// wake, appended to `Library/Caches/nse-trace.log` in the App Group
+/// container so a device run can be read back with `devicectl`. Capped at
+/// 256 KiB (the older half is dropped). Carries no message text.
+enum NseTraceFile {
+    private static let queue = DispatchQueue(label: "me.lakko.nse-trace")
+
+    /// Route ``nseTrace(_:)`` here. Called once from the extension's entry.
+    static func install() {
+        guard nseTraceSink == nil else { return }
+        nseTraceSink = { line in append(line) }
+    }
+
+    static func append(_ line: String) {
+        guard let dir = SharedStorage.containerURL()?
+            .appendingPathComponent("Library/Caches", isDirectory: true) else { return }
+        queue.sync {
+            let url = dir.appendingPathComponent("nse-trace.log")
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let existing = try? Data(contentsOf: url), existing.count + data.count > 256 * 1024 {
+                try? existing.suffix(128 * 1024).write(to: url)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+}
+#endif
+

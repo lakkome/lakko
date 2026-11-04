@@ -4,6 +4,7 @@
 package me.lakko.app.profile
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -129,5 +130,61 @@ class ProfileRepublishTest {
         h.scope.runCurrent()
         // No successful publish recorded: growth is not held back 30 s.
         assertEquals(0L, h.scheduler.onGrowth("G1"))
+    }
+
+    @Test
+    fun `a send after growth publishes the owed profile first, without the jitter`() {
+        val h = Harness(jitter = 9_000L)
+        assertEquals(9_000L, h.scheduler.onGrowth("G1"))
+        assertTrue(h.scheduler.isOwed("G1"))
+        // The person sends 1 s later: the profile goes out now, awaited.
+        h.scope.advanceTimeBy(1_000)
+        var flushed = false
+        h.scope.launch { flushed = h.scheduler.flushBeforeSend("G1") }
+        h.scope.runCurrent()
+        assertTrue(flushed)
+        assertEquals(listOf("G1" to 1_000L), h.published)
+        assertFalse(h.scheduler.isOwed("G1"))
+        // The jittered republish does not send it a second time.
+        h.scope.advanceTimeBy(60_000)
+        h.scope.runCurrent()
+        assertEquals(1, h.published.size)
+    }
+
+    @Test
+    fun `a send with nothing owed publishes nothing`() {
+        val h = Harness()
+        var flushed = true
+        h.scope.launch { flushed = h.scheduler.flushBeforeSend("G1") }
+        h.scope.runCurrent()
+        assertFalse(flushed)
+        assertTrue(h.published.isEmpty())
+    }
+
+    @Test
+    fun `a growth republish still waits its jitter when nobody sends`() {
+        val h = Harness(jitter = 4_000L)
+        h.scheduler.onGrowth("G1")
+        h.scope.advanceTimeBy(3_999)
+        h.scope.runCurrent()
+        assertTrue(h.published.isEmpty())
+        h.scope.advanceTimeBy(1)
+        h.scope.runCurrent()
+        assertEquals(listOf("G1" to 4_000L), h.published)
+        assertFalse(h.scheduler.isOwed("G1"))
+    }
+
+    @Test
+    fun `a failed join publish stays owed and goes before the next send`() {
+        val h = Harness()
+        h.succeed = false
+        h.scheduler.publishNow("G1")
+        h.scope.runCurrent()
+        assertTrue(h.scheduler.isOwed("G1"))
+        h.succeed = true
+        h.scope.launch { h.scheduler.flushBeforeSend("G1") }
+        h.scope.runCurrent()
+        assertEquals(2, h.published.size)
+        assertFalse(h.scheduler.isOwed("G1"))
     }
 }

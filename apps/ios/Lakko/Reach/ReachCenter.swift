@@ -1134,6 +1134,22 @@ public final class ReachCenter: ObservableObject {
         return withdrew
     }
 
+    /// A join request was refused, or the joiner's Welcome was written: the
+    /// `reply` grant the request carried has done its one job (UX section
+    /// 8). Every `reply` grant held for the person goes; the contact, group
+    /// and channel grants stay.
+    public func withdrawReplyGrants(ofAccountKeyB64 key: String) {
+        let name = ReachRules.className(.reply)
+        var withdrew = false
+        for personKey in personKeysB64(key) {
+            guard var held = record.held[personKey], held.contains(where: { $0.classRaw == name }) else { continue }
+            held.removeAll { $0.classRaw == name }
+            record.held[personKey] = held.isEmpty ? nil : held
+            withdrew = true
+        }
+        if withdrew { persist() }
+    }
+
     /// ADR-0087 section 9 — forget every grant learned in one group or channel
     /// this account is no longer in. A grant held from the same person in
     /// another scope stays.

@@ -184,6 +184,8 @@ public final class GroupSettingsStore {
     public struct RequestMeta: Equatable {
         public let askedAtMs: Int64
         public let inviterKey: Data?
+        /// The DS id of the knock row the request came in, when known.
+        public var knockRowId: Int64? = nil
     }
 
     /// The meta of each request, by the joiner's leaf signature key (base64).
@@ -193,7 +195,8 @@ public final class GroupSettingsStore {
         for (key, value) in row {
             guard let at = (value["at"] as? NSNumber)?.int64Value else { continue }
             out[key] = RequestMeta(
-                askedAtMs: at, inviterKey: (value["inviter"] as? String).flatMap { Data(base64Encoded: $0) })
+                askedAtMs: at, inviterKey: (value["inviter"] as? String).flatMap { Data(base64Encoded: $0) },
+                knockRowId: (value["row"] as? NSNumber)?.int64Value)
         }
         return out
     }
@@ -201,7 +204,8 @@ public final class GroupSettingsStore {
     /// Keeps the first sighting of a request; a request seen again keeps its
     /// time.
     public func keepRequestMeta(
-        accountIdB64: String, groupIdHex: String, joinerKeyB64: String, askedAtMs: Int64, inviterKey: Data?
+        accountIdB64: String, groupIdHex: String, joinerKeyB64: String, askedAtMs: Int64, inviterKey: Data?,
+        knockRowId: Int64? = nil
     ) {
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
         defer { gate.leave() }
@@ -210,9 +214,34 @@ public final class GroupSettingsStore {
         guard row[joinerKeyB64] == nil else { return }
         var entry: [String: Any] = ["at": NSNumber(value: askedAtMs)]
         if let inviterKey { entry["inviter"] = inviterKey.base64EncodedString() }
+        if let knockRowId { entry["row"] = NSNumber(value: knockRowId) }
         row[joinerKeyB64] = entry
         all[groupIdHex] = row
         defaults.set(all, forKey: Self.key(accountIdB64, "request_meta"))
+    }
+
+    // MARK: Rejected requests (UX section 8)
+
+    /// The requests rejected on this device, by the joiner's leaf signature
+    /// key (base64), each with the newest knock row it covers. A knock row of
+    /// that joiner at or below it is not read back into the queue: the knock
+    /// rows stay on the DS after a Reject, and a cursor that did not reach
+    /// the disk, or a request whose reject did not reach the MLS snapshot,
+    /// would bring it back after a restart. A later knock (a new row) asks
+    /// again.
+    public func rejected(accountIdB64: String, groupIdHex: String) -> [String: Int64] {
+        let row = map(accountIdB64, "rejected")[groupIdHex] as? [String: NSNumber] ?? [:]
+        return row.mapValues(\.int64Value)
+    }
+
+    public func noteRejected(accountIdB64: String, groupIdHex: String, joinerKeyB64: String, throughRowId: Int64) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var all = map(accountIdB64, "rejected")
+        var row = all[groupIdHex] as? [String: NSNumber] ?? [:]
+        row[joinerKeyB64] = NSNumber(value: max(throughRowId, row[joinerKeyB64]?.int64Value ?? 0))
+        all[groupIdHex] = row
+        defaults.set(all, forKey: Self.key(accountIdB64, "rejected"))
     }
 
     // MARK: Created here (UX section 10)
@@ -272,7 +301,7 @@ public final class GroupSettingsStore {
     public func removeGroup(accountIdB64: String, groupIdHex: String) {
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
         defer { gate.leave() }
-        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_rekey", "created", "request_names", "request_meta"] {
+        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_rekey", "created", "request_names", "request_meta", "rejected"] {
             var all = map(accountIdB64, part)
             if all.removeValue(forKey: groupIdHex) != nil {
                 defaults.set(all, forKey: Self.key(accountIdB64, part))
@@ -281,7 +310,7 @@ public final class GroupSettingsStore {
     }
 
     public func clear(accountIdB64: String) {
-        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_replaced", "photo_rekey", "created", "request_names", "request_meta"] {
+        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_replaced", "photo_rekey", "created", "request_names", "request_meta", "rejected"] {
             defaults.removeObject(forKey: Self.key(accountIdB64, part))
         }
     }

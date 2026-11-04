@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  channelRecordChanged,
   channelMetaErrorText,
   channelMetaSupersedes,
   CHANNEL_NEEDS_NAME,
@@ -104,5 +105,17 @@ describe("channelMetaErrorText", () => {
     expect(channelMetaErrorText("name.empty")).toBe(CHANNEL_NEEDS_NAME());
     expect(channelMetaErrorText("description.tooLong")).toBe("The description is too long.");
     expect(channelMetaErrorText("something.else")).toBe("That name or description cannot be used.");
+  });
+});
+
+describe("channelRecordChanged (UX 4.5.4: the public record follows a rename)", () => {
+  const meta = { name: "QA Second Channel", description: "about" };
+  it("a new name or description changes the record", () => {
+    expect(channelRecordChanged(meta, { ...meta, name: "Renamed" })).toBe(true);
+    expect(channelRecordChanged(meta, { ...meta, description: "new" })).toBe(true);
+    expect(channelRecordChanged(undefined, meta)).toBe(true);
+  });
+  it("a re-issue with the same text does not", () => {
+    expect(channelRecordChanged(meta, { ...meta })).toBe(false);
   });
 });

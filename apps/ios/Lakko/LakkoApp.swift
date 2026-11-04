@@ -412,6 +412,9 @@ struct LakkoApp: App {
             // component, and any photo set here but not yet sent.
             chat?.refreshGroupPhotos()
             Task { await chat?.sendOwedGroupPhotos() }
+            // ADR-0087 section 4.5.4 — a public group's record republish (a
+            // name or photo change, a knock bump) owed from an earlier session.
+            Task { await chat?.flushOwedHandleWrites() }
             // ADR-0087 section 3 — renew this account's names before their
             // lease lapses, quietly, once per session.
             Task { @MainActor in
@@ -712,6 +715,11 @@ struct LakkoApp: App {
                 // becoming active again sweeps at once, so an offer that
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
+                if phase == .background {
+                    // What the extension may need while the app is not
+                    // running, written as it leaves.
+                    services.chatRepository.mirrorCallPeerNames()
+                }
                 if phase == .active {
                     // ADR-0061 section 5 — the same throttled check on return
                     // to the foreground; a no-op until a day has passed.
@@ -735,6 +743,17 @@ struct LakkoApp: App {
             // language switch rewrites them rather than leaving the lock
             // screen in the old language until the next activation.
             .onReceive(Localization.shared.$language.removeDuplicates()) { _ in
+                services.chatRepository.mirrorCallPeerNames()
+            }
+            // A member's profile that arrived while the app is open is a
+            // name the extension may have to show (a reaction, a group
+            // message): mirrored when it lands, not only at the next
+            // activation. Debounced, since a group's profiles arrive in a
+            // burst.
+            .onReceive(
+                ProfileDirectory.shared.$revision.removeDuplicates()
+                    .debounce(for: .seconds(1), scheduler: RunLoop.main)
+            ) { _ in
                 services.chatRepository.mirrorCallPeerNames()
             }
             .task {
@@ -1335,6 +1354,23 @@ private final class SessionModels: ObservableObject {
         }
         channels.onSubscribedHere = { [weak chatRepository] channelId in
             chatRepository?.noteChannelSubscribed(channelIdHex: channelId.lowercased())
+        }
+        // ADR-0087 section 4.5.4 — a newer channel name or description owes
+        // the owner's device a republish of the public record; the owed flag
+        // is durable, and the force run retries it now (later, at every
+        // session start and every further change).
+        channels.onSharedMetaAccepted = { [weak chatRepository] channelId, meta in
+            guard let chat = chatRepository, let accountIdB64 = chat.currentAccountIdB64,
+                  HeldHandleStore.noteChannelMeta(
+                      channelIdHex: channelId, name: meta.name, description: meta.description, accountIdB64)
+            else { return }
+            Task { @MainActor [weak chat] in
+                await HandleLeaseRenewal.shared.runIfDue(
+                    accountIdB64: chat?.currentAccountIdB64,
+                    accountIdentity: { chat?.accountIdentity },
+                    groupFacts: { chat?.publicGroupFacts(journalIdHex: $0) },
+                    force: true)
+            }
         }
         chatRepository.onChannelEndedElsewhere = { [weak channels] channelIdHex in
             guard let channels else { return }

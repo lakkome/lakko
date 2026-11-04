@@ -301,6 +301,9 @@ public interface PushDecryptDeps {
      *  notification switch (on by default). A READ. */
     public fun reactionNotificationsOn(accountIdB64: String): Boolean = true
 
+    /** The group's shared name as this device stores it, or `null`. A READ. */
+    public fun groupName(accountIdB64: String, groupHex: String): String? = null
+
     /**
      * ADR-0073 R.5 — is the group the OLD segment of a one-to-one whose
      * conversation moved to a successor (the other person reset their account
@@ -623,6 +626,10 @@ public suspend fun decryptPushWake(
         // decrypted message asks: a message from it (another device of the
         // same account) is not a notification.
         val ownPersonKeyB64 by lazy { runCatching { group.facts()?.ownPersonKeyB64 }.getOrNull() }
+        // The notification's shape: the conversation's name as the title, in
+        // a group the sender before the text. Read once, when a row asks.
+        val conversationKind by lazy { runCatching { group.facts()?.kind }.getOrNull() }
+        val groupName by lazy { runCatching { deps.groupName(account.accountIdB64, realGroupHex) }.getOrNull() }
         var unreadableRows = 0
         for (row in rows) {
             val processed = try {
@@ -681,13 +688,18 @@ public suspend fun decryptPushWake(
                 )
             }
             if (reactionBody != null) {
-                latest = PushPreview(title = processed?.senderName ?: "Lakko", body = reactionBody, tag = realGroupHex)
+                // The reaction line names the reactor itself: no prefix.
+                val shape = notificationShape(conversationKind, groupName, processed?.senderName, reactionBody, prefixSender = false)
+                latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                    ?: unnamedSenderPreview(realGroupHex)
                 continue
             }
             val body = previewBodyOf(processed) ?: continue
-            // ADR-0048 UX §5 — the sender's resolved name when it is already
-            // known on this device; the generic title otherwise.
-            latest = PushPreview(title = processed?.senderName ?: "Lakko", body = body, tag = realGroupHex)
+            // The conversation's name as the title; in a group the sender's
+            // name before the text.
+            val shape = notificationShape(conversationKind, groupName, processed?.senderName, body)
+            latest = shape?.let { PushPreview(title = it.first, body = it.second, tag = realGroupHex) }
+                ?: unnamedSenderPreview(realGroupHex)
         }
         // `docs/ux/calls.md` section 2.1 — resolved only when this batch
         // actually rings for something, so an ordinary message wake never pays
@@ -791,10 +803,100 @@ internal fun reactionNotificationBody(
     if (ownPersonKeyB64 == null || row.reactionTargetAuthorB64 != ownPersonKeyB64) return null
     if (row.senderAccountB64 == ownPersonKeyB64) return null
     if (!enabled() || muted()) return null
-    val strings = me.lakko.app.l10n.Localization.strings.value
-    return strings.format(
+    // The reactor is named by the name this device holds for them. With no
+    // name there is no reaction line ([notificationShape] then refuses the
+    // row and the wake shows the generic banner): never a placeholder word.
+    val name = row.senderName?.trim()?.takeIf { it.isNotEmpty() } ?: return ""
+    return me.lakko.app.l10n.Localization.strings.value.format(
         "notification.reaction.body",
-        texts = mapOf("name" to (row.senderName ?: strings["contacts.request.someone"]), "emoji" to emoji),
+        texts = mapOf("name" to name, "emoji" to emoji),
+    )
+}
+
+/**
+ * The banner of a row whose sender has no name on this device: the generic
+ * one a wake that cannot be read shows ("Lakko" / "New message"). A sender is
+ * always a contact, a group member or a channel member whose name is stored
+ * here, so this is a defect, and it is logged as one, with no identifier.
+ */
+internal fun unnamedSenderPreview(tag: String): PushPreview {
+    try {
+        android.util.Log.e("LakkoPush", "notification sender has no name on this device")
+    } catch (_: RuntimeException) {
+        // Host unit tests: android.util.Log is a stub.
+    }
+    return PushPreview(
+        title = "Lakko",
+        body = me.lakko.app.l10n.Localization.strings.value["notification.message.new"],
+        tag = tag,
+    )
+}
+
+/**
+ * The sender's name for a background notification, by the rule the app's
+ * screens use ([me.lakko.app.profile.ProfileDirectory.resolve], which every
+ * bubble, member row and one-to-one title asks): the name filed under the
+ * PERSON key (the ADR-0050 account key a leaf is bound to, which is what
+ * every receive path files a profile under), else under the leaf's own
+ * signature key, else `null` (no name stored: a defect the caller reports,
+ * never covered by a placeholder word).
+ */
+internal fun backgroundSenderName(
+    personKeyB64: String,
+    leafKeyB64: String?,
+    resolve: (String) -> me.lakko.app.profile.ResolvedName,
+): String? {
+    val person = resolve(personKeyB64)
+    if (!person.isPlaceholder && person.primary.isNotBlank()) return person.primary
+    if (leafKeyB64 != null && leafKeyB64 != personKeyB64) {
+        val leaf = resolve(leafKeyB64)
+        if (!leaf.isPlaceholder && leaf.primary.isNotBlank()) return leaf.primary
+    }
+    return null
+}
+
+/**
+ * A profile envelope met in this background batch, applied to [names] for
+ * the rest of the batch: filed exactly where the app files a received
+ * profile (the sender's PERSON key, resolved from the leaf against the
+ * roster at receipt, C-68) and under the leaf's own key, so the sender's
+ * next row in the same batch is named. In memory only; the app stores the
+ * same row when it polls.
+ */
+internal fun withBatchProfile(
+    names: me.lakko.app.profile.ProfileNameSnapshot,
+    roster: List<uniffi.lakko_ffi_uniffi.GroupMember>,
+    senderLeaf: UInt?,
+    profile: me.lakko.app.profile.PeerProfile,
+    isNewer: (ULong, ULong) -> Boolean,
+): me.lakko.app.profile.ProfileNameSnapshot {
+    val leaf = senderLeaf ?: return names
+    val member = roster.firstOrNull { it.leafIndex == leaf } ?: return names
+    val encoder = java.util.Base64.getEncoder()
+    val personKey = encoder.encodeToString(me.lakko.app.chat.personKeyOf(member))
+    val leafKey = encoder.encodeToString(member.signaturePublicKey)
+    var out = names.withBatchProfile(personKey, profile, isNewer)
+    if (leafKey != personKey) out = out.withBatchProfile(leafKey, profile, isNewer)
+    return out
+}
+
+/**
+ * The sender's name for the leaf [senderLeaf] of [roster] (the throwaway
+ * group's roster right after the apply, C-68), or `null` when the leaf is
+ * not in it.
+ */
+internal fun backgroundSenderNameOf(
+    roster: List<uniffi.lakko_ffi_uniffi.GroupMember>,
+    senderLeaf: UInt?,
+    resolve: (String) -> me.lakko.app.profile.ResolvedName,
+): String? {
+    val leaf = senderLeaf ?: return null
+    val member = roster.firstOrNull { it.leafIndex == leaf } ?: return null
+    val encoder = java.util.Base64.getEncoder()
+    return backgroundSenderName(
+        personKeyB64 = encoder.encodeToString(me.lakko.app.chat.personKeyOf(member)),
+        leafKeyB64 = encoder.encodeToString(member.signaturePublicKey),
+        resolve = resolve,
     )
 }
 
@@ -883,3 +985,38 @@ public fun notificationGroupKey(
  */
 internal fun isOwnMessageEcho(cause: Throwable): Boolean =
     generateSequence(cause) { it.cause }.any { it.message?.contains("CannotDecryptOwnMessage") == true }
+
+/**
+ * A message notification's title and body, the same on every client: the
+ * title is the conversation's name (a group's name; in a one-to-one the other
+ * person's, who is the sender); in a group the body reads `Sender: text`, in
+ * a one-to-one just the text. The person is always named by the name stored
+ * on this device; with none (or an empty [text], a reaction line that could
+ * not name its reactor) this returns `null` and the caller shows the generic
+ * banner: never a placeholder word, never the conversation's name as the
+ * person, never a group body without the sender. A group with no name known
+ * is titled "Lakko". Media previews (an attachment line) take the same
+ * shape. [prefixSender] is `false` for a line that already names the sender
+ * (a reaction).
+ */
+public fun notificationShape(
+    kind: me.lakko.app.chat.ConversationKind?,
+    groupName: String?,
+    senderName: String?,
+    text: String,
+    prefixSender: Boolean = true,
+): Pair<String, String>? {
+    val sender = senderName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (text.isEmpty()) return null
+    val body = if (prefixSender) "$sender: $text" else text
+    return when (kind) {
+        me.lakko.app.chat.ConversationKind.Group -> {
+            val title = groupName?.trim()?.takeIf { it.isNotEmpty() } ?: "Lakko"
+            title to body
+        }
+        me.lakko.app.chat.ConversationKind.Chat -> sender to text
+        // The group could not be read: the generic title, the sender before
+        // the text, since nothing says whether this is a one-to-one.
+        null -> "Lakko" to body
+    }
+}

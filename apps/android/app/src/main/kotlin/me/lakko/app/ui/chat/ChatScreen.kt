@@ -445,6 +445,18 @@ public fun ChatScreen(
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
     }
+    // The author a reply quote or a forward attribution CARRIES: the same
+    // person, but never a placeholder (every receiver would show it forever);
+    // with no real name the snapshot carries none.
+    val snapshotAuthorLabel: (ChatMessage) -> String? = { msg ->
+        me.lakko.app.chat.snapshotAuthorOf(
+            message = msg,
+            youLabel = strings["chat.author.you"],
+            isOneToOne = !isGroupChat,
+            authorName = viewModel.snapshotNameOf(msg.authorKey),
+            peerName = viewModel.oneToOnePeerSnapshotName(),
+        )
+    }
     // docs/ux/feed.md section 5 — Reply chosen on a feed item: arm the reply
     // strip once the timeline holds the row. A row this timeline never shows
     // spends the request the first time the timeline is non-empty.
@@ -453,7 +465,7 @@ public fun ChatScreen(
         if (state.messages.isEmpty()) return@LaunchedEffect
         me.lakko.app.chat.PendingReplyArm.take(state.groupIdHex)
         state.messages.firstOrNull { it.messageId == pending }?.let { msg ->
-            viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
+            viewModel.onReplyToMessage(msg, snapshotAuthorLabel(msg).orEmpty())
         }
     }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
@@ -1160,7 +1172,7 @@ public fun ChatScreen(
                             // resolved name otherwise.
                             onReply = {
                                 editTarget = null
-                                viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
+                                viewModel.onReplyToMessage(msg, snapshotAuthorLabel(msg).orEmpty())
                             },
                             onJumpToReply = jumpToMessage,
                             // ADR-0052 decision 2 / UX 5.1 — Forward hands the
@@ -1173,7 +1185,7 @@ public fun ChatScreen(
                                     ForwardRequest(
                                         sourceGroupIdHex = state.groupIdHex,
                                         message = msg,
-                                        authorLabel = timelineAuthorLabel(msg),
+                                        authorLabel = snapshotAuthorLabel(msg),
                                         // ADR-0053 section 6 — no origin out of a one-to-one.
                                         sourceIsOneToOne = viewModel.conversationKind() ==
                                             me.lakko.app.chat.ConversationKind.Chat,
@@ -1297,7 +1309,7 @@ public fun ChatScreen(
                         ForwardRequest(
                             sourceGroupIdHex = state.groupIdHex,
                             message = msg,
-                            authorLabel = timelineAuthorLabel(msg),
+                            authorLabel = snapshotAuthorLabel(msg),
                             // ADR-0053 section 6 — no origin out of a one-to-one.
                             sourceIsOneToOne = viewModel.conversationKind() ==
                                 me.lakko.app.chat.ConversationKind.Chat,
@@ -2881,7 +2893,12 @@ private fun ReactionChips(
                                     size = 16.dp,
                                     personKey = key,
                                     avatar = if (mine) ownAvatar else null,
-                                    modifier = Modifier.offset(x = (-4 * i).dp),
+                                    // A 1 dp ring in the surface colour, as on
+                                    // iOS: the circle stays visible on the own
+                                    // chip's accent fill and where avatars overlap.
+                                    modifier = Modifier
+                                        .offset(x = (-4 * i).dp)
+                                        .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape),
                                 )
                             }
                         }

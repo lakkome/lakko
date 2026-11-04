@@ -12,7 +12,9 @@
  * drawn as one sentence per person, joined first ("VG3 joined", "VG2 is no
  * longer in the group": the roster cannot tell leaving from being removed).
  * The keys are stored, never the names: a name is resolved when the row is
- * drawn, through the one display resolver ("Member" when unknown).
+ * drawn, through the one display resolver, so the row follows the person's
+ * profile when it lands. A person the resolver has no real name for is not
+ * drawn at all (no placeholder word, no fingerprint) until it has one.
  *
  * Nothing else is drawn: a commit row with no keys (every row stored before
  * this rule, and every commit that only admitted or retired a person's
@@ -190,17 +192,20 @@ export function withDrawnMembershipRows<Row extends MembershipRowShape>(
 /**
  * The sentences of a membership row, joined first: one per person, each
  * `{name} joined` / `{name} left` with the name the resolver gives the stored
- * key at draw time.
+ * key at draw time. A person `nameOf` has no real name for (`null`, blank)
+ * gets no sentence yet; the row is drawn again when their profile lands.
  */
 export function membershipSentences(
   change: MembershipChange,
   render: (key: "chat.system.member_joined" | "chat.system.member_left", name: string) => string,
-  nameOf: (personKeyB64: string) => string,
+  nameOf: (personKeyB64: string) => string | null,
 ): string[] {
-  return [
-    ...change.joined.map((k) => render("chat.system.member_joined", nameOf(k))),
-    ...change.left.map((k) => render("chat.system.member_left", nameOf(k))),
-  ];
+  const named = (keys: readonly string[], key: "chat.system.member_joined" | "chat.system.member_left"): string[] =>
+    keys.flatMap((k) => {
+      const name = nameOf(k)?.trim() ?? "";
+      return name.length > 0 ? [render(key, name)] : [];
+    });
+  return [...named(change.joined, "chat.system.member_joined"), ...named(change.left, "chat.system.member_left")];
 }
 
 /** The stored form of a change (`PersistedMessage.membership`). */

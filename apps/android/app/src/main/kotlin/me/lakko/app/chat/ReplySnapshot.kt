@@ -65,6 +65,33 @@ public fun replySnapshotFor(message: ChatMessage, authorLabel: String): ReplyRef
 }
 
 /**
+ * The name a sent snapshot may carry for a person: their resolved name, or
+ * `null` when only the placeholder is known. A placeholder word or a key
+ * fingerprint baked into an envelope would be shown by every receiver
+ * forever, so none is ever sent; the receiver then draws no name.
+ */
+public fun snapshotNameFrom(name: me.lakko.app.profile.ResolvedName): String? =
+    name.primary.trim().takeIf { !name.isPlaceholder && it.isNotEmpty() }
+
+/**
+ * The author a reply quote or a forward attribution carries for [message]:
+ * "You" ([youLabel]) for an own message, as the timeline says it; otherwise
+ * the author's name ([authorName], from the message's author key) or, in a
+ * one-to-one, the other person's ([peerName]); `null` when neither is a real
+ * name (a placeholder is never baked into an envelope).
+ */
+public fun snapshotAuthorOf(
+    message: ChatMessage,
+    youLabel: String,
+    isOneToOne: Boolean,
+    authorName: String?,
+    peerName: String?,
+): String? = when {
+    message.direction == Direction.Outgoing -> youLabel
+    else -> authorName ?: if (isOneToOne) peerName else null
+}
+
+/**
  * The two lines of a quote block, name then excerpt. A reply that arrived
  * with no snapshot at all draws the name line empty and the excerpt
  * [REPLY_FALLBACK_EXCERPT_KEY] (section 3.1); a blank string counts as absent.

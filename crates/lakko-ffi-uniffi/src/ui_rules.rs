@@ -269,6 +269,16 @@ pub fn guest_name(random: u64) -> String {
     lakko_ui_rules::guest_name::guest_name(random)
 }
 
+/// The letters drawn in an avatar without a photo: the first letter of each
+/// of the first two words, or the first two letters of a one-word name, in
+/// upper case; at most two grapheme clusters; empty when nothing in the name
+/// is a letter, digit or emoji (the client then draws its placeholder).
+#[uniffi::export]
+#[must_use]
+pub fn avatar_initials(name: String) -> String {
+    lakko_ui_rules::initials::avatar_initials(&name)
+}
+
 /// One run of a message's text: `docs/ux/message-links.md`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MessageTextPiece {
@@ -2211,6 +2221,13 @@ mod tests {
     #[test]
     fn the_guest_name_crosses_the_boundary_intact() {
         assert_eq!(guest_name(0), "Calm Dog");
+    }
+
+    #[test]
+    fn the_avatar_initials_cross_the_boundary_intact() {
+        assert_eq!(avatar_initials("QA Phase A".to_owned()), "QP");
+        assert_eq!(avatar_initials("VG3".to_owned()), "VG");
+        assert_eq!(avatar_initials("   ".to_owned()), "");
     }
 
     #[test]

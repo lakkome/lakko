@@ -219,6 +219,7 @@ extension ChatRepository {
             groupSettingsStore.setPhoto(accountIdB64: accountIdB64, groupIdHex: groupIdHex, photo)
             groupSettingsStore.setOwedPhoto(accountIdB64: accountIdB64, groupIdHex: groupIdHex, nil)
             guard bound.isCurrent else { return }
+            notePublicRecordChanged(groupIdHex: groupIdHex)
             // ADR-0087 section 18.5 — a replaced photo is deleted by the
             // devices of whoever set it. Only files this device uploaded are
             // deletable at all (the delete key is the uploader's), and the
@@ -455,6 +456,21 @@ extension ChatRepository {
     /// Run every owed group-name write: a rekey after an ADR-0074 rotation,
     /// a flag change, a republish after a knock-version bump; then any owed
     /// photo re-key. Best-effort; what fails stays owed.
+    /// `group-and-channel-privacy.md` 4.5.4 — the public record carries the
+    /// name and the photo, so a change to either, whoever made it, owes a
+    /// republish on the device that holds the group's handle key (the
+    /// owner's: ``HeldHandleStore`` has an entry for the group only there).
+    /// Durable: the owed flag is stored before the write and cleared only by
+    /// a write that landed; a failure is retried at the next flush (the
+    /// session start and every later change).
+    func notePublicRecordChanged(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64,
+              groupHandle(groupIdHex: groupIdHex)?.isPublic == true,
+              HeldHandleStore.load(accountIdB64).contains(where: { $0.journalIdHex == groupIdHex }) else { return }
+        HeldHandleStore.markOwed(journalIdHex: groupIdHex, accountIdB64)
+        Task { @MainActor [weak self] in await self?.flushOwedHandleWrites() }
+    }
+
     public func flushOwedHandleWrites() async {
         guard let accountIdB64 = currentAccountIdB64, let accountIdentity else { return }
         let discovery = DiscoveryClient()
@@ -772,6 +788,8 @@ extension ChatRepository {
             case .accept:
                 groupSettingsStore.setPhoto(accountIdB64: accountIdB64, groupIdHex: groupIdHex, candidate)
                 groupSettingsRevision &+= 1
+                // An admin's photo reaches the owner as this envelope.
+                notePublicRecordChanged(groupIdHex: groupIdHex)
             case .acceptIdentical:
                 return
             case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:

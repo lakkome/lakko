@@ -1448,6 +1448,20 @@ public class ReachManager internal constructor(
         }
     }
 
+    /** Drop the one grant [grantWire] of [kind] held for [ownerKey] (a join
+     *  request's reply key, once the person is admitted or refused). */
+    public suspend fun withdrawHeldGrant(ownerKey: ByteArray, kind: ReachKind, grantWire: ByteArray) {
+        val b = binding.get() ?: return
+        val ownerKeys = personKeys(ownerKey)
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val kept = withoutHeldGrant(doc.held, ownerKeys, kind.name, reachHex(grantWire))
+            if (kept === doc.held) return@withLock
+            doc = doc.copy(held = kept)
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
     /** Whether a grant of [kind] is held for [ownerKey] at [scopeHex]. */
     public fun holdsHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String): Boolean {
         val ownerKeys = personKeys(ownerKey)

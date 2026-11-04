@@ -115,7 +115,7 @@ import {
   type RosterLeaf as RosterLeafView,
 } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
-import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
+import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf, realNameOf as realNameOfResolved } from "../profile/member-label";
 import { pendingJoinLabel, pendingJoinName, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
@@ -996,7 +996,11 @@ function ChatView(props: {
     const armed = replyingTo();
     if (armed === null) return undefined;
     setReplyingTo(null);
-    return { target: armed.target, author: armed.author, excerpt: armed.excerpt };
+    return {
+      target: armed.target,
+      ...(armed.author === undefined ? {} : { author: armed.author }),
+      excerpt: armed.excerpt,
+    };
   }
   // ADR-0052 decision 2 / message-actions.md section 5.1 — the message the
   // "Forward to" picker is open for, by DS id; `null` when the picker is
@@ -1061,16 +1065,13 @@ function ChatView(props: {
   });
   /** The timeline's name for a row's author: "You" for an own message (this
    *  device's or this person's other device, ADR-0050), else the one display
-   *  resolver, else the same fallback the bubble draws. Shared by the reply
-   *  snapshot and the forward attribution so the two never name one person
-   *  two ways. */
-  function authorLabelOf(row: TimelineRow): string {
+   *  resolver's real name. Shared by the reply snapshot and the forward
+   *  attribution so the two never name one person two ways. A person the
+   *  device cannot name gets no name at all, never a placeholder word or a
+   *  key fingerprint: the snapshot goes on the wire and stays there. */
+  function authorLabelOf(row: TimelineRow): string | undefined {
     const author = authorOf(row);
-    return author.kind === "self"
-      ? t("chat.author.you")
-      : author.kind === "named"
-        ? author.name
-        : t("chat.author.unknown");
+    return author.kind === "self" ? t("chat.author.you") : author.kind === "named" ? author.name : undefined;
   }
   /** Who wrote a row: this person, a named member, or nobody known. The
    *  forward attribution branches on this rather than on the words, which
@@ -1084,9 +1085,14 @@ function ChatView(props: {
     if (row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)) {
       return { kind: "self" };
     }
-    return senderKey !== undefined
-      ? { kind: "named", name: profiles.resolve(senderKey).name }
-      : { kind: "unknown" };
+    const name = senderKey === undefined ? null : realNameOf(senderKey);
+    return name !== null ? { kind: "named", name } : { kind: "unknown" };
+  }
+  /** The person's real name as this device holds it, or `null` when the
+   *  resolver could only show a key fingerprint. What goes into a snapshot
+   *  another device keeps. */
+  function realNameOf(keyB64: string): string | null {
+    return realNameOfResolved(profiles.resolve(keyB64));
   }
   /** The name a FORWARD carries for a row's author (spec section 5): the
    *  recipient reads it, so an own message names this account - the profile
@@ -4974,7 +4980,9 @@ function ChatView(props: {
       return {
         ref: savedRefOf(target.groupId),
         messageId,
-        author: ev.senderKey === undefined ? t("chat.members.unnamed") : memberName(ev.senderKey),
+        // A real name or none: the saved snapshot is kept on every device of
+        // the account (ADR-0065), so a placeholder would stay there for good.
+        author: (ev.senderKey === undefined ? null : realNameOf(ev.senderKey)) ?? "",
         text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? ev.text,
         attachments: ev.attachments,
         sentAtMs: new Date(ev.createdAt).getTime(),
@@ -7505,7 +7513,7 @@ function ChatView(props: {
         authorLabelOf(row),
         (a) => hub.decision(a).bubble,
       );
-      out.push({ ...item, author: snapshot.author, excerpt: snapshot.excerpt });
+      out.push({ ...item, author: snapshot.author ?? "", excerpt: snapshot.excerpt });
     }
     return out;
   });
@@ -8421,10 +8429,18 @@ function ChatView(props: {
           snapshot the recipient will see. */}
       <Show when={replyingTo()}>
         {(armed) => (
-          <div class="lk-reply-strip" role="status" aria-label={t("chat.reply.strip_label", { name: armed().author })}>
+          <div
+            class="lk-reply-strip"
+            role="status"
+            aria-label={
+              armed().author === undefined
+                ? t("chat.reply.quote")
+                : t("chat.reply.strip_label", { name: armed().author ?? "" })
+            }
+          >
             <span class="lk-reply-strip-rule" aria-hidden="true" />
             <span class="lk-reply-strip-body">
-              <span class="lk-reply-strip-name">{armed().author}</span>
+              <span class="lk-reply-strip-name">{armed().author ?? ""}</span>
               <span class="lk-reply-strip-excerpt">{armed().excerpt}</span>
             </span>
             <button
@@ -8990,7 +9006,7 @@ function ChatView(props: {
                             // row carries the link (`chat/knock-origins.ts`); an
                             // older attribution envelope names the issuer only.
                             const joinerB64 = base64Encode(ref);
-                            const origin = knockOriginFor(joinerB64);
+                            const origin = knockOriginFor(props.entry.groupIdB64, joinerB64);
                             const issuer = origin?.issuerKeyB64 ?? joinAttributions().get(joinerB64)?.issuerKeyB64 ?? null;
                             const askedAt = origin?.askedAtMs ?? null;
                             const when = askedAt === null ? null : relativeTimeLabel(askedAt);

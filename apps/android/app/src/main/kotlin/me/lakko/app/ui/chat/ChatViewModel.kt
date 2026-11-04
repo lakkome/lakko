@@ -2018,6 +2018,16 @@ public class ChatViewModel(
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String =
         profileNames.resolve(identity).primary
 
+    /** A name that may be baked into a sent snapshot (a reply quote, a
+     *  forward attribution): the person's name, or `null` when only the
+     *  placeholder is known (ADR-0052: never a placeholder in an envelope). */
+    public fun snapshotNameOf(identity: me.lakko.app.chat.MemberIdentity?): String? =
+        identity?.let { me.lakko.app.chat.snapshotNameFrom(profileNames.resolve(it)) }
+
+    /** [snapshotNameOf] for the other person of a two-member chat. */
+    public fun oneToOnePeerSnapshotName(): String? =
+        repo.oneToOnePeerKey(groupIdHex)?.let { me.lakko.app.chat.snapshotNameFrom(profileNames.resolve(it)) }
+
     /**
      * ADR-0052 decision 2 / UX 5.1 "Tap to jump" — where a forwarded
      * message's attribution takes the person, or `null` for nowhere: the

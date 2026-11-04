@@ -12,16 +12,21 @@
 import { createSignal, Match, Switch, type JSX } from "solid-js";
 
 import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
+import { wasmSync } from "../wasm";
 
-/** Up to two initials from a display label. */
-export function initialsOf(label: string): string {
-  const trimmed = label.replace(/^@/, "").trim();
-  if (trimmed.length === 0) return "?";
-  const parts = trimmed.split(/\s+/).filter((p) => p.length > 0);
-  if (parts.length >= 2) {
-    return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase();
+/**
+ * The initials of a display label: the shared rule in the core
+ * (`avatarInitials`, design-system.md Avatar bullet), the same on every
+ * client. No initials logic lives here; an empty answer, or a core not loaded
+ * yet, shows `placeholder`. Reactive: re-runs once the core has loaded.
+ */
+export function initialsOf(label: string, placeholder = "?"): string {
+  try {
+    const initials = wasmSync().avatarInitials(label);
+    return initials.length > 0 ? initials : placeholder;
+  } catch {
+    return placeholder;
   }
-  return trimmed.slice(0, 2).toUpperCase();
 }
 
 /** One of the four avatar tints, stable per id. */

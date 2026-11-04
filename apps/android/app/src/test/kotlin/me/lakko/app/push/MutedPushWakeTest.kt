@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -27,6 +28,11 @@ import org.junit.Test
  * `crates/lakko-ui-rules/src/ring.rs`, asserted once for all three clients.
  */
 class MutedPushWakeTest {
+
+    @Before
+    fun english() {
+        me.lakko.app.l10n.EnglishForTests.install()
+    }
 
     private val accountId = "acct-1"
     private val groupHex = "ab".repeat(32)
@@ -87,7 +93,7 @@ class MutedPushWakeTest {
         account = ResolvedPushAccount(accountIdB64 = accountId, groupIdBytes = groupIdBytes),
         group = FakeGroup {
             if (signal == null) {
-                ProcessedRow(ProcessedKind.CHAT, "hello", 0)
+                ProcessedRow(ProcessedKind.CHAT, "hello", 0, senderName = "Anna")
             } else {
                 ProcessedRow(ProcessedKind.CALL_SIGNALING, "", 0, callSignal = signal)
             }
@@ -147,7 +153,7 @@ class MutedPushWakeTest {
         val d = deps(signal = null)
         val outcome = wake(d)
 
-        assertEquals("hello", outcome.preview?.body)
+        assertEquals("Anna: hello", outcome.preview?.body)
         assertNull(outcome.ring)
         assertTrue(d.mutedAsked.isEmpty())
     }

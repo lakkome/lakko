@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import initWasm, * as core from "../../wasm/lakko_ffi_wasm";
 import { t } from "../l10n";
 import { initialsOf } from "../ui/Avatar";
 import { memberListLabelOf, memberNameOf } from "../profile/member-label";
@@ -46,6 +50,11 @@ describe("the notice after a membership attempt", () => {
   });
 });
 
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await initWasm({ module_or_path: readFileSync(path) });
+});
+
 describe("avatar initials come from the name, never the list label", () => {
   const vg2: ResolvedName = {
     name: "VG2",
@@ -59,9 +68,9 @@ describe("avatar initials come from the name, never the list label", () => {
 
   it("a member row with a username", () => {
     expect(memberListLabelOf(vg2)).toBe("VG2 · @vg2");
-    expect(initialsOf(memberNameOf(vg2))).toBe("VG");
-    // The defect seen live: initials taken from the label.
-    expect(initialsOf(memberListLabelOf(vg2))).toBe("V·");
+    expect(initialsOf(memberNameOf(vg2))).toBe(core.avatarInitials("VG2"));
+    // The defect seen live: initials taken from the label differ.
+    expect(initialsOf(memberListLabelOf(vg2))).not.toBe(initialsOf(memberNameOf(vg2)));
   });
 
   it("a pending join request with a username", () => {
@@ -70,6 +79,16 @@ describe("avatar initials come from the name, never the list label", () => {
     const b64 = (b: Uint8Array): string => `k${b[0]}`;
     const resolve = (): ResolvedName => vg2;
     expect(pendingJoinLabel(group, leaf, b64, resolve)).toBe("VG2 · @vg2");
-    expect(initialsOf(pendingJoinName(group, leaf, b64, resolve))).toBe("VG");
+    expect(initialsOf(pendingJoinName(group, leaf, b64, resolve))).toBe(core.avatarInitials("VG2"));
+  });
+});
+
+describe("initialsOf is the core's rule", () => {
+  it("returns what the core returns, the placeholder for nothing", () => {
+    for (const name of ["Anna Weber", "@vg2", "Мария", "  ", "李雷"]) {
+      const want = core.avatarInitials(name);
+      expect(initialsOf(name)).toBe(want.length > 0 ? want : "?");
+    }
+    expect(initialsOf("", "#")).toBe(core.avatarInitials("").length > 0 ? core.avatarInitials("") : "#");
   });
 });

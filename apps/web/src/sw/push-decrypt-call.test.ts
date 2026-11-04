@@ -113,7 +113,7 @@ function deps(
       wasm: opts.wasm ?? wasmStub(),
       dsFetchGroup: async () => ({ messages }),
       lookupSenderName: async (_a: string, _k: unknown, key: string) =>
-        key === SENDER_KEY_B64 ? (opts.senderName ?? null) : null,
+        key === SENDER_KEY_B64 ? ("senderName" in opts ? (opts.senderName ?? null) : "Test Sender") : null,
       nowMs: () => NOW,
       lookupMuted: async () => {
         if (opts.muted === "throws") throw new Error("idb is having a day");
@@ -261,7 +261,7 @@ describe("an end takes the ring down", () => {
       callIdHex: CALL_ID_HEX,
       groupHex: GROUP_HEX,
       video: false,
-      callerName: null,
+      callerName: "Test Sender",
       silent: false,
       offerAgeMs: 0,
     });
@@ -328,7 +328,7 @@ describe("a call outranks a message preview", () => {
     // of the pre-call behaviour can see a difference.
     const { deps: d } = deps([chat(42, "hello world")]);
     expect(await decryptPushPreview(wake, d)).toEqual({
-      title: "Lakko",
+      title: "Test Sender",
       body: "hello world",
       tag: GROUP_HEX,
     });

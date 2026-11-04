@@ -118,6 +118,8 @@ final class UnsupportedWireVersionTests: XCTestCase {
     }
 
     private struct StubDeps: NsePushDecryptDeps {
+        func personName(accountIdB64: String, keyB64: String) -> String? { nil }
+        func reactionNotificationsOn() -> Bool { true }
         let rows: [NseFetchedRow]
 
         func boundAccount(wakeSubscriptionIdHex: String?) -> String? { "acct" }

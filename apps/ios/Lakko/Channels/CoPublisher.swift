@@ -507,6 +507,8 @@ public enum CoPublisher {
         proposalRef: Data
     ) throws {
         try publisherGroup.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
+        let groupId = try publisherGroup.groupId()
+        Task { await CoPublisherKeyBook.shared.forget(groupId: groupId, joinerKey: proposalRef) }
     }
 
     // MARK: - Joiner side — a prospective co-publisher requests + joins
@@ -805,23 +807,68 @@ public enum CoPublisherError: Error, LocalizedError {
 /// Co-publisher keys read off PublisherGroup knock queues (ADR-0059
 /// section 1), filed under the joiner's account key each binding was
 /// verified under, so the approve looks one up by the joiner key it approves.
-/// In memory: a binding read before a restart is not kept (the knock cursor
-/// has moved past it), so a joiner approved after a restart is not appointed.
+///
+/// Durable per account (2026-11-04): the knock cursor moves past the row, so
+/// a binding kept in memory only was gone after a restart and a joiner
+/// approved after one was never appointed. Public keys only (the joiner's
+/// account key and the co-publisher key it asked for), so plain
+/// `UserDefaults` under ``AccountStoreGate``; removed once the appointment
+/// landed or the request was rejected, and with the account
+/// (``AccountLocalDataWipe``).
 actor CoPublisherKeyBook {
     static let shared = CoPublisherKeyBook()
-    private var keys: [Data: Data] = [:]
 
-    private static func slot(groupId: Data, joinerKey: Data) -> Data {
-        groupId + joinerKey
+    static func storeKey(_ accountIdB64: String) -> String { "lakko.copublisher-keys.v1.\(accountIdB64)" }
+
+    private static func slot(groupId: Data, joinerKey: Data) -> String {
+        (groupId + joinerKey).base64EncodedString()
     }
 
-    func record(groupId: Data, binding: FfiChannelCoPublisherBinding) {
-        keys[Self.slot(groupId: groupId, joinerKey: binding.accountPubkey)] =
-            binding.copublisherPubkey
+    private nonisolated func load(_ accountIdB64: String) -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: Self.storeKey(accountIdB64)) as? [String: String] ?? [:]
     }
 
-    func key(groupId: Data, joinerKey: Data) -> Data? {
-        keys[Self.slot(groupId: groupId, joinerKey: joinerKey)]
+    private nonisolated func save(_ all: [String: String], _ accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        if all.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.storeKey(accountIdB64))
+        } else {
+            UserDefaults.standard.set(all, forKey: Self.storeKey(accountIdB64))
+        }
+    }
+
+    func record(
+        groupId: Data, binding: FfiChannelCoPublisherBinding,
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) {
+        guard let accountIdB64 else { return }
+        var all = load(accountIdB64)
+        all[Self.slot(groupId: groupId, joinerKey: binding.accountPubkey)] =
+            binding.copublisherPubkey.base64EncodedString()
+        save(all, accountIdB64)
+    }
+
+    func key(
+        groupId: Data, joinerKey: Data, accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) -> Data? {
+        guard let accountIdB64 else { return nil }
+        return load(accountIdB64)[Self.slot(groupId: groupId, joinerKey: joinerKey)]
+            .flatMap { Data(base64Encoded: $0) }
+    }
+
+    /// The appointment landed, or the request was rejected.
+    func forget(
+        groupId: Data, joinerKey: Data, accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64
+    ) {
+        guard let accountIdB64 else { return }
+        var all = load(accountIdB64)
+        guard all.removeValue(forKey: Self.slot(groupId: groupId, joinerKey: joinerKey)) != nil else { return }
+        save(all, accountIdB64)
+    }
+
+    nonisolated static func clear(accountIdB64: String) {
+        UserDefaults.standard.removeObject(forKey: storeKey(accountIdB64))
     }
 }
 

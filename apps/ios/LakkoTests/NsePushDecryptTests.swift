@@ -63,6 +63,10 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func close() { closed = true }
+
+        /// ADR-0062 — the conversation kind the real group reads.
+        var isGroup = false
+        var isGroupConversation: Bool { isGroup }
     }
 
     /// Fully-configurable fake deps. Records the resolved account + the
@@ -207,6 +211,14 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func ownPersonKeyB64(accountIdB64: String) -> String? { ownKey }
+
+        /// The person-name mirror the app writes, by person key.
+        var names: [String: String] = [:]
+        func personName(accountIdB64: String, keyB64: String) -> String? { names[keyB64] }
+
+        /// The Settings > Notifications > Reactions switch.
+        var reactionsOn = true
+        func reactionNotificationsOn() -> Bool { reactionsOn }
     }
 
     private enum FakeError: Error { case open, ds, decrypt }
@@ -846,5 +858,93 @@ final class NsePushDecryptTests: XCTestCase {
         }
         XCTAssertTrue(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: ValidationError(CannotDecryptOwnMessage)\")")))
         XCTAssertFalse(nseIsOwnMessageEcho(Refusal(description: "Message(message: \"process_message: WrongEpoch\")")))
+    }
+
+    // MARK: - The sender's name (2026-11-04, seen on an iPhone)
+
+    /// A group message names its sender from the app's person-name mirror.
+    /// The mirror held the name and the notification still showed none: the
+    /// deps' lookup was reached through the protocol, which did not require it.
+    func testAGroupMessageNamesItsSenderFromTheMirror() async {
+        let group = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(kind: .chat, text: "Notification test 2", attachmentCount: 0, senderKeyB64: "vg3")
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        deps.names = ["vg3": "VG3"]
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(preview?.body, "VG3: Notification test 2")
+    }
+
+    /// A reaction to this person's own message names the reactor from the
+    /// mirror, and the Reactions switch is read from the deps.
+    func testAReactionNamesTheReactorAndHonoursTheSwitch() async {
+        let reacted = NseProcessedRow(
+            kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+            reaction: NseReaction(targetMessageId: 5, emoji: "\u{2764}\u{FE0F}", add: true, targetAuthorB64: "me"))
+        let group = FakeThrowawayGroup(decode: { _ in reacted })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        deps.ownKey = "me"
+        deps.names = ["vg3": "VG3"]
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(preview?.body, "VG3 reacted \u{2764}\u{FE0F} to your message")
+
+        let off = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        off.ownKey = "me"
+        off.names = ["vg3": "VG3"]
+        off.reactionsOn = false
+        let quiet = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), off)
+        XCTAssertFalse(quiet?.body.contains("reacted") ?? false, "the switch is off: no reaction line")
+    }
+
+    /// A sender the mirror holds no name for is a defect: the generic banner
+    /// (`.none`), never a placeholder name and never a group body without the
+    /// sender. Holds for a message and for a reaction.
+    func testASenderWithNoMirroredNameGetsTheGenericBanner() async {
+        let group = FakeThrowawayGroup(decode: { _ in
+            NseProcessedRow(kind: .chat, text: "hi", attachmentCount: 0, senderKeyB64: "stranger")
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        let outcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+        XCTAssertEqual(outcome, .none)
+
+        let reacted = NseProcessedRow(
+            kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "stranger",
+            reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me"))
+        let reactionGroup = FakeThrowawayGroup(decode: { _ in reacted })
+        reactionGroup.isGroup = true
+        let reactionDeps = FakeDeps(account: okAccount(), group: reactionGroup, rows: [row(10, 1)])
+        reactionDeps.ownKey = "me"
+        let reactionOutcome = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), reactionDeps)
+        XCTAssertEqual(reactionOutcome, .none)
+    }
+
+    /// No notification text the extension composes carries a placeholder
+    /// word for a person.
+    func testNoNotificationTextCarriesAPlaceholderWord() async {
+        let rows: [NseProcessedRow] = [
+            NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "vg3"),
+            NseProcessedRow(
+                kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+                reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me")),
+            NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "stranger"),
+        ]
+        for made in rows {
+            for isGroup in [true, false] {
+                let group = FakeThrowawayGroup(decode: { _ in made })
+                group.isGroup = isGroup
+                let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+                deps.ownKey = "me"
+                deps.names = ["vg3": "VG3"]
+                let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+                for text in [preview?.title, preview?.body].compactMap({ $0 }) {
+                    for word in ["Someone", "Member", "Unknown"] {
+                        XCTAssertFalse(text.contains(word), "\(text) carries \(word)")
+                    }
+                }
+            }
+        }
     }
 }
