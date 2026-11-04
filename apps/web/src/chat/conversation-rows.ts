@@ -279,6 +279,7 @@ export function createConversationRows() {
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
+        ...(c.localHandle !== undefined && c.localHandle.length > 0 ? { handle: c.localHandle } : {}),
         unread: channelUnread()(c.id),
         pinned: false,
         muted: false,
@@ -315,6 +316,10 @@ export function createConversationRows() {
           archived: f?.archived === true,
           // ADR-0084 - a one-to-one's circle is the person's photo.
           ...(kindOf(g) === "chat" ? { personKey: peerKeyOf(g) ?? undefined } : {}),
+          ...(() => {
+            const h = groupNames.handleOf(g.groupIdB64)?.handle;
+            return h === undefined ? {} : { handle: h };
+          })(),
         };
       }),
       ],

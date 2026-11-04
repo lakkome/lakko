@@ -138,9 +138,13 @@ public struct ChatScreen: View {
         return message.heldReactions.map { r in
             let key = Data(base64Encoded: r.reactor).flatMap { $0.count == 32 ? $0 : nil }
             let isOwn = r.reactor == own || r.reactor == AuthorIdentity.ownReactionSentinel
+            let directory = ProfileDirectory.shared
+            let ownName = (directory.ownProfile?.displayName ?? directory.ownUsername)
+                .flatMap { $0.isEmpty ? nil : $0 }
             return ReactorRow(
                 id: "\(r.reactor)|\(r.emoji)", key: key,
-                name: viewModel.personName(signatureKeyB64: r.reactor) ?? ResolvedDisplayName.placeholderMember,
+                name: (isOwn ? ownName : nil)
+                    ?? viewModel.personName(signatureKeyB64: r.reactor) ?? ResolvedDisplayName.placeholderMember,
                 emoji: r.emoji, isOwn: isOwn)
         }
     }
@@ -372,6 +376,17 @@ public struct ChatScreen: View {
         .onDisappear {
             // ADR-0024 — leaving the thread stops advertising typing.
             viewModel.screenVisible = false
+            // A screen pushed over the chat (a tapped `/g/` or `/i/` link)
+            // takes the keyboard away. SwiftUI restored the composer's focus
+            // on the way back, during the pop, and the keyboard then rose
+            // without the chat moving up for it: the composer sat under the
+            // keyboard. The field does not take focus again on return; a tap
+            // on it does.
+            composerFocused = false
+        }
+        // The read position is written before the app can be closed.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.flushPendingReadCursor()
         }
         .onChange(of: viewModel.composerFocusRequest) { _, _ in
             // ADR-0052 — choosing Reply puts the keyboard on the composer.
@@ -2764,9 +2779,10 @@ struct MessageRow: View {
             case .avatars(let reactors):
                 HStack(spacing: -5) {
                     ForEach(Array(reactors.prefix(3).enumerated()), id: \.offset) { _, key in
+                        let mine = key.base64EncodedString() == ownIdentity
                         InitialsAvatar(
                             name: reactorName(key), identity: key.base64EncodedString(), size: 16,
-                            photo: .person(key))
+                            photo: mine ? .own : .person(key))
                             .overlay(Circle().stroke(Color.lakkoSurface, lineWidth: 1))
                     }
                 }
@@ -2783,9 +2799,17 @@ struct MessageRow: View {
         .animation(.easeOut(duration: 0.15), value: chip.count)
     }
 
-    /// A reactor's name for an avatar's initials.
+    /// A reactor's name for an avatar's initials. This person's own key
+    /// resolves to no received profile (a device never receives its own), so
+    /// it reads the own profile instead of the placeholder.
     private func reactorName(_ key: Data) -> String {
-        ProfileDirectory.shared.resolve(signatureKey: key).name
+        let directory = ProfileDirectory.shared
+        if key.base64EncodedString() == ownIdentity {
+            let own = directory.ownProfile?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let own, !own.isEmpty { return own }
+            if let username = directory.ownUsername, !username.isEmpty { return username }
+        }
+        return directory.resolve(signatureKey: key).name
     }
 
     /// ADR-0024 — the delivery glyph in an own bubble's corner (UX spec
@@ -3166,7 +3190,6 @@ struct GroupInfoScreen: View {
     /// separately-stored target, because the confirmation names WHICH member:
     /// two pieces of state that must agree is how a confirmation ends up
     /// removing somebody the user did not look at.
-    @State private var removeConfirmLeaf: UInt32?
 
     /// ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Separate state
     /// from the leave confirmation rather than a shared flag, because the two
@@ -3246,15 +3269,20 @@ struct GroupInfoScreen: View {
         let sections = groupSections
         return List {
                 // ADR-0087 section 18 / UX 4.5.2 — the header photo.
+                // One row, no separator: as two rows the List drew its row
+                // separator between the photo and the line, a thin grey rule
+                // that read as an empty field.
                 Section {
-                    GroupPhotoHeader(viewModel: viewModel)
-                        .listRowBackground(Color.clear)
-                    // ADR-0087 section 4 — what this is, in one line.
-                    Text(viewModel.groupHeaderLine)
-                        .font(.footnote)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .listRowBackground(Color.clear)
+                    VStack(spacing: 8) {
+                        GroupPhotoHeader(viewModel: viewModel)
+                        // ADR-0087 section 4 — what this is, in one line.
+                        Text(viewModel.groupHeaderLine)
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
                 // Section 4.4 — the owner of a group with no @name.
                 if sections.contains(.groupType), viewModel.groupHandle == nil {
@@ -3468,7 +3496,11 @@ struct GroupInfoScreen: View {
                                     // ADR-0028 OQ2 — which member's link this
                                     // request arrived on + whether they are still
                                     // in the roster (advisory).
-                                    if let attr = viewModel.joinAttributions[ref] {
+                                    if let line = viewModel.pendingJoinLine(ref) {
+                                        Text(line)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    } else if let attr = viewModel.joinAttributions[ref] {
                                         Text(
                                             l10n.t(
                                                 attr.issuerInRoster
@@ -3478,10 +3510,6 @@ struct GroupInfoScreen: View {
                                         )
                                         .font(.caption2)
                                         .foregroundColor(attr.issuerInRoster ? .secondary : .red)
-                                    } else {
-                                        Text(l10n.t("chat.members.join.link_unknown"))
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
                                     }
                                 }
                                 Spacer()
@@ -3699,11 +3727,12 @@ struct GroupInfoScreen: View {
                                 if viewModel.canManageMembers,
                                     viewModel.ownLeafIndex != member.leafIndex {
                                     Button(role: .destructive) {
-                                        // ADR-0045 UX §6 — the confirmation is the
-                                        // LAST exit: a published request cannot be
-                                        // withdrawn, and a direct commit lands at
-                                        // once. Never remove on a single tap.
-                                        removeConfirmLeaf = member.leafIndex
+                                        // `proposal-based-membership.md` section
+                                        // 6, "No confirmation" (2026-11-04): an
+                                        // owner or admin decides, so Remove acts
+                                        // on the tap; the row's `Waiting to be
+                                        // removed.` says when it waits.
+                                        viewModel.onRemoveMember(leafIndex: member.leafIndex)
                                     } label: {
                                         Text(l10n.t("common.remove"))
                                     }
@@ -3897,32 +3926,6 @@ struct GroupInfoScreen: View {
             // and evicting it locally would leave it live in every peer's
             // store). The body carries the one fact the user needs — that they
             // remain in the group, receiving messages, until someone applies it.
-            // ADR-0045 UX §6 — the same idiom as `Leave this group?` directly
-            // below, deliberately: the two sit in the same panel and a user
-            // reading one after the other should be answering the same kind of
-            // question. The copy comes from `removeMemberConfirmation` rather
-            // than being inlined, so the three clients cannot drift on the
-            // sentence that tells a user whether the person they are removing
-            // can still read their messages. The body is ABSENT on a
-            // direct-commit group, where that sentence would be false.
-            .lakkoDialog(
-                isPresented: Binding(
-                    get: { removeConfirmLeaf != nil },
-                    set: { if !$0 { removeConfirmLeaf = nil } }
-                ),
-                title: removeMemberTitle,
-                message: removeMemberConfirmation(usesProposalPath: viewModel.usesProposalPath).body
-            ) {
-                [
-                    .danger(removeMemberConfirmLabel) {
-                        if let leaf = removeConfirmLeaf {
-                            removeConfirmLeaf = nil
-                            viewModel.onRemoveMember(leafIndex: leaf)
-                        }
-                    },
-                    .cancel(removeMemberCancelLabel) { removeConfirmLeaf = nil },
-                ]
-            }
             .lakkoDialog(
                 isPresented: $leaveConfirmPresented,
                 title: l10n.t("chat.leave.title"),

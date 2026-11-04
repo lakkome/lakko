@@ -419,4 +419,41 @@ class IntroductionPublicationTest {
         assertEquals(setOf(reachHex(idA)), reach.chosenHex)
         assertEquals(false, setting(emptyList(), FfiContactsForm.ALL).contactsReach().onlyChosen)
     }
+
+    @Test
+    fun `the introduction's terms go out in one batch and only the missing ones`() = runTest {
+        val r = Recorder()
+        val batches = mutableListOf<List<me.lakko.app.discovery.OwnTerm>>()
+        val base = ops(r)
+        val batched = IntroPublicationOps(
+            nameSearchTerms = base.nameSearchTerms,
+            oprfNameTerm = base.oprfNameTerm,
+            oprfUsername = base.oprfUsername,
+            composeIntroduction = base.composeIntroduction,
+            composeOffer = base.composeOffer,
+            composeBundle = base.composeBundle,
+            maxBundleRecords = base.maxBundleRecords,
+            send = base.send,
+            save = {},
+            oprfOwnTerms = { own ->
+                batches += own
+                own.map { t ->
+                    val tag = if (t is me.lakko.app.discovery.OwnTerm.Username) "u:${t.value}" else "n:${t.value}"
+                    OprfResult("out:$tag".toByteArray(), "key:$tag".toByteArray())
+                }
+            },
+        )
+        val held = IntroPublicationState(termOutputs = mapOf("n:anna" to reachHex("out:n:anna".toByteArray())))
+        publishIntroductions(held, inputs(), batched)
+        assertEquals(1, batches.size)
+        assertEquals(
+            listOf(
+                me.lakko.app.discovery.OwnTerm.NameTerm("weber"),
+                me.lakko.app.discovery.OwnTerm.Username("anna"),
+            ),
+            batches[0],
+        )
+        assertTrue(r.oprf.isEmpty())
+        assertEquals(listOf("out:n:anna", "out:n:weber", "out:u:anna"), r.composedOutputs)
+    }
 }

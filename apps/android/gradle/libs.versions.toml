@@ -15,7 +15,7 @@
 [versions]
 agp                = "8.6.1"
 kotlin             = "2.0.21"
-jna                = "5.14.0"          # UniFFI runtime — JNA-based bindings call into the cdylib
+jna                = "5.18.1"          # UniFFI runtime — JNA-based bindings call into the cdylib. 5.17+ ships libjnidispatch.so 16 KB aligned on every ABI (5.14 had 4 KB on x86_64)
 android-min-sdk    = "26"              # Android 8.0+ — covers ~97% of active devices as of 2026
 android-target-sdk = "35"              # Android 15 — current Play Store target requirement
 android-compile-sdk = "35"

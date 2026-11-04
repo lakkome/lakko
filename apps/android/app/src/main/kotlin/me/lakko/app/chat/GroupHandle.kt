@@ -65,6 +65,9 @@ public fun suggestedGroupHandle(name: String, private: Boolean, random: ULong): 
 /** A fresh random for [suggestedGroupHandle]. */
 public fun handleRandom(): ULong = java.security.SecureRandom().nextLong().toULong()
 
+/** The line of a discovery `429`: the per-network request limit. */
+public val HANDLE_RATE_LIMITED: UiText = UiText("common.error.too_many_attempts")
+
 /** Section 3.3 — the copy of a refused or failed handle write. */
 public fun handleWriteFailure(cause: Throwable): UiText {
     var c: Throwable? = cause
@@ -78,6 +81,9 @@ public fun handleWriteFailure(cause: Throwable): UiText {
             }
         }
         if (c is me.lakko.app.anon.AnonTokenQuotaExhausted) return UiText("group_handle.error.too_many")
+        // A 429 from a lookup or an OPRF evaluation is the per-network limit,
+        // not a refusal of the name: its own line, never "couldn't save".
+        if (c is me.lakko.app.discovery.DiscoveryHttpError && c.status == 429) return HANDLE_RATE_LIMITED
         if (c is me.lakko.app.discovery.DiscoveryNetworkError) return UiText("group_handle.error.offline")
         c = c.cause
     }
@@ -102,28 +108,57 @@ internal fun groupHandleSeed(accountSeed: ByteArray, groupId: ByteArray): ByteAr
     }
 }
 
-/** The record and the term lookup keys a public name publishes. */
-private suspend fun publicContent(
-    discovery: DiscoveryClient,
-    groupId: ByteArray,
-    handle: String,
-    handleOprf: uniffi.lakko_ffi_uniffi.OprfResult,
-    facts: PublicGroupFacts,
-): Pair<ByteArray, List<ByteArray>> {
+/** The name search terms a public name publishes beside its @name, at most
+ *  `maxHandleTerms() - 1`. */
+internal fun ownNameTerms(name: String): List<String> {
     val max = try {
         uniffi.lakko_ffi_uniffi.maxHandleTerms().toInt()
     } catch (_: Throwable) {
         1
     }
-    val nameTerms = try {
-        uniffi.lakko_ffi_uniffi.nameSearchTerms(facts.name)
+    return try {
+        uniffi.lakko_ffi_uniffi.nameSearchTerms(name)
     } catch (_: Throwable) {
         emptyList()
     }.take((max - 1).coerceAtLeast(0))
+}
+
+/**
+ * An own name's terms for one handle write: [usernames] (the @name, and for a
+ * replace the old one too) and, for a public name, the name search terms of
+ * [publicName], all evaluated in ONE `POST /discovery/oprf/batch` with one
+ * `discovery-register` token. A private write with an @name the taken check
+ * just asked reuses that answer and sends nothing.
+ */
+internal class OwnHandleTerms(
+    val usernames: List<uniffi.lakko_ffi_uniffi.OprfResult>,
+    val nameTerms: List<uniffi.lakko_ffi_uniffi.OprfResult>,
+)
+
+internal suspend fun evaluateOwnHandleTerms(
+    discovery: DiscoveryClient,
+    usernames: List<String>,
+    publicName: String?,
+): OwnHandleTerms {
+    val terms = publicName?.let(::ownNameTerms).orEmpty()
+    if (terms.isEmpty()) return OwnHandleTerms(usernames.map { discovery.oprfOwnName(it) }, emptyList())
+    val all = usernames.map { me.lakko.app.discovery.OwnTerm.Username(it) } +
+        terms.map { me.lakko.app.discovery.OwnTerm.NameTerm(it) }
+    val results = discovery.oprfOwnTerms(all)
+    return OwnHandleTerms(results.take(usernames.size), results.drop(usernames.size))
+}
+
+/** The record and the term lookup keys a public name publishes. */
+private fun publicContent(
+    groupId: ByteArray,
+    handle: String,
+    handleOprf: uniffi.lakko_ffi_uniffi.OprfResult,
+    nameTermOprf: List<uniffi.lakko_ffi_uniffi.OprfResult>,
+    facts: PublicGroupFacts,
+): Pair<ByteArray, List<ByteArray>> {
     val outputs = arrayListOf(handleOprf.output)
     val lookupKeys = arrayListOf(handleOprf.lookupKey)
-    for (term in nameTerms) {
-        val pair = discovery.oprfNameTerm(term)
+    for (pair in nameTermOprf) {
         outputs += pair.output
         lookupKeys += pair.lookupKey
     }
@@ -181,11 +216,12 @@ public suspend fun claimGroupHandle(
     facts: PublicGroupFacts?,
 ): SignedGroupHandle {
     val name = canonicalHandleInput(handle)
-    val pair = discovery.oprfUsername(name)
+    val own = evaluateOwnHandleTerms(discovery, listOf(name), facts?.name?.takeIf { public })
+    val pair = own.usernames[0]
     val seed = groupHandleSeed(accountSeed, groupId)
     try {
         val (record, terms) = if (public && facts != null) {
-            publicContent(discovery, groupId, name, pair, facts)
+            publicContent(groupId, name, pair, own.nameTerms, facts)
         } else {
             null to emptyList()
         }
@@ -213,11 +249,12 @@ public suspend fun updateGroupHandle(
     facts: PublicGroupFacts?,
 ): SignedGroupHandle {
     val name = canonicalHandleInput(handle)
-    val pair = discovery.oprfUsername(name)
+    val own = evaluateOwnHandleTerms(discovery, listOf(name), facts?.name?.takeIf { public })
+    val pair = own.usernames[0]
     val seed = groupHandleSeed(accountSeed, groupId)
     try {
         val (record, terms) = if (public && facts != null) {
-            publicContent(discovery, groupId, name, pair, facts)
+            publicContent(groupId, name, pair, own.nameTerms, facts)
         } else {
             null to emptyList()
         }
@@ -245,13 +282,18 @@ public suspend fun replaceGroupHandle(
     public: Boolean,
     facts: PublicGroupFacts?,
 ): SignedGroupHandle {
-    val old = discovery.oprfUsername(canonicalHandleInput(oldHandle))
     val name = canonicalHandleInput(newHandle)
-    val next = discovery.oprfUsername(name)
+    val own = evaluateOwnHandleTerms(
+        discovery,
+        listOf(canonicalHandleInput(oldHandle), name),
+        facts?.name?.takeIf { public },
+    )
+    val old = own.usernames[0]
+    val next = own.usernames[1]
     val seed = groupHandleSeed(accountSeed, groupId)
     try {
         val (record, terms) = if (public && facts != null) {
-            publicContent(discovery, groupId, name, next, facts)
+            publicContent(groupId, name, next, own.nameTerms, facts)
         } else {
             null to emptyList()
         }
@@ -378,23 +420,13 @@ public suspend fun claimChannelHandle(
     description: String,
 ): SignedGroupHandle {
     val canonical = canonicalHandleInput(handle)
-    val pair = discovery.oprfUsername(canonical)
+    val own = evaluateOwnHandleTerms(discovery, listOf(canonical), name)
+    val pair = own.usernames[0]
     val seed = groupHandleSeed(accountSeed, journalId)
     try {
-        val max = try {
-            uniffi.lakko_ffi_uniffi.maxHandleTerms().toInt()
-        } catch (_: Throwable) {
-            1
-        }
-        val nameTerms = try {
-            uniffi.lakko_ffi_uniffi.nameSearchTerms(name)
-        } catch (_: Throwable) {
-            emptyList()
-        }.take((max - 1).coerceAtLeast(0))
         val outputs = arrayListOf(pair.output)
         val terms = arrayListOf(pair.lookupKey)
-        for (term in nameTerms) {
-            val p = discovery.oprfNameTerm(term)
+        for (p in own.nameTerms) {
             outputs += p.output
             terms += p.lookupKey
         }
@@ -440,7 +472,7 @@ public suspend fun rekeyGroupHandle(
     public: Boolean,
 ): SignedGroupHandle {
     val name = canonicalHandleInput(handle)
-    val pair = discovery.oprfUsername(name)
+    val pair = discovery.oprfOwnName(name)
     val newSeed = groupHandleSeed(newAccountSeed, groupId)
     try {
         val newWritePk = uniffi.lakko_ffi_uniffi.handleWritePublicKey(newSeed)

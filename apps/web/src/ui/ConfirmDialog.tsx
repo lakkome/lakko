@@ -42,6 +42,7 @@
  */
 
 import { type Component, Show, createEffect, onCleanup, onMount } from "solid-js";
+import { Portal } from "solid-js/web";
 
 import {
   pendingConfirm,
@@ -74,9 +75,16 @@ export const ConfirmDialog: Component = () => {
     }
   });
 
+  // Mounted on `document.body` and centred by its own class
+  // (`.lk-confirm-dialog`), so no ancestor of the app shell (a pane, a pushed
+  // screen, a scroll area) can decide where it sits or how far its backdrop
+  // reaches: a confirmation is centred over the whole window with a backdrop
+  // over the whole window, from any screen.
   return (
+    <Portal mount={document.body}>
     <dialog
       ref={el}
+      class="lk-confirm-dialog"
       aria-labelledby="lakko-confirm-title"
       aria-describedby="lakko-confirm-body"
       onClose={() => resolvePendingConfirm(false)}
@@ -213,5 +221,6 @@ export const ConfirmDialog: Component = () => {
         )}
       </Show>
     </dialog>
+    </Portal>
   );
 };

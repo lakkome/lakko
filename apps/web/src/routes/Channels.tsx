@@ -76,6 +76,7 @@ import { LegacyChannelError } from "../channels/legacy-v1";
 import { coPublisherJoinFailure } from "../channels/copublisher-join-failure";
 import { JOIN_TRY_AGAIN } from "./join-group-failure";
 import { DiscoveryHttpError, HandleWriteError, registerChannelHandle } from "../channels/channel-discovery";
+import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken, isRateLimited } from "../discovery/handle-check";
 import { channelTitle, displayHandle } from "../channels/channel-row";
 import { knownSubscriberCount } from "../channels/ui-cache";
 import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/conversation-info";
@@ -90,7 +91,7 @@ import { isHiddenPostDecode, toPostDecode, type PostDecode } from "../channels/p
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
-import { DiscoveryClient } from "../discovery/client";
+import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 import { markChannelRead } from "../feed/feed-marks-store";
 import { useChats } from "../chat/ChatContext";
 import {
@@ -482,6 +483,26 @@ const NewChannel: Component = () => {
   const [handle, setHandle] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
+  // A held `@name` reads "taken" once typing stops, asked as seldom as search
+  // asks (who-can-find-me 6.1): 500 ms after the last key, never twice for
+  // one name within 60 s; Create reuses the name's OPRF answer
+  // (`discovery/handle-check.ts`).
+  const [handleIsTaken, setHandleIsTaken] = createSignal(false);
+  let takenTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    const h = handle().trim().replace(/^@/, "");
+    setHandleIsTaken(false);
+    if (takenTimer !== null) clearTimeout(takenTimer);
+    if (h.length < 3 || !/^[a-z0-9_]{3,32}$/.test(h.toLowerCase())) return;
+    takenTimer = setTimeout(() => {
+      void handleTaken(h).then((taken) => {
+        if (handle().trim().replace(/^@/, "") === h && taken !== null) setHandleIsTaken(taken);
+      });
+    }, HANDLE_CHECK_DEBOUNCE_MS);
+  });
+  onCleanup(() => {
+    if (takenTimer !== null) clearTimeout(takenTimer);
+  });
 
   /** Generate a fresh 16-byte channel id locally — the server has no role in
    *  id allocation per ADR-0010 (the id is a pseudonym chosen by the
@@ -571,6 +592,11 @@ const NewChannel: Component = () => {
             setError(
               () => anonTokenMessage(err, t("channels.new.error.handle_offline")) ?? "",
             );
+          } else if (isRateLimited(err)) {
+            // Discovery refusing for the rate: say so, never "could not claim".
+            setError(() => t("common.error.too_many_attempts"));
+          } else if (err instanceof DiscoveryNetworkError) {
+            setError(() => t("channels.new.error.handle_offline"));
           } else {
             console.warn("[channels] handle claim failed", err);
             setError(() => t("channels.new.error.handle"));
@@ -671,7 +697,14 @@ const NewChannel: Component = () => {
               setHandle(e.currentTarget.value);
             }}
           />
-          <span class="lk-meta lk-block lk-mt-4">{t("channels.new.handle_hint")}</span>
+          <Show
+            when={handleIsTaken()}
+            fallback={<span class="lk-meta lk-block lk-mt-4">{t("channels.new.handle_hint")}</span>}
+          >
+            <span class="form-error lk-block lk-mt-4" role="status">
+              {t("group_handle.error.taken")}
+            </span>
+          </Show>
         </label>
         <Show when={error()}>
           {(msg) => (
@@ -1266,6 +1299,11 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     const state = location.state;
     return typeof state?.handle === "string" ? state.handle.replace(/^@/, "") : undefined;
   };
+  /** The name the channel's public record carried, when search passed one. */
+  const foundName = (): string | undefined => {
+    const state = location.state as { name?: unknown } | undefined;
+    return typeof state?.name === "string" && state.name.trim().length > 0 ? state.name.trim() : undefined;
+  };
 
   // Persisted keypair lookup. If none exists on first mount, generate one
   // and store it. Waits for the per-account hydration first: on a reload
@@ -1300,7 +1338,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
     const handle = foundHandle();
     channelsActions.addChannel({
       id: params.id,
-      localName: handle ?? "",
+      localName: foundName() ?? handle ?? "",
       localDescription: "",
       addedAtMs: Date.now(),
       ...(handle !== undefined ? { localHandle: handle } : {}),
@@ -1540,7 +1578,7 @@ const ChannelSubscribeFor: Component<{ readonly id: string }> = (props) => {
       <div class="lk-chat-body" style={{ position: "relative" }}>
         <ChannelHead
           id={params.id}
-          name={follows() ? meta().name : channelTitle(undefined, "", foundHandle())}
+          name={follows() ? meta().name : channelTitle(undefined, foundName() ?? "", foundHandle())}
           sub={statusLine()}
           onOpenInfo={(): void => {
               setInfoOpen(true);

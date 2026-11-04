@@ -20,6 +20,11 @@ struct ChannelReaderScreen: View {
     /// subscribe can file the channel in the local list under it. Empty when
     /// the channel is already listed.
     var foundHandle: String = ""
+    /// The name a directory record carried (a card's `Subscribe`): the name
+    /// the channel is listed under until its own record arrives.
+    var foundName: String = ""
+    /// The card's `Subscribe` was pressed: subscribe on open, one step.
+    var subscribeOnOpen: Bool = false
     /// `docs/ux/feed.md` section 5, "Channel posts" — the newest readable post
     /// was on screen while the app was active: it is read, here and in the
     /// feed (the channel's count goes to zero).
@@ -48,6 +53,12 @@ struct ChannelReaderScreen: View {
     }
     @State private var bootstrap: Bootstrap = .notSubscribed
     @State private var bootstrapError: UiText?
+    /// What the screen shows: a card's `Subscribe` opens the channel already
+    /// subscribing, so the first frame never reads "Not subscribed" with a
+    /// second Subscribe button.
+    private var shownBootstrap: Bootstrap {
+        bootstrap == .notSubscribed && subscribeOnOpen ? .registering : bootstrap
+    }
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     @State private var posts: [PostView] = []
@@ -87,7 +98,7 @@ struct ChannelReaderScreen: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if bootstrap == .notSubscribed {
+            if shownBootstrap == .notSubscribed {
                 subscribeBar
             }
         }
@@ -100,6 +111,8 @@ struct ChannelReaderScreen: View {
             if state.subscriberKeysByChannel[channelId] != nil {
                 ensureListed()
                 await runBootstrap()
+            } else if subscribeOnOpen {
+                await subscribe()
             }
         }
         .onDisappear { pollTask?.cancel() }
@@ -121,6 +134,7 @@ struct ChannelReaderScreen: View {
             channelId: channelId,
             channel: state.channels.first(where: { $0.id == channelId }),
             foundHandle: foundHandle,
+            foundName: foundName,
             isOwner: false,
             status: headerStatus
         )
@@ -128,7 +142,7 @@ struct ChannelReaderScreen: View {
     }
 
     private var headerStatus: String? {
-        switch bootstrap {
+        switch shownBootstrap {
         case .notSubscribed: return l10n.t("channels.subscribe.status.not_subscribed")
         case .registering: return l10n.t("channels.subscribe.status.subscribing")
         case .polling: return l10n.t("channels.subscribe.status.waiting")
@@ -142,7 +156,7 @@ struct ChannelReaderScreen: View {
     @ViewBuilder
     private var statusBanner: some View {
         let line: (text: String, colour: Color, symbol: String)? = {
-            switch bootstrap {
+            switch shownBootstrap {
             case .notSubscribed, .active:
                 return nil
             case .registering:
@@ -182,7 +196,7 @@ struct ChannelReaderScreen: View {
 
     @ViewBuilder
     private var postsSection: some View {
-        switch bootstrap {
+        switch shownBootstrap {
         case .notSubscribed:
             Text(l10n.t("channels.subscribe.prompt_title"))
                 .font(.subheadline)
@@ -281,7 +295,7 @@ struct ChannelReaderScreen: View {
         guard !state.channels.contains(where: { $0.id == channelId }) else { return }
         state.addChannel(.init(
             id: channelId,
-            localName: foundHandle,
+            localName: foundName.isEmpty ? foundHandle : foundName,
             localDescription: "",
             addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
             handle: foundHandle

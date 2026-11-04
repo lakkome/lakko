@@ -83,6 +83,8 @@ import {
 } from "../media/inline-media";
 import { allowlist, mediaKey, type MediaHub } from "../media/media-hub";
 import { useProfiles } from "../profile/ProfileContext";
+import { ownAvatarLabel } from "../profile/member-label";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { joinList, t } from "../l10n";
@@ -573,6 +575,13 @@ function ChatBubbleBody(
   };
   const personName = (k: string): string =>
     k === props.ownReactorKey ? t("chat.author.you") : profiles.resolve(k).name;
+  // The avatar of a reactor: this account's own photo and initials for its
+  // own reaction (never the letters of "You"), anyone else's as resolved.
+  const ownUsername = (): string => profiles.ownUsername() ?? "";
+  const avatarOf = (k: string): { label: string; personKey: string } =>
+    k === props.ownReactorKey
+      ? { label: ownAvatarLabel(profiles.ownProfile().displayName, ownUsername()), personKey: OWN_AVATAR_KEY }
+      : { label: profiles.resolve(k).name, personKey: k };
 
   /** Section 13 — a message of one to three emoji and nothing else, no
    *  attachment, no quote, no forward line, is drawn large with no bubble. */
@@ -1020,7 +1029,15 @@ function ChatBubbleBody(
                     <Show when={re.face === "avatars"}>
                       <span class="lk-reaction-avatars" aria-hidden="true">
                         <For each={re.reactors}>
-                          {(k) => <Avatar label={personName(k)} id={k} size="sm" personKey={k} class="lk-reaction-avatar" />}
+                          {(k) => (
+                            <Avatar
+                              label={avatarOf(k).label}
+                              id={k}
+                              size="sm"
+                              personKey={avatarOf(k).personKey}
+                              class="lk-reaction-avatar"
+                            />
+                          )}
                         </For>
                       </span>
                     </Show>
@@ -1093,6 +1110,7 @@ function ChatBubbleBody(
               initialTab={at().tab}
               tabs={reactorTabs()}
               nameOf={personName}
+              avatarOf={avatarOf}
               ownKey={props.ownReactorKey}
               onOpenPerson={props.onOpenPerson}
               isContact={(k) => props.isContactKey?.(k) === true}
@@ -1326,6 +1344,7 @@ function ReactorsList(props: {
   initialTab: string | null;
   tabs: Array<{ emoji: string; people: string[] }>;
   nameOf: (personKeyB64: string) => string;
+  avatarOf: (personKeyB64: string) => { label: string; personKey: string };
   ownKey: string | null;
   onOpenPerson: ((personKeyB64: string) => void) | undefined;
   isContact: (personKeyB64: string) => boolean;
@@ -1381,7 +1400,12 @@ function ReactorsList(props: {
             {(r) => {
               const body = (): JSX.Element => (
                 <>
-                  <Avatar label={props.nameOf(r.person)} id={r.person} size="sm" personKey={r.person} />
+                  <Avatar
+                    label={props.avatarOf(r.person).label}
+                    id={r.person}
+                    size="sm"
+                    personKey={props.avatarOf(r.person).personKey}
+                  />
                   <span class="lk-reactors-name">{props.nameOf(r.person)}</span>
                   <Show when={r.emoji}>{(e) => <span class="lk-reactors-emoji">{e()}</span>}</Show>
                 </>

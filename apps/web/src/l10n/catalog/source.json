@@ -1692,7 +1692,7 @@
       "comment": "Label of the optional public handle of a new channel."
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "comment": "Example in the empty handle field. Keep the @ and Latin letters."
     },
     "channels.new.subtitle": {
@@ -2457,9 +2457,17 @@
       "text": "Link cleared. This device holds no key to revoke it, so it works until it expires.",
       "comment": "Notice after clearing a group invite link this device cannot revoke at the server (it keeps no revocation key for it)."
     },
+    "chat.invite_link.copied": {
+      "text": "Link copied.",
+      "comment": "Shown after an invite link was copied to the clipboard."
+    },
     "chat.invite_link.copy": {
       "text": "Copy link",
       "comment": "Button that copies the invite link."
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Couldn't copy the link.",
+      "comment": "Shown when the browser refused to copy an invite link to the clipboard."
     },
     "chat.invite_link.create": {
       "text": "Create invite link",
@@ -2622,6 +2630,10 @@
       "text": "Approve",
       "comment": "Button that approves a request to join the group."
     },
+    "chat.members.join.asked": {
+      "text": "Asked {when}",
+      "comment": "Line under a request to join in the members panel (ADR-0087, group-and-channel-privacy.md section 8). {when} is a relative time such as \"2 hours ago\"."
+    },
     "chat.members.join.heading": {
       "text": "Join requests ({count})",
       "comment": "Heading of the list of people asking to join through a link."
@@ -2629,6 +2641,14 @@
     "chat.members.join.heading_full": {
       "text": "Join requests (64+)",
       "comment": "Heading of the join requests section when 64 are waiting."
+    },
+    "chat.members.join.invited_by": {
+      "text": "Invited by {name} · {when}",
+      "comment": "Line under a request to join that came by an invite link (ADR-0087, group-and-channel-privacy.md section 8). {name} is the person whose link it was, {when} a relative time such as \"2 hours ago\"."
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Invited by {name}",
+      "comment": "Under a join request made from an invite link when the time it was sent is not known."
     },
     "chat.members.join.link_unknown": {
       "text": "Invite link not known",
@@ -3798,6 +3818,10 @@
     "common.copy": {
       "text": "Copy",
       "comment": "Button that copies the text next to it to the clipboard."
+    },
+    "common.copy_failed": {
+      "text": "Couldn't copy.",
+      "comment": "Shown when the browser refused to copy text to the clipboard."
     },
     "common.creating": {
       "text": "Creating...",
@@ -8408,6 +8432,10 @@
     "search.conversations.heading": {
       "text": "Groups and channels",
       "comment": "Heading of the search section listing public groups and channels, under People."
+    },
+    "search.nothing_found": {
+      "text": "Nothing found. Check the spelling, or ask for an invite link.",
+      "comment": "The one line of the search list when nothing local and nothing from the network stands in it (who-can-find-me.md section 6.1, One list)."
     },
     "search.people.add_contact": {
       "text": "Add contact",

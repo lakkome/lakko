@@ -1312,6 +1312,43 @@ public class ReachManager internal constructor(
         return result
     }
 
+    /**
+     * The OPRF rounds of [keys] at once: those this account holds come from
+     * it, the rest are evaluated by ONE [batch] call (the own name's terms go
+     * through `POST /discovery/oprf/batch`, one token for all) and kept.
+     * Results in the order of [keys].
+     */
+    internal suspend fun keptOprfBatch(
+        keys: List<String>,
+        batch: suspend (missing: List<Int>) -> List<OprfResult>,
+    ): List<OprfResult> {
+        val held = keys.map { key ->
+            val output = doc.termOutputs[key]?.let(::reachUnhex)
+            val lookupKey = doc.termOutputs["k:$key"]?.let(::reachUnhex)
+            if (output != null && lookupKey != null) OprfResult(output, lookupKey) else null
+        }
+        val missing = held.indices.filter { held[it] == null }
+        if (missing.isEmpty()) return held.map { it!! }
+        val fresh = waitingOutRateLimit { batch(missing) }
+        val out = held.toMutableList()
+        for ((i, at) in missing.withIndex()) out[at] = fresh[i]
+        val b = binding.get()
+        if (b != null) {
+            lock.withLock {
+                if (binding.get() === b) {
+                    val kept = HashMap<String, String>()
+                    for ((i, at) in missing.withIndex()) {
+                        kept[keys[at]] = reachHex(fresh[i].output)
+                        kept["k:${keys[at]}"] = reachHex(fresh[i].lookupKey)
+                    }
+                    doc = doc.copy(termOutputs = doc.termOutputs + kept)
+                    store.save(b.accountIdB64, doc)
+                }
+            }
+        }
+        return out.map { it!! }
+    }
+
     /** Whether the last Everyone publication did not land. */
     public fun everyonePublicationStuck(): Boolean = everyoneStuck
 

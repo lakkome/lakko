@@ -27,7 +27,8 @@
  */
 
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
-import { handleWrite, lookupHandle, oprfForName, type HandleWriteResult } from "../discovery/handle-lookup";
+import { handleWrite, lookupHandle, type HandleWriteResult } from "../discovery/handle-lookup";
+import { namePair, noteHandleHeld, termPairsInBatch } from "../discovery/handle-check";
 import { ScopedDiscoveryClient } from "../reach/scoped-discovery";
 import { avatarToWasm, type AvatarData } from "../profile/avatar-model";
 import type { ProfileAvatar as WasmProfileAvatar } from "../../wasm/lakko_ffi_wasm";
@@ -104,8 +105,13 @@ async function recordContent(
   const nameTerms = wasm.nameSearchTerms(subject.name).slice(0, Math.max(0, wasm.maxHandleTerms() - 1));
   const outputs: Uint8Array[] = [handleOutput];
   const lookupKeys: Uint8Array[] = [handleLookupKey];
-  for (const term of nameTerms) {
-    const pair = await scoped.nameTermOprf(term);
+  // The record's own words in ONE batch round (`POST /discovery/oprf/batch`,
+  // one register token), kept for the session and asked once more after a
+  // rate limit (`discovery/handle-check.ts`).
+  const pairs = await termPairsInBatch(nameTerms, (missing) =>
+    scoped.ownTermsOprf(missing.map((value) => ({ kind: "term" as const, value }))),
+  );
+  for (const pair of pairs) {
     outputs.push(pair.output);
     lookupKeys.push(pair.lookupKey);
   }
@@ -186,7 +192,7 @@ export async function claimGroupHandle(args: {
   readonly facts: PublicGroupFacts | null;
 }): Promise<StoredConversationHandle> {
   const { wasm, groupId } = args;
-  const pair = await oprfForName(args.handle);
+  const pair = await namePair(args.handle);
   const seed = groupHandleSeed(wasm, args.accountIdentity, groupId);
   try {
     let record: Uint8Array | null = null;
@@ -198,6 +204,7 @@ export async function claimGroupHandle(args: {
     const statement = wasm.signHandleClaim(seed, pair.lookupKey, args.isPublic, hash);
     const result = await handleWrite("claim", statement, record, terms);
     if (result === null) throw new Error("handle claim answered no certificate");
+    noteHandleHeld(pair.normalized);
     return signedEnvelope(wasm, seed, groupId, pair.normalized, args.isPublic, result);
   } finally {
     seed.fill(0);
@@ -214,7 +221,7 @@ export async function updateGroupHandle(args: {
   readonly facts: PublicGroupFacts | null;
 }): Promise<StoredConversationHandle> {
   const { wasm, groupId } = args;
-  const pair = await oprfForName(args.handle);
+  const pair = await namePair(args.handle);
   const seed = groupHandleSeed(wasm, args.accountIdentity, groupId);
   try {
     let record: Uint8Array | null = null;
@@ -243,8 +250,8 @@ export async function replaceGroupHandle(args: {
   readonly facts: PublicGroupFacts | null;
 }): Promise<StoredConversationHandle> {
   const { wasm, groupId } = args;
-  const old = await oprfForName(args.oldHandle);
-  const next = await oprfForName(args.newHandle);
+  const old = await namePair(args.oldHandle);
+  const next = await namePair(args.newHandle);
   const seed = groupHandleSeed(wasm, args.accountIdentity, groupId);
   try {
     let record: Uint8Array | null = null;
@@ -275,7 +282,7 @@ export async function rekeyGroupHandle(args: {
   readonly isPublic: boolean;
 }): Promise<StoredConversationHandle> {
   const { wasm, groupId } = args;
-  const pair = await oprfForName(args.handle);
+  const pair = await namePair(args.handle);
   const oldSeed = groupHandleSeed(wasm, args.oldIdentity, groupId);
   const seed = groupHandleSeed(wasm, args.accountIdentity, groupId);
   try {
@@ -297,7 +304,7 @@ export async function retireGroupHandle(args: {
   readonly handle: string;
 }): Promise<void> {
   const { wasm, groupId } = args;
-  const pair = await oprfForName(args.handle);
+  const pair = await namePair(args.handle);
   const seed = groupHandleSeed(wasm, args.accountIdentity, groupId);
   try {
     await handleWrite("retire", wasm.signHandleRetire(seed, pair.lookupKey));
@@ -403,7 +410,7 @@ async function channelWrite(
   },
 ): Promise<ChannelHandleWrite> {
   const { wasm } = args;
-  const pair = await oprfForName(args.handle);
+  const pair = await namePair(args.handle);
   const seed = channelHandleSeed(wasm, args.ownerIdentity, args.channelId);
   try {
     const subject = channelSubject(wasm, args.ownerIdentity, args.channelId, args.facts);
@@ -414,6 +421,7 @@ async function channelWrite(
         ? wasm.signHandleClaim(seed, pair.lookupKey, true, hash)
         : wasm.signHandleUpdate(seed, pair.lookupKey, true, hash);
     const result = await handleWrite(route, statement, record, terms);
+    noteHandleHeld(pair.normalized);
     return { handle: pair.normalized, leaseUntilMs: result?.leaseUntilMs ?? 0 };
   } finally {
     seed.fill(0);
@@ -423,7 +431,7 @@ async function channelWrite(
 /** A channel found by its exact `@name`: its id, or `null`. One OPRF round
  *  and one lookup; the record is opened with the name's own OPRF output. */
 export async function lookupChannelByHandle(wasm: Wasm, handle: string): Promise<Uint8Array | null> {
-  const pair = await oprfForName(handle);
+  const pair = await namePair(handle);
   const record = await lookupHandle(pair.lookupKey);
   if (record === null) return null;
   let opened;

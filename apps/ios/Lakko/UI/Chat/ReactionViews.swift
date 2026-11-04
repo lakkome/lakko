@@ -128,7 +128,7 @@ struct ReactionsListSheet: View {
         let content = HStack(spacing: 12) {
             InitialsAvatar(
                 name: row.name, identity: row.key?.base64EncodedString() ?? row.id, size: 36,
-                photo: row.key.map { .person($0) })
+                photo: row.isOwn ? .own : row.key.map { .person($0) })
             Text(row.isOwn ? l10n.t("chat.author.you") : row.name)
                 .font(.body)
                 .foregroundStyle(Color.lakkoText)

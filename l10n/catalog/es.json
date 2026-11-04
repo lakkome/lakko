@@ -1571,7 +1571,7 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@mi-canal",
+      "text": "@mi_canal",
       "status": "machine"
     },
     "channels.new.subtitle": {
@@ -2306,8 +2306,16 @@
       "text": "Información del grupo",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Enlace copiado.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Copiar enlace",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "No se pudo copiar el enlace.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2470,12 +2478,24 @@
       "text": "Aprobar",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "Lo pidió {when}",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "Solicitudes para unirse ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "Solicitudes para unirse (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "Invitado por {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Invitado por {name}",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3624,6 +3644,10 @@
     },
     "common.copy": {
       "text": "Copiar",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "No se pudo copiar.",
       "status": "machine"
     },
     "common.creating": {
@@ -7812,6 +7836,10 @@
     },
     "search.conversations.heading": {
       "text": "Grupos y canales",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "No se encontró nada. Revisa la ortografía o pide un enlace de invitación.",
       "status": "machine"
     },
     "search.people.add_contact": {

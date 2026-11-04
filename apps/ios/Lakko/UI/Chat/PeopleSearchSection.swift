@@ -4,49 +4,58 @@
 import LakkoCore
 import SwiftUI
 
-/// `docs/ux/who-can-find-me.md` section 6.1 — what one search field shows
-/// beside its own list: under the heading **People**, the people this device
-/// knows, then what the network found. Nothing to press: the field asks the
-/// network by itself (``PeopleSearchModel``). A row is an avatar, the name,
-/// the `@username` when verified and **Add contact**, which sends the request
-/// at once. A row never says why the person was found.
+/// `docs/ux/who-can-find-me.md` section 6.1, "One list" (2026-11-04): what
+/// one search field adds to the screen's own list, in the same list and with
+/// no heading: the people this device knows, then what the network found
+/// (people, public groups and channels), each row saying what it is on its
+/// second line. The spinner, a failure and "Nothing found" stand at the end of
+/// the list; "Nothing found" only when the whole list is empty. Nothing to
+/// press: the field asks the network by itself (``PeopleSearchModel``).
 ///
 /// The same view under the Chats field (`includesChannels`, which also shows
-/// a channel found by its handle) and under the Contacts field (people only,
-/// and no local contact rows: the Contacts list already shows them).
+/// groups and channels found by `@name` or name) and under the Contacts field
+/// (people only, and no local contact rows: the Contacts list shows them).
 struct PeopleSearchSection: View {
     @ObservedObject var model: PeopleSearchModel
     @ObservedObject var session: PeopleSearchSession
     let includesChannels: Bool
     let showsLocalContacts: Bool
-    /// The line shown when the field shows nothing of its own and does not
-    /// ask the network, whose People part answers by itself (Chats: "No
-    /// results" when no conversation matched either); `nil` shows nothing.
-    let emptyText: String?
+    /// Whether the screen's own list shows rows above this view (matching
+    /// conversations, contacts): then "Nothing found" never shows.
+    let listShowsRows: Bool
     /// The people a list row above shows (a contact, someone added through
     /// their invite link): one person, one row.
     let listed: Set<Data>
     /// The people whose one-to-one is among the matching conversations above.
     let chatPeers: Set<Data>
+    /// The conversations the list above already shows: not repeated.
+    let listedConversations: Set<String>
     let onOpenPerson: (FoundPerson) -> Void
     let onOpenChannel: (_ channelIdHex: String, _ handle: String) -> Void
     /// The name of a channel this device holds, `nil` when it knows none.
     let channelName: (_ channelIdHex: String) -> String?
     /// ADR-0087 section 5 — a public group or channel row was opened (its card).
     var onOpenConversation: (ConversationHandles.Found) -> Void = { _ in }
+    /// Whether this device holds a found group or channel: its row reads
+    /// `Open` and opens it, with no card.
+    let isHeld: (String) -> Bool
+    let onOpenHeld: (String) -> Void
     @ObservedObject private var l10n = Localization.shared
 
     init(
         model: PeopleSearchModel,
         includesChannels: Bool,
         showsLocalContacts: Bool,
-        emptyText: String? = nil,
+        listShowsRows: Bool = false,
         listed: Set<Data> = [],
         chatPeers: Set<Data> = [],
+        listedConversations: Set<String> = [],
         onOpenPerson: @escaping (FoundPerson) -> Void,
         onOpenChannel: @escaping (String, String) -> Void = { _, _ in },
         channelName: @escaping (String) -> String? = { _ in nil },
-        onOpenConversation: @escaping (ConversationHandles.Found) -> Void = { _ in }
+        onOpenConversation: @escaping (ConversationHandles.Found) -> Void = { _ in },
+        isHeld: @escaping (String) -> Bool = { _ in false },
+        onOpenHeld: @escaping (String) -> Void = { _ in }
     ) {
         self.onOpenConversation = onOpenConversation
         self.channelName = channelName
@@ -54,89 +63,83 @@ struct PeopleSearchSection: View {
         self.session = model.session
         self.includesChannels = includesChannels
         self.showsLocalContacts = showsLocalContacts
-        self.emptyText = emptyText
+        self.listShowsRows = listShowsRows
         self.listed = listed
         self.chatPeers = chatPeers
+        self.listedConversations = listedConversations
         self.onOpenPerson = onOpenPerson
         self.onOpenChannel = onOpenChannel
+        self.isHeld = isHeld
+        self.onOpenHeld = onOpenHeld
     }
 
     var body: some View {
         let rows = model.rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
-        let channel = includesChannels ? model.answer?.channel : nil
+        let conversations = includesChannels
+            ? (model.answer?.conversations ?? []).filter { !listedConversations.contains($0.idHex) } : []
+        let channel = includesChannels ? model.answer?.channel.flatMap { found in
+            listedConversations.contains(found.idHex) || conversations.contains { $0.idHex == found.idHex }
+                ? nil : found
+        } : nil
+        let anyRow = listShowsRows || !rows.local.isEmpty || !rows.network.isEmpty
+            || !conversations.isEmpty || channel != nil
         let message = model.peopleMessage(
             includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
-            listed: listed, chatPeers: chatPeers)
-        // No heading without something under it. Below 3 characters nothing
-        // was asked, so a person row is all that can stand here. A channel
-        // found by its handle is not a person: it has its own heading.
-        let showsHeading = model.searching || !rows.local.isEmpty || !rows.network.isEmpty
-            || message != nil
+            listed: listed, chatPeers: chatPeers, listShowsRows: anyRow)
         VStack(alignment: .leading, spacing: 10) {
-            if let emptyText, !model.asksNetwork,
-               !model.showsAnything(
-                   includesChannels: includesChannels, showsLocalContacts: showsLocalContacts,
-                   listed: listed, chatPeers: chatPeers) {
-                Text(emptyText)
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .frame(maxWidth: .infinity)
+            ForEach(rows.local) { person in
+                personRow(person)
             }
-            if showsHeading {
-                HStack(spacing: 8) {
-                    Text(l10n.t("search.people.heading"))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.lakkoTextMuted)
-                    if model.searching {
-                        ProgressView().controlSize(.small)
-                            .accessibilityLabel(l10n.t("search.people.searching_a11y"))
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isHeader)
-                ForEach(rows.local) { person in
-                    personRow(person)
-                }
-                ForEach(rows.network) { person in
-                    personRow(person)
-                }
-                if let message {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        .accessibilityAddTraits(.updatesFrequently)
-                }
+            ForEach(rows.network) { person in
+                personRow(person)
             }
-            // ADR-0087 section 5 — "Groups and channels", below People.
-            let conversations = includesChannels ? (model.answer?.conversations ?? []) : []
-            if !conversations.isEmpty {
-                Text(l10n.t("search.conversations.heading"))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(conversations) { found in
-                    Button { onOpenConversation(found) } label: {
-                        ConversationFoundRow(found: found)
-                    }
-                    .buttonStyle(.plain)
+            ForEach(conversations) { found in
+                let held = isHeld(found.idHex)
+                Button { held ? onOpenHeld(found.idHex) : onOpenConversation(found) } label: {
+                    ConversationFoundRow(found: found, opens: held)
                 }
+                .buttonStyle(.plain)
             }
             if let channel {
-                Text(l10n.t("nav.channels"))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .accessibilityAddTraits(.isHeader)
                 Button { onOpenChannel(channel.idHex, channel.handle) } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "megaphone")
                             .frame(width: 40, height: 40)
                             .foregroundStyle(Color.lakkoAccent)
-                        Text(Self.channelRowTitle(channel, name: channelName(channel.idHex)))
-                            .foregroundStyle(Color.lakkoText)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(Self.channelRowTitle(channel, name: channelName(channel.idHex)))
+                                .foregroundStyle(Color.lakkoText)
+                            Text(l10n.t("nav.channels"))
+                                .font(.footnote)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                        }
                         Spacer()
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+            }
+            // The state line, at the end of the list.
+            if model.searching {
+                HStack {
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(l10n.t("search.people.searching_a11y"))
+            } else if let message {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(maxWidth: .infinity, alignment: anyRow ? .leading : .center)
+                    .multilineTextAlignment(anyRow ? .leading : .center)
+                    .accessibilityAddTraits(.updatesFrequently)
+            } else if !anyRow, !model.asksNetwork {
+                Text(l10n.t("search.nothing_found"))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
             }
         }
     }
@@ -235,6 +238,8 @@ private struct FoundPersonRow: View {
 /// and its kind and size band.
 struct ConversationFoundRow: View {
     let found: ConversationHandles.Found
+    /// This device is in it: the row reads `Open` and opens it.
+    var opens: Bool = false
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
@@ -253,6 +258,10 @@ struct ConversationFoundRow: View {
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             Spacer()
+            if opens {
+                Text(l10n.t("search.conversation.open"))
+                    .foregroundStyle(Color.lakkoAccent)
+            }
         }
         .contentShape(Rectangle())
     }

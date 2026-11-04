@@ -157,7 +157,7 @@ public struct ContactsScreen: View {
                         Section {
                             PeopleSearchSection(
                                 model: peopleSearch, includesChannels: false, showsLocalContacts: true,
-                                emptyText: noMatchText,
+                                listShowsRows: !items.isEmpty,
                                 listed: listedKeys,
                                 onOpenPerson: onOpenPerson)
                         }

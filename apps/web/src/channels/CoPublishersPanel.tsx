@@ -162,15 +162,17 @@ export function CoPublishersPanel(props: {
   });
 
   const [copied, setCopied] = createSignal(false);
+  const [copyFailed, setCopyFailed] = createSignal(false);
   async function copyLink(): Promise<void> {
     const l = link();
     if (l === null) return;
+    setCopyFailed(false);
     try {
       await navigator.clipboard.writeText(l);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      /* the button is the only feedback surface */
+      setCopyFailed(true);
     }
   }
   return (
@@ -204,6 +206,16 @@ export function CoPublishersPanel(props: {
             </button>
           </div>
         )}
+      </Show>
+      <Show when={copied()}>
+        <p class="form-info" role="status">
+          {t("chat.invite_link.copied")}
+        </p>
+      </Show>
+      <Show when={copyFailed()}>
+        <p class="form-error" role="alert">
+          {t("chat.invite_link.copy_failed")}
+        </p>
       </Show>
       <Show when={pending().length > 0}>
         <div class="lk-section-label lk-flush">

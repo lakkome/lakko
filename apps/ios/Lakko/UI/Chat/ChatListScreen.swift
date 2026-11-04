@@ -58,6 +58,10 @@ public struct ChatListScreen: View {
     /// A channel the search found by its handle, which this device may not
     /// hold yet: its subscribe page.
     public var onFoundChannel: (_ channelIdHex: String, _ handle: String) -> Void
+    /// `Subscribe` on the card of a public channel found by search
+    /// (`docs/ux/group-and-channel-privacy.md` section 5.1): subscribe in one
+    /// step and open the channel under the name its record carries.
+    public var onSubscribeFoundChannel: (_ channelIdHex: String, _ handle: String, _ name: String) -> Void
     /// **Open** on a found person who is already a contact: the conversation
     /// with them (`docs/ux/who-can-find-me.md` section 6.1).
     public var onOpenPerson: (FoundPerson) -> Void
@@ -108,6 +112,7 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
+        onSubscribeFoundChannel: @escaping (String, String, String) -> Void = { _, _, _ in },
         onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
         accountNotice: AccountNoticeBanner? = nil,
@@ -125,6 +130,7 @@ public struct ChatListScreen: View {
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
+        self.onSubscribeFoundChannel = onSubscribeFoundChannel
         self.onOpenPerson = onOpenPerson
         self.onOpenFolderSettings = onOpenFolderSettings
         self.recalledNotice = recalledNotice
@@ -272,7 +278,30 @@ public struct ChatListScreen: View {
     /// own — and a channel's last post time has to become the same field as a
     /// chat's last message time, or the one ordering has nothing to order by.
     private var rows: [ConversationListRow] {
-        ConversationList.filtered(allRows, query: searchText)
+        let all = allRows
+        let byText = ConversationList.filtered(all, query: searchText)
+        // ADR-0087 — a group or channel the person is in is found by its
+        // `@name` too, with or without the `@`.
+        let needle = String(searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .drop(while: { $0 == "@" })).lowercased()
+        guard !needle.isEmpty else { return byText }
+        let found = Set(byText.map(\.id))
+        return all.filter { row in
+            found.contains(row.id) || (heldHandle(row).map { $0.contains(needle) } ?? false)
+        }
+    }
+
+    /// The `@name` (without `@`, lower case) of a group or channel row.
+    private func heldHandle(_ row: ConversationListRow) -> String? {
+        switch row.kind {
+        case .channel:
+            let handle = channels.channels.first { $0.id == row.id }?.handle ?? ""
+            return handle.isEmpty ? nil : handle.lowercased()
+        case .group:
+            return viewModel.repository.groupHandle(groupIdHex: row.id)?.handle.lowercased()
+        default:
+            return nil
+        }
     }
 
     /// Every conversation, ordered, unfiltered: what All chats shows and what
@@ -522,14 +551,16 @@ public struct ChatListScreen: View {
                         if let peopleSearch {
                             PeopleSearchSection(
                                 model: peopleSearch, includesChannels: true, showsLocalContacts: true,
-                                emptyText: l10n.t("chats.search.no_results"),
                                 onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
                                 channelName: foundChannelName,
-                                onOpenConversation: { foundCard = $0 })
+                                onOpenConversation: { foundCard = $0 },
+                                isHeld: { idHex in allRows.contains { $0.id == idHex } },
+                                onOpenHeld: { _ = openHeldConversation($0) })
                             .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         } else {
-                            Text(l10n.t("chats.search.no_results"))
+                            Text(l10n.t("search.nothing_found"))
                                 .foregroundStyle(Color.lakkoTextMuted)
+                                .multilineTextAlignment(.center)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -581,17 +612,22 @@ public struct ChatListScreen: View {
                     // folder items (`docs/ux/chat-folders.md` section 5).
                     .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
                 }
-                // ADR-0060 — the people this device knows, then the network
-                // results under People (UX section 6.1).
+                // ADR-0060 — the people this device knows, then what the
+                // network found, in the same list with no heading (UX section
+                // 6.1, "One list").
                 if !query.isEmpty, let peopleSearch {
                     PeopleSearchSection(
                         model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                        listShowsRows: true,
                         listed: Set(invited.map(\.signaturePubkey)),
                         chatPeers: Set(visible.filter { $0.kind == .chat }.compactMap {
                             viewModel.peerSignatureKey(groupIdHex: $0.id)
                         }),
+                        listedConversations: Set(visible.map(\.id)),
                         onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel,
-                                channelName: foundChannelName, onOpenConversation: { foundCard = $0 })
+                        channelName: foundChannelName, onOpenConversation: { foundCard = $0 },
+                        isHeld: { idHex in allRows.contains { $0.id == idHex } },
+                        onOpenHeld: { _ = openHeldConversation($0) })
                         .sheet(item: $foundCard) { found in foundCardScreen(found) }
                         .listRowSeparator(.hidden)
                 }
@@ -797,15 +833,19 @@ public struct ChatListScreen: View {
 
     private func foundCardScreen(_ found: ConversationHandles.Found) -> some View {
         ConversationCardScreen(
-            found: found, repository: viewModel.repository, openHeld: openHeldGroup,
-            subscribe: openFoundChannel, onClose: { foundCard = nil })
+            found: found, repository: viewModel.repository,
+            isHeld: { idHex in allRows.contains { $0.id == idHex } },
+            openHeld: openHeldConversation,
+            subscribe: { idHex, handle, name in
+                searchText = ""
+                onSubscribeFoundChannel(idHex, handle, name)
+            },
+            onClose: { foundCard = nil })
     }
 
-    /// UX 5.1 — `Open` on the card of a group this device holds.
-    private func openHeldGroup(_ groupIdHex: String) -> Bool {
-        let rows = Self.chatRows(
-            viewModel: viewModel, flags: deviceGroupSync.flags, readCursors: deviceGroupSync.readCursors)
-        guard let row = rows.first(where: { $0.id == groupIdHex }) else { return false }
+    /// UX 5.1 — `Open` on the card of a group or channel this device holds.
+    private func openHeldConversation(_ idHex: String) -> Bool {
+        guard let row = allRows.first(where: { $0.id == idHex }) else { return false }
         searchText = ""
         onOpen(row)
         return true

@@ -38,7 +38,8 @@ import {
   bundleTargets,
   decodePublication,
   encodePublication,
-  evaluateMissingTerms,
+  evaluateMissingTermsInBatch,
+  type BatchTerm,
   everyoneAction,
   everyoneKey,
   forgetSentRecords,
@@ -172,21 +173,21 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const certificate = username === null ? null : await profiles.fetchOwnUsernameCertificate();
 
     /** A term to evaluate: its cache key and the OPRF round that yields it. */
-    type Term = { readonly key: string; readonly evaluate: () => Promise<OprfPair> };
+    type Term = BatchTerm;
 
-    /** The OPRF OUTPUTS of the terms (cached; each new one costs a token).
-     *  Outputs never leave the device; see `lookupKeysOf`. */
+    /** The OPRF OUTPUTS of the terms (cached). The terms not yet kept go in
+     *  ONE batch round (`POST /discovery/oprf/batch`, one register token):
+     *  they are this account's own name words and username. Outputs never
+     *  leave the device; see `lookupKeysOf`. */
     const outputsOf = async (terms: readonly Term[]): Promise<Uint8Array[]> => {
-      await evaluateMissingTerms(
-        state,
-        terms.map((t) => ({ key: t.key, evaluate: async () => base64Encode((await t.evaluate()).output) })),
-        {
-          keep: (termOutputs) => save({ ...state, termOutputs }),
-          isRateLimited: (err) => err instanceof DiscoveryHttpError && err.status === 429,
-          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        },
-      );
-      return terms.map((t) => base64Decode(state.termOutputs[t.key] ?? ""));
+      const kept = await evaluateMissingTermsInBatch(state, terms, {
+        evaluateBatch: async (missing) =>
+          (await scoped.ownTermsOprf(missing)).map((pair: OprfPair) => base64Encode(pair.output)),
+        keep: (termOutputs) => save({ ...state, termOutputs }),
+        isRateLimited: (err) => err instanceof DiscoveryHttpError && err.status === 429,
+        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      });
+      return terms.map((t) => base64Decode(kept[t.key] ?? state.termOutputs[t.key] ?? ""));
     };
     /** The lookup keys discovery gets for these outputs (ADR-0060 §5). */
     const lookupKeysOf = (outputs: readonly Uint8Array[]): Uint8Array[] =>
@@ -194,12 +195,9 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const nameTerms = (n: string | null): Term[] =>
       n === null
         ? []
-        : wasm.nameSearchTerms(n).map((term) => ({
-            key: `n:${term}`,
-            evaluate: () => scoped.nameTermOprf(term),
-          }));
+        : wasm.nameSearchTerms(n).map((term) => ({ key: `n:${term}`, kind: "term" as const, value: term }));
     const usernameTerms = (u: string | null): Term[] =>
-      u === null ? [] : [{ key: `u:${u}`, evaluate: () => scoped.usernameOprf(u) }];
+      u === null ? [] : [{ key: `u:${u}`, kind: "username" as const, value: u }];
 
     // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
     //    reach session's; this is the discovery half: the lookup keys of the

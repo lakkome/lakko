@@ -145,6 +145,7 @@ async fn every_token_route_answers_503_when_tokens_are_disabled() {
     let token = mint_header(&master(), TokenContext::DiscoveryLookup, 1);
     for uri in [
         "/discovery/oprf",
+        "/discovery/oprf/batch",
         "/discovery/handle/claim",
         "/discovery/handle/replace",
         "/discovery/invite/AAAAAAAA/consume",
@@ -241,4 +242,185 @@ async fn the_consumes_spend_their_own_context() {
 
     // The handle claim's `discovery-register` spend is tested with the
     // handle routes (`handles::tests`).
+}
+
+// ============================================================================
+// POST /discovery/oprf/batch (amendment of 2026-11-04, ADR-0087 section 4)
+// ============================================================================
+
+fn blinded_b64(input: &[u8]) -> String {
+    use rand::rngs::OsRng;
+    let blind = voprf::OprfClient::<oprf::LakkoOprfCs>::blind(input, &mut OsRng).unwrap();
+    B64.encode(blind.message.serialize())
+}
+
+fn batch_body(elements: &[String]) -> String {
+    serde_json::json!({ "blinded": elements }).to_string()
+}
+
+fn lazy_pool() -> MySqlPool {
+    MySqlPoolOptions::new()
+        .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
+        .unwrap()
+}
+
+#[test]
+fn the_batch_cap_covers_a_rename_of_a_name_with_every_term() {
+    // 64 name terms, the new @name and, on a rename, the old one.
+    assert_eq!(oprf::MAX_OPRF_BATCH, 66);
+    assert_eq!(oprf::MAX_OPRF_BATCH, lakko_contacts::MAX_HANDLE_TERMS + 1);
+    assert_eq!(
+        oprf::MAX_OPRF_BATCH,
+        lakko_discovery_client::MAX_NAME_TERMS + 2
+    );
+}
+
+/// The body is refused before the token is looked at, so these run without a
+/// database: the lazy pool is never reached (a spend would answer 500).
+#[tokio::test]
+async fn a_bad_batch_is_refused_before_any_token_is_spent() {
+    let app = build_app(state(lazy_pool(), true));
+    let token = mint_header(
+        &master(),
+        TokenContext::DiscoveryRegister,
+        current_epoch(DEFAULT_WINDOW_SECS),
+    );
+    let good = blinded_b64(b"alice");
+    let too_many: Vec<String> = (0..=oprf::MAX_OPRF_BATCH)
+        .map(|i| blinded_b64(format!("t{i}").as_bytes()))
+        .collect();
+    assert_eq!(too_many.len(), 67);
+    let cases = [
+        (batch_body(&[]), "oprf-batch-empty"),
+        (batch_body(&too_many), "oprf-batch-too-large"),
+        (
+            batch_body(&[good.clone(), "not base64!".to_owned()]),
+            "oprf-batch-bad-element",
+        ),
+        (
+            batch_body(&[good.clone(), B64.encode([0xffu8; 32])]),
+            "oprf-batch-bad-element",
+        ),
+        ("{}".to_owned(), "oprf-batch-malformed"),
+        ("not json".to_owned(), "oprf-batch-malformed"),
+        (
+            serde_json::json!({ "blinded": [good], "extra": 1 }).to_string(),
+            "oprf-batch-malformed",
+        ),
+    ];
+    for (body, code) in cases {
+        let (status, resp) = send(&app, post("/discovery/oprf/batch", Some(&token), body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{code}: {resp}");
+        assert_eq!(error_code(&resp), code);
+    }
+}
+
+#[tokio::test]
+async fn a_batch_evaluates_like_single_evaluations_for_one_register_token() {
+    let Some(pool) =
+        test_pool("a_batch_evaluates_like_single_evaluations_for_one_register_token").await
+    else {
+        return;
+    };
+    let app = build_app(state(pool, true));
+    let m = master();
+    let now = current_epoch(DEFAULT_WINDOW_SECS);
+
+    let elements: Vec<String> = (0..5)
+        .map(|i| blinded_b64(format!("term{i}").as_bytes()))
+        .collect();
+
+    // No token.
+    let (status, body) = send(
+        &app,
+        post("/discovery/oprf/batch", None, batch_body(&elements)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "anon-token-required");
+
+    // A lookup token is the wrong context.
+    let lookup = mint_header(&m, TokenContext::DiscoveryLookup, now);
+    let (status, body) = send(
+        &app,
+        post(
+            "/discovery/oprf/batch",
+            Some(&lookup),
+            batch_body(&elements),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "anon-token-wrong-context");
+
+    // A bad batch costs the register token nothing: the same token then pays
+    // for a good one.
+    let register = mint_header(&m, TokenContext::DiscoveryRegister, now);
+    let (status, _) = send(
+        &app,
+        post(
+            "/discovery/oprf/batch",
+            Some(&register),
+            batch_body(&[elements[0].clone(), "!!".to_owned()]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = send(
+        &app,
+        post(
+            "/discovery/oprf/batch",
+            Some(&register),
+            batch_body(&elements),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let batch: Vec<String> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["evaluated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(batch.len(), elements.len());
+
+    // Spent once for the whole batch.
+    let (status, body) = send(
+        &app,
+        post(
+            "/discovery/oprf/batch",
+            Some(&register),
+            batch_body(&elements),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "anon-token-spent");
+
+    // Each evaluation equals the single-element route's, in order.
+    for (element, evaluated) in elements.iter().zip(&batch) {
+        let t = mint_header(&m, TokenContext::DiscoveryLookup, now);
+        let single = serde_json::json!({ "blinded": element }).to_string();
+        let (status, body) = send(&app, post("/discovery/oprf", Some(&t), single)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["evaluated"].as_str().unwrap(), evaluated);
+    }
+
+    // The full cap is accepted.
+    let full: Vec<String> = (0..oprf::MAX_OPRF_BATCH)
+        .map(|i| blinded_b64(format!("f{i}").as_bytes()))
+        .collect();
+    let t = mint_header(&m, TokenContext::DiscoveryRegister, now);
+    let (status, body) = send(
+        &app,
+        post("/discovery/oprf/batch", Some(&t), batch_body(&full)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["evaluated"].as_array().unwrap().len(),
+        oprf::MAX_OPRF_BATCH
+    );
 }

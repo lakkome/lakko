@@ -346,6 +346,54 @@ export async function evaluateMissingTerms(
   }
 }
 
+/** One own term for a batch round: its cache key and what to blind. */
+export interface BatchTerm {
+  readonly key: string;
+  readonly kind: "term" | "username";
+  readonly value: string;
+}
+
+/**
+ * Evaluate the terms not yet kept in ONE batch round (`POST
+ * /discovery/oprf/batch`, one register token per 66 terms), asked once more
+ * after a rate limit, and keep every output the moment the batch answers.
+ * The per-term {@link evaluateMissingTerms} spent a lookup token per word and
+ * ran into the server's burst on a long name.
+ */
+export async function evaluateMissingTermsInBatch(
+  state: PublicationState,
+  terms: readonly BatchTerm[],
+  deps: {
+    /** The base64 outputs of `missing`, in order. */
+    readonly evaluateBatch: (missing: readonly BatchTerm[]) => Promise<string[]>;
+    readonly keep: (termOutputs: Readonly<Record<string, string>>) => Promise<void>;
+    readonly isRateLimited: (err: unknown) => boolean;
+    readonly wait: (ms: number) => Promise<void>;
+  },
+): Promise<Readonly<Record<string, string>>> {
+  const wanted = new Set(termsToEvaluate(state, terms.map((t) => t.key)));
+  const missing: BatchTerm[] = [];
+  for (const t of terms) {
+    if (wanted.delete(t.key)) missing.push(t);
+  }
+  if (missing.length === 0) return state.termOutputs;
+  let outputs: string[];
+  try {
+    outputs = await deps.evaluateBatch(missing);
+  } catch (err) {
+    if (!deps.isRateLimited(err)) throw err;
+    await deps.wait(TERM_RATE_LIMIT_WAIT_MS);
+    outputs = await deps.evaluateBatch(missing);
+  }
+  if (outputs.length !== missing.length) throw new Error("an OPRF batch answered fewer terms than asked");
+  const kept: Record<string, string> = { ...state.termOutputs };
+  missing.forEach((t, i) => {
+    kept[t.key] = outputs[i] ?? "";
+  });
+  await deps.keep(kept);
+  return kept;
+}
+
 /** Version of the persisted row. 2: `termOutputs` and the Everyone `key`
  *  (ADR-0060 section 5: discovery holds lookup keys, never OPRF outputs). A
  *  row of any other version reads as empty, so a device that published under

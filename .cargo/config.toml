@@ -7,3 +7,12 @@ git-fetch-with-cli = true
 [build]
 # An rustc wrapper can be wired in here later (e.g. sccache):
 # rustc-wrapper = "sccache"
+
+# Google Play requires 16 KB-aligned LOAD segments in every native library
+# (Android 15+ devices with 16 KB pages). NDK r28+ links that way by default;
+# this keeps an older NDK from producing a 4 KB-aligned liblakko_ffi_uniffi.so.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

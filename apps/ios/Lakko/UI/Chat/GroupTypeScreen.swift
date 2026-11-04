@@ -18,6 +18,10 @@ struct GroupTypeScreen: View {
     @State private var saving = false
     @State private var lineKey: String?
     @State private var confirm: Confirm?
+    /// The live taken check of a new public `@name` (who-can-find-me 6.1).
+    @State private var taken = false
+    @State private var rateLimited = false
+    @State private var takenCheck: Task<Void, Never>?
 
     private let initialPublic: Bool
     private let initialHandle: String
@@ -47,7 +51,30 @@ struct GroupTypeScreen: View {
             || viewModel.groupHandle == nil
     }
     private var canSave: Bool {
-        changed && !saving && !needsName && ConversationHandles.wellFormed(handle)
+        changed && !saving && !needsName && ConversationHandles.wellFormed(handle) && !(isPublic && taken)
+    }
+
+    /// 500 ms after typing stops, a public name other than the group's own
+    /// is looked up once; an answer from the last minute is reused.
+    private func scheduleTakenCheck() {
+        takenCheck?.cancel()
+        taken = false
+        rateLimited = false
+        let typed = ConversationHandles.canonical(handle)
+        guard isPublic, typed.count >= 3, ConversationHandles.wellFormed(typed),
+              typed != viewModel.groupHandle?.handle else { return }
+        if let held = HandleTakenCheck.held(typed) {
+            taken = held == .taken
+            return
+        }
+        takenCheck = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: HandleTakenCheck.debounceNanoseconds)
+            guard !Task.isCancelled, typed == ConversationHandles.canonical(handle) else { return }
+            let answer = await HandleTakenCheck.check(typed)
+            guard !Task.isCancelled, typed == ConversationHandles.canonical(handle) else { return }
+            taken = answer == .taken
+            rateLimited = answer == .rateLimited
+        }
     }
 
     var body: some View {
@@ -72,6 +99,10 @@ struct GroupTypeScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if !handle.isEmpty && !ConversationHandles.wellFormed(handle) {
                         Text(l10n.t("group_handle.error.bad_form")).foregroundStyle(Color.lakkoDanger)
+                    } else if isPublic && taken {
+                        Text(l10n.t("group_handle.error.taken")).foregroundStyle(Color.lakkoDanger)
+                    } else if isPublic && rateLimited {
+                        Text(l10n.t("common.error.too_many_attempts")).foregroundStyle(Color.lakkoTextMuted)
                     } else {
                         Text(l10n.t(isPublic ? "group_type.handle_public" : "group_type.handle_private"))
                     }
@@ -88,6 +119,8 @@ struct GroupTypeScreen: View {
                 }
             }
         }
+        .onChange(of: handle) { _, _ in scheduleTakenCheck() }
+        .onChange(of: isPublic) { _, _ in scheduleTakenCheck() }
         .navigationTitle(l10n.t("group_type.title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

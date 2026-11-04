@@ -15,7 +15,10 @@ import { createSignal, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode } from "../auth/account-id";
-import { useChats } from "../chat/ChatContext";
+import { useChats, type ChatApi } from "../chat/ChatContext";
+import { readIsActive } from "../chat/membership-ended";
+import { useLineage, type LineageView } from "../chat/use-lineage";
+import { channelsState } from "../state/channels-state";
 import { recordRequestSent, sentRequestFor, mayAskAgain } from "../chat/requests-sent";
 import { ContactsClient } from "../contacts/client";
 import { DsHttpError, DsNetworkError } from "../ds/client";
@@ -38,13 +41,48 @@ export function sizeLine(c: FoundConversation): string {
 
 const BANDS = ["<10", "10+", "100+", "1k+", "10k+", "100k+"];
 
+/** The hex form of a found conversation's id (a channel's route id). */
+export function foundIdHex(found: FoundConversation): string {
+  let hex = "";
+  for (const b of atob(found.idB64)) hex += b.charCodeAt(0).toString(16).padStart(2, "0");
+  return hex;
+}
+
+/** Whether this account is already in the found group or channel: a group
+ *  any segment of whose lineage this device holds, a channel in the channel
+ *  list. Such a card offers `Open`, never a request (UX section 5.1). */
+export function isMemberOf(
+  found: FoundConversation,
+  chats: Pick<ChatApi, "get">,
+  lineage: Pick<LineageView, "resolve"> | null,
+): boolean {
+  if (found.kind === "channel") {
+    const hex = foundIdHex(found);
+    return channelsState.channels().some((c) => c.id === hex);
+  }
+  if (chats.get(found.idB64) !== undefined) return true;
+  const view = lineage?.resolve(found.idB64);
+  return view !== undefined && readIsActive(view.head.group) !== false;
+}
+
+/** The lineage view where the device-group sync is mounted (the app);
+ *  `null` outside it, where only the group id itself is matched. */
+export function useLineageIfMounted(): LineageView | null {
+  try {
+    return useLineage();
+  } catch {
+    return null;
+  }
+}
+
 /** One row under **Groups and channels**. */
 export function ConversationRow(props: {
   readonly found: FoundConversation;
   readonly onOpen: (found: FoundConversation) => void;
 }): JSX.Element {
   const chats = useChats();
-  const member = (): boolean => chats.get(props.found.idB64) !== undefined;
+  const lineage = useLineageIfMounted();
+  const member = (): boolean => isMemberOf(props.found, chats, lineage);
   // UX 4.5.4 — the row shows the photo of a public one.
   rememberCardAvatar(`conv:${props.found.idB64}`, props.found.avatar);
   return (
@@ -77,8 +115,8 @@ export function ConversationCard(props: {
   readonly onBack: () => void;
   /** Open a conversation this device is in. */
   readonly onOpenConversation: (idB64: string) => void;
-  /** A channel: open its page (subscribing stays as it is today). */
-  readonly onOpenChannel?: (found: FoundConversation) => void;
+  /** A channel: open it; `subscribe` subscribes in the same step. */
+  readonly onOpenChannel?: (found: FoundConversation, subscribe: boolean) => void;
 }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
@@ -90,7 +128,8 @@ export function ConversationCard(props: {
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
   });
 
-  const member = (): boolean => props.found !== null && chats.get(props.found.idB64) !== undefined;
+  const lineage = useLineageIfMounted();
+  const member = (): boolean => props.found !== null && isMemberOf(props.found, chats, lineage);
   const alreadySent = (): boolean => {
     const f = props.found;
     return f !== null && !mayAskAgain(sentRequestFor(f.idB64), Date.now());
@@ -139,7 +178,13 @@ export function ConversationCard(props: {
             <Show
               when={!member()}
               fallback={
-                <button type="button" class="primary" onClick={() => props.onOpenConversation(f().idB64)}>
+                <button
+                  type="button"
+                  class="primary"
+                  onClick={() =>
+                    f().kind === "channel" ? props.onOpenChannel?.(f(), false) : props.onOpenConversation(f().idB64)
+                  }
+                >
                   {t("search.conversation.open")}
                 </button>
               }
@@ -147,7 +192,7 @@ export function ConversationCard(props: {
               <Show
                 when={f().kind === "group"}
                 fallback={
-                  <button type="button" class="primary" onClick={() => props.onOpenChannel?.(f())}>
+                  <button type="button" class="primary" onClick={() => props.onOpenChannel?.(f(), true)}>
                     {t("search.conversation.subscribe")}
                   </button>
                 }

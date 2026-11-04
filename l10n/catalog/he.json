@@ -1571,7 +1571,7 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
@@ -2306,8 +2306,16 @@
       "text": "פרטי הקבוצה",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "הקישור הועתק.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "העתקת הקישור",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "לא ניתן היה להעתיק את הקישור.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2470,12 +2478,24 @@
       "text": "אישור",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "ביקש {when}",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "בקשות הצטרפות ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "בקשות הצטרפות (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "הוזמן על ידי {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "הוזמן על ידי {name}",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3624,6 +3644,10 @@
     },
     "common.copy": {
       "text": "העתקה",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "לא ניתן היה להעתיק.",
       "status": "machine"
     },
     "common.creating": {
@@ -7812,6 +7836,10 @@
     },
     "search.conversations.heading": {
       "text": "קבוצות וערוצים",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "לא נמצא דבר. בדקו את האיות, או בקשו קישור הזמנה.",
       "status": "machine"
     },
     "search.people.add_contact": {

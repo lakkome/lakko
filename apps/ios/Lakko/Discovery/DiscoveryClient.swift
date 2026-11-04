@@ -138,6 +138,50 @@ public final class DiscoveryClient {
             endpoint: "/discovery/oprf", body: request, context: .discoveryLookup)
     }
 
+    /// What one entry of an own-name batch blinds: the `@name` (the username
+    /// domain) or a name search term.
+    public enum OwnOprfInput: Equatable {
+        case name(String)
+        case term(String)
+    }
+
+    /// The most entries one batch takes: the record's 65 terms (the `@name`
+    /// and 64 name terms) plus the old `@name` of a replace.
+    public static let ownOprfBatchMax = 66
+
+    /// `POST /discovery/oprf/batch` (maintainer, 2026-11-04) — every OPRF
+    /// evaluation the account needs to publish its own or a conversation's
+    /// own name, in ONE request spending ONE `discovery-register` token:
+    /// blinded here, evaluated in order, each finalized with its own blinder.
+    /// Before it, each term was its own `/discovery/oprf` round with its own
+    /// lookup token, and a long name ran out of the token pool and into the
+    /// per-address limit. A search for someone else stays on
+    /// `/discovery/oprf`. Throws on an empty or oversized batch and on an
+    /// answer that does not match the request.
+    public func oprfOwnBatch(_ inputs: [OwnOprfInput]) async throws -> [OprfResult] {
+        guard !inputs.isEmpty, inputs.count <= Self.ownOprfBatchMax else {
+            throw DiscoveryClientError.argument("an OPRF batch takes 1 to \(Self.ownOprfBatchMax) entries")
+        }
+        let blinders: [OprfBlinder] = try inputs.map { input in
+            switch input {
+            case .name(let name): return try OprfBlinder.blind(username: name)
+            case .term(let term): return try OprfBlinder.blindNameTerm(term: term)
+            }
+        }
+        let endpoint = "/discovery/oprf/batch"
+        let response: OprfBatchResponse = try await postAnonymous(
+            endpoint: endpoint,
+            body: OprfBatchRequest(blinded: blinders.map { $0.blindedB64() }),
+            context: .discoveryRegister)
+        guard response.evaluated.count == blinders.count else {
+            throw DiscoveryClientError.http(
+                status: 200, endpoint: endpoint, body: "evaluation count does not match the request")
+        }
+        return try zip(blinders, response.evaluated).map { blinder, evaluated in
+            try blinder.finalize(evaluatedB64: evaluated)
+        }
+    }
+
     /// `POST /discovery/register`.
     public func register(_ request: RegisterRequest) async throws -> RegisterResponse {
         try await post(endpoint: "/discovery/register", body: request)

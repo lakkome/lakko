@@ -421,17 +421,12 @@ A pending **role change** gets no row annotation — it cannot be attributed to 
 one of: the roster updates within the quiet window (nothing else ever renders), or the row
 annotation + panel notice appear.
 
-**Confirmation is now required on all three platforms.** Today only web confirms
-(`window.confirm("Remove this member (leaf #N)?")`); iOS and Android remove on a single
-tap. Because a request cannot be withdrawn (§3), the confirm is the last exit and the
-asymmetry has to go. Copy:
-
-- Title: `Remove this member?`
-- Body: `They will keep receiving messages until an owner or an admin applies the change.`
-- Buttons: `Remove` (destructive) / `Cancel`
-
-That body line is not a nicety. It is the one fact a user removing someone for a safety
-reason must have, and it is the fact the old immediate-looking UI concealed.
+**No confirmation (decided 2026-11-04 by the maintainer).** `Remove` acts on the tap,
+on all three platforms. The person removing is an owner or an admin, the one who decides,
+and an extra dialog asking them whether they meant it, or telling them the removal waits
+for "an owner or an admin" when they are that person, was rejected as noise. Where the
+removal has to wait for another committer, the row's `Waiting to be removed.` line says so;
+that annotation stays.
 
 **Leaving** (new — the core made this reachable for the first time):
 

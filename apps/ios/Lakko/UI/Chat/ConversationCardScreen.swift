@@ -11,9 +11,14 @@ import SwiftUI
 struct ConversationCardScreen: View {
     let found: ConversationHandles.Found
     let repository: ChatRepository
-    /// Opens the group when this device holds it; `false` when it does not.
+    /// Whether this device already holds the group or follows the channel
+    /// (a row in its conversation list).
+    let isHeld: (String) -> Bool
+    /// Opens the conversation when this device holds it; `false` when it does
+    /// not.
     let openHeld: (String) -> Bool
-    let subscribe: (_ channelIdHex: String, _ handle: String) -> Void
+    /// Subscribes to the channel and opens it under `name`.
+    let subscribe: (_ channelIdHex: String, _ handle: String, _ name: String) -> Void
     let onClose: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
@@ -21,7 +26,7 @@ struct ConversationCardScreen: View {
     @State private var lineKey: String?
     @State private var sent = false
 
-    private var held: Bool { repository.groups[found.idHex] != nil }
+    private var held: Bool { isHeld(found.idHex) || repository.groups[found.idHex] != nil }
 
     private var alreadySent: Bool {
         sent || (AcceptedContactsStore.boundAccountIdB64.map {
@@ -72,14 +77,14 @@ struct ConversationCardScreen: View {
 
     @ViewBuilder
     private var button: some View {
-        if found.kind == .channel {
-            AuthPrimaryButton(title: l10n.t("search.conversation.subscribe")) {
-                subscribe(found.idHex, found.handle)
-                onClose()
-            }
-        } else if held {
+        if held {
             AuthPrimaryButton(title: l10n.t("search.conversation.open")) {
                 if openHeld(found.idHex) { onClose() }
+            }
+        } else if found.kind == .channel {
+            AuthPrimaryButton(title: l10n.t("search.conversation.subscribe")) {
+                onClose()
+                subscribe(found.idHex, found.handle, found.name)
             }
         } else if alreadySent {
             AuthPrimaryButton(title: l10n.t("search.conversation.request_sent_button"), disabled: true) {}

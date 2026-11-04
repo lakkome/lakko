@@ -48,6 +48,16 @@ data class OprfResponse(
     val evaluated: String,
 )
 
+/** Body of `POST /discovery/oprf/batch`: the own name's terms, 1..=66
+ *  blinded elements, one `discovery-register` token for all of them. */
+@Serializable
+data class OprfBatchRequest(val blinded: List<String>)
+
+/** Response of `POST /discovery/oprf/batch`: one evaluation per element, in
+ *  the order sent. */
+@Serializable
+data class OprfBatchResponse(val evaluated: List<String>)
+
 // ----------------------------------------------------------------------------
 // /discovery/register  (services/discovery/src/registry.rs)
 // ----------------------------------------------------------------------------

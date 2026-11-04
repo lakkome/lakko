@@ -179,6 +179,42 @@ public final class GroupSettingsStore {
         defaults.set(all, forKey: Self.key(accountIdB64, "request_names"))
     }
 
+    /// UX section 8 — when a request to join reached this device and, for a
+    /// request that came by a link, the account key of the link's issuer.
+    public struct RequestMeta: Equatable {
+        public let askedAtMs: Int64
+        public let inviterKey: Data?
+    }
+
+    /// The meta of each request, by the joiner's leaf signature key (base64).
+    public func requestMeta(accountIdB64: String, groupIdHex: String) -> [String: RequestMeta] {
+        let row = map(accountIdB64, "request_meta")[groupIdHex] as? [String: [String: Any]] ?? [:]
+        var out: [String: RequestMeta] = [:]
+        for (key, value) in row {
+            guard let at = (value["at"] as? NSNumber)?.int64Value else { continue }
+            out[key] = RequestMeta(
+                askedAtMs: at, inviterKey: (value["inviter"] as? String).flatMap { Data(base64Encoded: $0) })
+        }
+        return out
+    }
+
+    /// Keeps the first sighting of a request; a request seen again keeps its
+    /// time.
+    public func keepRequestMeta(
+        accountIdB64: String, groupIdHex: String, joinerKeyB64: String, askedAtMs: Int64, inviterKey: Data?
+    ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        var all = map(accountIdB64, "request_meta")
+        var row = all[groupIdHex] as? [String: Any] ?? [:]
+        guard row[joinerKeyB64] == nil else { return }
+        var entry: [String: Any] = ["at": NSNumber(value: askedAtMs)]
+        if let inviterKey { entry["inviter"] = inviterKey.base64EncodedString() }
+        row[joinerKeyB64] = entry
+        all[groupIdHex] = row
+        defaults.set(all, forKey: Self.key(accountIdB64, "request_meta"))
+    }
+
     // MARK: Created here (UX section 10)
 
     /// This device's account created the group: the timeline opens with
@@ -236,7 +272,7 @@ public final class GroupSettingsStore {
     public func removeGroup(accountIdB64: String, groupIdHex: String) {
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
         defer { gate.leave() }
-        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_rekey", "created", "request_names"] {
+        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_rekey", "created", "request_names", "request_meta"] {
             var all = map(accountIdB64, part)
             if all.removeValue(forKey: groupIdHex) != nil {
                 defaults.set(all, forKey: Self.key(accountIdB64, part))
@@ -245,7 +281,7 @@ public final class GroupSettingsStore {
     }
 
     public func clear(accountIdB64: String) {
-        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_replaced", "photo_rekey", "created", "request_names"] {
+        for part in ["reactions", "photo", "photo_owed", "handle", "knock", "photo_replaced", "photo_rekey", "created", "request_names", "request_meta"] {
             defaults.removeObject(forKey: Self.key(accountIdB64, part))
         }
     }

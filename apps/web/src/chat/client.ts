@@ -117,6 +117,7 @@ import { sniffSharedChannels, type SharedList } from "../discover/shared-channel
 import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
 import { deliverKnockSeed, groupIsPublic, knockSeedsForRow, rememberKnockName } from "../ds/knock-seeds";
+import { rememberKnockOrigin, rowStampMs } from "./knock-origins";
 import { joinReplyBindingVerifies, rememberJoinReply } from "../reach/join-replies";
 import { reachSession } from "../reach/reach-service";
 import { sniffGroupSetting, type GroupSetting } from "./group-settings-envelope";
@@ -1380,19 +1381,22 @@ export class ChatClient {
     }
     if (request === undefined) return "dropped";
     try {
-      // A private group takes a row only with a capability of this group.
-      if (!groupIsPublic(groupIdB64)) {
-        const cap = request.capability;
-        if (cap === undefined || cap.length === 0) return "dropped";
+      // The link the request came through, when it came through one (its
+      // issuer is the "Invited by" line, UX section 8). A private group takes
+      // a row only with a capability of this group.
+      let issuerKeyB64: string | null = null;
+      const cap = request.capability;
+      if (cap !== undefined && cap.length > 0) {
         try {
           const c = wasm.GroupInviteCapability.decodeAndVerify(cap);
           const same = base64Encode(c.groupId) === groupIdB64;
+          if (same) issuerKeyB64 = base64Encode(c.issuerSignaturePubkey);
           c.free();
-          if (!same) return "dropped";
         } catch {
-          return "dropped";
+          issuerKeyB64 = null;
         }
       }
+      if (!groupIsPublic(groupIdB64) && issuerKeyB64 === null) return "dropped";
       let joined;
       try {
         joined = group.retainJoinRequest(myIdentity, request.keyPackage);
@@ -1427,6 +1431,10 @@ export class ChatClient {
         rememberKnockName(base64Encode(joinerKey), name);
         profile.free();
       }
+      await rememberKnockOrigin(base64Encode(joinerKey), {
+        askedAtMs: rowStampMs(row.createdAt),
+        issuerKeyB64,
+      });
       return {
         kind: "externalJoinRequest",
         messageId: row.id,

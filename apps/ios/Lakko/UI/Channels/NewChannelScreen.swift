@@ -37,6 +37,11 @@ struct NewChannelScreen: View {
     @State private var handle: String = ""
     @State private var busy = false
     @State private var errorMessage: UiText?
+    /// The live taken check of the handle (who-can-find-me 6.1): 500 ms
+    /// after typing stops, an answer reused for a minute.
+    @State private var handleTaken = false
+    @State private var handleRateLimited = false
+    @State private var takenCheck: Task<Void, Never>?
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
@@ -54,7 +59,14 @@ struct NewChannelScreen: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
             } footer: {
-                Text(l10n.t("channels.new.handle_hint"))
+                if handleTaken {
+                    Text(l10n.t("channels.new.error.handle_taken", texts: ["handle": "@\(bareHandle)"]))
+                        .foregroundStyle(Color.lakkoDanger)
+                } else if handleRateLimited {
+                    Text(l10n.t("common.error.too_many_attempts"))
+                } else {
+                    Text(l10n.t("channels.new.handle_hint"))
+                }
             }
             if let errorMessage {
                 Section {
@@ -71,6 +83,7 @@ struct NewChannelScreen: View {
                 }
             }
         }
+        .onChange(of: handle) { _, _ in scheduleTakenCheck() }
         .scrollContentBackground(.hidden)
         .background(Color.lakkoBackground)
         .navigationTitle(l10n.t("channels.new.title"))
@@ -85,8 +98,38 @@ struct NewChannelScreen: View {
         }
     }
 
+    private var bareHandle: String {
+        String(handle.trimmingCharacters(in: .whitespaces).drop(while: { $0 == "@" }))
+    }
+
+    private func scheduleTakenCheck() {
+        takenCheck?.cancel()
+        handleTaken = false
+        handleRateLimited = false
+        let typed = ConversationHandles.canonical(bareHandle)
+        guard typed.count >= 3, ConversationHandles.wellFormed(typed) else { return }
+        if let held = HandleTakenCheck.held(typed) {
+            handleTaken = held == .taken
+            return
+        }
+        takenCheck = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: HandleTakenCheck.debounceNanoseconds)
+            guard !Task.isCancelled, typed == ConversationHandles.canonical(bareHandle) else { return }
+            let answer = await HandleTakenCheck.check(typed)
+            guard !Task.isCancelled, typed == ConversationHandles.canonical(bareHandle) else { return }
+            handleTaken = answer == .taken
+            handleRateLimited = answer == .rateLimited
+        }
+    }
+
     private func create() async {
         if busy { return }
+        // A handle the check found taken in the last minute: no claim.
+        if !bareHandle.isEmpty, HandleTakenCheck.held(bareHandle) == .taken {
+            handleTaken = true
+            errorMessage = .key("channels.new.error.handle_taken", texts: ["handle": "@\(bareHandle)"])
+            return
+        }
         busy = true
         defer { busy = false }
         errorMessage = nil
@@ -128,10 +171,15 @@ struct NewChannelScreen: View {
                         description: description.trimmingCharacters(in: .whitespacesAndNewlines)
                     )
                 } catch let refusal as DiscoveryClient.HandleWriteError where refusal.code == "name-taken" {
+                    HandleTakenCheck.note(cleanHandle, .taken)
                     if let accountIdB64 {
                         PendingChannelHandleStore.forget(handle: cleanHandle, accountIdB64: accountIdB64)
                     }
                     errorMessage = .key("channels.new.error.handle_taken", texts: ["handle": "@\(cleanHandle)"])
+                    return
+                } catch let refusal as DiscoveryClient.HandleWriteError where refusal.status == 429 {
+                    // Discovery's rate limit: its own line, not "could not claim".
+                    errorMessage = .key("common.error.too_many_attempts")
                     return
                 } catch let token as AnonTokenUnavailable {
                     // ADR-0054 S3: the allowance copy, or the network copy.

@@ -197,7 +197,7 @@ internal fun ConversationPicker(
         )
     }
     val visible = remember(rows, query) {
-        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview, it.handle) }
     }
 
     Scaffold(

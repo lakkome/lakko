@@ -44,10 +44,10 @@ import me.lakko.app.search.channelResultLabel
 import me.lakko.app.search.keptGrantsToCheck
 import me.lakko.app.search.mergePeople
 import me.lakko.app.search.peopleRows
-import me.lakko.app.search.peopleSectionMessage
 import me.lakko.app.search.personRowView
 import me.lakko.app.search.rowSendState
-import me.lakko.app.search.showsPeopleHeading
+import me.lakko.app.search.searchEndLine
+import me.lakko.app.search.searchShowsNothingFound
 import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
 
@@ -78,7 +78,7 @@ internal fun PeopleSearchSection(
     /** Open a contact's page (their chat). */
     onOpenContact: (keyB64: String) -> Unit,
     /** The line when nothing local matches; `null` for none. */
-    noLocalMatchKey: String? = "chats.search.no_results",
+    noLocalMatchKey: String? = "search.nothing_found",
     /** People already listed above (standard base64 account keys), left out. */
     excludeKeysB64: Set<String> = emptySet(),
     /** The people whose one-to-one is among the conversations above (standard
@@ -118,21 +118,33 @@ internal fun PeopleSearchSection(
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
     val channel = shown?.channel
-    val state = view.state
-    val nothingLocal = conversationMatches == 0 && local.none { it.keyB64 !in excludeKeysB64 } && channel == null
+    // ADR-0087 section 5 — the public groups and channels, asked here so the
+    // field knows whether anything matched at all.
+    val found = rememberFoundConversations(query, conversations)
+    // who-can-find-me.md section 6.1, "One list": no headings. The rows this
+    // device holds stand above (the caller's list), then the people (local
+    // first), the groups and channels, the channel a handle names; the spinner
+    // and the failure line at the end. "Nothing found" only when nothing
+    // stands at all.
+    val searching = view.searching || found.pending
+    val endLine = if (view.searching) null else searchEndLine(view.state)
+    val nothing = noLocalMatchKey != null && searchShowsNothingFound(
+        listRows = conversationMatches,
+        people = people.size,
+        channelFound = channel != null,
+        conversationsFound = found.rows.size,
+        searching = searching,
+        endLine = endLine != null,
+    )
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (noLocalMatchKey != null && nothingLocal && state != PeopleSearchState.FOUND) {
+        if (nothing && noLocalMatchKey != null) {
             Text(
                 t(noLocalMatchKey),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
-        }
-        val line = peopleSectionMessage(state, people.size)
-        if (showsPeopleHeading(people.size, view.searching, line != null)) {
-            Heading(t("search.people.heading"), searching = view.searching)
         }
         for (person in people) {
             PersonRow(
@@ -144,16 +156,16 @@ internal fun PeopleSearchSection(
                 onOpenContact = onOpenContact,
             )
         }
-        // ADR-0087 section 5 — "Groups and channels", below People.
-        if (conversations != null) GroupsAndChannelsSection(query = query, port = conversations)
+        if (conversations != null) GroupsAndChannelsSection(found = found.rows, port = conversations)
         if (channel != null) {
-            Heading(t("nav.channels"), searching = false)
             ChannelRow(
                 label = channelResultLabel(channelName(channel.idHex), channel.handle),
+                handle = channel.handle,
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
             )
         }
-        line?.let {
+        if (searching) SearchingRow()
+        endLine?.let {
             Text(
                 it.text(),
                 style = MaterialTheme.typography.bodySmall,
@@ -164,40 +176,41 @@ internal fun PeopleSearchSection(
     }
 }
 
+/** The spinner at the end of the list while the network is asked. */
 @Composable
-private fun Heading(title: String, searching: Boolean) {
+private fun SearchingRow() {
+    val label = t("search.people.searching_a11y")
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        horizontalArrangement = Arrangement.Center,
     ) {
-        Text(
-            title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp).semantics { contentDescription = label },
+            strokeWidth = 2.dp,
         )
-        if (searching) {
-            Spacer(Modifier.width(8.dp))
-            val label = t("search.people.searching_a11y")
-            CircularProgressIndicator(
-                modifier = Modifier.size(14.dp).semantics { contentDescription = label },
-                strokeWidth = 2.dp,
-            )
-        }
     }
 }
 
 @Composable
-private fun ChannelRow(label: String, onClick: () -> Unit) {
+private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Campaign, contentDescription = null)
+        Icon(Icons.Filled.Campaign, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
         Spacer(Modifier.width(12.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            // Its second line says what it is.
+            Text(
+                t("search.people.channel_result", mapOf("handle" to "@$handle")),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Icon(Icons.Filled.ChevronRight, contentDescription = null)
     }
 }

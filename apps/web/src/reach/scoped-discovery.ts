@@ -188,6 +188,44 @@ export class ScopedDiscoveryClient {
     }
   }
 
+  /**
+   * The OPRF pairs of this account's or a conversation's OWN search terms,
+   * in the order given: every term blinded, sent in batches of at most 66
+   * (`POST /discovery/oprf/batch`, one `discovery-register` token each), and
+   * each answer finalized with its own blinder. A `username` item is blinded
+   * as a username, a `term` item as a name search word.
+   */
+  async ownTermsOprf(
+    items: readonly { readonly kind: "term" | "username"; readonly value: string }[],
+  ): Promise<OprfPair[]> {
+    const wasm = await loadWasm();
+    const out: OprfPair[] = [];
+    for (let start = 0; start < items.length; start += DiscoveryClient.OPRF_BATCH_MAX) {
+      const chunk = items.slice(start, start + DiscoveryClient.OPRF_BATCH_MAX);
+      const blinders = chunk.map((it) =>
+        it.kind === "username" ? wasm.OprfBlinder.blind(it.value) : wasm.OprfBlinder.blindNameTerm(it.value),
+      );
+      const consumed = new Set<number>();
+      try {
+        const evaluated = await this.discovery.oprfEvaluateBatch(blinders.map((b) => b.blindedB64));
+        blinders.forEach((blinder, i) => {
+          consumed.add(i);
+          out.push(finalizeOprf(blinder, evaluated[i] ?? ""));
+        });
+      } finally {
+        blinders.forEach((blinder, i) => {
+          if (consumed.has(i)) return;
+          try {
+            blinder.free();
+          } catch {
+            /* already freed */
+          }
+        });
+      }
+    }
+    return out;
+  }
+
   /** One OPRF round over a username (one anonymous token): the lookup key
    *  for discovery and certificates, the output for records. */
   async usernameOprf(username: string): Promise<OprfPair> {

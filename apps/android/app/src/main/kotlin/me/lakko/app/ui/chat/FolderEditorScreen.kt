@@ -431,7 +431,7 @@ private fun ChatPicker(
     var checked by remember { mutableStateOf(initiallyChecked) }
     var query by remember { mutableStateOf("") }
     val visible = remember(rows, query) {
-        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview, it.handle) }
     }
     val full = checked.size + unresolvedCount >= FolderLimits.MAX_HAND
     Dialog(

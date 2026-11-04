@@ -25,11 +25,20 @@
 export const INFO_PARAM = "info";
 
 /** The screens of a group's info, front to back. */
-export type InfoScreen = "group" | "add-members";
+export type InfoScreen = "group" | "add-members" | "group-type" | "group-reactions";
 
 /** The parameter value of each screen. */
 export function infoParamOf(screen: InfoScreen): string {
-  return screen === "group" ? "group" : "add";
+  switch (screen) {
+    case "group":
+      return "group";
+    case "add-members":
+      return "add";
+    case "group-type":
+      return "type";
+    case "group-reactions":
+      return "reactions";
+  }
 }
 
 /**
@@ -41,13 +50,16 @@ export function infoScreenOf(param: string | undefined, isGroup: boolean): InfoS
   if (!isGroup) return null;
   if (param === "group") return "group";
   if (param === "add") return "add-members";
+  if (param === "type") return "group-type";
+  if (param === "reactions") return "group-reactions";
   return null;
 }
 
-/** Where a screen's back control goes: Add members to the info, the info to
- *  the conversation (`null`). */
+/** Where a screen's back control goes: a screen pushed from the info (Add
+ *  members, Who can join, Reactions) to the info, the info to the
+ *  conversation (`null`). */
 export function infoBackStep(screen: InfoScreen): InfoScreen | null {
-  return screen === "add-members" ? "group" : null;
+  return screen === "group" ? null : "group";
 }
 
 /** The history-entry state a screen that opens the contact screen leaves. */

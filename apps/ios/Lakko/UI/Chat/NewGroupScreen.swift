@@ -40,6 +40,8 @@ struct NewGroupScreen: View {
     @State private var photoError: String?
     /// UX 3.3 — "That @name is taken." from the live lookup (public only).
     @State private var handleTaken = false
+    /// Discovery refused the check for now (429): the field says so.
+    @State private var handleRateLimited = false
     @State private var takenCheck: Task<Void, Never>?
     /// One random per form, so the suffix does not change on every keystroke.
     @State private var handleRandom: UInt64 = UInt64.random(in: 0...UInt64.max)
@@ -77,17 +79,21 @@ struct NewGroupScreen: View {
     private func scheduleTakenCheck() {
         takenCheck?.cancel()
         handleTaken = false
+        handleRateLimited = false
         guard isPublic, handle.count >= 3, ConversationHandles.wellFormed(handle) else { return }
         let typed = handle
+        // An answer from the last minute shows at once, with no new question.
+        if let held = HandleTakenCheck.held(typed) {
+            handleTaken = held == .taken
+            return
+        }
         takenCheck = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: HandleTakenCheck.debounceNanoseconds)
             guard !Task.isCancelled, typed == handle else { return }
-            let discovery = DiscoveryClient()
-            guard let pair = try? await discovery.oprfName(typed) else { return }
-            let answered = (try? await discovery.lookupRaw(
-                LookupRequest(oprfHash: base64Encode(pair.lookupKey)))) ?? nil
+            let answer = await HandleTakenCheck.check(typed)
             guard !Task.isCancelled, typed == handle else { return }
-            handleTaken = answered != nil
+            handleTaken = answer == .taken
+            handleRateLimited = answer == .rateLimited
         }
     }
 
@@ -157,6 +163,8 @@ struct NewGroupScreen: View {
                         Text(l10n.t("group_handle.error.bad_form")).foregroundStyle(Color.lakkoDanger)
                     } else if isPublic && handleTaken {
                         Text(l10n.t("group_handle.error.taken")).foregroundStyle(Color.lakkoDanger)
+                    } else if isPublic && handleRateLimited {
+                        Text(l10n.t("common.error.too_many_attempts")).foregroundStyle(Color.lakkoTextMuted)
                     } else {
                         Text(l10n.t(isPublic ? "group_type.handle_public" : "group_type.handle_private"))
                     }
@@ -251,6 +259,13 @@ struct NewGroupScreen: View {
         if busy { return }
         let chosen = picks
         guard Self.canCreate(name: name, handle: handle, isPublic: isPublic) else { return }
+        // A public name the check found taken in the last minute: no claim,
+        // the field already says it.
+        if isPublic, HandleTakenCheck.held(handle) == .taken {
+            handleTaken = true
+            errorMessage = "group_handle.error.held"
+            return
+        }
         busy = true
         defer { busy = false }
         errorMessage = nil
@@ -291,9 +306,10 @@ struct NewGroupScreen: View {
                     avatar: photoForRecord)
             })
         } catch let refusal as DiscoveryClient.HandleWriteError {
+            if refusal.code == "name-taken" { HandleTakenCheck.note(handle, .taken) }
             errorMessage = refusal.code == "name-taken"
                 ? "group_handle.error.held"
-                : (refusal.status == 429 ? "group_handle.error.too_many" : "new_group.error.secure_setup")
+                : (refusal.status == 429 ? "common.error.too_many_attempts" : "new_group.error.secure_setup")
             deleteUploaded(uploadedPhoto)
             return
         } catch let token as AnonTokenUnavailable {

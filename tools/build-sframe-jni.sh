@@ -160,6 +160,10 @@ for entry in "${ABIS[@]}"; do
     # first live group call on Android died exactly there. The
     # bridge is the only C++ in the APK, so the static runtime has
     # no second copy to collide with.
+    # `-Wl,-z,max-page-size=16384` aligns every LOAD segment to 16 KB,
+    # which Google Play requires (Android 15+ devices with 16 KB pages).
+    # NDK r28+ already defaults to it; the flag keeps an older NDK from
+    # quietly producing a 4 KB-aligned library.
     # `-Wl,--exclude-libs,ALL` hides the Rust archive symbols
     # from the .so's dynamic symbol table so we don't pollute
     # the AAR consumer's namespace with internal Rust symbols.
@@ -187,6 +191,7 @@ for entry in "${ABIS[@]}"; do
         "${SRC[@]}" \
         "$archive" \
         -Wl,--exclude-libs,ALL \
+        -Wl,-z,max-page-size=16384 \
         -llog \
         -o "$out_so"
 

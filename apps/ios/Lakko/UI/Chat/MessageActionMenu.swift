@@ -583,6 +583,12 @@ struct MessageReactionRow: View {
     let onReact: (String) -> Void
     let onMore: () -> Void
 
+    /// The emoji row's width: its targets plus the 4 pt gaps between them.
+    private var rowWidth: CGFloat {
+        let count = model.emoji.count + (model.showsExpand ? 1 : 0)
+        return CGFloat(count) * Self.target + CGFloat(max(0, count - 1)) * 4
+    }
+
     var body: some View {
         VStack(spacing: 4) {
             HStack(spacing: 4) {
@@ -621,11 +627,17 @@ struct MessageReactionRow: View {
                 }
             }
             if model.capReached {
+                // The panel sizes itself (`fixedSize` below), which gives a
+                // Text its one-line height: the second line spilled out under
+                // the panel. The line takes the emoji row's width and its own
+                // wrapped height, so the panel grows to hold it.
                 Text(Localization.text("chat.reaction.cap_reached"))
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 280)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: rowWidth)
+                    .padding(.bottom, 4)
             }
         }
         .padding(.horizontal, 6)

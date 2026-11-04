@@ -24,7 +24,6 @@ import { useGroupNames } from "./GroupNameContext";
 import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
-import { PushedScreen } from "../ui/PushedScreen";
 import { LakkoPicker } from "../ui/LakkoPicker";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { AvatarCamera, AvatarCrop, AvatarMenu, UnsavedChangesDialog, type CropSource } from "../profile/AvatarEditor";
@@ -52,6 +51,8 @@ import {
   recordOwedHandle,
 } from "./handle-owed";
 import { DiscoveryNetworkError } from "../discovery/client";
+import { isRateLimited } from "../discovery/handle-check";
+import { anonTokenMessage } from "../tokens/token-copy";
 import { quickReactions } from "../../wasm/lakko_ffi_wasm";
 import type { AllowedSetting } from "./reaction-rules";
 import type { InfoSection } from "./conversation-info";
@@ -63,6 +64,12 @@ export type InfoRole = "owner" | "admin" | "member";
 
 /** The copy of a refused handle write (UX 3.3 / 4.1). */
 export function handleWriteErrorText(err: unknown): string {
+  // The day's lookups used up, or the token pool unreachable.
+  const token = anonTokenMessage(err, t("group_handle.error.offline"));
+  if (token !== null) return token;
+  // Discovery refusing for the rate (the name's or a word's OPRF round): the
+  // rate-limit line, never "could not save".
+  if (isRateLimited(err) && !(err instanceof HandleWriteError)) return t("common.error.too_many_attempts");
   if (err instanceof HandleWriteError) {
     if (err.code === "name-taken") return t("group_handle.error.held");
     if (err.status === 429) return t("group_handle.error.too_many");
@@ -88,11 +95,11 @@ export function GroupInfoExtras(props: {
   readonly ended: boolean;
   /** What the info holds, from the shared rule (`conversationInfoSections`). */
   readonly sections: readonly InfoSection[];
+  /** Open a screen pushed from the info (Who can join, Reactions): the
+   *  conversation view routes it like Add members. */
+  readonly onOpenScreen: (screen: "group-type" | "group-reactions") => void;
 }): JSX.Element {
-  const chats = useChats();
   const groupNames = useGroupNames();
-  /** The Reactions screen's back handler (it asks before losing changes). */
-  let reactionsLeave: (() => void) | null = null;
   /** A change of who can join still owed (`handle-owed.ts`). */
   const owedChange = () => {
     const o = owedHandleFor("group", props.entry.groupIdB64);
@@ -104,6 +111,7 @@ export function GroupInfoExtras(props: {
 
   // ----- photo (4.5.2) -----
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [handleCopy, setHandleCopy] = createSignal<"idle" | "copied" | "failed">("idle");
   const [cropSource, setCropSource] = createSignal<CropSource | null>(null);
   const [cameraOpen, setCameraOpen] = createSignal(false);
   const [uploading, setUploading] = createSignal<LocalAvatar | null>(null);
@@ -151,7 +159,6 @@ export function GroupInfoExtras(props: {
   }
 
   // ----- screens -----
-  const [screen, setScreen] = createSignal<"info" | "type" | "reactions">("info");
 
   return (
     <>
@@ -240,23 +247,33 @@ export function GroupInfoExtras(props: {
                 type="button"
                 class="lk-card-row-action"
                 aria-label={t("group_info.handle.copy_a11y")}
-                onClick={() => void copyMessageText(`@${h().handle}`)}
+                onClick={() =>
+                  void copyMessageText(`@${h().handle}`).then((ok) => {
+                    setHandleCopy(ok ? "copied" : "failed");
+                    if (ok) window.setTimeout(() => setHandleCopy((s) => (s === "copied" ? "idle" : s)), 2000);
+                  })
+                }
               >
-                {t("common.copy")}
+                {handleCopy() === "copied" ? t("common.copied") : t("common.copy")}
               </button>
             </div>
           )}
         </Show>
+        <Show when={handleCopy() === "failed"}>
+          <p class="form-error" role="alert">
+            {t("common.copy_failed")}
+          </p>
+        </Show>
         <Show when={!props.sections.includes("handle") && props.sections.includes("group-type")}>
           <div class="lk-banner" role="status">
             <span>{t("group_info.handle.lapsed")}</span>
-            <button type="button" class="ghost small" onClick={() => setScreen("type")}>
+            <button type="button" class="ghost small" onClick={() => props.onOpenScreen("group-type")}>
               {t("group_info.handle.choose")}
             </button>
           </div>
         </Show>
         <Show when={props.sections.includes("group-type")}>
-          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => setScreen("type")}>
+          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-type")}>
             <span class="lk-card-row-icon">
               <Icon name="eye" size={18} />
             </span>
@@ -293,7 +310,7 @@ export function GroupInfoExtras(props: {
         </Show>
         {/* reactions-and-emoji.md section 9 — from the shared info rule. */}
         <Show when={props.sections.includes("reactions")}>
-          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => setScreen("reactions")}>
+          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-reactions")}>
             <span class="lk-card-row-icon">
               <Icon name="heart" size={18} />
             </span>
@@ -327,28 +344,6 @@ export function GroupInfoExtras(props: {
         />
       </Show>
 
-      <PushedScreen open={screen() === "type"} title={t("group_type.title")} onBack={() => setScreen("info")}>
-        <GroupTypeScreen
-          entry={props.entry}
-          groupName={props.groupName}
-          memberCount={props.memberCount}
-          onDone={() => setScreen("info")}
-          accountIdentity={() => chats.accountIdentity()}
-        />
-      </PushedScreen>
-      <PushedScreen
-        open={screen() === "reactions"}
-        title={t("group_reactions.title")}
-        onBack={() => (reactionsLeave !== null ? reactionsLeave() : setScreen("info"))}
-      >
-        <ReactionsScreen
-          entry={props.entry}
-          onDone={() => setScreen("info")}
-          bindLeave={(leave) => {
-            reactionsLeave = leave;
-          }}
-        />
-      </PushedScreen>
     </>
   );
 }
@@ -388,7 +383,7 @@ export async function reuploadedPhoto(a: AvatarData | null): Promise<AvatarData 
 }
 
 /** Section 4.1 — the pushed **Group type** screen (the owner's). */
-function GroupTypeScreen(props: {
+export function GroupTypeScreen(props: {
   readonly entry: ActiveGroup;
   readonly groupName: string | null;
   readonly memberCount: number;
@@ -591,7 +586,7 @@ function GroupTypeScreen(props: {
 }
 
 /** Reactions section 9 — the pushed **Reactions** screen (owner, admins). */
-function ReactionsScreen(props: {
+export function ReactionsScreen(props: {
   readonly entry: ActiveGroup;
   readonly onDone: () => void;
   /** Hands the screen's back handler to the pushed screen around it. */

@@ -2006,6 +2006,15 @@ public class ChatViewModel(
      * base64) — message author labels, reactions, read receipts. The name
      * alone, as chat bubbles show it (UX §3).
      */
+    /** group-and-channel-privacy.md section 8 — where a waiting request came
+     *  from (its row's time, a link's issuer), or `null`. */
+    public fun joinRequestOrigin(joinerSignatureKey: ByteArray): me.lakko.app.chat.KnockOrigin? =
+        try {
+            repo.knockOriginFor(groupIdHex, joinerSignatureKey)
+        } catch (_: Throwable) {
+            null
+        }
+
     public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String =
         profileNames.resolve(identity).primary
 

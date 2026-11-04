@@ -48,6 +48,7 @@ import { oneToOnePeerKey, ownPersonKeyB64, personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
+import { useLineage } from "./use-lineage";
 import { uiRules } from "./ui-rules";
 import { badgeText } from "../feed/feed-marks";
 import { formatListTime } from "./list-time";
@@ -254,6 +255,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     conversationIdB64Of,
     readPositionBytes,
   } = createConversationRows();
+  const lineageView = useLineage();
 
   // ----- chat folders (`docs/ux/chat-folders.md`) ------------------------
 
@@ -305,7 +307,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const visibleRows = (): readonly ConversationRow[] => {
     const q = query();
     if (!searching()) return tabRows();
-    return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview));
+    return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview, row.handle));
   };
 
   /** The bar's tabs with their counts. */
@@ -388,6 +390,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     kindOf(g) === "chat" ? oneToOnePeerKey(personKeysOf(g.group), ownPersonKeyB64(chats.identity())) : null;
 
   /** The people whose one-to-one is among the matching conversations. */
+  /** The ids of the conversation rows the local filter shows (a group's
+   *  conversation id, a channel's hex id), so a directory result for one of
+   *  them is not listed twice (one conversation, one row). */
+  const visibleRowIds = (): ReadonlySet<string> => new Set(visibleRows().map((row) => row.id));
   const visibleChatPeers = (): ReadonlySet<string> => {
     const out = new Set<string>();
     for (const row of visibleRows()) {
@@ -419,9 +425,14 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
 
   /** A channel the people search found by its handle opens its subscribe
    *  page. */
-  const openFoundChannel = (channelIdHex: string, handle: string): void => {
+  /** A channel from search: its Subscribe subscribes in one step and the
+   *  channel opens under its name (`docs/ux/group-and-channel-privacy.md`
+   *  section 5.1); a channel this account follows just opens. */
+  const openFoundChannel = (channelIdHex: string, handle: string, name?: string, subscribe?: boolean): void => {
     setQuery("");
-    navigate(paths.channelSubscribe(channelIdHex), { state: { handle } });
+    navigate(paths.channelSubscribe(channelIdHex), {
+      state: { handle, ...(name !== undefined ? { name } : {}), ...(subscribe === true ? { subscribe: true } : {}) },
+    });
   };
 
   /** ADR-0050 section 2.9 — a device added through another device was
@@ -912,11 +923,14 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               onOpenChannel={openFoundChannel}
               listedB64={listedInvited}
               standingAboveB64={visibleChatPeers}
+              standingConversationIds={visibleRowIds}
               chatHrefOf={chatHrefOf}
               channelNameOf={channelNameOf}
               onOpenConversation={(idB64) => {
-                const g = chats.get(idB64);
-                if (g !== undefined) navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
+                const g = chats.get(idB64) ?? lineageView.resolve(idB64)?.head;
+                if (g === undefined) return;
+                setQuery("");
+                navigate(paths.groupChat(base64UrlEncodeNoPad(g.group.groupId)));
               }}
             />
           </Show>

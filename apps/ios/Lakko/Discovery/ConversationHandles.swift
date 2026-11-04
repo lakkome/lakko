@@ -57,19 +57,32 @@ enum ConversationHandles {
         return try handleWriteSeed(journalRootSeed: root)
     }
 
+    /// The name search terms a public record publishes, after the `@name`.
+    private static func recordTerms(_ facts: PublicFacts) -> [String] {
+        let max = Int(maxHandleTerms())
+        return Array(nameSearchTerms(displayName: facts.name).prefix(Swift.max(0, max - 1)))
+    }
+
+    /// The `@name`s and, for a public record, its name terms, evaluated in
+    /// ONE `/discovery/oprf/batch` request (one `discovery-register` token):
+    /// the results of `names` in order, then those of the terms.
+    private static func evaluateOwn(
+        discovery: DiscoveryClient, names: [String], facts: PublicFacts?
+    ) async throws -> (names: [OprfResult], terms: [OprfResult]) {
+        let terms = facts.map(recordTerms) ?? []
+        let inputs = names.map(DiscoveryClient.OwnOprfInput.name) + terms.map(DiscoveryClient.OwnOprfInput.term)
+        // At most the old and the new `@name` plus 64 terms: 66, the batch
+        // cap, so nothing is dropped.
+        let results = try await discovery.oprfOwnBatch(inputs)
+        return (Array(results.prefix(names.count)), Array(results.dropFirst(names.count)))
+    }
+
     /// The record and the term lookup keys a public name publishes.
     private static func publicContent(
-        discovery: DiscoveryClient, handle: String, handleOprf: OprfResult, facts: PublicFacts
-    ) async throws -> (record: Data, terms: [Data]) {
-        let max = Int(maxHandleTerms())
-        let nameTerms = Array(nameSearchTerms(displayName: facts.name).prefix(Swift.max(0, max - 1)))
-        var outputs = [handleOprf.output]
-        var lookupKeys = [handleOprf.lookupKey]
-        for term in nameTerms {
-            let pair = try await discovery.oprfNameTerm(term)
-            outputs.append(pair.output)
-            lookupKeys.append(pair.lookupKey)
-        }
+        handle: String, handleOprf: OprfResult, termOprfs: [OprfResult], facts: PublicFacts
+    ) throws -> (record: Data, terms: [Data]) {
+        let outputs = [handleOprf.output] + termOprfs.map(\.output)
+        let lookupKeys = [handleOprf.lookupKey] + termOprfs.map(\.lookupKey)
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let payload = FfiHandleRecordPayload(
             kind: facts.kind, updatedAtMs: now, id: facts.id, key: facts.key,
@@ -112,14 +125,16 @@ enum ConversationHandles {
         journalId: Data, handle typed: String, isPublic: Bool, facts: PublicFacts?
     ) async throws -> Written {
         let name = canonical(typed)
-        let pair = try await discovery.oprfName(name)
+        let published = isPublic ? facts : nil
+        let evaluated = try await evaluateOwn(discovery: discovery, names: [name], facts: published)
+        let pair = evaluated.names[0]
         var seed = try seed(accountSeed: accountSeed, journalId: journalId)
         defer { RootHandover.wipe(&seed) }
         var record: Data?
         var terms: [Data] = []
-        if isPublic, let facts {
-            (record, terms) = try await publicContent(
-                discovery: discovery, handle: name, handleOprf: pair, facts: facts)
+        if let published {
+            (record, terms) = try publicContent(
+                handle: name, handleOprf: pair, termOprfs: evaluated.terms, facts: published)
         }
         let hash = try handleContentHash(record: record, terms: terms)
         let visibility: FfiHandleVisibility = isPublic ? .public : .private
@@ -143,7 +158,7 @@ enum ConversationHandles {
         handle typed: String
     ) async throws -> Written {
         let name = canonical(typed)
-        let pair = try await discovery.oprfName(name)
+        let pair = try await evaluateOwn(discovery: discovery, names: [name], facts: nil).names[0]
         var old = try seed(accountSeed: oldAccountSeed, journalId: journalId)
         defer { RootHandover.wipe(&old) }
         var new = try seed(accountSeed: newAccountSeed, journalId: journalId)
@@ -163,16 +178,19 @@ enum ConversationHandles {
         discovery: DiscoveryClient, accountSeed: Data, journalId: Data, oldHandle: String,
         newHandle typed: String, isPublic: Bool, facts: PublicFacts?
     ) async throws -> Written {
-        let old = try await discovery.oprfName(canonical(oldHandle))
         let name = canonical(typed)
-        let next = try await discovery.oprfName(name)
+        let published = isPublic ? facts : nil
+        let evaluated = try await evaluateOwn(
+            discovery: discovery, names: [canonical(oldHandle), name], facts: published)
+        let old = evaluated.names[0]
+        let next = evaluated.names[1]
         var seed = try seed(accountSeed: accountSeed, journalId: journalId)
         defer { RootHandover.wipe(&seed) }
         var record: Data?
         var terms: [Data] = []
-        if isPublic, let facts {
-            (record, terms) = try await publicContent(
-                discovery: discovery, handle: name, handleOprf: next, facts: facts)
+        if let published {
+            (record, terms) = try publicContent(
+                handle: name, handleOprf: next, termOprfs: evaluated.terms, facts: published)
         }
         let hash = try handleContentHash(record: record, terms: terms)
         let statement = try signHandleStatement(
@@ -187,7 +205,7 @@ enum ConversationHandles {
 
     /// Retire the name (Delete group, section 11).
     static func retire(discovery: DiscoveryClient, accountSeed: Data, journalId: Data, handle typed: String) async throws {
-        let pair = try await discovery.oprfName(canonical(typed))
+        let pair = try await evaluateOwn(discovery: discovery, names: [canonical(typed)], facts: nil).names[0]
         var seed = try seed(accountSeed: accountSeed, journalId: journalId)
         defer { RootHandover.wipe(&seed) }
         let statement = try signHandleStatement(handleSeed: seed, lookupKey: pair.lookupKey, body: .retire)
@@ -413,4 +431,70 @@ final class HandleLeaseRenewal {
     }
 
     func resetSession() { ranThisSession = false }
+}
+
+/// `who-can-find-me.md` section 6.1 and `group-and-channel-privacy.md` 3.3 —
+/// the live "taken" check of an `@name` field (New group, New channel, Group
+/// type). The field asks 500 ms after typing stops; a text asked in the last
+/// 60 seconds is not asked again, a found answer and a free one alike, so
+/// typing back and forth spends no discovery-lookup token twice and does not
+/// run into discovery's per-address limit (on web ten checks in a row met a
+/// 429 and the create that followed failed). A create reuses a `taken`
+/// answer instead of claiming; a `free` one never skips the claim.
+@MainActor
+enum HandleTakenCheck {
+    enum Answer: Equatable {
+        /// A public group, channel or person holds it.
+        case taken
+        /// No lookup answers for it (a private name still may hold it).
+        case free
+        /// Discovery said 429, or the lookup allowance is used up.
+        case rateLimited
+        /// Offline or another failure: nothing is said.
+        case unknown
+    }
+
+    /// The pause after the last keystroke before the field asks.
+    static let debounceNanoseconds: UInt64 = 500_000_000
+    /// How long an answer is reused for the same text.
+    static let reuseSeconds: TimeInterval = 60
+
+    private static var answers: [String: (answer: Answer, at: Date)] = [:]
+
+    /// The answer held for `handle` from the last 60 seconds, `taken` or
+    /// `free` only.
+    static func held(_ handle: String, now: Date = Date()) -> Answer? {
+        let key = ConversationHandles.canonical(handle)
+        guard let entry = answers[key], now.timeIntervalSince(entry.at) < reuseSeconds else { return nil }
+        return entry.answer
+    }
+
+    /// Records what a claim learned: refused as taken, or now held by this
+    /// account (taken as well, to anyone who asks).
+    static func note(_ handle: String, _ answer: Answer, now: Date = Date()) {
+        guard answer == .taken || answer == .free else { return }
+        answers[ConversationHandles.canonical(handle)] = (answer, now)
+    }
+
+    /// One check: the held answer when there is one, else one OPRF round and
+    /// one lookup.
+    static func check(_ handle: String, discovery: DiscoveryClient = DiscoveryClient()) async -> Answer {
+        let key = ConversationHandles.canonical(handle)
+        if let held = held(key) { return held }
+        do {
+            let pair = try await discovery.oprfName(key)
+            let answered = try await discovery.lookupRaw(LookupRequest(oprfHash: base64Encode(pair.lookupKey)))
+            let answer: Answer = answered != nil ? .taken : .free
+            note(key, answer)
+            return answer
+        } catch DiscoveryClientError.rateLimited {
+            return .rateLimited
+        } catch let DiscoveryClientError.http(status, _, _) where status == 429 {
+            return .rateLimited
+        } catch let token as AnonTokenUnavailable {
+            return AnonTokenUnavailable.isQuotaExhausted(token) ? .rateLimited : .unknown
+        } catch {
+            return .unknown
+        }
+    }
 }

@@ -45,7 +45,7 @@ vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({ identitySecrets: () => null, state: () => ({ kind: "anonymous" }) }),
 }));
 vi.mock("../chat/ChatContext", () => ({
-  useChats: () => ({ identity: () => null, accountIdentity: () => null }),
+  useChats: () => ({ identity: () => null, accountIdentity: () => null, get: () => undefined }),
 }));
 vi.mock("../chat/persist-hooks", () => ({
   durableSnapshotHook: () => async () => {},
@@ -121,6 +121,7 @@ function mount(
     listed?: () => ReadonlySet<string>;
     noMatchLine?: () => string | null;
     scope?: "chats" | "contacts";
+    standing?: () => ReadonlySet<string>;
   } = {},
 ) {
   const [query, setQuery] = createSignal("");
@@ -135,6 +136,7 @@ function mount(
       {...(over.noMatchLine === undefined ? {} : { noMatchLine: over.noMatchLine })}
       {...(over.chatPeers === undefined ? {} : { standingAboveB64: over.chatPeers })}
       {...(over.chatHref === undefined ? {} : { chatHrefOf: over.chatHref })}
+      {...(over.standing === undefined ? {} : { standingConversationIds: over.standing })}
     />
   ));
   return setQuery;
@@ -204,6 +206,43 @@ describe("one person, one row (UX 6.1)", () => {
   });
 });
 
+describe("one conversation, one row (UX 6.1 One list)", () => {
+  const group = {
+    kind: "group",
+    idB64: "R1JPVVBJRA==",
+    handle: "qa_ios_walk",
+    name: "QA walk group",
+    description: "",
+    sizeBand: 0,
+    key: new Uint8Array(32),
+    knockVersion: 0,
+    avatar: null,
+  };
+  const found = { people: [], channel: null, conversations: [group], state: { kind: "found" } } as unknown as PeopleSearchOutcome;
+
+  it("a group that stands above as a conversation row is not listed again", async () => {
+    searchPeople.mockResolvedValue(found);
+    const type = mount({ standing: () => new Set([group.idB64]) });
+    await flush();
+    type("@qa_ios_walk");
+    await flush();
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).not.toContain("QA walk group");
+  });
+
+  it("a group not above keeps its directory row", async () => {
+    searchPeople.mockResolvedValue(found);
+    const type = mount({ standing: () => new Set(["T1RIRVI="]) });
+    await flush();
+    type("@qa_ios_walk");
+    await flush();
+    vi.advanceTimersByTime(500);
+    await flush();
+    expect(document.body.textContent).toContain("QA walk group");
+  });
+});
+
 describe("the line that nothing matches (UX 6.1)", () => {
   const line = (): string => t("contacts.list.no_match");
   const contacts = {
@@ -264,12 +303,12 @@ describe("the line that nothing matches (UX 6.1)", () => {
     expect(document.querySelector(".lk-pane-nomatch")).toBeNull();
   });
 
-  it("is Chats' own line in Chats", async () => {
+  it("is the one list's own line in Chats (UX 6.1 One list)", async () => {
     const type = mount();
     await flush();
     type("zz");
     await flush();
-    expect(document.body.textContent).toContain(t("chats.search.no_results"));
+    expect(document.body.textContent).toContain(t("search.nothing_found"));
     expect(document.body.textContent).not.toContain(line());
   });
 });
@@ -288,7 +327,8 @@ describe("PeopleSearch (UX 6.1)", () => {
     expect(searchPeople).toHaveBeenCalledWith("ann");
     await flush();
     expect(document.body.textContent).toContain("Anna Weber");
-    expect(document.body.textContent).toContain(t("search.people.heading"));
+    // One list (UX 6.1): the person stands with no People heading above.
+    expect(document.body.textContent).not.toContain(t("search.people.heading"));
   });
 
   it("shows nothing under People under three characters", async () => {
@@ -660,7 +700,7 @@ describe("PeopleSearch (UX 6.1)", () => {
       expect(document.body.textContent).not.toContain(t("search.people.not_found"));
     });
 
-    it("says No one found only when no person stands under People", async () => {
+    it("says Nothing found only when the list is empty", async () => {
       held.candidates = [kept("b7")];
       reachCheck.mockResolvedValue(false);
       searchPeople.mockResolvedValue({ people: [], channel: null, state: { kind: "not-found" } });
@@ -678,7 +718,8 @@ describe("PeopleSearch (UX 6.1)", () => {
       vi.advanceTimersByTime(500);
       await flush();
       expect(document.body.textContent).not.toContain("Bob Lind");
-      expect(document.body.textContent).toContain(t("search.people.not_found"));
+      expect(document.body.textContent).toContain(t("search.nothing_found"));
+      expect(document.body.textContent).not.toContain(t("search.people.not_found"));
     });
   });
 });

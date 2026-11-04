@@ -1651,7 +1651,7 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
@@ -2406,8 +2406,16 @@
       "text": "О группе",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Ссылка скопирована.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Копировать ссылку",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Не удалось скопировать ссылку.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2570,12 +2578,24 @@
       "text": "Одобрить",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "Запрос {when}",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "Запросы на вступление ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "Запросы на вступление (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "Пригласил(а) {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "Пригласил(а) {name}",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3740,6 +3760,10 @@
     },
     "common.copy": {
       "text": "Копировать",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "Не удалось скопировать.",
       "status": "machine"
     },
     "common.creating": {
@@ -8080,6 +8104,10 @@
     },
     "search.conversations.heading": {
       "text": "Группы и каналы",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "Ничего не найдено. Проверьте написание или попросите ссылку-приглашение.",
       "status": "machine"
     },
     "search.people.add_contact": {

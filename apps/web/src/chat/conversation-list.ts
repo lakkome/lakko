@@ -52,6 +52,8 @@ export interface ConversationRow {
   /** ADR-0084 - the person a one-to-one is with (their profile key), whose
    *  photo the row's circle shows. Absent for groups and channels. */
   readonly personKey?: string | undefined;
+  /** A group's or channel's `@name`, for the local search (ADR-0087). */
+  readonly handle?: string | undefined;
 }
 
 /**

@@ -45,6 +45,9 @@
 //!   follow it and keep only the per-IP limiter);
 //! - `POST /discovery/handle/claim` and `/discovery/handle/replace` —
 //!   context `discovery-register` (ADR-0087: taking a name);
+//! - `POST /discovery/oprf/batch` — context `discovery-register`, one
+//!   token for the whole term set of a name being published (amendment of
+//!   2026-11-04); spent inside the handler once the body validates;
 //! - the three `POST .../{blob_id}/consume` routes — context
 //!   `invite-consume`.
 //!
@@ -116,6 +119,8 @@
 //! - `GET    /ready`               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
+//! - `POST   /discovery/oprf/batch` — evaluate 1..=66 blinded elements of a name being
+//!   published, for one `discovery-register` token (ADR-0087 section 4, ADR-0060)
 //! - `POST   /discovery/register`  — bind an account's FIRST OPRF-hashed username
 //!   (`409 name-taken` / `409 username-already-set`, ADR-0076, ADR-0087)
 //! - `POST   /discovery/username/replace` — rename: retire the current name and bind another
@@ -587,6 +592,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
     let oprf = Router::new()
         .route("/discovery/oprf", post(oprf::evaluate))
         .route_layer(gate(TokenContext::DiscoveryLookup));
+    // Amendment of 2026-11-04 (ADR-0087 section 4, ADR-0060): publishing a
+    // name evaluates its whole term set in one request for one
+    // `discovery-register` token. The handler validates the body before it
+    // spends the token, so no token layer here; it still sits under the
+    // per-IP bucket below, charged once per request.
+    let oprf = oprf.route("/discovery/oprf/batch", post(oprf::evaluate_batch));
 
     // ADR-0054 S3 — the three ledgers' consumes spend an `invite-consume`
     // token. The dedup tag in the body stays server-blind.

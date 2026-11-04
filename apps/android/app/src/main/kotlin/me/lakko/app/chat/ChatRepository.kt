@@ -3895,6 +3895,15 @@ public class ChatRepository(
         groups[groupIdHex]?.sawUnkeptExternalJoin = false
     }
 
+    /** Section 8 — where a waiting request came from, or `null`. */
+    public fun knockOriginFor(groupIdHex: String, joinerSignatureKey: ByteArray): KnockOrigin? =
+        GroupSettingsStore.knockOrigin(
+            applicationContext,
+            currentAccountIdB64.get(),
+            groupIdHex,
+            me.lakko.app.ds.hexOf(joinerSignatureKey),
+        )
+
     /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
      *  member minted the `/g/` link it arrived on, and whether that issuer is in
      *  the current roster. */
@@ -5575,6 +5584,17 @@ public class ChatRepository(
                     putVisibility = { public, lookupKeys, record ->
                         client.putVisibility(public, lookupKeys, record)
                     },
+                    // Publishing the own name: the terms not yet held, in one
+                    // batch with one register token.
+                    oprfOwnTerms = { own ->
+                        val keys = own.map { t ->
+                            when (t) {
+                                is me.lakko.app.discovery.OwnTerm.Username -> "u:${t.value}"
+                                is me.lakko.app.discovery.OwnTerm.NameTerm -> "n:${t.value}"
+                            }
+                        }
+                        reach.keptOprfBatch(keys) { missing -> client.oprfOwnTerms(missing.map { own[it] }) }
+                    },
                 ),
                 nowMs = System.currentTimeMillis(),
             )
@@ -5703,6 +5723,7 @@ public class ChatRepository(
                     nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
                     oprfNameTerm = { client.oprfNameTerm(it) },
                     oprfUsername = { client.oprfUsername(it) },
+                    oprfOwnTerms = { client.oprfOwnTerms(it) },
                     composeIntroduction = { payload, outputs, issuedAt ->
                         uniffi.lakko_ffi_uniffi.composeIntroduction(payload, outputs, issuedAt)
                     },
@@ -7287,6 +7308,8 @@ public class ChatRepository(
         val joinerSignatureKey: ByteArray,
         val keyPackage: ByteArray,
         val replyGrant: uniffi.lakko_ffi_uniffi.FfiReachGrant,
+        /** The `/g/` link's issuer key when the request came by a link. */
+        val linkIssuer: ByteArray? = null,
     )
 
     /**
@@ -7310,13 +7333,16 @@ public class ChatRepository(
             seed.fill(0)
         }
         val capability = request.capability
-        val byLink = capability != null && try {
-            uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(capability).use {
-                it.groupId().contentEquals(record.groupId)
+        val linkIssuer: ByteArray? = capability?.let {
+            try {
+                uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(it).use { cap ->
+                    cap.issuerSignaturePubkey().takeIf { cap.groupId().contentEquals(record.groupId) }
+                }
+            } catch (_: Throwable) {
+                null
             }
-        } catch (_: Throwable) {
-            false
         }
+        val byLink = linkIssuer != null
         val public = groupHandle(groupIdHex)?.public == true
         if (!byLink && !public) return SealedKnockStep.DROP to null
         val kept = try {
@@ -7327,7 +7353,7 @@ public class ChatRepository(
         return when (kept.outcome) {
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED,
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING,
-            -> SealedKnockStep.KEEP to OpenedKnock(kept.joinerSignatureKey, request.keyPackage, request.replyGrant)
+            -> SealedKnockStep.KEEP to OpenedKnock(kept.joinerSignatureKey, request.keyPackage, request.replyGrant, linkIssuer)
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.QUEUE_FULL -> SealedKnockStep.STOP to null
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_MEMBER,
             uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.NOT_ADMISSIBLE,
@@ -10438,6 +10464,26 @@ public class ChatRepository(
                 // for the joiner's account, so the sweep that admits it can
                 // write the Welcome into its closed mailbox.
                 for ((_, opened) in drained.accepted) keepKnockReplyGrant(opened)
+                // Section 8 — where each request came from, for the line
+                // under it: the row's stamp, and the link's issuer.
+                currentAccountIdB64.get()?.let { acct ->
+                    for ((row, opened) in drained.accepted) {
+                        try {
+                            GroupSettingsStore.saveKnockOrigin(
+                                applicationContext,
+                                acct,
+                                groupIdHex,
+                                me.lakko.app.ds.hexOf(opened.joinerSignatureKey),
+                                KnockOrigin(
+                                    askedAtMs = me.lakko.app.ui.chat.parseMessageTimeMs(row.createdAt),
+                                    issuerKeyB64 = opened.linkIssuer?.let { java.util.Base64.getEncoder().encodeToString(it) },
+                                ),
+                            )
+                        } catch (_: Throwable) {
+                            // The line is informative; a failed write shows none.
+                        }
+                    }
+                }
                 record.knockQueueFull = drained.cursor < (raw.messages.lastOrNull()?.id ?: drained.cursor)
                 record.lastSeenKnockId = maxOf(record.lastSeenKnockId, raw.messages.lastOrNull()?.id ?: 0L)
                 // The retained request set lives in the provider (ADR-0027).

@@ -2313,6 +2313,20 @@ input.lk-sas-code {
 .lk-layer::backdrop {
   background: rgba(15, 18, 32, 0.45);
 }
+/* The confirmation host (ui/ConfirmDialog.tsx) and the conversation-info
+   layer: centred over the whole window, whatever the page around them sets,
+   with a backdrop over the whole window. */
+.lk-confirm-dialog:modal,
+.lk-layer:modal {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+}
+.lk-confirm-dialog::backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 32, 0.45);
+}
 .lk-layer-card {
   display: flex;
   flex-direction: column;

@@ -24,7 +24,7 @@
  *
  * Every decision is in the plain modules beside this file; this renders them.
  */
-import { ConversationCard, ConversationRow } from "./ConversationCard";
+import { ConversationCard, ConversationRow, foundIdHex, isMemberOf, useLineageIfMounted } from "./ConversationCard";
 import type { FoundConversation } from "./people-search";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
@@ -41,7 +41,6 @@ import { useProfiles } from "../profile/ProfileContext";
 import { reachSession } from "../reach/reach-service";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
-import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
 import { AutoSearch, networkQueryOf, SearchMemory, type NetworkQuery, type NetworkView } from "./auto-search";
 import {
@@ -67,7 +66,7 @@ import {
   type OutgoingRequests,
   type RowSendState,
 } from "./row-send";
-import { peopleLineOf, REQUEST_FAILED, REQUEST_SENT, showsNoMatchLine } from "./search-state";
+import { REQUEST_FAILED, REQUEST_SENT, searchStateMessage, showsNoMatchLine } from "./search-state";
 import { sendFoundRequest, type SendOutcome } from "./send-request";
 import {
   canonicalUsernameOf,
@@ -107,7 +106,7 @@ export function PeopleSearch(props: {
   /** The account keys (base64) of everyone in this device's groups. */
   readonly groupPeopleKeys: () => readonly string[];
   /** Open a channel's subscribe page (Chats only). */
-  readonly onOpenChannel?: (channelIdHex: string, handle: string) => void;
+  readonly onOpenChannel?: (channelIdHex: string, handle: string, name?: string, subscribe?: boolean) => void;
   /** The people a list row above shows: the matching contacts and people
    *  added through their link. They leave People whatever their reach. */
   readonly listedB64?: () => ReadonlySet<string>;
@@ -121,12 +120,17 @@ export function PeopleSearch(props: {
   readonly chatHrefOf?: (personKeyB64: string) => string | null;
   /** A channel's name when this device knows one, `null` otherwise. */
   readonly channelNameOf?: (channelIdHex: string) => string | null;
+  /** The ids of the conversation rows standing above (Chats): a group's
+   *  conversation id, a channel's hex id. A found group or channel among them
+   *  is not listed again (one conversation, one row). */
+  readonly standingConversationIds?: () => ReadonlySet<string>;
   /** ADR-0087 — open a group this device is in (a found row's `Open`). */
   readonly onOpenConversation?: (groupIdB64: string) => void;
 }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const lineage = useLineageIfMounted();
 
   const [wasm, setWasm] = createSignal<Wasm | null>(null);
   void loadWasm().then(setWasm);
@@ -266,19 +270,34 @@ export function PeopleSearch(props: {
 
   const channel = () => (inContacts ? null : (network().outcome?.channel ?? null));
   /** ADR-0087 section 5 — public groups and channels, under People. */
-  const conversations = (): readonly FoundConversation[] =>
-    inContacts ? [] : (network().outcome?.conversations ?? []);
+  const conversations = (): readonly FoundConversation[] => {
+    if (inContacts) return [];
+    const found = network().outcome?.conversations ?? [];
+    const standing = props.standingConversationIds?.();
+    if (standing === undefined || standing.size === 0) return found;
+    return found.filter((f) => !standsAbove(f, standing));
+  };
+  /** Whether a found group or channel is already a row above: a channel by
+   *  its hex id, a group by its own id or the conversation its lineage
+   *  belongs to. */
+  const standsAbove = (f: FoundConversation, standing: ReadonlySet<string>): boolean => {
+    if (f.kind === "channel") return standing.has(foundIdHex(f));
+    if (standing.has(f.idB64)) return true;
+    const view = lineage?.resolve(f.idB64);
+    return view !== undefined && standing.has(view.conversationIdB64);
+  };
   const [card, setCard] = createSignal<FoundConversation | null>(null);
   const searching = (): boolean => network().searching;
-  /** The line under People; none while a new question is out. */
+  /** The line at the end of the one list (`docs/ux/who-can-find-me.md`
+   *  section 6.1, "One list"): a network failure or an empty token pool.
+   *  "Not found" is never said here: the empty-list line says it, and only
+   *  when nothing stands in the list. None while a new question is out. */
   const message = (): string | null => {
     if (searching()) return null;
     const outcome = network().outcome;
-    // Counted before a contact leaves for the list above: "not found" would
-    // contradict the person standing there.
-    return outcome === null ? null : peopleLineOf(outcome.state, merged().length);
+    if (outcome === null || outcome.state.kind === "not-found") return null;
+    return searchStateMessage(outcome.state);
   };
-  const showsPeople = (): boolean => people().length > 0 || searching() || message() !== null;
 
   /** The line that nothing matches, when nothing stands in the field. */
   const noMatchLine = (): string | null => {
@@ -288,21 +307,17 @@ export function PeopleSearch(props: {
       channel: channel() !== null || conversations().length > 0,
       searchOut: searching() || network().waiting === true,
     });
-    if (!nothing) return null;
-    return props.noMatchLine === undefined ? t("chats.search.no_results") : props.noMatchLine();
+    if (!nothing || message() !== null) return null;
+    return props.noMatchLine === undefined ? t("search.nothing_found") : props.noMatchLine();
   };
 
   return (
     <>
       <Show when={noMatchLine()}>{(line) => <p class="lk-pane-nomatch">{line()}</p>}</Show>
-      <Show when={showsPeople()}>
-        <div class="lk-section-label" style={{ display: "flex", "align-items": "center", gap: "8px" }}>
-          <span>{t("search.people.heading")}</span>
-          <Show when={searching()}>
-            <span class="lakko-spinner" role="status" aria-label={t("search.people.searching_a11y")} />
-          </Show>
-        </div>
-        <For each={people()}>
+      {/* One list, no headings (UX 6.1 "One list"): people, then groups and
+          channels, then the channel a handle names; the spinner and the
+          failure line at the end. Each row's second line says what it is. */}
+      <For each={people()}>
           {(p) => (
             <PersonRow
               person={p}
@@ -315,23 +330,14 @@ export function PeopleSearch(props: {
             />
           )}
         </For>
-        <Show when={message()}>
-          {(line) => (
-            <p class="lk-pane-nomatch" role="status">
-              {line()}
-            </p>
-          )}
-        </Show>
-      </Show>
-      <Show when={conversations().length > 0}>
-        <div class="lk-section-label">{t("search.conversations.heading")}</div>
         <For each={conversations()}>
           {(c) => (
             <ConversationRow
               found={c}
               onOpen={(found) => {
-                if (chats.get(found.idB64) !== undefined) {
-                  props.onOpenConversation?.(found.idB64);
+                if (isMemberOf(found, chats, lineage)) {
+                  if (found.kind === "channel") props.onOpenChannel?.(foundIdHex(found), found.handle, found.name);
+                  else props.onOpenConversation?.(found.idB64);
                   return;
                 }
                 setCard(found);
@@ -339,7 +345,6 @@ export function PeopleSearch(props: {
             />
           )}
         </For>
-      </Show>
       <ConversationCard
         found={card()}
         onBack={() => setCard(null)}
@@ -347,26 +352,38 @@ export function PeopleSearch(props: {
           setCard(null);
           props.onOpenConversation?.(id);
         }}
-        onOpenChannel={(found) => {
+        onOpenChannel={(found, subscribe) => {
           setCard(null);
-          let hex = "";
-          for (const b of atob(found.idB64)) hex += b.charCodeAt(0).toString(16).padStart(2, "0");
-          props.onOpenChannel?.(hex, found.handle);
+          props.onOpenChannel?.(foundIdHex(found), found.handle, found.name, subscribe);
         }}
       />
       <Show when={channel()}>
         {(c) => (
-          <>
-            <div class="lk-section-label">{t("nav.channels")}</div>
-            <button
-              type="button"
-              class="lk-pane-lookup"
-              onClick={() => props.onOpenChannel?.(c().idHex, c().handle)}
-            >
-              <Icon name="channels" size={16} />
-              {props.channelNameOf?.(c().idHex) ?? `@${c().handle}`}
-            </button>
-          </>
+          <button
+            type="button"
+            class="lk-row"
+            onClick={() => props.onOpenChannel?.(c().idHex, c().handle)}
+          >
+            <Avatar label={props.channelNameOf?.(c().idHex) ?? c().handle} id={c().idHex} />
+            <span class="lk-row-body">
+              <span class="lk-row-title">{props.channelNameOf?.(c().idHex) ?? `@${c().handle}`}</span>
+              <span class="lk-row-sub" dir="auto">
+                {t("search.people.channel_result", { handle: `@${c().handle}` })}
+              </span>
+            </span>
+          </button>
+        )}
+      </Show>
+      <Show when={searching()}>
+        <div style={{ display: "flex", "justify-content": "center", padding: "12px" }}>
+          <span class="lakko-spinner" role="status" aria-label={t("search.people.searching_a11y")} />
+        </div>
+      </Show>
+      <Show when={message()}>
+        {(line) => (
+          <p class="lk-pane-nomatch" role="status">
+            {line()}
+          </p>
         )}
       </Show>
     </>

@@ -98,6 +98,9 @@ internal class EveryoneOps(
     val oprfUsername: suspend (String) -> OprfResult,
     val composePublicRecord: (FfiIntroductionPayload, List<ByteArray>, ULong) -> ByteArray,
     val putVisibility: suspend (public: Boolean, lookupKeys: List<ByteArray>, record: ByteArray?) -> Unit,
+    /** The own name's terms at once (`POST /discovery/oprf/batch`, one
+     *  register token), in order; `null` evaluates them one by one. */
+    val oprfOwnTerms: (suspend (List<me.lakko.app.discovery.OwnTerm>) -> List<OprfResult>)? = null,
 )
 
 /** How a publication ended. */
@@ -140,12 +143,26 @@ internal suspend fun publishEveryone(
         return EveryoneOutcome.NOTHING_TO_PUBLISH
     }
     val recordTermOutputs = mutableListOf<ByteArray>()
-    if (username != null) recordTermOutputs += ops.oprfUsername(username).output
     val lookupKeys = mutableListOf<ByteArray>()
-    for (term in terms) {
-        val oprf = ops.oprfNameTerm(term)
-        lookupKeys += oprf.lookupKey
-        recordTermOutputs += oprf.output
+    val batch = ops.oprfOwnTerms
+    if (batch != null) {
+        // Publishing the own name: every term in one batch, one token.
+        val own = listOfNotNull(username?.let { me.lakko.app.discovery.OwnTerm.Username(it) }) +
+            terms.map { me.lakko.app.discovery.OwnTerm.NameTerm(it) }
+        val results = batch(own)
+        val offset = if (username != null) 1 else 0
+        if (username != null) recordTermOutputs += results[0].output
+        for (i in terms.indices) {
+            lookupKeys += results[offset + i].lookupKey
+            recordTermOutputs += results[offset + i].output
+        }
+    } else {
+        if (username != null) recordTermOutputs += ops.oprfUsername(username).output
+        for (term in terms) {
+            val oprf = ops.oprfNameTerm(term)
+            lookupKeys += oprf.lookupKey
+            recordTermOutputs += oprf.output
+        }
     }
     val payload = FfiIntroductionPayload(
         identityPk = identityPk,

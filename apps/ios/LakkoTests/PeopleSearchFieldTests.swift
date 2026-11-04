@@ -321,7 +321,7 @@ final class PeopleSearchFieldTests: XCTestCase {
         XCTAssertEqual(model.networkState(includesChannels: true)?.message,
                        Localization.text("search.people.out_of_searches"))
         XCTAssertNotEqual(model.networkState(includesChannels: true)?.message,
-                          Localization.text("search.people.not_found"))
+                          Localization.text("search.nothing_found"))
         XCTAssertNotEqual(model.networkState(includesChannels: true)?.message,
                           Localization.text("search.people.failed"))
         XCTAssertEqual(PeopleSearch.message(for: .allowanceUsed),
@@ -931,13 +931,13 @@ final class PeopleSearchFieldTests: XCTestCase {
         let model = instantModel(session(rec))
         await type("anna", into: model)
         XCTAssertEqual(model.peopleMessage(includesChannels: true, showsLocalContacts: true),
-                       Localization.text("search.people.not_found"))
+                       Localization.text("search.nothing_found"))
 
         // A contact the Contacts list shows itself is no row of this section.
         rec.candidates = [candidate(4, isContact: true)]
         await type("anna w", into: model)
         XCTAssertEqual(model.peopleMessage(includesChannels: false, showsLocalContacts: false),
-                       Localization.text("search.people.not_found"))
+                       Localization.text("search.nothing_found"))
     }
 
     func testAFailedSearchStillSaysSoBesideARow() async {

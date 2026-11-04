@@ -5884,9 +5884,21 @@ public final class ChatRepository: ObservableObject {
     /// Count what a receive path just applied towards the chat list's unread
     /// badge — unless the chat is open, in which case it is being read.
     private func noteAppliedForUnread(_ events: [IncomingChatEvent], groupIdHex: String) {
+        // A row the timeline already holds is not new: a journal read again
+        // after a relaunch (the cursor may lag the durable state) re-applies
+        // rows that were read before it, and counted them as unread.
+        let held = Set(groups[groupIdHex]?.messages.map(\.messageId) ?? [])
+        let fresh = held.isEmpty ? events : events.filter { event in
+            switch event {
+            case .application(let messageId, _, _, _, _, _, _), .unsupported(let messageId, _, _, _):
+                return !held.contains(messageId)
+            default:
+                return true
+            }
+        }
         let next = UnreadCounting.next(
             current: unreadMessageIds[groupIdHex] ?? [],
-            applied: events,
+            applied: fresh,
             chatOpen: isChatOpen(groupIdHex: groupIdHex),
             syncedThrough: groups[groupIdHex]?.syncedThroughMessageId
         )
@@ -8841,17 +8853,19 @@ public final class ChatRepository: ObservableObject {
     /// as a request to join; the joiner's reply grant is kept for its account
     /// so the sweep can write the Welcome into its mailbox.
     private func openSealedKnock(
-        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data
+        record: GroupRecord, groupIdHex: String, identity: Identity, row: Data, createdAt: String
     ) -> SealedKnockStep {
         guard let version = knockRowVersion(row: row),
               var seed = knockSeed(record: record, groupIdHex: groupIdHex, version: version) else { return .drop }
         defer { RootHandover.wipe(&seed) }
         guard let request = try? openKnockRow(knockSeed: seed, row: row) else { return .drop }
-        let byLink: Bool = {
+        let linkCap: GroupInviteCapability? = {
             guard let capability = request.capability,
-                  let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability) else { return false }
-            return cap.groupId() == record.groupId
+                  let cap = try? GroupInviteCapability.decodeAndVerify(wire: capability),
+                  cap.groupId() == record.groupId else { return nil }
+            return cap
         }()
+        let byLink = linkCap != nil
         // A public group (ADR-0087 section 1) also takes a row with no link;
         // a private one only a row carrying a capability of this group.
         guard byLink || groupHandle(groupIdHex: groupIdHex)?.isPublic == true else { return .drop }
@@ -8859,6 +8873,16 @@ public final class ChatRepository: ObservableObject {
         else { return .drop }
         switch kept.outcome {
         case .retained, .alreadyPending:
+            // UX section 8 — `Asked 2 hours ago`, or from a link `Invited by
+            // Anna · 2 hours ago`: when the request reached the Delivery
+            // Service and whose link it carried.
+            if let accountIdB64 = currentAccountIdB64 {
+                groupSettingsStore.keepRequestMeta(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                    joinerKeyB64: base64Encode(kept.joinerSignatureKey),
+                    askedAtMs: Self.parseDsTimestampMs(createdAt) ?? Self.nowMs(),
+                    inviterKey: linkCap?.issuerSignaturePubkey())
+            }
             // UX section 8 — the name the request carries, shown unverified.
             if let accountIdB64 = currentAccountIdB64,
                let name = request.profile?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -9388,7 +9412,8 @@ public final class ChatRepository: ObservableObject {
             // instead of being lost.
             for row in raw.messages {
                 let step = openSealedKnock(
-                    record: record, groupIdHex: groupIdHex, identity: identity, row: row.payload)
+                    record: record, groupIdHex: groupIdHex, identity: identity, row: row.payload,
+                    createdAt: row.createdAt)
                 if step == .stop {
                     record.sawUnkeptExternalJoin = true
                     break

@@ -138,6 +138,9 @@ internal class IntroPublicationOps(
     val send: suspend (groupHex: String, envelope: ByteArray) -> Unit,
     /** Persist the state after every step that changed it. */
     val save: suspend (IntroPublicationState) -> Unit,
+    /** The own name's terms at once (`POST /discovery/oprf/batch`, one
+     *  register token), in order; `null` evaluates them one by one. */
+    val oprfOwnTerms: (suspend (List<me.lakko.app.discovery.OwnTerm>) -> List<OprfResult>)? = null,
 )
 
 /**
@@ -159,7 +162,11 @@ internal suspend fun <T> waitingOutRateLimit(round: suspend () -> T): T =
         round()
     }
 
-private class Term(val key: String, val evaluate: suspend () -> OprfResult)
+private class Term(
+    val key: String,
+    val own: me.lakko.app.discovery.OwnTerm,
+    val evaluate: suspend () -> OprfResult,
+)
 
 /**
  * Run the three steps. Throws what [IntroPublicationOps] throws (the caller
@@ -184,9 +191,11 @@ internal suspend fun publishIntroductions(
     if (offerNeedsRebuild(state.ownOffer?.key, inputs.contactsOfContacts, key)) {
         val terms = mutableListOf<Term>()
         name?.let { n ->
-            for (t in ops.nameSearchTerms(n)) terms += Term("n:$t") { ops.oprfNameTerm(t) }
+            for (t in ops.nameSearchTerms(n)) {
+                terms += Term("n:$t", me.lakko.app.discovery.OwnTerm.NameTerm(t)) { ops.oprfNameTerm(t) }
+            }
         }
-        username?.let { u -> terms += Term("u:$u") { ops.oprfUsername(u) } }
+        username?.let { u -> terms += Term("u:$u", me.lakko.app.discovery.OwnTerm.Username(u)) { ops.oprfUsername(u) } }
         val grant = inputs.fofGrant
         val identityPk = inputs.identityPk
         val accountId = inputs.accountId
@@ -196,10 +205,21 @@ internal suspend fun publishIntroductions(
             // Keeping them only at the end spent a token per term on every
             // retry and ran through the account's daily quota.
             val missing = termsToEvaluate(state.termOutputs.keys, terms.map { it.key }).toMutableSet()
-            for (t in terms) {
-                if (!missing.remove(t.key)) continue
-                val output = waitingOutRateLimit { t.evaluate() }.output
-                save(state.copy(termOutputs = state.termOutputs + (t.key to reachHex(output))))
+            val batch = ops.oprfOwnTerms
+            if (batch != null) {
+                // The own name's terms in one batch, one token; kept together.
+                val todo = terms.filter { it.key in missing }.distinctBy { it.key }
+                if (todo.isNotEmpty()) {
+                    val results = waitingOutRateLimit { batch(todo.map { it.own }) }
+                    val kept = todo.indices.associate { i -> todo[i].key to reachHex(results[i].output) }
+                    save(state.copy(termOutputs = state.termOutputs + kept))
+                }
+            } else {
+                for (t in terms) {
+                    if (!missing.remove(t.key)) continue
+                    val output = waitingOutRateLimit { t.evaluate() }.output
+                    save(state.copy(termOutputs = state.termOutputs + (t.key to reachHex(output))))
+                }
             }
             val outputs = terms.map { reachUnhex(state.termOutputs[it.key] ?: "") ?: ByteArray(0) }
             val payload = FfiIntroductionPayload(

@@ -2102,6 +2102,15 @@ private fun SessionRoot(
                                 if (held) Routes.channel(id) else Routes.channelSubscribe(id, handle, pressed = false),
                             )
                         },
+                        // ADR-0087 section 5.1 — the card's Subscribe: a
+                        // press, so the channel opens subscribed, under the
+                        // name the card read.
+                        onSubscribeChannelPressed = { id, handle, name ->
+                            val held = channelsState.channels.value.any { it.id == id }
+                            navController.navigate(
+                                if (held) Routes.channel(id) else Routes.channelSubscribe(id, handle, pressed = true, name = name),
+                            )
+                        },
                         // Only the plain lookup row (no people search wired)
                         // reaches this; the people search sends the request
                         // from its own row (who-can-find-me.md section 6.1).
@@ -2272,6 +2281,11 @@ private fun SessionRoot(
                             type = androidx.navigation.NavType.BoolType
                             defaultValue = false
                         },
+                        androidx.navigation.navArgument("name") {
+                            type = androidx.navigation.NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
                     ),
                 ) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
@@ -2281,6 +2295,7 @@ private fun SessionRoot(
                         client = channelsClient,
                         handle = entry.arguments?.getString("handle")?.takeIf { it.isNotEmpty() },
                         subscribePressed = entry.arguments?.getBoolean("pressed") == true,
+                        name = entry.arguments?.getString("name")?.takeIf { it.isNotBlank() },
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -3056,12 +3071,15 @@ private object Routes {
     /** A channel; `channelId` is the 32-char hex id (URL-safe by construction). */
     const val CHANNEL = "channel/{channelId}"
     fun channel(channelId: String): String = "channel/$channelId"
-    const val CHANNEL_SUBSCRIBE = "channel/{channelId}/subscribe?handle={handle}&pressed={pressed}"
+    const val CHANNEL_SUBSCRIBE = "channel/{channelId}/subscribe?handle={handle}&pressed={pressed}&name={name}"
 
     /** [pressed]: the person pressed Subscribe on the way here. Without it the
-     *  page only offers the button. */
-    fun channelSubscribe(channelId: String, handle: String?, pressed: Boolean): String =
-        "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}&pressed=$pressed"
+     *  page only offers the button. [name]: the channel's name as the card
+     *  that opened the page read it, its list name until the channel's own
+     *  record arrives. */
+    fun channelSubscribe(channelId: String, handle: String?, pressed: Boolean, name: String? = null): String =
+        "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}&pressed=$pressed" +
+            "&name=${android.net.Uri.encode(name.orEmpty())}"
     const val CHANNEL_MANAGE = "channel/{channelId}/manage"
     fun channelManage(channelId: String): String = "channel/$channelId/manage"
     const val PROFILE = "settings/profile"

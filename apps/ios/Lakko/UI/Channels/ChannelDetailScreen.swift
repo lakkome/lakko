@@ -40,6 +40,11 @@ struct ChannelDetailScreen: View {
     /// The handle the channel was found by when opened from the search field
     /// (a channel not yet in the local list). Empty otherwise.
     var foundHandle: String = ""
+    /// The name the channel's public record carried, when it was opened from
+    /// a directory card: the title until the channel's own record arrives.
+    var foundName: String = ""
+    /// The card's `Subscribe` was pressed: subscribe without asking again.
+    var subscribeOnOpen: Bool = false
     /// `docs/ux/feed.md` section 5 — the newest readable post was on screen
     /// in the subscriber view: it is read here and in the feed.
     var onPostRead: ((_ channelId: String, _ cursor: UInt64) -> Void)?
@@ -71,6 +76,8 @@ struct ChannelDetailScreen: View {
                     state: state,
                     client: client,
                     foundHandle: foundHandle,
+                    foundName: foundName,
+                    subscribeOnOpen: subscribeOnOpen,
                     onPostRead: onPostRead.map { read in { read(channelId, $0) } }
                 )
             }
@@ -117,7 +124,7 @@ struct ChannelDetailScreen: View {
         let channel = state.channels.first(where: { $0.id == channelId })
         return ChannelsFormatting.title(
             sharedName: channel?.sharedName ?? "",
-            localName: channel?.localName ?? "",
+            localName: channel?.localName ?? foundName,
             handle: channel?.handle ?? foundHandle)
     }
 }
@@ -132,6 +139,8 @@ struct ChannelHeaderCard: View {
     let channel: ChannelHandle?
     /// The handle the channel was found by when it is not listed yet.
     var foundHandle: String = ""
+    /// The name a directory record carried, while the channel is not listed.
+    var foundName: String = ""
     let isOwner: Bool
     /// Overrides the role / handle status while access is being set up.
     var status: String? = nil
@@ -141,7 +150,7 @@ struct ChannelHeaderCard: View {
     private var title: String {
         ChannelsFormatting.title(
             sharedName: channel?.sharedName ?? "",
-            localName: channel?.localName ?? "",
+            localName: channel?.localName ?? foundName,
             handle: handle)
     }
 

@@ -2816,6 +2816,12 @@ private fun ReactionChips(
 ) {
     val ctx = LocalBubbleReactions.current
     val strings = LocalStrings.current
+    // The own reactor's circle: the person's own photo, else the initials of
+    // their own name (a contact directory never holds the own profile).
+    val ownAvatar = me.lakko.app.ui.components.rememberOwnAvatar()
+    val ownAvatarName = me.lakko.app.ui.components.rememberOwnAvatarName(
+        ownIdentity?.let { ctx?.nameOf?.invoke(it) } ?: "?",
+    )
     val row = remember(reactions, ownIdentity, ctx?.allowed, ctx?.chipConversation) {
         chipRowOf(reactions, ownIdentity, ctx)
     }
@@ -2868,11 +2874,13 @@ private fun ReactionChips(
                         is uniffi.lakko_ffi_uniffi.FfiChipFace.Avatars -> Row {
                             face.reactors.forEachIndexed { i, key ->
                                 val b64 = java.util.Base64.getEncoder().encodeToString(key)
+                                val mine = b64 == ownIdentity
                                 LakkoAvatar(
-                                    name = ctx?.nameOf?.invoke(b64) ?: "?",
+                                    name = if (mine) ownAvatarName else ctx?.nameOf?.invoke(b64) ?: "?",
                                     seed = b64,
                                     size = 16.dp,
                                     personKey = key,
+                                    avatar = if (mine) ownAvatar else null,
                                     modifier = Modifier.offset(x = (-4 * i).dp),
                                 )
                             }
@@ -2959,6 +2967,10 @@ internal fun ReactorsSheet(
     nameOf: (me.lakko.app.chat.MemberIdentity) -> String,
     onDismiss: () -> Unit,
 ) {
+    val ownAvatar = me.lakko.app.ui.components.rememberOwnAvatar()
+    val ownAvatarName = me.lakko.app.ui.components.rememberOwnAvatarName(
+        ownIdentity?.let(nameOf) ?: "?",
+    )
     val strings = LocalStrings.current
     val kinds = remember(reactions) {
         reactions.groupBy { it.emoji }.entries
@@ -3001,12 +3013,16 @@ internal fun ReactorsSheet(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 ) {
-                    val name = if (r.reactor == ownIdentity) strings["chat.author.you"] else nameOf(r.reactor)
+                    val mine = r.reactor == ownIdentity
+                    val name = if (mine) strings["chat.author.you"] else nameOf(r.reactor)
+                    // The own row's circle is the person's own photo or
+                    // initials, never the "Y" of the "You" label.
                     LakkoAvatar(
-                        name = name,
+                        name = if (mine) ownAvatarName else name,
                         seed = r.reactor,
                         size = 32.dp,
                         personKey = me.lakko.app.ui.components.personKeyBytes(r.reactor),
+                        avatar = if (mine) ownAvatar else null,
                     )
                     Spacer(Modifier.width(12.dp))
                     Text(text = name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
@@ -3015,35 +3031,6 @@ internal fun ReactorsSheet(
             }
         }
     }
-}
-
-/**
- * ADR-0045 UX §6 — the `Remove this member?` confirmation.
- *
- * Same idiom as [LeaveGroupDialog] deliberately: the two sit in the same panel
- * and a user reading one after the other should be answering the same kind of
- * question. The copy comes from `me.lakko.app.chat.removeMemberConfirmation`
- * rather than being inlined, so the three clients cannot drift on the sentence
- * that tells a user whether the person they are removing can still read their
- * messages.
- *
- * The body is absent on a direct-commit group, where §6's sentence would be
- * false — see the module for why it is dropped rather than reworded.
- */
-@Composable
-private fun RemoveMemberDialog(
-    usesProposalPath: Boolean,
-    onCancel: () -> Unit,
-    onRemove: () -> Unit,
-) {
-    val copy = me.lakko.app.chat.removeMemberConfirmation(usesProposalPath)
-    LakkoDialog(
-        onDismissRequest = onCancel,
-        title = copy.title.text(),
-        body = copy.body?.text(),
-        confirm = LakkoDialogAction(copy.confirmLabel.text(), LakkoDialogTone.Danger, onClick = onRemove),
-        cancel = LakkoDialogAction(copy.cancelLabel.text(), LakkoDialogTone.Ghost, onClick = onCancel),
-    )
 }
 
 /** ADR-0023 — the pre-filled edit dialog (Save / Cancel). */
@@ -4116,7 +4103,6 @@ private fun MembersSheet(
     // nullable leaf rather than a boolean because the confirmation names WHICH
     // member: a shared boolean plus a separately-stored target is how a
     // confirmation ends up removing somebody the user did not look at.
-    var confirmingRemove by remember { mutableStateOf<UInt?>(null) }
 
     // docs/ux/conversation-info.md section 2.2 — WHAT this panel holds is
     // asked, never decided here. The one copy of the rule is
@@ -4228,17 +4214,6 @@ private fun MembersSheet(
             onLeave = {
                 confirmingLeave = false
                 viewModel.onLeaveGroup()
-            },
-        )
-    }
-
-    confirmingRemove?.let { leaf ->
-        RemoveMemberDialog(
-            usesProposalPath = roleTable != null,
-            onCancel = { confirmingRemove = null },
-            onRemove = {
-                confirmingRemove = null
-                viewModel.onRemoveMember(leaf)
             },
         )
     }
@@ -4660,37 +4635,36 @@ private fun MembersSheet(
                                     text = viewModel.pendingJoinLabel(ref),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                // ADR-0028 OQ2 — which member's `/g/` link this
-                                // request arrived on + whether they are still in
-                                // the roster (advisory).
+                                // group-and-channel-privacy.md section 8 — one
+                                // line: `Asked 2 hours ago`, or from a link
+                                // `Invited by Anna · 2 hours ago`. The sealed
+                                // knock row gave both; an older attribution
+                                // envelope names the issuer only.
                                 val attr = joinAttributions[
                                     ref.joinToString("") { "%02x".format(it.toInt() and 0xff) },
                                 ]
-                                if (attr != null) {
+                                val strings = LocalStrings.current
+                                val settingsVersion by me.lakko.app.chat.GroupSettingsStore.version.collectAsStateWithLifecycle()
+                                val origin = remember(ref.contentHashCode(), settingsVersion) {
+                                    viewModel.joinRequestOrigin(ref)
+                                }
+                                val line = me.lakko.app.chat.joinRequestLine(
+                                    origin = origin,
+                                    attributionIssuerB64 = attr?.issuerKeyB64,
+                                    nameOf = viewModel::nameOf,
+                                    whenOf = { at ->
+                                        me.lakko.app.ui.channels.relativeTimeLabel(
+                                            at,
+                                            System.currentTimeMillis(),
+                                            java.time.ZoneId.systemDefault(),
+                                            java.util.Locale.getDefault(),
+                                            strings,
+                                        )
+                                    },
+                                )
+                                if (line != null) {
                                     Text(
-                                        text = t(
-                                            if (attr.issuerInRoster) {
-                                                "chat.members.join.via_member"
-                                            } else {
-                                                "chat.members.join.via_former"
-                                            },
-                                            mapOf(
-                                                "name" to (
-                                                    attr.issuerKeyB64?.let(viewModel::nameOf)
-                                                        ?: attr.issuerFingerprint.take(11)
-                                                    ),
-                                            ),
-                                        ),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (attr.issuerInRoster) {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        } else {
-                                            MaterialTheme.colorScheme.error
-                                        },
-                                    )
-                                } else {
-                                    Text(
-                                        text = t("chat.members.join.link_unknown"),
+                                        text = line.text(),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -4860,11 +4834,11 @@ private fun MembersSheet(
                                 // (owner / admin / open group) and not our own leaf.
                                 if (canManage && ownLeaf != member.leafIndex) {
                                     TextButton(
-                                        // ADR-0045 UX §6 — the confirmation is the
-                                        // LAST exit: a published request cannot be
-                                        // withdrawn, and a direct commit lands at
-                                        // once. Never remove on a single tap.
-                                        onClick = { confirmingRemove = member.leafIndex },
+                                        // proposal-based-membership.md section 6,
+                                        // "No confirmation" (2026-11-04): Remove
+                                        // acts on the tap; a removal that waits for
+                                        // another committer says so on the row.
+                                        onClick = { viewModel.onRemoveMember(member.leafIndex) },
                                         // UX §5.3 — a member with a pending removal keeps
                                         // Remove VISIBLE but DISABLED. Hiding it would read
                                         // as the permission having vanished; the annotation

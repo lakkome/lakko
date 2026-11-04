@@ -1159,6 +1159,10 @@ enum TabRoute: Hashable {
     /// A channel the network lookup found by `@handle`, which this device may
     /// not hold yet — the reader screen offers Subscribe.
     case channelFound(channelId: String, handle: String)
+    /// `Subscribe` on the card of a public channel found by search
+    /// (`docs/ux/group-and-channel-privacy.md` section 5.1): the channel,
+    /// subscribed at once and named by its record.
+    case channelSubscribe(channelId: String, handle: String, name: String)
     /// The create menu's Create channel.
     case newChannel
     /// ADR-0028 OQ3 — the joiner side of a co-publisher link.
@@ -1578,6 +1582,9 @@ private struct SessionRoot: View, Equatable {
                     onCreate: { create($0) },
                     onFoundChannel: { channelId, handle in
                         push(.channelFound(channelId: channelId, handle: handle), on: .chats)
+                    },
+                    onSubscribeFoundChannel: { channelId, handle, name in
+                        push(.channelSubscribe(channelId: channelId, handle: handle, name: name), on: .chats)
                     },
                     onOpenPerson: { openFoundPerson($0, on: .chats) },
                     onOpenFolderSettings: { reorder in
@@ -2134,6 +2141,22 @@ private struct SessionRoot: View, Equatable {
                     state: channelsState,
                     client: ChannelsClient(),
                     accountIdentitySeed: seed,
+                    onPostRead: { [feedReading = models.feedReading] in
+                        feedReading.advanceChannelRead($0, cursor: $1)
+                    })
+            } else {
+                channelSeedMissing(l10n.t("channels.fallback_name"))
+            }
+        case .channelSubscribe(let channelId, let handle, let name):
+            if let seed = accountIdentitySeed {
+                ChannelDetailScreen(
+                    channelId: channelId,
+                    state: channelsState,
+                    client: ChannelsClient(),
+                    accountIdentitySeed: seed,
+                    foundHandle: handle,
+                    foundName: name,
+                    subscribeOnOpen: true,
                     onPostRead: { [feedReading = models.feedReading] in
                         feedReading.advanceChannelRead($0, cursor: $1)
                     })

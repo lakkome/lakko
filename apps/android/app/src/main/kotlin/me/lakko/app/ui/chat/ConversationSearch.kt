@@ -66,6 +66,12 @@ public interface ConversationSearchPort {
 
     /** Open a group this device is in, or a channel's subscribe page. */
     public fun open(found: FoundConversation)
+
+    /** Section 5.1 — the card's Subscribe: subscribe to the channel at once
+     *  and open it, under the name the card read. */
+    public fun subscribe(found: FoundConversation) {
+        open(found)
+    }
 }
 
 private fun FoundConversation.idHex(): String = id.joinToString("") { "%02x".format(it) }
@@ -80,29 +86,48 @@ private fun bandText(band: Int): String = when (band) {
     else -> "<10"
 }
 
-/** Section 5 — the "Groups and channels" rows under People. */
+/**
+ * Section 5 — the public groups and channels matching [query], asked 500 ms
+ * after the last keystroke from 3 characters; empty below that or on a
+ * failure. Hoisted so the field knows whether anything matched at all.
+ */
+/** The public groups and channels a search found, and whether it is still
+ *  asking. */
+internal class FoundConversations(val rows: List<FoundConversation>, val pending: Boolean)
+
 @Composable
-internal fun GroupsAndChannelsSection(query: String, port: ConversationSearchPort) {
+internal fun rememberFoundConversations(query: String, port: ConversationSearchPort?): FoundConversations {
     var found by remember { mutableStateOf<List<FoundConversation>>(emptyList()) }
-    var opened by remember { mutableStateOf<FoundConversation?>(null) }
-    LaunchedEffect(query) {
+    var pending by remember { mutableStateOf(false) }
+    LaunchedEffect(query, port != null) {
         found = emptyList()
-        if (query.trim().length < 3) return@LaunchedEffect
-        delay(500)
-        found = try {
-            port.search(query)
-        } catch (cause: Throwable) {
-            me.lakko.app.rethrowIfCancelled(cause)
-            emptyList()
+        if (port == null || query.trim().length < 3) {
+            pending = false
+            return@LaunchedEffect
+        }
+        pending = true
+        try {
+            delay(500)
+            found = try {
+                port.search(query)
+            } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause)
+                emptyList()
+            }
+        } finally {
+            pending = false
         }
     }
+    return FoundConversations(found, pending)
+}
+
+/** Section 5 — the public groups and channels in the one result list
+ *  (who-can-find-me.md section 6.1, "One list"): no heading; each row's
+ *  second line says what it is. */
+@Composable
+internal fun GroupsAndChannelsSection(found: List<FoundConversation>, port: ConversationSearchPort) {
+    var opened by remember { mutableStateOf<FoundConversation?>(null) }
     if (found.isEmpty()) return
-    Text(
-        t("search.conversations.heading"),
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-    )
     val strings = LocalStrings.current
     for (f in found) {
         val member = port.isMember(f.idHex())
@@ -126,6 +151,8 @@ internal fun GroupsAndChannelsSection(query: String, port: ConversationSearchPor
             if (member) TextButton(onClick = { port.open(f) }) { Text(t("search.conversation.open")) }
         }
     }
+    // The card reads membership as it draws: a join that lands while it is
+    // open turns its button into Open.
     opened?.let { f -> ConversationCard(f, port, onClose = { opened = null }) }
 }
 
@@ -176,7 +203,7 @@ private fun ConversationCard(f: FoundConversation, port: ConversationSearchPort,
                 Spacer(Modifier.height(8.dp))
                 when {
                     port.isMember(f.idHex()) -> Button(onClick = { port.open(f) }) { Text(t("search.conversation.open")) }
-                    !isGroup -> Button(onClick = { port.open(f) }) { Text(t("search.conversation.subscribe")) }
+                    !isGroup -> Button(onClick = { port.subscribe(f) }) { Text(t("search.conversation.subscribe")) }
                     else -> Button(
                         enabled = !sending && !sent,
                         onClick = {

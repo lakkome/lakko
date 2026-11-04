@@ -426,6 +426,37 @@ export class DiscoveryClient {
     return this.tokenPostJson("discovery-lookup", "/discovery/oprf", req);
   }
 
+  /** Most blinded elements one batch carries: the server's bound, the most
+   *  search terms one record carries plus one (room for the old `@name` in a
+   *  replace). A longer list is sent in more batches; no term is dropped. */
+  static readonly OPRF_BATCH_MAX = 66;
+
+  /**
+   * `POST /discovery/oprf/batch`: evaluate the blinded elements of the
+   * account's or a conversation's OWN search terms in one round, for one
+   * `discovery-register` token and no session. The answers come back in the
+   * order sent. Searches for someone else stay on {@link oprfEvaluate}.
+   * Throws `DiscoveryHttpError` (400 / 401 / 429); a reply of another length
+   * is refused.
+   */
+  async oprfEvaluateBatch(blinded: readonly string[]): Promise<string[]> {
+    if (blinded.length === 0 || blinded.length > DiscoveryClient.OPRF_BATCH_MAX) {
+      throw new DiscoveryClientArgError(`an OPRF batch holds 1 to ${DiscoveryClient.OPRF_BATCH_MAX} elements`);
+    }
+    const resp = await this.tokenPostJson<{ evaluated?: unknown }>("discovery-register", "/discovery/oprf/batch", {
+      blinded,
+    });
+    const evaluated = resp.evaluated;
+    if (
+      !Array.isArray(evaluated) ||
+      evaluated.length !== blinded.length ||
+      !evaluated.every((e) => typeof e === "string")
+    ) {
+      throw new DiscoveryHttpError(200, "/discovery/oprf/batch", "answer does not match the batch");
+    }
+    return evaluated as string[];
+  }
+
   async register(req: RegisterRequest): Promise<RegisterResponse> {
     return this.post("/discovery/register", req);
   }

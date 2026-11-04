@@ -262,7 +262,10 @@ public enum PeopleNetworkState: Equatable {
     public var message: String? {
         switch self {
         case .found: return nil
-        case .notFound: return Localization.text("search.people.not_found")
+        // `who-can-find-me.md` 6.1, "One list" (2026-11-04): the whole list,
+        // not people alone, so a search that found a group never reads "No
+        // one found" above it.
+        case .notFound: return Localization.text("search.nothing_found")
         case .failed: return Localization.text("search.people.failed")
         case .outOfSearches: return Localization.text("search.people.out_of_searches")
         }
@@ -303,7 +306,7 @@ public struct PeopleSearchAnswer: Equatable {
     /// found" only when every question was answered. `includesChannels` is
     /// `false` in Contacts, which matches only people.
     public func state(includesChannels: Bool) -> PeopleNetworkState {
-        if !people.isEmpty || (includesChannels && channel != nil) { return .found }
+        if !people.isEmpty || (includesChannels && (channel != nil || !conversations.isEmpty)) { return .found }
         if allowanceUsed { return .outOfSearches }
         if failed { return .failed }
         return .notFound
@@ -1061,7 +1064,10 @@ public enum PeopleSearch {
     public static func message(for outcome: PeopleSearchOutcome) -> String? {
         switch outcome {
         case .found: return nil
-        case .notFound: return Localization.text("search.people.not_found")
+        // `who-can-find-me.md` 6.1, "One list" (2026-11-04): the whole list,
+        // not people alone, so a search that found a group never reads "No
+        // one found" above it.
+        case .notFound: return Localization.text("search.nothing_found")
         case .failed: return Localization.text("search.people.failed")
         case .allowanceUsed: return Localization.text("search.people.out_of_searches")
         }
@@ -1559,15 +1565,17 @@ public final class PeopleSearchModel: ObservableObject {
         answer?.state(includesChannels: includesChannels)
     }
 
-    /// The line under People. "No one found" says nobody stands there, so it
-    /// goes whenever a person row does.
+    /// The state line at the end of the one list (`who-can-find-me.md` 6.1,
+    /// "One list"). "Nothing found" says nothing stands in the field, so it
+    /// goes whenever any row does: a person here, or a row of the screen's
+    /// own list above (`listShowsRows`).
     public func peopleMessage(
         includesChannels: Bool, showsLocalContacts: Bool, listed: Set<Data> = [],
-        chatPeers: Set<Data> = []
+        chatPeers: Set<Data> = [], listShowsRows: Bool = false
     ) -> String? {
         let state = networkState(includesChannels: includesChannels)
         let rows = rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
-        if state == .notFound, !rows.local.isEmpty || !rows.network.isEmpty { return nil }
+        if state == .notFound, listShowsRows || !rows.local.isEmpty || !rows.network.isEmpty { return nil }
         return state?.message
     }
 
@@ -1580,7 +1588,7 @@ public final class PeopleSearchModel: ObservableObject {
         if searching { return true }
         let rows = rows(showsLocalContacts: showsLocalContacts, listed: listed, chatPeers: chatPeers)
         if !rows.local.isEmpty || !rows.network.isEmpty { return true }
-        if includesChannels, answer?.channel != nil { return true }
+        if includesChannels, answer?.channel != nil || !(answer?.conversations.isEmpty ?? true) { return true }
         if let state = networkState(includesChannels: includesChannels), state != .found { return true }
         return false
     }

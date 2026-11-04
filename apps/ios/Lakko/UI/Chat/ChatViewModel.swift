@@ -488,6 +488,9 @@ public final class ChatViewModel: ObservableObject {
                 // UX 9.1 — the group went while another screen was on top.
                 noteConversationEnd(threadPresent: threadKnown)
             } else {
+                // The read position goes out now rather than 1.5 s later: an
+                // app closed right after reading came back with the badge.
+                flushPendingReadCursor()
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
                 // ADR-0052 — and drop an armed reply: "a reply is not a draft
@@ -1565,6 +1568,30 @@ public final class ChatViewModel: ObservableObject {
             leafName: carried ?? personName(signatureKeyB64: base64Encode(ref)))
     }
 
+    /// UX section 8 — the one line under a join request: `Asked 2 hours ago`,
+    /// or from a link `Invited by Anna · 2 hours ago`. `nil` when this device
+    /// holds nothing about when the request came.
+    func pendingJoinLine(_ ref: Data) -> String? {
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64,
+              let meta = repository.groupSettingsStore
+                .requestMeta(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[base64Encode(ref)]
+        else { return nil }
+        let when = ChannelsFormatting.relativeLabel(
+            ms: meta.askedAtMs, nowMs: ChatRepository.nowMs(), calendar: .current,
+            locale: Localization.currentLocale)
+        guard let inviter = meta.inviterKey else {
+            return Localization.text("chat.members.join.asked", texts: ["when": when])
+        }
+        let directory = ProfileDirectory.shared
+        let name: String
+        if base64Encode(inviter) == ownIdentity {
+            name = directory.ownProfile?.displayName ?? directory.ownUsername ?? directory.resolve(signatureKey: inviter).name
+        } else {
+            name = directory.resolve(signatureKey: inviter).name
+        }
+        return Localization.text("chat.members.join.invited_by", texts: ["name": name, "when": when])
+    }
+
     /// Pure rule behind ``pendingJoinLabel(_:)``: a name the account key
     /// resolves to (anything but the placeholder) wins; otherwise the leaf
     /// key's name, else "Someone" — the pre-existing row label.
@@ -2284,8 +2311,12 @@ public final class ChatViewModel: ObservableObject {
             case .owed: return "group_photo.owed"
             }
         } catch let refusal as DiscoveryClient.HandleWriteError {
-            if refusal.code == "name-taken" { return "group_handle.error.held" }
-            if refusal.status == 429 { return "group_handle.error.too_many" }
+            if refusal.code == "name-taken" {
+                HandleTakenCheck.note(handle, .taken)
+                return "group_handle.error.held"
+            }
+            // A 429 is discovery's rate limit, not the day's allowance.
+            if refusal.status == 429 { return "common.error.too_many_attempts" }
             return "group_handle.error.failed"
         } catch let DiscoveryClientError.network(_, _) {
             return "group_handle.error.offline"
@@ -2436,6 +2467,15 @@ public final class ChatViewModel: ObservableObject {
                 )
             }
             .store(in: &cancellables)
+    }
+
+    /// The debounced read-cursor write, run now (a screen left, the app going
+    /// to the background). Nothing when none is waiting.
+    func flushPendingReadCursor() {
+        guard let work = readCursorWork, !work.isCancelled else { return }
+        readCursorWork = nil
+        work.perform()
+        work.cancel()
     }
 
     private func scheduleReadCursorBroadcast(

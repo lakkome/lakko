@@ -296,7 +296,11 @@ public fun ContactsScreen(
                     }
                 }
 
-                if (pending.isNotEmpty()) {
+                // who-can-find-me.md section 6.1, "One list": while a text is
+                // typed the field shows one list with no headings, so the
+                // request blocks and the letter headers step aside.
+                val oneList = query.isNotBlank()
+                if (pending.isNotEmpty() && !oneList) {
                     item(key = "requests-header") { SectionTitle(t("contacts.list.requests")) }
                     items(pending.distinctBy { it.messageId }, key = { "req-${it.messageId}" }) { req ->
                         RequestRow(
@@ -310,7 +314,7 @@ public fun ContactsScreen(
                     }
                 }
 
-                if (state.sent.isNotEmpty()) {
+                if (state.sent.isNotEmpty() && !oneList) {
                     item(key = "sent-header") {
                         SentHeader(
                             count = state.sent.size,
@@ -339,7 +343,7 @@ public fun ContactsScreen(
                                 conversationMatches = 0,
                                 onOpenChannel = { _, _ -> },
                                 onOpenContact = openPerson,
-                                noLocalMatchKey = "contacts.list.no_match",
+                                noLocalMatchKey = "search.nothing_found",
                                 excludeKeysB64 = listedKeys,
                             )
                         } else {
@@ -352,11 +356,11 @@ public fun ContactsScreen(
                         }
                     }
                 } else {
-                    if (pending.isNotEmpty() || state.sent.isNotEmpty()) {
+                    if ((pending.isNotEmpty() || state.sent.isNotEmpty()) && !oneList) {
                         item(key = "contacts-header") { SectionTitle(t("nav.contacts")) }
                     }
                     for (section in sections) {
-                        stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
+                        if (!oneList) stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
                         items(section.rows, key = { "c-${it.key}" }) { row ->
                             val contact = byKey[row.key]
                             ContactRow(

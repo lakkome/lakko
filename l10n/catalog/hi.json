@@ -1571,7 +1571,7 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
@@ -2306,8 +2306,16 @@
       "text": "ग्रुप की जानकारी",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "लिंक कॉपी हो गया।",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "लिंक कॉपी करें",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "लिंक कॉपी नहीं हो सका।",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2470,12 +2478,24 @@
       "text": "स्वीकार करें",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "{when} अनुरोध किया",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "शामिल होने के अनुरोध ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "जुड़ने के अनुरोध (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "{name} ने आमंत्रित किया · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "{name} ने आमंत्रित किया",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3624,6 +3644,10 @@
     },
     "common.copy": {
       "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "कॉपी नहीं हो सका।",
       "status": "machine"
     },
     "common.creating": {
@@ -7812,6 +7836,10 @@
     },
     "search.conversations.heading": {
       "text": "समूह और चैनल",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "कुछ नहीं मिला। वर्तनी जाँचें, या आमंत्रण लिंक माँगें।",
       "status": "machine"
     },
     "search.people.add_contact": {

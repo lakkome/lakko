@@ -50,6 +50,27 @@ public struct OprfResponse: Codable, Equatable {
     }
 }
 
+/// Body of `POST /discovery/oprf/batch` (maintainer, 2026-11-04): the blinded
+/// elements of every term the account publishes about its own name, in one
+/// request with one `discovery-register` token (1..=65 entries).
+public struct OprfBatchRequest: Codable, Equatable {
+    public let blinded: [String]
+
+    public init(blinded: [String]) {
+        self.blinded = blinded
+    }
+}
+
+/// Response body of `POST /discovery/oprf/batch`: one evaluation per blinded
+/// element, in the same order.
+public struct OprfBatchResponse: Codable, Equatable {
+    public let evaluated: [String]
+
+    public init(evaluated: [String]) {
+        self.evaluated = evaluated
+    }
+}
+
 // ----------------------------------------------------------------------------
 // /discovery/register  (services/discovery/src/registry.rs)
 // ----------------------------------------------------------------------------

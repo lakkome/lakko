@@ -352,8 +352,9 @@ is not found, a channel is not found by its name, and a handle outside the usern
 is accepted at creation and then never asked for. One rule for every `@name` ends the
 last of these, and the rows below end the rest.
 
-Under the local results, public groups and channels appear under the heading **Groups
-and channels**, below **People**.
+Public groups and channels appear in the one result list of
+[`who-can-find-me.md`](who-can-find-me.md) section 6.1 beside the people found, with no
+heading of their own (maintainer, 2026-11-04).
 
 Row: avatar, name, `@name`, second line:
 
@@ -365,7 +366,7 @@ appears only in the local results of its members, like any conversation.
 
 A name is matched by `@name` exactly, and by the start of a word from 3 letters, the
 same rule as a person who chose Everyone. Up to 20 come back; more letters narrow it.
-The states are those of who-can-find-me section 6.1, word for word, including "No one
+The states are those of who-can-find-me section 6.1, word for word, including "Nothing
 found" when nothing matches. A private group and a name no one holds read alike.
 
 Discover keeps its own search.
@@ -385,7 +386,8 @@ Weekend walks around Berlin.
 [ Request to join ]
 ```
 
-For a channel, `Subscribe`. The size is what the owner last published. No member is
+For a channel, `Subscribe`: it subscribes at once and opens the channel under its name,
+with no second step (2026-11-04). The size is what the owner last published. No member is
 listed and no message is shown: those are for members.
 
 | State | What it shows |
@@ -489,7 +491,9 @@ admins only.
 Row: avatar, the name the request carries, `@username` when it is verified, one line,
 `Approve`, `Reject`.
 
-- Line: `Asked 2 hours ago`. From a link: `Invited by Anna · 2 hours ago`.
+- Line: `Asked 2 hours ago`. From a link: `Invited by Anna · 2 hours ago`. Both are
+  recorded by the admin's device when it first reads the request; a request it holds
+  no record of shows no line.
 - A contact shows their contact name.
 - A name in a request is what the person claims, unverified, with no mark, like a
   `Forwarded from` line.

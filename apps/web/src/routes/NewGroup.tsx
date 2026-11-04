@@ -9,9 +9,10 @@
  * later as in any group.
  */
 import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { base64Encode } from "../auth/account-id";
-import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
-import { HandleWriteError, oprfForName } from "../discovery/handle-lookup";
+import { DiscoveryNetworkError } from "../discovery/client";
+import { anonTokenMessage } from "../tokens/token-copy";
+import { HandleWriteError } from "../discovery/handle-lookup";
+import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken as askHandleTaken, isRateLimited } from "../discovery/handle-check";
 import {
   claimGroupHandle,
   handleRandom,
@@ -103,17 +104,14 @@ export default function NewGroup(): JSX.Element {
     setHandleTaken(false);
     if (takenTimer !== null) clearTimeout(takenTimer);
     if (!pub || h.length < 3 || !handleWell()) return;
+    // Asked as seldom as search asks (who-can-find-me 6.1): once typing
+    // stops, never twice for one name within 60 s; Create reuses the name's
+    // OPRF answer (`discovery/handle-check.ts`).
     takenTimer = setTimeout(() => {
-      void (async () => {
-        try {
-          const pair = await oprfForName(h);
-          const res = await new DiscoveryClient().lookupRaw({ oprf_hash: base64Encode(pair.lookupKey) });
-          if (handle() === h) setHandleTaken(res !== null);
-        } catch {
-          /* the lookup answers nothing: say nothing */
-        }
-      })();
-    }, 500);
+      void askHandleTaken(h).then((taken) => {
+        if (handle() === h && taken !== null) setHandleTaken(taken);
+      });
+    }, HANDLE_CHECK_DEBOUNCE_MS);
   });
   onCleanup(() => {
     if (takenTimer !== null) clearTimeout(takenTimer);
@@ -257,7 +255,10 @@ export default function NewGroup(): JSX.Element {
         navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
       }
     } catch (err) {
-      if (err instanceof HandleWriteError || err instanceof DiscoveryNetworkError) {
+      if (isRateLimited(err) || anonTokenMessage(err, "") !== null) {
+        // A refused lookup is the rate, never a refusal of the name.
+        setError(() => handleWriteErrorText(err));
+      } else if (err instanceof HandleWriteError || err instanceof DiscoveryNetworkError) {
         const text = handleWriteErrorText(err);
         if (err instanceof HandleWriteError && err.code === "name-taken") setHandleError(text);
         else setError(() => text);

@@ -358,9 +358,27 @@ public fun NewChannelScreen(
                                             "channels.new.error.handle_taken",
                                             texts = mapOf("handle" to "@$wantedHandle"),
                                         )
+                                    } else if (e.status == 429) {
+                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
                                     } else {
                                         UiText("channels.new.error.handle")
                                     }
+                                    busy = false
+                                    return@launch
+                                } catch (e: me.lakko.app.discovery.DiscoveryHttpError) {
+                                    // The OPRF evaluation or a lookup before the
+                                    // claim: a 429 is the per-network limit.
+                                    Log.w(TAG, "handle claim: discovery ${e.status}", e)
+                                    error = if (e.status == 429) {
+                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
+                                    } else {
+                                        UiText("channels.new.error.handle")
+                                    }
+                                    busy = false
+                                    return@launch
+                                } catch (e: me.lakko.app.discovery.DiscoveryNetworkError) {
+                                    Log.w(TAG, "handle claim: no network", e)
+                                    error = UiText("channels.new.error.handle_offline")
                                     busy = false
                                     return@launch
                                 } catch (e: me.lakko.app.anon.AnonTokenException) {
@@ -671,6 +689,8 @@ public fun ChannelSubscribeScreen(
     /** Subscribe was already pressed, on the card that opened this page. */
     subscribePressed: Boolean,
     onBack: () -> Unit,
+    /** The channel's name as the card that opened this page read it. */
+    name: String? = null,
 ) {
     val channels by state.channels.collectAsState()
     val subscriberKeys by state.subscriberKeysByChannel.collectAsState()
@@ -688,7 +708,7 @@ public fun ChannelSubscribeScreen(
             state.addChannel(
                 ChannelHandle(
                     id = channelId,
-                    localName = bare,
+                    localName = name?.trim()?.takeIf { it.isNotEmpty() } ?: bare,
                     localDescription = "",
                     addedAtMs = System.currentTimeMillis().toULong(),
                     handle = bare,
@@ -700,6 +720,7 @@ public fun ChannelSubscribeScreen(
         topBar = {
             ChannelTopBar(
                 title = channel?.let { channelTitle(it, LocalStrings.current) }
+                    ?: name?.trim()?.takeIf { it.isNotEmpty() }
                     ?: handle?.takeIf { it.isNotBlank() }?.let { "@" + it.trim().removePrefix("@") }
                     ?: t("channels.fallback_name"),
                 onBack = onBack,

@@ -189,6 +189,14 @@ public class DiscoveryClient(
             setBody(req)
         }
 
+    /** `POST /discovery/oprf/batch`: the own name's terms in one request, one
+     *  `discovery-register` token, no session. */
+    public suspend fun oprfEvaluateBatch(req: OprfBatchRequest): OprfBatchResponse =
+        tokenPost("/discovery/oprf/batch", AnonTokenContext.DISCOVERY_REGISTER) {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
     /** `POST /discovery/register`. */
     public suspend fun register(req: RegisterRequest): RegisterResponse =
         doPost("/discovery/register") {
@@ -706,10 +714,51 @@ public class DiscoveryClient(
      * the device.
      */
     public suspend fun oprfUsername(username: String): uniffi.lakko_ffi_uniffi.OprfResult =
-        uniffi.lakko_ffi_uniffi.OprfBlinder.blind(username).use { blinder ->
-            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
-            blinder.finalize(oprfResp.evaluated)
+        // who-can-find-me.md 6.1 — the same text is not asked twice within 60
+        // seconds: a taken check and the claim at Create share one answer.
+        recentOprf.getOrAsk(username) {
+            uniffi.lakko_ffi_uniffi.OprfBlinder.blind(username).use { blinder ->
+                val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
+                blinder.finalize(oprfResp.evaluated)
+            }
         }
+
+    /**
+     * Publishing an own name (a group's or channel's @name and name terms, the
+     * account's public record, its introduction terms): every term blinded,
+     * sent in batches of at most [OPRF_BATCH_MAX] (66) through
+     * `POST /discovery/oprf/batch` (one `discovery-register` token per batch),
+     * each finalized with its own blinder. Results in the order of [terms].
+     * Searches for others stay on [oprfUsername] / [oprfNameTerm].
+     */
+    public suspend fun oprfOwnTerms(terms: List<OwnTerm>): List<uniffi.lakko_ffi_uniffi.OprfResult> {
+        val out = ArrayList<uniffi.lakko_ffi_uniffi.OprfResult>(terms.size)
+        for (chunk in terms.chunked(OPRF_BATCH_MAX)) {
+            val blinders = chunk.map { t ->
+                when (t) {
+                    is OwnTerm.Username -> uniffi.lakko_ffi_uniffi.OprfBlinder.blind(t.value)
+                    is OwnTerm.NameTerm -> uniffi.lakko_ffi_uniffi.OprfBlinder.blindNameTerm(t.value)
+                }
+            }
+            try {
+                val resp = oprfEvaluateBatch(OprfBatchRequest(blinded = blinders.map { it.blindedB64() }))
+                if (resp.evaluated.size != blinders.size) {
+                    throw DiscoveryHttpError(200, "/discovery/oprf/batch", "evaluated ${resp.evaluated.size} of ${blinders.size}")
+                }
+                for ((i, b) in blinders.withIndex()) out += b.finalize(resp.evaluated[i])
+            } finally {
+                blinders.forEach { it.close() }
+            }
+        }
+        // An own @name is also what a claim and the taken check ask: kept.
+        for ((i, t) in terms.withIndex()) if (t is OwnTerm.Username) recentOprf.put(t.value, out[i])
+        return out
+    }
+
+    /** An own `@name`'s OPRF answer: the one kept from the last 60 s (the
+     *  taken check), else evaluated through the batch route. */
+    public suspend fun oprfOwnName(name: String): uniffi.lakko_ffi_uniffi.OprfResult =
+        recentOprf.get(name) ?: oprfOwnTerms(listOf(OwnTerm.Username(name))).single()
 
     /** `POST /discovery/name/lookup` (anonymous): the accounts in Everyone
      *  that published the name term whose discovery lookup key is [lookupKey]
@@ -761,9 +810,9 @@ public class DiscoveryClient(
     /** Section 3.3 — whether a name answers a lookup (a person in Everyone,
      *  or a public group or channel): `That @name is taken.` Private names
      *  answer nothing, by design. */
-    public suspend fun nameAnswers(name: String): Boolean {
+    public suspend fun nameAnswers(name: String): Boolean = recentNameAnswers.getOrAsk(name) {
         val pair = oprfUsername(name)
-        return lookupRaw(LookupRequest(oprf_hash = base64Encode(pair.lookupKey))) != null
+        lookupRaw(LookupRequest(oprf_hash = base64Encode(pair.lookupKey))) != null
     }
 
     /** `POST /discovery/name/lookup` keeping only the public groups and
@@ -1796,6 +1845,13 @@ public class DiscoveryClient(
     }
 
     public companion object {
+        /** Section 6.1 — OPRF answers by username, kept 60 s, process-wide
+         *  (every client instance asks the same server key). */
+        private val recentOprf = RecentAnswers<uniffi.lakko_ffi_uniffi.OprfResult>()
+
+        /** Section 3.3 — whether a name answered a lookup, kept 60 s. */
+        private val recentNameAnswers = RecentAnswers<Boolean>()
+
         /** ADR-0074 - the header a statement rides in on a route with no
          *  JSON body. The native core names it (`accountStatementHeaderName`);
          *  this is the same value for code that runs without the core. */
@@ -2023,6 +2079,21 @@ public data class LookupResult(
 // =============================================================================
 // Errors
 // =============================================================================
+
+/** One term of an own name to evaluate: an `@name` / username, or a name
+ *  search term. */
+public sealed class OwnTerm {
+    public abstract val value: String
+
+    public data class Username(override val value: String) : OwnTerm()
+
+    public data class NameTerm(override val value: String) : OwnTerm()
+}
+
+/** The most elements `POST /discovery/oprf/batch` takes: `maxHandleTerms()`
+ *  + 1, room for the old @name beside the new one and its name terms in a
+ *  replace. A longer list goes in several batches; no term is dropped. */
+public const val OPRF_BATCH_MAX: Int = 66
 
 /** Programmer error — empty / invalid inputs caught before any
  *  network round-trip. Distinct from HTTP errors so the UI can

@@ -2306,8 +2306,16 @@
       "text": "Grup bilgisi",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "Bağlantı kopyalandı.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "Bağlantıyı kopyala",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "Bağlantı kopyalanamadı.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2470,12 +2478,24 @@
       "text": "Onayla",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "İstedi: {when}",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "Katılma istekleri ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "Katılma istekleri (64+)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "{name} davet etti · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "{name} davet etti",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3624,6 +3644,10 @@
     },
     "common.copy": {
       "text": "Kopyala",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "Kopyalanamadı.",
       "status": "machine"
     },
     "common.creating": {
@@ -7812,6 +7836,10 @@
     },
     "search.conversations.heading": {
       "text": "Gruplar ve kanallar",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "Hiçbir şey bulunamadı. Yazımı kontrol edin veya bir davet bağlantısı isteyin.",
       "status": "machine"
     },
     "search.people.add_contact": {

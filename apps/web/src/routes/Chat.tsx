@@ -213,6 +213,8 @@ import {
   resetCase,
 } from "../chat/reset-repair";
 import { createdHere, openCreatedGroups } from "../chat/created-groups";
+import { knockOriginFor } from "../chat/knock-origins";
+import { relativeTimeLabel } from "../channels/relative-time";
 import {
   conversationInfoSectionsFor,
   findPersonRecord,
@@ -259,7 +261,8 @@ import {
   type AllowedSetting,
 } from "../chat/reaction-rules";
 import { quickReactionOf } from "../chat/quick-reaction-register";
-import { GroupInfoExtras } from "../chat/GroupInfoExtras";
+import { GroupInfoExtras, GroupTypeScreen, ReactionsScreen } from "../chat/GroupInfoExtras";
+import { PushedScreen } from "../ui/PushedScreen";
 import { copyMessageText } from "../chat/copy-message";
 import { retireGroupHandle } from "../chat/group-handle";
 import { HandleWriteError } from "../discovery/handle-lookup";
@@ -464,13 +467,12 @@ import {
   type EndedTeardownStep,
   type MembershipState,
 } from "../chat/membership-ended";
-import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { MembershipEndDialog } from "../chat/MembershipEndNotices";
 import { chatViewKey, groupIdOfViewKey, type EndNotice } from "../chat/membership-end";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
-import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
+import { pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
 import { joinList, t } from "../l10n";
 import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { createLiveText, type LiveTextInput } from "../l10n/live-text";
@@ -1925,6 +1927,8 @@ function ChatView(props: {
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
   // "create invite link" affordance), or `null` before it is generated.
   const [inviteLink, setInviteLink] = createSignal<string | null>(null);
+  /** The group-of-one `Copy invite link` outcome (ADR-0087 section 10). */
+  const [soloCopy, setSoloCopy] = createSignal<"idle" | "copied" | "failed">("idle");
   // `memberCount` mirrors `peopleCountOf(props.entry.group)` into
   // a reactive signal so the header re-renders after
   // `addMember`. Without this the WASM-side property read in
@@ -1969,6 +1973,24 @@ function ChatView(props: {
    *  sees the info. */
   const addMembersShown = (): boolean =>
     infoScreen() === "add-members" && groupSections().includes("add-member");
+  /** Who can join and Reactions, pushed over the info like Add members
+   *  (`docs/ux/group-and-channel-privacy.md` sections 4.1 and 18), each only
+   *  for the role the shared rule gives it. */
+  const groupTypeShown = (): boolean =>
+    infoScreen() === "group-type" && groupSections().includes("group-type");
+  const reactionsShown = (): boolean =>
+    infoScreen() === "group-reactions" && groupSections().includes("reactions");
+  const subScreenShown = (): boolean => addMembersShown() || groupTypeShown() || reactionsShown();
+  /** The Reactions screen's back handler: it asks "Save changes?" first. */
+  let reactionsLeave: (() => void) | null = null;
+  /** One step back from the screen shown, by its back icon or `Esc`. */
+  function stepBack(): void {
+    if (reactionsShown() && reactionsLeave !== null) {
+      reactionsLeave();
+      return;
+    }
+    closeInfo();
+  }
   /** The info's back icon, focused when the info opens so the keyboard starts
    *  on the screen it is on. */
   let infoBackButton: HTMLButtonElement | undefined;
@@ -1987,7 +2009,7 @@ function ChatView(props: {
       if (e.key !== "Escape" || e.defaultPrevented || !infoOpen()) return;
       if (document.querySelector("dialog[open]") !== null) return;
       e.preventDefault();
-      closeInfo();
+      stepBack();
     };
     document.addEventListener("keydown", onKey);
     onCleanup(() => document.removeEventListener("keydown", onKey));
@@ -6281,35 +6303,10 @@ function ChatView(props: {
   // their own client lands the commit on next poll and learns
   // they're out.
   async function onRemoveMember(leafIndex: number): Promise<void> {
-    // ADR-0045 UX §6 — the confirmation is the LAST EXIT, because a published
-    // request cannot be withdrawn: it is in every member's proposal store and
-    // dies only when some commit lands, and there is no wire withdraw. The body
-    // line is not a nicety — it is the one fact a user removing someone for a
-    // safety reason must have, and the fact the old immediate-looking UI
-    // concealed.
-    //
-    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`. §6's
-    // decision is unchanged and still lives in `remove-member-confirm.ts`;
-    // what the widget adds is §6.1's rule that the action button NAMES the
-    // person, which a browser OK/Cancel pair cannot do. The roster label is
-    // read from `rosterViews()` so the button and the row the user just
-    // pressed cannot name the same member differently — the one thing they
-    // cross-check. An absent label falls back to the bare `Remove`.
-    const decided = removeMemberConfirmation({
-      usesProposalPath: usesProposalPath(),
-    });
-    const memberLabel = rosterViews().find(
-      (r) => r.leafIndex === leafIndex,
-    )?.label;
-    if (
-      !(await requestConfirm({
-        ...decided,
-        confirmLabel: namedActionKey("common.remove", "chat.members.remove.confirm_named", memberLabel),
-        tone: "danger",
-      }))
-    ) {
-      return;
-    }
+    // ADR-0045 UX §6 "No confirmation" (decided 2026-11-04): the person
+    // removing is an owner or an admin, the one who decides, so Remove acts
+    // on the tap. Where the removal waits for another committer, the row's
+    // "Waiting to be removed." line says so.
     setError(null);
     showNotice(null);
     setBusy(true);
@@ -8068,9 +8065,16 @@ function ChatView(props: {
                 disabled={busy()}
                 onClick={() =>
                   void (async () => {
+                    setSoloCopy("idle");
                     await onCreateInviteLink();
                     const link = inviteLink();
-                    if (link !== null) await copyMessageText(link);
+                    if (link === null) return;
+                    // A browser may refuse the clipboard once the network
+                    // round trip has spent the click; the link is then shown
+                    // with its own Copy button.
+                    const ok = await copyMessageText(link);
+                    setSoloCopy(ok ? "copied" : "failed");
+                    if (ok) window.setTimeout(() => setSoloCopy((s) => (s === "copied" ? "idle" : s)), 2000);
                   })()
                 }
               >
@@ -8078,6 +8082,21 @@ function ChatView(props: {
               </button>
             </Show>
           </div>
+          <Show when={soloCopy() === "copied"}>
+            <p class="form-info" role="status">
+              {t("chat.invite_link.copied")}
+            </p>
+          </Show>
+          <Show when={soloCopy() === "failed" ? inviteLink() : null}>
+            {(l) => (
+              <>
+                <p class="form-error" role="alert">
+                  {t("chat.invite_link.copy_failed")}
+                </p>
+                <ShareLinkRow url={l()} onRevoke={() => void onRevokeInviteLink()} busy={busy()} />
+              </>
+            )}
+          </Show>
         </div>
       </Show>
 
@@ -8632,7 +8651,7 @@ function ChatView(props: {
       <section
         class="lk-info-screen"
         aria-labelledby="lk-group-info-title"
-        inert={addMembersShown()}
+        inert={subScreenShown()}
       >
         <header class="lk-chat-head lk-info-head">
           <button
@@ -8675,6 +8694,7 @@ function ChatView(props: {
             groupName={groupNames.nameOf(props.entry.groupIdB64)}
             ended={membershipEnded()}
             sections={groupSections()}
+            onOpenScreen={(screen) => goToInfoScreen(screen)}
           />
           <Show when={!membershipEnded()}>
             <ShareChannelsSwitch entry={props.entry} />
@@ -8965,32 +8985,37 @@ function ChatView(props: {
                             )}
                           </span>
                           {(() => {
-                            const attr = joinAttributions().get(base64Encode(ref));
-                            if (!attr) {
-                              return (
-                                <span
-                                  style={{
-                                    "font-size": "0.7rem",
-                                    color: "var(--surface-muted)",
-                                  }}
-                                >
-                                  {t("chat.members.join.link_unknown")}
-                                </span>
-                              );
-                            }
+                            // UX section 8: `Asked 2 hours ago`, or from a link
+                            // `Invited by Anna · 2 hours ago`. The sealed knock
+                            // row carries the link (`chat/knock-origins.ts`); an
+                            // older attribution envelope names the issuer only.
+                            const joinerB64 = base64Encode(ref);
+                            const origin = knockOriginFor(joinerB64);
+                            const issuer = origin?.issuerKeyB64 ?? joinAttributions().get(joinerB64)?.issuerKeyB64 ?? null;
+                            const askedAt = origin?.askedAtMs ?? null;
+                            const when = askedAt === null ? null : relativeTimeLabel(askedAt);
+                            const line =
+                              issuer !== null
+                                ? when !== null
+                                  ? t("chat.members.join.invited_by", { name: memberName(issuer), when })
+                                  : t("chat.members.join.invited_by_name", { name: memberName(issuer) })
+                                : when !== null
+                                  ? t("chat.members.join.asked", { when })
+                                  : null;
                             return (
-                              <span
-                                style={{
-                                  "font-size": "0.7rem",
-                                  color: attr.issuerInRoster
-                                    ? "var(--surface-muted)"
-                                    : "var(--danger, #c0392b)",
-                                }}
-                              >
-                                {attr.issuerInRoster
-                                  ? t("chat.members.join.via_member", { name: memberName(attr.issuerKeyB64) })
-                                  : t("chat.members.join.via_former", { name: memberName(attr.issuerKeyB64) })}
-                              </span>
+                              <Show when={line}>
+                                {(text) => (
+                                  <span
+                                    class="lk-ellipsis"
+                                    style={{
+                                      "font-size": "0.7rem",
+                                      color: "var(--surface-muted)",
+                                    }}
+                                  >
+                                    {text()}
+                                  </span>
+                                )}
+                              </Show>
                             );
                           })()}
                         </div>
@@ -9804,6 +9829,24 @@ function ChatView(props: {
           </section>
         </div>
       </section>
+      <PushedScreen open={groupTypeShown()} title={t("group_type.title")} onBack={stepBack}>
+        <GroupTypeScreen
+          entry={props.entry}
+          groupName={groupNames.nameOf(props.entry.groupIdB64)}
+          memberCount={members().length}
+          onDone={closeInfo}
+          accountIdentity={() => chats.accountIdentity()}
+        />
+      </PushedScreen>
+      <PushedScreen open={reactionsShown()} title={t("group_reactions.title")} onBack={stepBack}>
+        <ReactionsScreen
+          entry={props.entry}
+          onDone={closeInfo}
+          bindLeave={(leave) => {
+            reactionsLeave = leave;
+          }}
+        />
+      </PushedScreen>
       <Show when={addMembersShown()}>
         {/* Section 2.4 — pushed over the info; its back icon returns there. */}
         <AddMembersScreen
@@ -9830,17 +9873,15 @@ function ShareLinkRow(props: {
   busy: boolean;
   onRevoke: () => void;
 }): JSX.Element {
-  const [copied, setCopied] = createSignal(false);
+  const [copyState, setCopyState] = createSignal<"idle" | "copied" | "failed">("idle");
+  const copied = (): boolean => copyState() === "copied";
   async function copy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(props.url);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* the button is the only feedback surface; a failed copy leaves it as is */
-    }
+    const ok = await copyMessageText(props.url);
+    setCopyState(ok ? "copied" : "failed");
+    if (ok) window.setTimeout(() => setCopyState((s) => (s === "copied" ? "idle" : s)), 2000);
   }
   return (
+    <>
     <div class="lk-link-row" role="group" aria-label={t("chat.invite_link.label")}>
       <span class="lk-link-text" title={props.url}>
         {props.url.replace(/^https?:\/\//, "")}
@@ -9864,6 +9905,15 @@ function ShareLinkRow(props: {
         {t("chat.invite_link.revoke")}
       </button>
     </div>
+      <Show when={copyState() !== "idle"}>
+        <span
+          class={copyState() === "failed" ? "form-error" : "form-info"}
+          role={copyState() === "failed" ? "alert" : "status"}
+        >
+          {copyState() === "failed" ? t("chat.invite_link.copy_failed") : t("chat.invite_link.copied")}
+        </span>
+      </Show>
+    </>
   );
 }
 

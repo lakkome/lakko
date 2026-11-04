@@ -1811,16 +1811,18 @@ public final class ReachCenter: ObservableObject {
                 // and never leave the device.
                 var recordTermOutputs: [Data] = []
                 let username = cert == nil ? nil : own.username
-                if let username {
-                    let oprf = try await keptOprf("u:\(username)", accountIdB64: accountIdB64) {
-                        try await client.usernameOprf(username)
-                    }
+                // Every term not kept yet is evaluated in ONE batch with one
+                // `discovery-register` token (maintainer, 2026-11-04); a term
+                // per request ran out of the token pool on a long name.
+                var entries: [(key: String, input: DiscoveryClient.OwnOprfInput)] = []
+                if let username { entries.append(("u:\(username)", .name(username))) }
+                for term in nameSearchTerms(displayName: name) { entries.append(("n:\(term)", .term(term))) }
+                let oprfs = try await keptOprfs(entries, accountIdB64: accountIdB64, discovery: client)
+                if let username, let oprf = oprfs["u:\(username)"] {
                     recordTermOutputs.append(oprf.output)
                 }
                 for term in nameSearchTerms(displayName: name) {
-                    let oprf = try await keptOprf("n:\(term)", accountIdB64: accountIdB64) {
-                        try await client.nameTermOprf(term)
-                    }
+                    guard let oprf = oprfs["n:\(term)"] else { continue }
                     nameTermLookupKeys.append(oprf.lookupKey)
                     recordTermOutputs.append(oprf.output)
                 }
@@ -1872,30 +1874,44 @@ public final class ReachCenter: ObservableObject {
     /// when it can be: each round costs an anonymous token, and an Everyone
     /// publication that fails part way otherwise pays for every term again.
     /// The lookup key is kept beside the output under `k:<key>`.
-    private func keptOprf(
-        _ key: String,
+    /// The OPRF results of `entries`: those kept in the reach record, and the
+    /// rest evaluated together in one `/discovery/oprf/batch` request, kept
+    /// as soon as they are known.
+    private func keptOprfs(
+        _ entries: [(key: String, input: DiscoveryClient.OwnOprfInput)],
         accountIdB64: String,
-        round: () async throws -> OprfResult
-    ) async throws -> OprfResult {
+        discovery: DiscoveryClient
+    ) async throws -> [String: OprfResult] {
+        var out: [String: OprfResult] = [:]
+        var missing: [(key: String, input: DiscoveryClient.OwnOprfInput)] = []
         let kept = record.introductionTermOutputsB64 ?? [:]
-        if let output = kept[key].flatMap({ Data(base64Encoded: $0) }),
-           let lookupKey = kept["k:\(key)"].flatMap({ Data(base64Encoded: $0) }) {
-            return OprfResult(output: output, lookupKey: lookupKey)
+        for entry in entries {
+            if let output = kept[entry.key].flatMap({ Data(base64Encoded: $0) }),
+               let lookupKey = kept["k:\(entry.key)"].flatMap({ Data(base64Encoded: $0) }) {
+                out[entry.key] = OprfResult(output: output, lookupKey: lookupKey)
+            } else if !missing.contains(where: { $0.key == entry.key }) {
+                missing.append(entry)
+            }
         }
-        let result: OprfResult
+        guard !missing.isEmpty else { return out }
+        let batch = Array(missing.prefix(DiscoveryClient.ownOprfBatchMax))
+        let results: [OprfResult]
         do {
-            result = try await round()
+            results = try await discovery.oprfOwnBatch(batch.map(\.input))
         } catch DiscoveryClientError.rateLimited {
             try await Task.sleep(nanoseconds: Self.termRateLimitWaitNs)
-            result = try await round()
+            results = try await discovery.oprfOwnBatch(batch.map(\.input))
         }
-        guard self.accountIdB64 == accountIdB64 else { return result }
+        guard self.accountIdB64 == accountIdB64 else { return out }
         var next = record.introductionTermOutputsB64 ?? [:]
-        next[key] = result.output.base64EncodedString()
-        next["k:\(key)"] = result.lookupKey.base64EncodedString()
+        for (entry, result) in zip(batch, results) {
+            out[entry.key] = result
+            next[entry.key] = result.output.base64EncodedString()
+            next["k:\(entry.key)"] = result.lookupKey.base64EncodedString()
+        }
         record.introductionTermOutputsB64 = next
         persist()
-        return result
+        return out
     }
 
     /// This account's introduction record at the current `fof` version and
@@ -1927,33 +1943,39 @@ public final class ReachCenter: ObservableObject {
         // a changed input re-evaluates only its new terms (web and Android
         // keep theirs the same way). Without this every attempt spent a token
         // per term, and the retries ran through the account's daily quota.
-        var evaluators: [(key: String, evaluate: () async throws -> Data)] = []
+        // Every term not kept yet goes in ONE `/discovery/oprf/batch`
+        // request with one `discovery-register` token (maintainer,
+        // 2026-11-04); a term per request ran through the token pool and the
+        // per-address limit on a long name.
+        var evaluators: [(key: String, input: DiscoveryClient.OwnOprfInput)] = []
         if let username {
-            evaluators.append(("u:\(username)", { try await discovery.usernameOprf(username).output }))
+            evaluators.append(("u:\(username)", .name(username)))
         }
         for term in nameSearchTerms(displayName: own.displayName ?? "") {
-            evaluators.append(("n:\(term)", { try await discovery.nameTermOprf(term).output }))
+            evaluators.append(("n:\(term)", .term(term)))
         }
         let missing = ReachRules.termsToEvaluate(
             cached: Set((record.introductionTermOutputsB64 ?? [:]).keys), terms: evaluators.map(\.key))
         do {
-            for entry in evaluators where missing.contains(entry.key) {
-                let output: Data
+            let batch = Array(evaluators.filter { missing.contains($0.key) }.prefix(DiscoveryClient.ownOprfBatchMax))
+            if !batch.isEmpty {
+                let results: [OprfResult]
                 do {
-                    output = try await entry.evaluate()
+                    results = try await discovery.oprfOwnBatch(batch.map(\.input))
                 } catch DiscoveryClientError.rateLimited {
-                    // A long name has more terms than the server's burst, and
-                    // the build runs only on an event, so it waits here once
+                    // The build runs only on an event, so it waits here once
                     // rather than until something next happens. Chosen, not
-                    // measured: the bucket refills about one per second.
+                    // measured.
                     try await Task.sleep(nanoseconds: Self.termRateLimitWaitNs)
-                    output = try await entry.evaluate()
+                    results = try await discovery.oprfOwnBatch(batch.map(\.input))
                 }
-                // The account changed while the term was being evaluated:
-                // its output is not kept in the next account's reach record.
+                // The account changed while the terms were being evaluated:
+                // their outputs are not kept in the next account's record.
                 guard self.accountIdB64 == accountIdB64 else { return nil }
                 var kept = record.introductionTermOutputsB64 ?? [:]
-                kept[entry.key] = output.base64EncodedString()
+                for (entry, result) in zip(batch, results) {
+                    kept[entry.key] = result.output.base64EncodedString()
+                }
                 record.introductionTermOutputsB64 = kept
                 persist()
             }

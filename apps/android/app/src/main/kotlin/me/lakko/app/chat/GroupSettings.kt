@@ -275,6 +275,7 @@ public object GroupSettingsStore {
     private const val OWED_TYPE = "owed-type:"
     private const val KNOCK_VERSION = "knock-version:"
     private const val KNOCK_ADMINS = "knock-admins:"
+    private const val KNOCK_ORIGIN = "knock-origin:"
 
     private val mutableVersion = MutableStateFlow(0L)
 
@@ -318,6 +319,18 @@ public object GroupSettingsStore {
             e.apply()
             mutableVersion.value += 1
         }
+    }
+
+    /** Section 8 — where a waiting request came from, by the joiner's key
+     *  (hex), or `null` when this device never opened its row. */
+    public fun knockOrigin(context: Context, accountIdB64: String?, groupIdHex: String, joinerHex: String): KnockOrigin? =
+        accountIdB64?.let { decodeKnockOrigin(read(context, key(KNOCK_ORIGIN + joinerHex.lowercase() + ":", it, groupIdHex))) }
+
+    /** Record where a request came from; the first record for a joiner stays. */
+    public fun saveKnockOrigin(context: Context, accountIdB64: String, groupIdHex: String, joinerHex: String, origin: KnockOrigin) {
+        val k = key(KNOCK_ORIGIN + joinerHex.lowercase() + ":", accountIdB64, groupIdHex)
+        if (read(context, k) != null) return
+        write(context, accountIdB64, k, encodeKnockOrigin(origin))
     }
 
     /** The group's stored photo, or `null`. */
@@ -529,3 +542,46 @@ public fun nextKnockVersion(previous: Set<String>?, current: Set<String>, versio
  *  `version(1) ‖ lookup_key(64) ‖ write_pk(32) ‖ issued_at(8) ‖ sig(64)`. */
 internal const val HANDLE_CERT_WRITE_KEY_START: Int = 65
 internal const val HANDLE_CERT_WRITE_KEY_END: Int = 97
+
+/**
+ * `docs/ux/group-and-channel-privacy.md` section 8 — where one request to join
+ * came from: when its knock row was posted (the DS stamp) and, for a request
+ * made from a `/g/` link, who issued the link (the capability's issuer key).
+ */
+public data class KnockOrigin(val askedAtMs: Long?, val issuerKeyB64: String?)
+
+internal fun encodeKnockOrigin(o: KnockOrigin): String =
+    (o.askedAtMs?.toString() ?: "") + "|" + (o.issuerKeyB64 ?: "")
+
+internal fun decodeKnockOrigin(raw: String?): KnockOrigin? {
+    if (raw.isNullOrEmpty()) return null
+    val i = raw.indexOf('|')
+    if (i < 0) return null
+    return KnockOrigin(
+        askedAtMs = raw.substring(0, i).toLongOrNull(),
+        issuerKeyB64 = raw.substring(i + 1).takeIf { it.isNotEmpty() },
+    )
+}
+
+/**
+ * Section 8 — the line under a request: `Invited by {name} · {when}` from a
+ * link, `Asked {when}` otherwise; without a time, `Invited by {name}`, and no
+ * line at all for a request with neither.
+ */
+public fun joinRequestLine(
+    origin: KnockOrigin?,
+    attributionIssuerB64: String?,
+    nameOf: (String) -> String,
+    whenOf: (Long) -> String,
+): me.lakko.app.l10n.UiText? {
+    val issuer = origin?.issuerKeyB64 ?: attributionIssuerB64
+    val time = origin?.askedAtMs?.let(whenOf)
+    return when {
+        issuer != null && time != null ->
+            me.lakko.app.l10n.UiText("chat.members.join.invited_by", mapOf("name" to nameOf(issuer), "when" to time))
+        issuer != null ->
+            me.lakko.app.l10n.UiText("chat.members.join.invited_by_name", mapOf("name" to nameOf(issuer)))
+        time != null -> me.lakko.app.l10n.UiText("chat.members.join.asked", mapOf("when" to time))
+        else -> null
+    }
+}

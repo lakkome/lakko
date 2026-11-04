@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMPTY_PUBLICATION,
   evaluateMissingTerms,
+  evaluateMissingTermsInBatch,
   TERM_RATE_LIMIT_WAIT_MS,
   type PublicationState,
   type TermRound,
@@ -61,5 +62,50 @@ describe("evaluateMissingTerms", () => {
     const evaluate = vi.fn(async () => "out:a");
     await evaluateMissingTerms(EMPTY_PUBLICATION, [{ key: "a", evaluate }, { key: "a", evaluate }], deps(() => {}));
     expect(evaluate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("evaluateMissingTermsInBatch", () => {
+  const term = (key: string) => ({ key, kind: "term" as const, value: key });
+
+  it("asks every missing term in one batch, in order, and keeps them all", async () => {
+    const state: PublicationState = { ...EMPTY_PUBLICATION, termOutputs: { a: "out:a" } };
+    const evaluateBatch = vi.fn(async (missing: readonly { key: string }[]) => missing.map((t) => `out:${t.key}`));
+    let kept: Readonly<Record<string, string>> = {};
+    const got = await evaluateMissingTermsInBatch(state, [term("a"), term("b"), term("c")], {
+      ...deps((o) => (kept = o)),
+      evaluateBatch,
+    });
+    expect(evaluateBatch).toHaveBeenCalledTimes(1);
+    expect(evaluateBatch.mock.calls[0]?.[0].map((t) => t.key)).toEqual(["b", "c"]);
+    expect(kept).toEqual({ a: "out:a", b: "out:b", c: "out:c" });
+    expect(got).toEqual(kept);
+  });
+
+  it("asks nothing when every term is kept", async () => {
+    const state: PublicationState = { ...EMPTY_PUBLICATION, termOutputs: { a: "out:a" } };
+    const evaluateBatch = vi.fn(async () => []);
+    await evaluateMissingTermsInBatch(state, [term("a")], { ...deps(() => {}), evaluateBatch });
+    expect(evaluateBatch).not.toHaveBeenCalled();
+  });
+
+  it("asks the batch once more after a rate limit", async () => {
+    let calls = 0;
+    const d = deps(() => {});
+    const evaluateBatch = vi.fn(async (missing: readonly { key: string }[]) => {
+      calls += 1;
+      if (calls === 1) throw LIMITED;
+      return missing.map((t) => `out:${t.key}`);
+    });
+    await evaluateMissingTermsInBatch(EMPTY_PUBLICATION, [term("a")], { ...d, evaluateBatch });
+    expect(evaluateBatch).toHaveBeenCalledTimes(2);
+    expect(d.wait).toHaveBeenCalledWith(TERM_RATE_LIMIT_WAIT_MS);
+  });
+
+  it("refuses a batch answer of another length", async () => {
+    const evaluateBatch = vi.fn(async () => ["only-one"]);
+    await expect(
+      evaluateMissingTermsInBatch(EMPTY_PUBLICATION, [term("a"), term("b")], { ...deps(() => {}), evaluateBatch }),
+    ).rejects.toThrow();
   });
 });

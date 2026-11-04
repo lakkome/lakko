@@ -610,7 +610,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
             query={filter}
             groupPeopleKeys={groupPeopleKeys}
             listedB64={listedKeysB64}
-            noMatchLine={() => (anyListRow() ? t("contacts.list.no_match") : null)}
+            noMatchLine={() => (anyListRow() ? t("search.nothing_found") : null)}
           />
         )}
         onAdd={(mode) => {

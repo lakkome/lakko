@@ -78,6 +78,9 @@ public data class ConversationListRow(
     /** ADR-0084 — for a one-to-one, the other person's signature key
      *  (standard base64), so the row shows their profile photo. */
     val peerKeyB64: String? = null,
+    /** ADR-0087 — the group's or channel's `@name` (no `@`), "" when none:
+     *  the local search matches it too. */
+    val handle: String = "",
 )
 
 /** The shared kind a chat-or-group row opens under. */
@@ -132,10 +135,14 @@ public fun conversationRowMatchesQuery(
     query: String,
     title: String,
     preview: String,
+    handle: String = "",
 ): Boolean {
     val q = query.trim()
     if (q.isEmpty()) return true
-    return title.contains(q, ignoreCase = true) || preview.contains(q, ignoreCase = true)
+    if (title.contains(q, ignoreCase = true) || preview.contains(q, ignoreCase = true)) return true
+    // ADR-0087 — a group or channel the person is in is found by its @name.
+    val h = q.removePrefix("@")
+    return h.isNotEmpty() && handle.isNotEmpty() && handle.contains(h, ignoreCase = true)
 }
 
 /**
@@ -158,3 +165,22 @@ public fun showsEmptyConversationState(listIsEmpty: Boolean, query: String): Boo
  */
 public fun searchFoundNoRow(conversations: Int, pendingContacts: Int): Boolean =
     conversations == 0 && pendingContacts == 0
+
+/**
+ * ADR-0087 section 5 — the ids (lower-case hex) of the groups and channels
+ * this device is in, so a search result for one of them says Open: a group's
+ * conversation id and its current group id, a channel's id. A conversation
+ * whose membership ended is not one the person is in.
+ */
+public fun searchMemberIds(rows: List<ConversationListRow>): Set<String> {
+    val out = HashSet<String>()
+    for (r in rows) {
+        if (r.membershipEnded) continue
+        when (r.kind) {
+            ConversationRowKind.GROUP -> { out += r.id.lowercase(); out += r.headId.lowercase() }
+            ConversationRowKind.CHANNEL -> out += r.id.lowercase()
+            else -> Unit
+        }
+    }
+    return out
+}

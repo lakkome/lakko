@@ -315,6 +315,25 @@ version ‖ kind(1 group, 2 channel) ‖ updated_at_ms(8) ‖ id_len ‖ id
   day quota covers it.
 - ADR-0059's Discover directory stays, with its ranking; section 16 folds `listed` into
   the flag.
+- **Amended 2026-11-04: publishing evaluates its terms in one request.** Found live on
+  `test.lakko.me`: a publish ran one `POST /discovery/oprf` per term, each spending a
+  `discovery-lookup` token under the per-IP bucket (burst 10), and a device holds at most
+  32 tokens, so a name of about ten terms ("QA Second Channel") stopped at the tenth call
+  with a 429. Publishing (the record of a public group or channel here, a person's public
+  record in Everyone under ADR-0060) and a rename now evaluate every term in one
+  `POST /discovery/oprf/batch` (`{"blinded": [...]}` -> `{"evaluated": [...]}` in request
+  order, 1 to 66 elements: `MAX_HANDLE_TERMS` (65, the `@name` included) plus the old
+  `@name` of a rename), for **one `discovery-register` token** in `x-lakko-anon-token`,
+  with no session (a session would link the account to the publish by time), under the
+  same per-IP bucket charged once. An empty list, more than 66 elements or one element
+  that does not deserialise is a 400 before the token is spent and before anything is
+  evaluated. Lookups are unchanged: one `discovery-lookup` token per evaluation on
+  `/discovery/oprf`. The bullet above that prices a name in `discovery-lookup` tokens is
+  history; a publish now costs one `discovery-register` token for the batch plus the one
+  the claim or replace already spends. **Residual:** a register token buys up to 66
+  evaluations, so with the default 20 register tokens a day an account can evaluate up to
+  1320 terms a day through this route, against 300 through lookups. Every evaluation is a
+  blind OPRF of a term the client chose; the records it reaches are public by choice.
 
 Sealing protects against a copy of the tables, as it does for a person: the
 operator, who holds the OPRF key, can open any record whose name it can guess, and

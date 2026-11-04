@@ -221,4 +221,44 @@ class EveryonePublicationTest {
         assertEquals(EveryoneAction.PUT, everyoneAction(true, restored.publishedPublic, restored.publishedKey, "k"))
         assertEquals(EveryoneAction.PUT, everyoneAction(false, restored.publishedPublic, restored.publishedKey, "k"))
     }
+
+    @Test
+    fun `the own name's terms go out in one batch, the username first`() = runTest {
+        val r = Recorder()
+        val batches = mutableListOf<List<me.lakko.app.discovery.OwnTerm>>()
+        val base = ops(r, listOf("ann", "web"))
+        val batched = EveryoneOps(
+            nameSearchTerms = base.nameSearchTerms,
+            oprfNameTerm = base.oprfNameTerm,
+            oprfUsername = base.oprfUsername,
+            composePublicRecord = base.composePublicRecord,
+            putVisibility = base.putVisibility,
+            oprfOwnTerms = { own ->
+                batches += own
+                own.map { t ->
+                    val tag = if (t is me.lakko.app.discovery.OwnTerm.Username) "u:${t.value}" else "n:${t.value}"
+                    OprfResult(output(tag), lookup(tag))
+                }
+            },
+        )
+        val outcome = publishEveryone(
+            wantPublic = true,
+            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId, binding),
+            ops = batched,
+            nowMs = 1_000,
+        )
+        assertEquals(EveryoneOutcome.PUBLISHED, outcome)
+        assertEquals(1, batches.size)
+        assertEquals(
+            listOf(
+                me.lakko.app.discovery.OwnTerm.Username("anna"),
+                me.lakko.app.discovery.OwnTerm.NameTerm("ann"),
+                me.lakko.app.discovery.OwnTerm.NameTerm("web"),
+            ),
+            batches[0],
+        )
+        assertTrue(r.oprfNameCalls.isEmpty() && r.oprfUsernameCalls.isEmpty())
+        assertEquals(listOf("out:u:anna", "out:n:ann", "out:n:web"), r.composedOutputs.map { String(it) })
+        assertEquals(listOf("key:n:ann", "key:n:web"), r.puts.single().lookupKeys.map { String(it) })
+    }
 }

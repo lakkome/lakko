@@ -97,6 +97,7 @@ import {
 import { durableSnapshotHook } from "../chat/persist-hooks";
 import { noteKnockKeyChanged } from "../chat/handle-owed";
 import { ownsGroup } from "../chat/group-owner";
+import { openKnockOrigins } from "../chat/knock-origins";
 
 /** How long a reconcile that left members pending waits before trying the
  *  unresolved ones again (chosen, not measured: a member's profile, which
@@ -807,6 +808,8 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
         await pendingRootSeeds.open(account, new IdbPendingRootSeedBackend(getDeviceKey));
         if (accountId() !== account) return;
         await knockSeeds.open(account);
+        // UX section 8: where each request to join came from.
+        await openKnockOrigins(account);
         if (accountId() !== account) return;
         dsAccess.setAuthorityFactory(
           wasmJournalAuthorityFactory(wasm, accountIdentityNow, registrarSeeds, {

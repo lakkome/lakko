@@ -231,6 +231,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 self?.reloadFromDisk(accountIdB64: account)
             }
         }
+        // A relaunch must not lose a fold that is still waiting for its
+        // half-second persist: a read cursor written just before the app
+        // went to the background read as unread again after the restart.
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: Self.resignActiveName, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.persistNowIfScheduled() }
+        }
         restoreObserver = NotificationCenter.default.addObserver(
             forName: .lakkoSyncedStateRestored, object: nil, queue: .main
         ) { [weak self] note in
@@ -403,6 +411,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     ///
     /// Debounced because a draft moves on a keystroke and each write is an
     /// AES seal plus a file replace.
+    /// `UIApplication.willResignActiveNotification`, by name: this file does
+    /// not import UIKit.
+    private static let resignActiveName = Notification.Name("UIApplicationWillResignActiveNotification")
+    private var resignObserver: NSObjectProtocol?
+
+    /// The scheduled persist, written now.
+    private func persistNowIfScheduled() {
+        guard let task = persistTask, !task.isCancelled else { return }
+        task.cancel()
+        persistTask = nil
+        persistSyncState()
+    }
+
     private func scheduleSyncStatePersist() {
         persistTask?.cancel()
         if deviceRemoved { return }

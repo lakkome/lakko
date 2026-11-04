@@ -283,6 +283,20 @@ field is open, so nothing a row says may need an app restart to become correct:
 - The line that nothing matches shows only when nothing stands in the field, no
   list row and no person under **People**.
 
+**One list (decided 2026-11-04 by the maintainer).** Everything the field
+finds, by `@name` or by name, stands in ONE list with no section headings:
+first what this device already holds (conversations in Chats, contacts),
+then what the network found (people, groups, channels), each row saying
+what it is on its second line. There is no **People** heading and no
+**Groups and channels** heading, so a search for a group never reads "No
+one found" above the group it found. The state lines of the table above
+apply to the whole list: the spinner sits at the end of the list while the
+network is asked; "Nothing found. Check the spelling, or ask for an invite
+link." replaces "No one found" and shows only when the list is empty; a
+network failure or an empty token pool shows its line at the end of the
+list, under whatever local rows stand. Where the text above says "under
+**People**", read "in the list".
+
 **What goes away:** the "Search people" row of the Chats search, the "Add by
 username" form in Contacts (its username field, its message field and its
 Send button), and the introduction step after Add contact. The Contacts

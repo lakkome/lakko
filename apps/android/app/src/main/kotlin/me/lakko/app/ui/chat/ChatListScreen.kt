@@ -153,6 +153,10 @@ public fun ChatListScreen(
     onCreateChannel: () -> Unit,
     /** A looked-up channel handle: its subscribe page. */
     onSubscribeToChannel: (channelId: String, handle: String) -> Unit,
+    /** ADR-0087 section 5.1 — the card's Subscribe: subscribe at once and
+     *  open the channel under [name]. */
+    onSubscribeChannelPressed: (channelId: String, handle: String, name: String) -> Unit =
+        { id, handle, _ -> onSubscribeToChannel(id, handle) },
     modifier: Modifier = Modifier,
     channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
@@ -197,12 +201,16 @@ public fun ChatListScreen(
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     // ADR-0087 section 5 — public groups and channels in search.
+    // The groups and channels this device is in, read as snapshot state so a
+    // card or a result row says Open as soon as a join lands.
+    val memberIds = remember { mutableStateOf<Set<String>>(emptySet()) }
     val conversationSearch = remember(repository) {
         object : ConversationSearchPort {
             override suspend fun search(query: String) = repository.searchPublicConversations(query)
             override suspend fun requestToJoin(found: me.lakko.app.chat.FoundConversation) =
                 repository.requestToJoinPublicGroup(found)
-            override fun isMember(idHex: String): Boolean = repository.holdsGroup(idHex)
+            override fun isMember(idHex: String): Boolean =
+                idHex.lowercase() in memberIds.value || repository.holdsGroup(idHex)
             override fun open(found: me.lakko.app.chat.FoundConversation) {
                 val hex = found.id.joinToString("") { "%02x".format(it) }
                 if (found.kind == uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP) {
@@ -210,6 +218,10 @@ public fun ChatListScreen(
                 } else {
                     onSubscribeToChannel(hex, found.handle)
                 }
+            }
+            override fun subscribe(found: me.lakko.app.chat.FoundConversation) {
+                val hex = found.id.joinToString("") { "%02x".format(it) }
+                onSubscribeChannelPressed(hex, found.handle, found.name)
             }
         }
     }
@@ -262,8 +274,10 @@ public fun ChatListScreen(
     val allRows = rememberConversationRows(repository, channels, deviceGroupSync)
 
     val rows = remember(allRows) { orderConversationRows(allRows) }
+    val currentMembers = remember(allRows) { me.lakko.app.chat.searchMemberIds(allRows) }
+    androidx.compose.runtime.SideEffect { if (memberIds.value != currentMembers) memberIds.value = currentMembers }
     val visible = remember(rows, query) {
-        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview, it.handle) }
     }
     // The people whose one-to-one is among the matching conversations.
     val visibleChatPeers = remember(visible) {
@@ -688,6 +702,7 @@ internal fun rememberConversationRows(
                     readThrough = reading.channelRead[channel.id],
                     own = channelKeys.containsKey(channel.id),
                 ),
+                handle = channel.handle,
             )
         }
     }
@@ -985,6 +1000,15 @@ internal fun threadConversationRows(
             repository.oneToOnePeerKey(thread.groupIdHex)?.let { java.util.Base64.getEncoder().encodeToString(it) }
         } else {
             null
+        },
+        // ADR-0087 — a group's verified @name, so the local search finds it.
+        handle = if (kind == ConversationKind.Group) {
+            runCatching {
+                me.lakko.app.chat.GroupSettingsStore.handle(context, repository.currentAccountIdB64(), thread.groupIdHex)
+                    ?.takeIf { it.verified }?.handle
+            }.getOrNull().orEmpty()
+        } else {
+            ""
         },
     )
 }

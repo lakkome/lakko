@@ -49,6 +49,8 @@ vi.mock("../profile/ProfileContext", () => ({
   useProfiles: () => ({
     version: () => 0,
     resolve: (k: Uint8Array | string) => ({ name: typeof k === "string" ? k : "Member" }),
+    ownProfile: () => ({ displayName: "Self" }),
+    ownUsername: () => "self",
   }),
 }));
 

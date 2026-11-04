@@ -326,14 +326,6 @@ public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) 
 }
 
 /**
- * The line under the rows of the People part. "No one found" is about the
- * network half, and under a person who stands there it would contradict the
- * row above it, so it is said only when no person row stands.
- */
-public fun peopleSectionMessage(state: PeopleSearchState, personRows: Int): UiText? =
-    searchStateMessage(state).takeUnless { state == PeopleSearchState.NOT_FOUND && personRows > 0 }
-
-/**
  * The rows under People. [listedKeysB64] are shown above already (the Contacts
  * list). [chatPeersB64] are the people whose one-to-one is among the matching
  * conversations above: a contact among them stands there, so they are not
@@ -371,10 +363,31 @@ public fun withCurrentContacts(merged: List<PersonResult>, contactKeysB64: Set<S
 public fun namesFormerContact(people: List<PersonResult>, contactKeysB64: Set<String>): Boolean =
     people.any { it.reach == PersonReach.CONTACT && it.keyB64 !in contactKeysB64 }
 
-/** Whether the heading **People** stands: over a row, the spinner or a line,
- *  never alone. A channel has its own heading. */
-public fun showsPeopleHeading(rows: Int, searching: Boolean, line: Boolean): Boolean =
-    rows > 0 || searching || line
+/**
+ * `docs/ux/who-can-find-me.md` section 6.1, "One list" — the line at the end
+ * of the one result list: a network failure or an empty token pool. "Not
+ * found" is never said here (the empty-list line says it), and nothing while
+ * a question is out.
+ */
+public fun searchEndLine(state: PeopleSearchState): UiText? = when (state) {
+    PeopleSearchState.FAILED -> SEARCH_FAILED
+    PeopleSearchState.ALLOWANCE_USED -> SEARCH_OUT_OF_SEARCHES
+    else -> null
+}
+
+/**
+ * Section 6.1, "One list" — whether the field says "Nothing found": nothing
+ * stands in the list (no conversation or contact row, no person, no group or
+ * channel), nothing is still being asked, and no end line explains why.
+ */
+public fun searchShowsNothingFound(
+    listRows: Int,
+    people: Int,
+    channelFound: Boolean,
+    conversationsFound: Int,
+    searching: Boolean,
+    endLine: Boolean,
+): Boolean = listRows == 0 && people == 0 && !channelFound && conversationsFound == 0 && !searching && !endLine
 
 /** What a channel found by its handle reads as: its name when one is known,
  *  else the handle. */

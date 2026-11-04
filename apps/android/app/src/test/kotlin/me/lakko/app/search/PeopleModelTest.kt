@@ -186,15 +186,6 @@ class PeopleModelTest {
     }
 
     @Test
-    fun `no one found is said only when no person row stands`() {
-        assertEquals(SEARCH_NOT_FOUND, peopleSectionMessage(PeopleSearchState.NOT_FOUND, personRows = 0))
-        assertNull(peopleSectionMessage(PeopleSearchState.NOT_FOUND, personRows = 1))
-        // The other lines are not about whether anyone was found.
-        assertEquals(SEARCH_FAILED, peopleSectionMessage(PeopleSearchState.FAILED, personRows = 1))
-        assertEquals(SEARCH_OUT_OF_SEARCHES, peopleSectionMessage(PeopleSearchState.ALLOWANCE_USED, personRows = 1))
-    }
-
-    @Test
     fun `not found is an answer only when every question was answered`() {
         assertEquals(PeopleSearchState.FOUND, foldSearch(1, listOf(LegOutcome.FAILED)))
         assertEquals(PeopleSearchState.NOT_FOUND, foldSearch(0, listOf(LegOutcome.ANSWERED, LegOutcome.ANSWERED)))
@@ -233,14 +224,6 @@ class PeopleModelTest {
         val granted = row("g", PersonReach.GRANT)
         val elsewhere = row("e", PersonReach.OPEN)
         assertEquals(listOf(elsewhere), peopleRows(listOf(pending, granted, elsewhere), setOf("p", "g"), emptySet()))
-    }
-
-    @Test
-    fun `the heading never stands alone`() {
-        assertFalse(showsPeopleHeading(rows = 0, searching = false, line = false))
-        assertTrue(showsPeopleHeading(rows = 1, searching = false, line = false))
-        assertTrue(showsPeopleHeading(rows = 0, searching = true, line = false))
-        assertTrue(showsPeopleHeading(rows = 0, searching = false, line = true))
     }
 
     @Test

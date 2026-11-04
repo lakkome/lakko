@@ -24,10 +24,6 @@ import {
   resolvePendingConfirm,
   setConfirmHostMounted,
 } from "./confirm-dialog";
-import {
-  REMOVE_MEMBER_CONFIRM_LABEL,
-  removeMemberConfirmation,
-} from "../chat/remove-member-confirm";
 
 beforeEach(() => {
   // Every test states its own host state; nothing carries over.
@@ -59,15 +55,6 @@ describe("namedAction", () => {
 
   it("trims the name rather than embedding stray whitespace", () => {
     expect(namedAction("Remove", "  Alice  ")).toBe("Remove Alice");
-  });
-
-  it("names the member on the settled remove-member confirmation", () => {
-    // §6 owns the remove strings and its decision is settled — the verb stays
-    // `Remove`. What §6.1's rule adds is the target, composed here rather than
-    // in the component, so the naming is a tested decision and not markup.
-    const c = removeMemberConfirmation({ usesProposalPath: true });
-    expect(namedAction(c.confirmLabel, "Alice")).toBe("Remove Alice");
-    expect(REMOVE_MEMBER_CONFIRM_LABEL()).toBe("Remove");
   });
 });
 

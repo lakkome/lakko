@@ -165,4 +165,62 @@ class Adr0087PhaseATest {
         assertEquals(listOf(r), decodeSentRequests(encodeSentRequests(listOf(r))))
         assertTrue(decodeSentRequests("not json").isEmpty())
     }
+
+    @Test
+    fun `nothing found only when the one list is empty and nothing is asked or explained`() {
+        val f: (Int, Int, Boolean, Int, Boolean, Boolean) -> Boolean = { a, b, c, d, e, g ->
+            me.lakko.app.search.searchShowsNothingFound(a, b, c, d, e, g)
+        }
+        assertTrue(f(0, 0, false, 0, false, false))
+        assertFalse(f(1, 0, false, 0, false, false))
+        assertFalse(f(0, 1, false, 0, false, false))
+        assertFalse(f(0, 0, true, 0, false, false))
+        assertFalse(f(0, 0, false, 1, false, false))
+        assertFalse(f(0, 0, false, 0, true, false))
+        assertFalse(f(0, 0, false, 0, false, true))
+        // The end line never says "not found"; the empty list does.
+        assertNull(me.lakko.app.search.searchEndLine(me.lakko.app.search.PeopleSearchState.NOT_FOUND))
+        assertNull(me.lakko.app.search.searchEndLine(me.lakko.app.search.PeopleSearchState.SEARCHING))
+        assertEquals(me.lakko.app.search.SEARCH_FAILED, me.lakko.app.search.searchEndLine(me.lakko.app.search.PeopleSearchState.FAILED))
+        assertEquals(
+            me.lakko.app.search.SEARCH_OUT_OF_SEARCHES,
+            me.lakko.app.search.searchEndLine(me.lakko.app.search.PeopleSearchState.ALLOWANCE_USED),
+        )
+    }
+
+    @Test
+    fun `a group or channel the person is in matches its at-name and counts as a membership`() {
+        assertTrue(conversationRowMatchesQuery("@hiking", "Trails", "", "hiking_club"))
+        assertTrue(conversationRowMatchesQuery("HIKING", "Trails", "", "hiking_club"))
+        assertFalse(conversationRowMatchesQuery("@", "Trails", "", "hiking_club"))
+        assertFalse(conversationRowMatchesQuery("@sail", "Trails", "", ""))
+        val group = ConversationListRow(
+            id = "AA", kind = ConversationRowKind.GROUP, title = "g", preview = "",
+            time = null, lastActivityMs = null, headId = "BB",
+        )
+        val channel = ConversationListRow(
+            id = "cc", kind = ConversationRowKind.CHANNEL, title = "c", preview = "",
+            time = null, lastActivityMs = null,
+        )
+        val ended = group.copy(id = "dd", headId = "dd", membershipEnded = true)
+        val chat = group.copy(id = "ee", headId = "ee", kind = ConversationRowKind.CHAT)
+        assertEquals(setOf("aa", "bb", "cc"), searchMemberIds(listOf(group, channel, ended, chat)))
+    }
+
+    @Test
+    fun `a join request line names the link and the time`() {
+        val nameOf = { k: String -> if (k == a) "Anna" else "?" }
+        val whenOf = { _: Long -> "2 hours ago" }
+        val linked = joinRequestLine(KnockOrigin(5, a), null, nameOf, whenOf)!!
+        assertEquals("chat.members.join.invited_by", linked.key)
+        assertEquals(mapOf("name" to "Anna", "when" to "2 hours ago"), linked.texts)
+        val searched = joinRequestLine(KnockOrigin(5, null), null, nameOf, whenOf)!!
+        assertEquals("chat.members.join.asked", searched.key)
+        val old = joinRequestLine(null, a, nameOf, whenOf)!!
+        assertEquals("chat.members.join.invited_by_name", old.key)
+        assertNull(joinRequestLine(null, null, nameOf, whenOf))
+        assertEquals(KnockOrigin(5, a), decodeKnockOrigin(encodeKnockOrigin(KnockOrigin(5, a))))
+        assertEquals(KnockOrigin(null, null), decodeKnockOrigin(encodeKnockOrigin(KnockOrigin(null, null))))
+        assertNull(decodeKnockOrigin("garbage"))
+    }
 }

@@ -340,6 +340,21 @@ numbers are chosen, not measured.
   16 letters), and `name_matches_query` (the post-filter: every query word is
   a prefix of some name word). Name terms are OPRF inputs in their own domain,
   apart from usernames and channel handles.
+- **Publishing evaluates its terms in one request (amended 2026-11-04).** Entering
+  Everyone, or changing the name while in it, evaluates the whole term set (up to 64
+  name terms plus the username) in one `POST /discovery/oprf/batch` for one
+  `discovery-register` anonymous token, not one `POST /discovery/oprf` and one
+  `discovery-lookup` token per term: a device's pool holds at most 32 tokens and the
+  per-IP bucket bursts at 10, so a name of two or three long words could not be
+  published (found live on `test.lakko.me`). The route takes 1 to 66 blinded elements
+  and answers their evaluations in order; a malformed batch is refused before the token
+  is spent and before any evaluation; it carries no session and sits under the per-IP
+  bucket, charged once. Lookups (searching for others) are unchanged, one
+  `discovery-lookup` token per evaluation. ADR-0087 section 4 carries the same
+  amendment for group and channel records. **Residual:** a register token buys up to 66
+  evaluations, so with the default 20 register tokens a day an account can evaluate up
+  to 1320 terms a day through this route against 300 lookups; the records reached are
+  public by choice.
 
 ### 6. Every write path carries its key
 

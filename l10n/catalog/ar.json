@@ -1571,7 +1571,7 @@
       "status": "machine"
     },
     "channels.new.handle_placeholder": {
-      "text": "@my-channel",
+      "text": "@my_channel",
       "status": "machine"
     },
     "channels.new.subtitle": {
@@ -2306,8 +2306,16 @@
       "text": "معلومات المجموعة",
       "status": "machine"
     },
+    "chat.invite_link.copied": {
+      "text": "تم نسخ الرابط.",
+      "status": "machine"
+    },
     "chat.invite_link.copy": {
       "text": "نسخ الرابط",
+      "status": "machine"
+    },
+    "chat.invite_link.copy_failed": {
+      "text": "تعذّر نسخ الرابط.",
       "status": "machine"
     },
     "chat.invite_link.create": {
@@ -2470,12 +2478,24 @@
       "text": "موافقة",
       "status": "machine"
     },
+    "chat.members.join.asked": {
+      "text": "طلب {when}",
+      "status": "machine"
+    },
     "chat.members.join.heading": {
       "text": "طلبات الانضمام ({count})",
       "status": "machine"
     },
     "chat.members.join.heading_full": {
       "text": "طلبات الانضمام (+64)",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by": {
+      "text": "دعاه {name} · {when}",
+      "status": "machine"
+    },
+    "chat.members.join.invited_by_name": {
+      "text": "دعاه {name}",
       "status": "machine"
     },
     "chat.members.join.link_unknown": {
@@ -3624,6 +3644,10 @@
     },
     "common.copy": {
       "text": "نسخ",
+      "status": "machine"
+    },
+    "common.copy_failed": {
+      "text": "تعذّر النسخ.",
       "status": "machine"
     },
     "common.creating": {
@@ -7812,6 +7836,10 @@
     },
     "search.conversations.heading": {
       "text": "المجموعات والقنوات",
+      "status": "machine"
+    },
+    "search.nothing_found": {
+      "text": "لم يُعثر على شيء. تحقّق من الإملاء، أو اطلب رابط دعوة.",
       "status": "machine"
     },
     "search.people.add_contact": {
