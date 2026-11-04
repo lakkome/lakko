@@ -622,7 +622,7 @@ final class FeedViewModel: ObservableObject {
         switch message.direction {
         case .outgoing:
             let directory = ProfileDirectory.shared
-            return directory.ownProfile?.displayName ?? directory.ownUsername
+            return directory.ownProfile?.displayName ?? directory.ownUsername.map { "@\($0)" }
         case .incoming, .system:
             guard let key = message.authorKeyB64,
                   let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key),

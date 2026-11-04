@@ -89,6 +89,8 @@ import { announceOwnStateRestored } from "../profile/own-profile-sync";
 import { markRestoreFinished } from "./restored-marker";
 import { resetEveryoneNote } from "../reach/publication-store";
 import { receiveServiceEnvelope } from "../reach/service-envelope-intake";
+import { offerRestoredProfiles } from "./received-profiles";
+import type { CarriedProfile } from "../devices/state-bundle";
 
 /** What a run of {@link restoreAccountBackup} ended as. */
 export type AccountBackupRestoreOutcome =
@@ -152,6 +154,9 @@ export interface AccountBackupRestoreDeps {
     accountIdB64: string,
     own: { readonly ownProfile: Uint8Array; readonly visibility: Uint8Array },
   ) => Promise<void>;
+  /** Payload v8 — offer the other people's profiles to the profile runtime,
+   *  which files them through its ordinary receive gate. */
+  readonly applyReceivedProfiles: (accountIdB64: string, profiles: readonly CarriedProfile[]) => Promise<void>;
   /** Store the own predecessors under the device key. */
   readonly applyOwnPredecessors: (
     accountIdB64: string,
@@ -216,6 +221,10 @@ const DEFAULT_DEPS: AccountBackupRestoreDeps = {
   applySyncedState: mergeRestoredSyncedState,
   rememberKnownGroups: (accountIdB64, idsB64) => addRestoredKnownGroups(accountIdB64, idsB64),
   applyOwnState: applyRestoredOwnState,
+  applyReceivedProfiles: async (accountIdB64, profiles) => {
+    if (profiles.length === 0) return;
+    offerRestoredProfiles(accountIdB64, profiles, await loadWasm());
+  },
   applyOwnPredecessors: async (accountIdB64, deviceKey, ownPredecessors) => {
     const wasm = await loadWasm();
     return applyOwnPredecessors({ ownPredecessors }, accountIdB64, deviceKey, (seed) =>
@@ -429,6 +438,12 @@ async function runRestore(
       // upload must already list them.
       deps.rememberKnownGroups(accountIdB64, result.knownGroupIds);
       // Before the owed flag goes too: the first upload after it carries them.
+      try {
+        await deps.applyReceivedProfiles(accountIdB64, result.receivedProfiles);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("account backup restore: names not applied", err instanceof Error ? err.name : "");
+      }
       try {
         await deps.applyOwnState(accountIdB64, {
           ownProfile: result.ownProfile,

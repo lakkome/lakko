@@ -323,6 +323,14 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         if let call = nseClassifyCallSignaling(data, parser: Self.callParser) {
             return call.attributed(senderKeyB64: senderKeyB64)
         }
+        // ADR-0048 — a profile envelope names its sender for the rest of this
+        // batch (applied in memory by the caller's loop, never persisted,
+        // C-59). Asked before the service-envelope filter, which drops it.
+        if Self.decodesAsProfile(data) {
+            return NseProcessedRow(
+                kind: .profile, text: "", attachmentCount: 0, senderKeyB64: senderKeyB64,
+                profileName: Self.profileDisplayName(data))
+        }
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
@@ -501,6 +509,16 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// of a notification body.
     private static func decodesAsProfile(_ bytes: Data) -> Bool {
         (try? decodeProfileEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// ADR-0048 — the display name a profile envelope carries, for the
+    /// batch-local name map, from the slim FFI's
+    /// `profileEnvelopeDisplayName` (`crates/lakko-ffi-extension/src/profile.rs`).
+    /// Used in memory for the rest of this wake only; nothing is stored (C-59).
+    private static func profileDisplayName(_ bytes: Data) -> String? {
+        guard let name = (try? profileEnvelopeDisplayName(plaintext: bytes)) ?? nil else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// The well-formed profile envelope length range, read from the slim FFI's

@@ -133,7 +133,8 @@ public final class BackupClient {
             syncedState: syncedState,
             ownPredecessors: ownPredecessors.isEmpty ? nil : ownPredecessors,
             ownProfile: own.ownProfile,
-            visibility: own.visibility
+            visibility: own.visibility,
+            receivedProfiles: own.receivedProfiles.isEmpty ? nil : own.receivedProfiles
         )
     }
 
@@ -404,6 +405,10 @@ public final class BackupClient {
 struct OwnBackupEnvelopes: Equatable {
     var ownProfile: Data?
     var visibility: Data?
+    /// The names this device holds for other people (ADR-0048 profiles), so a
+    /// device restored with no other device alive names its contacts and
+    /// group members at once. The core keeps what fits its bounds, in order.
+    var receivedProfiles: [BackupReceivedProfile] = []
 
     /// What this device holds for `accountIdB64` now, whether or not its
     /// session is up: a baseline can go out before the shell mounts.
@@ -411,8 +416,51 @@ struct OwnBackupEnvelopes: Equatable {
     static func current(accountIdB64: String) -> OwnBackupEnvelopes {
         OwnBackupEnvelopes(
             ownProfile: ProfileDirectory.shared.backupProfileEnvelope(accountIdB64: accountIdB64),
-            visibility: ReachCenter.shared.backupSettingEnvelope(accountIdB64: accountIdB64))
+            visibility: ReachCenter.shared.backupSettingEnvelope(accountIdB64: accountIdB64),
+            receivedProfiles: receivedProfileRecords(
+                profiles: ProfileDirectory.shared.receivedProfiles(accountIdB64: accountIdB64),
+                contactKeysB64: AcceptedContactsStore.load(accountIdB64: accountIdB64)
+                    .map { base64Encode($0.request.fromPubkey) },
+                recentPeopleB64: BackupPeopleOrder.recent(),
+                ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64)))
     }
+
+    /// The received profiles a backup carries, in the order the core keeps
+    /// them when it must cut: the account's contacts first (in contact
+    /// order), then everyone else by recent use (``BackupPeopleOrder``), then
+    /// the rest in key order. Never this account's own keys. Each entry is
+    /// the person key the profile is stored under and its envelope, composed
+    /// from the stored profile with its original stamp (grants are never
+    /// kept, so none travel).
+    static func receivedProfileRecords(
+        profiles: [String: ProfileClaim],
+        contactKeysB64: [String],
+        recentPeopleB64: [String],
+        ownKeysB64: Set<String>
+    ) -> [BackupReceivedProfile] {
+        var order: [String] = []
+        var seen = Set<String>()
+        for key in contactKeysB64 + recentPeopleB64 + profiles.keys.sorted()
+        where profiles[key] != nil && !ownKeysB64.contains(key) && seen.insert(key).inserted {
+            order.append(key)
+        }
+        return order.compactMap { key in
+            guard let personKey = Data(base64Encoded: key), personKey.count == 32,
+                  let claim = profiles[key],
+                  let envelope = StateBundle.profileEnvelope(claim) else { return nil }
+            return BackupReceivedProfile(personKey: personKey, envelope: envelope)
+        }
+    }
+}
+
+/// Who this device talked with most recently, as person keys (base64), most
+/// recent first: the order a backup keeps received names in after contacts.
+/// The chat repository installs the source at bootstrap; with none, no order.
+@MainActor
+enum BackupPeopleOrder {
+    static var source: (() -> [String])?
+
+    static func recent() -> [String] { source?() ?? [] }
 }
 
 /// Discriminated outcome of ``BackupClient/uploadFromCache``.

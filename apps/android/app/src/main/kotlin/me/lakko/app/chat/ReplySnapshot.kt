@@ -75,19 +75,22 @@ public fun snapshotNameFrom(name: me.lakko.app.profile.ResolvedName): String? =
 
 /**
  * The author a reply quote or a forward attribution carries for [message]:
- * "You" ([youLabel]) for an own message, as the timeline says it; otherwise
- * the author's name ([authorName], from the message's author key) or, in a
- * one-to-one, the other person's ([peerName]); `null` when neither is a real
- * name (a placeholder is never baked into an envelope).
+ * the author's real name for everyone, so an own message carries this
+ * account's own name ([ownName]), never "You" (every receiver would read it
+ * as themselves; the account's own devices draw "You" locally, see
+ * [replyQuoteLines]). Otherwise the author's name ([authorName], from the
+ * message's author key) or, in a one-to-one, the other person's
+ * ([peerName]); `null` when none is a real name (a placeholder is never
+ * baked into an envelope).
  */
 public fun snapshotAuthorOf(
     message: ChatMessage,
-    youLabel: String,
+    ownName: String?,
     isOneToOne: Boolean,
     authorName: String?,
     peerName: String?,
 ): String? = when {
-    message.direction == Direction.Outgoing -> youLabel
+    message.direction == Direction.Outgoing -> ownName?.trim()?.takeIf { it.isNotEmpty() }
     else -> authorName ?: if (isOneToOne) peerName else null
 }
 
@@ -99,8 +102,11 @@ public fun snapshotAuthorOf(
 public fun replyQuoteLines(
     reply: ReplyRef,
     strings: Strings = Localization.strings.value,
+    /** The quoted message is this account's own: drawn "You" on this
+     *  account's devices, whatever name the snapshot carries. */
+    quotesOwnAccount: Boolean = false,
 ): Pair<String, String> {
-    val name = reply.author?.trim().orEmpty()
+    val name = if (quotesOwnAccount) strings["chat.author.you"] else reply.author?.trim().orEmpty()
     val excerpt = reply.excerpt?.trim()?.takeIf { it.isNotEmpty() } ?: strings[REPLY_FALLBACK_EXCERPT_KEY]
     return name to excerpt
 }

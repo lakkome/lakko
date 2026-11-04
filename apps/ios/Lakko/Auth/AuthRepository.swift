@@ -6208,6 +6208,8 @@ public final class AuthRepository: ObservableObject {
             PhraseRestoreBackup.applyOwnState(
                 ownProfile: parsed.ownProfile, visibility: parsed.visibility,
                 accountIdB64: accountIdB64, context: context)
+            PhraseRestoreBackup.applyReceivedProfiles(
+                parsed.receivedProfiles, accountIdB64: accountIdB64, context: context)
             RestoredDeviceStore.noteRestored(
                 accountIdB64: accountIdB64, knownConversations: applied.knownGroups,
                 defaults: backupDefaults)

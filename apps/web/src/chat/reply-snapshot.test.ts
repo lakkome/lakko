@@ -149,3 +149,11 @@ describe("a reply snapshot never carries a placeholder (2026-11-04)", () => {
     }
   });
 });
+
+describe("a reply to one's own message (decided 2026-11-04)", () => {
+  it("the snapshot carries the name; the author's own device draws You", () => {
+    expect(replyQuoteLines({ author: "Vera G", excerpt: "hi" }, true).name).toBe("You");
+    expect(replyQuoteLines({ author: "Vera G", excerpt: "hi" }, false).name).toBe("Vera G");
+    expect(replyQuoteLines({ author: "Vera G", excerpt: "hi" }).name).toBe("Vera G");
+  });
+});

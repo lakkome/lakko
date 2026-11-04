@@ -48,7 +48,10 @@ vi.mock("./ChatContext", () => ({ useChats: () => ({ identity: () => null }) }))
 vi.mock("../profile/ProfileContext", () => ({
   useProfiles: () => ({
     version: () => 0,
-    resolve: (k: Uint8Array | string) => ({ name: typeof k === "string" ? k : "Member" }),
+    resolve: (k: Uint8Array | string) =>
+      k === "unnamed-key"
+        ? { name: "a1b2 c3d4", source: "fingerprint" }
+        : { name: typeof k === "string" ? k : "Member" },
     ownProfile: () => ({ displayName: "Self" }),
     ownUsername: () => "self",
   }),
@@ -844,5 +847,64 @@ describe("Select", () => {
     expect(present(".lk-select-mark-slot")).toBe(true);
     mouse(one(".lk-bubble-row"), "click");
     expect(toggled).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Names (2026-11-04): a reply to one's own message, a sender with no name.
+// ---------------------------------------------------------------------------
+
+describe("the reply quote names the author", () => {
+  function withReply(): TimelineRow {
+    const row = incoming("thanks");
+    if (row.kind !== "incoming" || row.event.kind !== "application") throw new Error("fixture");
+    return { ...row, event: { ...row.event, reply: { target: 7, author: "Vera G", excerpt: "hi" } } };
+  }
+
+  it("the snapshot's real name for someone else's message", () => {
+    mount(withReply(), { isAuthoredByViewer: () => false });
+    expect(one(".lk-reply-quote-name").textContent).toBe("Vera G");
+  });
+
+  it("'You' on the author's own device, though the snapshot carries the name", () => {
+    mount(withReply(), { isAuthoredByViewer: (id) => id === 7 });
+    expect(one(".lk-reply-quote-name").textContent).toBe("You");
+  });
+});
+
+describe("a group bubble's sender line", () => {
+  function from(senderKey: string): TimelineRow {
+    const row = incoming("hi");
+    if (row.kind !== "incoming" || row.event.kind !== "application") throw new Error("fixture");
+    return { ...row, event: { ...row.event, senderKey } };
+  }
+  function mountGroup(row: TimelineRow): void {
+    renderUi(() => <TimelineBubble row={row} isGroup={true} startsRun={true} endsRun={true} {...host()} />);
+  }
+
+  it("a sender with no name: the placeholder kept, never the fingerprint, and one error line naming nobody", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      mountGroup(from("unnamed-key"));
+      const text = document.body.textContent ?? "";
+      expect(text).not.toContain("a1b2 c3d4");
+      expect(text).toContain("Member");
+      const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[names]"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toContain("unnamed-key");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("a named sender: the name, no error", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      mountGroup(from("Vera G"));
+      expect(document.body.textContent ?? "").toContain("Vera G");
+      expect(errors.mock.calls.filter((c) => String(c[0]).startsWith("[names]"))).toHaveLength(0);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });

@@ -31,7 +31,7 @@ import {
 } from "../contacts/pending-contacts";
 import { avatarToWasm, type AvatarWasm } from "../profile/avatar-model";
 import { IdbProfileBackend } from "../profile/profile-idb";
-import { forStateBundle } from "../profile/profile-store";
+import { forStateBundle, type ProfileRow } from "../profile/profile-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import type { DeviceCipher } from "../auth/device-cipher";
 import type { Wasm } from "../wasm";
@@ -79,6 +79,48 @@ function heldFor(contact: PendingContact, logHeld: readonly PersistedHeldSend[])
 }
 
 /**
+ * The received profiles a row holds, each composed again as an envelope with
+ * its stored stamp, keyed on the person key it is filed under: what a pairing
+ * state bundle and a backup carry of the people this device knows. A profile
+ * filed under one of `ownKeysB64` is not carried, and neither is one the core
+ * refuses. Row order. Pure over the core.
+ */
+export function carriedProfilesFromRow(
+  wasm: Pick<Wasm, "composeProfileEnvelope"> & Partial<AvatarWasm>,
+  row: Pick<ProfileRow, "profiles"> | null,
+  ownKeysB64: readonly string[],
+): CarriedProfile[] {
+  const own = new Set(ownKeysB64);
+  const out: CarriedProfile[] = [];
+  for (const [personKeyB64, stored] of row?.profiles ?? []) {
+    if (own.has(personKeyB64)) continue;
+    const p = forStateBundle(stored);
+    if (p === null) continue;
+    try {
+      const avatar =
+        p.avatar === undefined || p.avatar === null || wasm.AvatarRef === undefined
+          ? undefined
+          : avatarToWasm<never>(wasm as unknown as AvatarWasm, p.avatar);
+      const envelope = wasm.composeProfileEnvelope(
+        p.displayName ?? undefined,
+        p.username ?? undefined,
+        p.updatedAtMs,
+        p.accountIdHex === null ? undefined : hexToBytes(p.accountIdHex),
+        p.usernameCertificateB64 === undefined || p.usernameCertificateB64 === null
+          ? undefined
+          : base64Decode(p.usernameCertificateB64),
+        undefined,
+        avatar,
+      );
+      out.push({ personKeyB64, envelopeB64: base64Encode(envelope) });
+    } catch {
+      /* a stored profile the core refuses is not carried */
+    }
+  }
+  return out;
+}
+
+/**
  * Sending device: the names and pending contacts of `accountIdB64` for the
  * bundle. `ownKeysB64` are this account's own keys (the account key, its
  * predecessor, the device key); no profile filed under one is carried.
@@ -111,35 +153,10 @@ export async function collectCarriedExtras(args: {
     console.warn("state bundle: group names not read", err instanceof Error ? err.name : "");
   }
 
-  const profiles: CarriedProfile[] = [];
+  let profiles: CarriedProfile[] = [];
   try {
-    const own = new Set(args.ownKeysB64);
     const row = await new IdbProfileBackend(async () => args.deviceKey, () => new Map()).load(args.accountIdB64);
-    for (const [personKeyB64, stored] of row?.profiles ?? []) {
-      if (own.has(personKeyB64)) continue;
-      const p = forStateBundle(stored);
-      if (p === null) continue;
-      try {
-        const avatar =
-          p.avatar === undefined || p.avatar === null
-            ? undefined
-            : avatarToWasm<never>(wasm as unknown as AvatarWasm, p.avatar);
-        const envelope = wasm.composeProfileEnvelope(
-          p.displayName ?? undefined,
-          p.username ?? undefined,
-          p.updatedAtMs,
-          p.accountIdHex === null ? undefined : hexToBytes(p.accountIdHex),
-          p.usernameCertificateB64 === undefined || p.usernameCertificateB64 === null
-            ? undefined
-            : base64Decode(p.usernameCertificateB64),
-          undefined,
-          avatar,
-        );
-        profiles.push({ personKeyB64, envelopeB64: base64Encode(envelope) });
-      } catch {
-        /* a stored profile the core refuses is not carried */
-      }
-    }
+    profiles = carriedProfilesFromRow(wasm, row, args.ownKeysB64);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("state bundle: profiles not read", err instanceof Error ? err.name : "");

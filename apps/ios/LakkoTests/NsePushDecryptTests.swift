@@ -947,4 +947,62 @@ final class NsePushDecryptTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - ADR-0048: a profile and a message in one wake
+
+    /// A member's profile and first message arrive in one batch while the
+    /// app has not run: the profile names the message, with nothing in the
+    /// mirror.
+    func testAProfileEarlierInTheBatchNamesAGroupMessage() async {
+        let group = FakeThrowawayGroup(decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return NseProcessedRow(
+                kind: .profile, text: "", attachmentCount: 0, senderKeyB64: "vg3", profileName: "VG3")
+            default: return NseProcessedRow(kind: .chat, text: "hello", attachmentCount: 0, senderKeyB64: "vg3")
+            }
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1), row(11, 2)])
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+        XCTAssertEqual(preview?.body, "VG3: hello")
+    }
+
+    /// The same for a reaction to this person's own message.
+    func testAProfileEarlierInTheBatchNamesAReaction() async {
+        let group = FakeThrowawayGroup(decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return NseProcessedRow(
+                kind: .profile, text: "", attachmentCount: 0, senderKeyB64: "vg3", profileName: "VG3")
+            default: return NseProcessedRow(
+                kind: .reaction, text: "", attachmentCount: 0, senderKeyB64: "vg3",
+                reaction: NseReaction(targetMessageId: 5, emoji: "\u{1F44D}", add: true, targetAuthorB64: "me"))
+            }
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1), row(11, 2)])
+        deps.ownKey = "me"
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+        XCTAssertEqual(preview?.body, "VG3 reacted \u{1F44D} to your message")
+    }
+
+    /// A profile row is never a preview, and a profile in the batch replaces
+    /// an older mirrored name (it is newer than what the app last wrote).
+    func testAProfileRowIsNoPreviewAndOutranksTheMirror() async {
+        let group = FakeThrowawayGroup(decode: { payload in
+            switch payload[payload.startIndex] {
+            case 1: return NseProcessedRow(
+                kind: .profile, text: "", attachmentCount: 0, senderKeyB64: "vg3", profileName: "Valentin")
+            default: return NseProcessedRow(kind: .chat, text: "hi", attachmentCount: 0, senderKeyB64: "vg3")
+            }
+        })
+        group.isGroup = true
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1), row(11, 2)])
+        deps.names = ["vg3": "VG3"]
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+        XCTAssertEqual(preview?.body, "Valentin: hi")
+
+        let onlyProfile = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        let quiet = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), onlyProfile)
+        XCTAssertEqual(quiet, .quiet(tag: groupHex))
+    }
 }

@@ -287,7 +287,7 @@ class BackupRestoreTest {
                 "fetch", "storeOwnPredecessors", "rebindConversationKey", "mergeContacts", "mergeSyncedState",
                 "rememberRestoredGroups", "markBackupDirty", "setRetryPending", "retryPending",
                 "raiseRollbackAlert", "log", "applyOwnProfile", "applyVisibility", "noteEveryoneUnknown",
-                "markRestored",
+                "markRestored", "applyReceivedProfiles",
             ),
             portNames.filterNot { it.contains('$') }.toSet(),
         )
@@ -538,7 +538,7 @@ class BackupRestoreTest {
         assertEquals(
             listOf(
                 "accountId", "createdAtMs", "ed25519Seed", "contacts", "knownGroupIds", "syncedState",
-                "ownPredecessors", "ownProfile", "visibility",
+                "ownPredecessors", "ownProfile", "visibility", "receivedProfiles",
             ),
             named,
         )

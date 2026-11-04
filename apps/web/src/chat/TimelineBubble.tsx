@@ -67,7 +67,7 @@ import {
 import { forwardLineLabel } from "./forward";
 import { MessageText } from "./MessageText";
 import { membershipSentences } from "./membership-rows";
-import { realNameOf } from "../profile/member-label";
+import { bubbleSenderLabelOf, realNameOf, reportUnnamedPerson } from "../profile/member-label";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { canSelectRow, selectionMarkName } from "./selection";
@@ -110,6 +110,10 @@ export interface BubbleHost {
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
   getCachedUrl: (ref: AttachmentRefBytes) => string | null;
+  /** Whether the message with this id is this account's own (this device's
+   *  or another device of this person's) and held in this timeline: a reply
+   *  quoting it draws "You" for the author snapshot. */
+  isAuthoredByViewer?: (messageId: number) => boolean;
   /** ADR-0023 — our own signature key (for the own-reaction
    *  highlight). Not our leaf: a leaf we compare against a stored
    *  reactor would start matching a stranger after a renumber. */
@@ -249,7 +253,13 @@ export function TimelineBubble(
           membershipSentences(
             change,
             (key, name) => t(key, { name }),
-            (k) => realNameOf(profiles.resolve(k)),
+            (k) => {
+              const resolved = profiles.resolve(k);
+              const name = realNameOf(resolved);
+              // The sentence waits for the name; a wait is still reported.
+              if (name === null) reportUnnamedPerson(resolved.name, "a membership row");
+              return name;
+            },
           );
         return (
           <Show when={sentences().length > 0}>
@@ -346,8 +356,10 @@ export function TimelineBubble(
       return null;
     }
     const own = fromOwnDevice(ev.senderKey);
+    // A real name, else the placeholder word with one error line: never a
+    // key fingerprint in a sender line (docs/ux/client-redesign.md section 6).
     const senderName = (): string =>
-      ev.senderKey !== undefined ? profiles.resolve(ev.senderKey).name : t("chat.author.unknown");
+      bubbleSenderLabelOf(ev.senderKey !== undefined ? profiles.resolve(ev.senderKey) : null, ev.senderKey);
     // Incoming application message — never our own -> Edit/Delete
     // are not offered (the author-only gate would reject our op
     // anyway); React is.
@@ -992,7 +1004,7 @@ function ChatBubbleBody(
                 <Show when={props.reply}>
                   {(reply) => {
                     const lines = (): ReturnType<typeof replyQuoteLines> =>
-                      replyQuoteLines(reply());
+                      replyQuoteLines(reply(), props.isAuthoredByViewer?.(reply().target) === true);
                     return (
                       <button
                         type="button"

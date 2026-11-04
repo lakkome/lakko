@@ -2022,9 +2022,14 @@ public final class ChatRepository: ObservableObject {
     /// name with no view model in existence (`docs/ux/calls.md` section 4).
     public func conversationTitle(groupIdHex: String) -> String {
         if let shared = groupName(groupIdHex: groupIdHex) { return shared }
-        if let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
-            let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
-            if !resolved.isPlaceholder { return resolved.name }
+        // ADR-0062 — a one-to-one is titled by the person, never by the
+        // group-title fallback ("Group"). Their name is on this device; when
+        // it is not (a defect), the resolver's own answer stands.
+        if isOneToOne(groupIdHex: groupIdHex) {
+            if let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+                return ProfileDirectory.shared.resolve(signatureKey: peer).name
+            }
+            return ResolvedDisplayName.placeholderMember
         }
         let members = self.members(groupIdHex: groupIdHex) ?? []
         let own = ownLeafIndex(groupIdHex: groupIdHex)
@@ -2036,6 +2041,41 @@ public final class ChatRepository: ObservableObject {
                         signatureKey: member.signaturePublicKey)
                     return resolved.isPlaceholder ? nil : resolved.name
                 })
+    }
+
+    /// The people of this device's conversations, as person keys (base64),
+    /// most recently active conversation first; this device's own person is
+    /// left out. The order a backup keeps received names in after contacts.
+    func peopleByRecentUse() -> [String] {
+        let byActivity = groups.values.sorted {
+            ($0.messages.last?.createdAt ?? "") > ($1.messages.last?.createdAt ?? "")
+        }
+        var out: [String] = []
+        var seen = Set<String>()
+        for record in byActivity {
+            let own = try? record.group.ownLeafIndex()
+            for member in (try? record.group.members()) ?? [] where member.leafIndex != own {
+                let key = PersonKey.of(member).base64EncodedString()
+                if seen.insert(key).inserted { out.append(key) }
+            }
+        }
+        return out
+    }
+
+    /// The title the notification extension may show for `groupIdHex`: the
+    /// conversation's title, or `nil` (the row is removed) when it would be a
+    /// placeholder: a one-to-one whose person this device has no name for, or
+    /// a group with no name and no named member. The extension then shows its
+    /// own unnamed wording; it never shows "Group" or "Member" for a person.
+    func mirroredConversationTitle(groupIdHex: String) -> String? {
+        if let shared = groupName(groupIdHex: groupIdHex) { return shared }
+        if isOneToOne(groupIdHex: groupIdHex) {
+            guard let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return nil }
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
+            return resolved.isPlaceholder ? nil : resolved.name
+        }
+        let title = conversationTitle(groupIdHex: groupIdHex)
+        return title == Localization.text("chat.group.fallback_name") ? nil : title
     }
 
     /// `docs/ux/calls.md` section 2.1 — refresh the background name mirror for
@@ -2060,7 +2100,7 @@ public final class ChatRepository: ObservableObject {
             CallPeerNameMirror.mirror(
                 accountIdB64: accountIdB64,
                 groupIdHex: groupIdHex,
-                name: conversationTitle(groupIdHex: groupIdHex)
+                name: mirroredConversationTitle(groupIdHex: groupIdHex)
             )
         }
         // Reactions-and-emoji spec section 12 — the people in these
@@ -4341,6 +4381,10 @@ public final class ChatRepository: ObservableObject {
             else { throw ChatError.argument("the message could not be kept for sending") }
             return
         }
+        // ADR-0048 §2 — a newcomer this device owes its profile gets the
+        // profile before this message (taken before the message's own lock;
+        // the profile send takes the same per-group chain and is not nested).
+        await profilePublisher.publishOwedBeforeSend(groupIdHex: groupIdHex)
         // 1.19c3: build the JSON envelope before encrypting.
         // `composeEnvelopeBytes` routes through the UniFFI
         // `composeEnvelope` free function — wrong-length byte
@@ -4508,6 +4552,8 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("reaction envelope compose failed", underlying: error)
         }
+        // ADR-0048 §2 — as for a message: an owed profile goes first.
+        if add { await profilePublisher.publishOwedBeforeSend(groupIdHex: groupIdHex) }
         try await publishMessageOpLocked(
             groupIdHex: groupIdHex,
             envelopeBytes: envelopeBytes,

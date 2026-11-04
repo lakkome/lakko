@@ -41,12 +41,25 @@ final class ReplyComposerRulesTests: XCTestCase {
         XCTAssertEqual(vm.composerFocusRequest, before + 1)
     }
 
-    /// The name is what the timeline calls the person: "You" for an own
-    /// message.
-    func testAReplyToAnOwnMessageIsQuotedAsYou() {
+    /// Maintainer, 2026-11-04: the snapshot on the wire carries the author's
+    /// real name, never "You" (other people read it); this device draws "You"
+    /// for its own message.
+    func testAReplyToAnOwnMessageCarriesTheRealNameAndIsShownAsYouHere() {
         let vm = model()
         vm.beginReply(own(9, "mine"))
-        XCTAssertEqual(vm.replyingTo?.snapshot.author, "You")
+        XCTAssertNotEqual(vm.replyingTo?.snapshot.author, "You")
+        XCTAssertEqual(vm.replyingTo?.shown.author, "You")
+        XCTAssertEqual(vm.replyingTo?.snapshot.excerpt, "mine")
+    }
+
+    /// A reply to someone this device has no name for carries no name: never
+    /// the "Member" placeholder and never a key fingerprint.
+    func testAReplyToAnUnnamedAuthorCarriesNoPlaceholder() {
+        let vm = model()
+        vm.beginReply(incoming(5, "hello"))
+        let author = vm.replyingTo?.snapshot.author
+        XCTAssertNil(author, "carried \(author ?? "")")
+        XCTAssertNil(vm.forwardAuthorLabel(for: incoming(5, "hello")))
     }
 
     /// "Choosing Reply while an edit is open ends the edit (the draft is

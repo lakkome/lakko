@@ -768,23 +768,86 @@ private fun MenuLayout(
             return wanted.coerceIn(margin, (width - itemWidth - margin).coerceAtLeast(margin))
         }
 
-        fun clampY(wanted: Int, itemHeight: Int): Int =
-            wanted.coerceIn(margin, (height - itemHeight - margin).coerceAtLeast(margin))
+        val placement = messageMenuPlacement(
+            bubbleTop = bubble.top.toInt(),
+            bubbleBottom = bubble.bottom.toInt(),
+            rowHeight = rowPlaceable.height,
+            cardHeight = cardPlaceable.height,
+            height = height,
+            gap = gap,
+            margin = margin,
+        )
 
         layout(width, height) {
             // `place`, not `placeRelative`: these coordinates are already window
             // coordinates read off the bubble, so mirroring them under RTL would
             // move both surfaces away from the bubble they belong to.
-            rowPlaceable.place(
-                x = x(rowPlaceable.width),
-                y = clampY(bubble.top.toInt() - gap - rowPlaceable.height, rowPlaceable.height),
-            )
-            cardPlaceable.place(
-                x = x(cardPlaceable.width),
-                y = clampY(bubble.bottom.toInt() + gap, cardPlaceable.height),
-            )
+            rowPlaceable.place(x = x(rowPlaceable.width), y = placement.rowY)
+            cardPlaceable.place(x = x(cardPlaceable.width), y = placement.cardY)
         }
     }
+}
+
+/** Where the reaction row and the action card go, top edges. */
+internal data class MenuPlacement(val rowY: Int, val cardY: Int)
+
+/**
+ * Section 2 — the reaction row above the bubble and the card below it, and
+ * the two NEVER on top of each other. The bubble is not moved here (the scrim
+ * leaves it legible in place), so where one surface has no room the pair is
+ * placed together instead, in this order of preference:
+ *
+ *  1. row above the bubble, card below (the ordinary case);
+ *  2. both above, the row next to the bubble and the card above the row (a
+ *     message near the bottom: seen on a Pixel 2026-11-04, the card was
+ *     pushed up over the first two reactions);
+ *  3. both below, the row next to the bubble and the card under the row (a
+ *     message near the top);
+ *  4. otherwise the row and the card as one block, the row on top, moved in
+ *     one piece inside the screen; it may then cover the bubble, never itself.
+ *
+ * A height of 0 is a surface that is not drawn, and its gap goes with it.
+ * Pure arithmetic on pixels, so it is tested without a screen.
+ */
+internal fun messageMenuPlacement(
+    bubbleTop: Int,
+    bubbleBottom: Int,
+    rowHeight: Int,
+    cardHeight: Int,
+    height: Int,
+    gap: Int,
+    margin: Int,
+): MenuPlacement {
+    val hasRow = rowHeight > 0
+    val hasCard = cardHeight > 0
+    val low = margin
+    val high = height - margin
+    fun fits(top: Int, bottom: Int): Boolean = top >= low && bottom <= high
+
+    // 1. Row above, card below.
+    val rowAbove = bubbleTop - gap - rowHeight
+    val cardBelow = bubbleBottom + gap
+    if ((!hasRow || fits(rowAbove, rowAbove + rowHeight)) && (!hasCard || fits(cardBelow, cardBelow + cardHeight))) {
+        return MenuPlacement(rowAbove, cardBelow)
+    }
+    // 2. Both above: the card over the row.
+    val cardAbove = if (hasRow) rowAbove - gap - cardHeight else bubbleTop - gap - cardHeight
+    val topOfAbove = if (hasCard) cardAbove else rowAbove
+    if (fits(topOfAbove, bubbleTop - gap)) return MenuPlacement(rowAbove, cardAbove)
+    // 3. Both below: the card under the row.
+    val rowBelow = bubbleBottom + gap
+    val cardUnderRow = if (hasRow) rowBelow + rowHeight + gap else bubbleBottom + gap
+    val bottomOfBelow = if (hasCard) cardUnderRow + cardHeight else rowBelow + rowHeight
+    if (fits(bubbleBottom + gap, bottomOfBelow)) return MenuPlacement(rowBelow, cardUnderRow)
+    // 4. One block, row on top, moved in one piece.
+    val blockHeight = (if (hasRow) rowHeight else 0) + (if (hasRow && hasCard) gap else 0) +
+        (if (hasCard) cardHeight else 0)
+    val wanted = if (hasRow) rowAbove else bubbleBottom + gap
+    val ceiling = high - blockHeight
+    val top = if (ceiling < low) low else wanted.coerceIn(low, ceiling)
+    val rowY = top
+    val cardY = if (hasRow) top + rowHeight + gap else top
+    return MenuPlacement(rowY, cardY)
 }
 
 private const val SLOT_ROW = "reaction-row"

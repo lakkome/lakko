@@ -2015,14 +2015,20 @@ public class ChatViewModel(
             null
         }
 
-    public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String =
-        profileNames.resolve(identity).primary
+    public fun nameOf(identity: me.lakko.app.chat.MemberIdentity): String {
+        val resolved = profileNames.resolve(identity)
+        if (resolved.isPlaceholder) me.lakko.app.profile.reportUnnamedPerson(identity)
+        return resolved.primary
+    }
 
     /** A name that may be baked into a sent snapshot (a reply quote, a
      *  forward attribution): the person's name, or `null` when only the
      *  placeholder is known (ADR-0052: never a placeholder in an envelope). */
     public fun snapshotNameOf(identity: me.lakko.app.chat.MemberIdentity?): String? =
         identity?.let { me.lakko.app.chat.snapshotNameFrom(profileNames.resolve(it)) }
+
+    /** This account's own name as a snapshot carries it. */
+    public fun ownSnapshotName(): String? = repo.ownSnapshotName()
 
     /** [snapshotNameOf] for the other person of a two-member chat. */
     public fun oneToOnePeerSnapshotName(): String? =

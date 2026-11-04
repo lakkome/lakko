@@ -2830,7 +2830,13 @@ public final class ChatViewModel: ObservableObject {
     /// so a later edit or deletion of the quoted message changes nothing.
     public struct ReplyArmed: Equatable {
         public let messageId: Int64
+        /// What goes on the wire: the author's real name, never "You".
         public let snapshot: ReplyRef
+        /// The quoted message is this account's own: the strip reads "You".
+        public var quotesOwn: Bool = false
+
+        /// The snapshot as this device draws it.
+        public var shown: ReplyRef { quotesOwn ? ReplySnapshot.shownAsOwn(snapshot) : snapshot }
     }
 
     /// The reply currently armed, `nil` when the composer is plain.
@@ -2853,7 +2859,8 @@ public final class ChatViewModel: ObservableObject {
         replyingTo = ReplyArmed(
             messageId: message.messageId,
             snapshot: ReplySnapshot.replySnapshot(
-                for: message, authorLabel: replyAuthorLabel(for: message)))
+                for: message, authorLabel: replyAuthorLabel(for: message)),
+            quotesOwn: message.direction == .outgoing)
         composerFocusRequest += 1
     }
 
@@ -2942,19 +2949,7 @@ public final class ChatViewModel: ObservableObject {
     /// 1x1. `nil` when nothing is known — the line then reads "Forwarded"
     /// rather than the roster's placeholder word.
     func forwardAuthorLabel(for message: ChatMessage) -> String? {
-        switch message.direction {
-        case .outgoing:
-            let directory = ProfileDirectory.shared
-            return directory.ownProfile?.displayName ?? directory.ownUsername
-        case .incoming, .system:
-            if let key = message.authorKeyB64,
-               let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key),
-               !resolved.isPlaceholder
-            {
-                return resolved.name
-            }
-            return oneToOnePeerName
-        }
+        snapshotAuthorName(for: message)
     }
 
     /// Picking a row: send `message` to `targetGroupIdHex` at once and close
@@ -3111,8 +3106,9 @@ public final class ChatViewModel: ObservableObject {
         guard let message = messages.first(where: { $0.messageId == entry.messageId }) else {
             return (author: "", excerpt: ReplySnapshot.missingExcerpt)
         }
-        let snapshot = ReplySnapshot.replySnapshot(
+        let taken = ReplySnapshot.replySnapshot(
             for: message, authorLabel: replyAuthorLabel(for: message))
+        let snapshot = message.direction == .outgoing ? ReplySnapshot.shownAsOwn(taken) : taken
         let lines = ReplySnapshot.replyQuoteLines(snapshot)
         switch entry.scope {
         case .personal: return (author: Localization.text("chat.pinned_bar.for_you"), excerpt: lines.excerpt)
@@ -3238,20 +3234,48 @@ public final class ChatViewModel: ObservableObject {
         return pendingJump
     }
 
-    /// What the timeline calls the author of `message` (section 3.1): "You"
-    /// for an own message; for anyone else the resolved name, falling back
-    /// to the other person's name in a 1x1 and to the resolver's own
-    /// fallback word in a group.
-    func replyAuthorLabel(for message: ChatMessage) -> String {
+    /// The name a snapshot of `message` carries (a reply quote, a forward, a
+    /// saved entry): the author's REAL name, also for this account's own
+    /// message (maintainer, 2026-11-04: the snapshot is read on other
+    /// people's devices too, so it never says "You"); never a placeholder or
+    /// a key fingerprint. `nil` when this device holds no name for the
+    /// author, and the snapshot then carries none.
+    func snapshotAuthorName(for message: ChatMessage) -> String? {
         switch message.direction {
         case .outgoing:
-            return Localization.text("chat.author.you")
+            let directory = ProfileDirectory.shared
+            let own = directory.ownProfile?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let own, !own.isEmpty { return own }
+            return directory.ownUsername.map { "@\($0)" }
         case .incoming, .system:
-            if let key = message.authorKeyB64, let name = personName(signatureKeyB64: key) {
-                return name
+            if let key = message.authorKeyB64,
+               let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key),
+               !resolved.isPlaceholder {
+                return resolved.name
             }
-            return oneToOnePeerName ?? Localization.text("chat.members.unnamed")
+            guard let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return nil }
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
+            return resolved.isPlaceholder ? nil : resolved.name
         }
+    }
+
+    /// What a reply snapshot of `message` carries as its author: the real
+    /// name (``snapshotAuthorName(for:)``), or no name.
+    func replyAuthorLabel(for message: ChatMessage) -> String {
+        snapshotAuthorName(for: message) ?? ""
+    }
+
+    /// Whether `message` quotes a message of this account's own that this
+    /// device holds: its quote then reads "You" here.
+    func quotesOwnMessage(_ message: ChatMessage) -> Bool {
+        guard let target = message.reply?.target else { return false }
+        return isOwnMessage(id: target)
+    }
+
+    /// Whether the held message `id` is this account's own.
+    func isOwnMessage(id: Int64) -> Bool {
+        guard id > 0 else { return false }
+        return messages.last(where: { $0.messageId == id })?.direction == .outgoing
     }
 
     /// Open the edit sheet for `message`, pre-filling the field
@@ -3314,11 +3338,7 @@ public final class ChatViewModel: ObservableObject {
 
     /// The author name kept in the snapshot.
     private func savedAuthorName(_ message: ChatMessage) -> String {
-        if message.direction == .outgoing {
-            let directory = ProfileDirectory.shared
-            return directory.ownProfile?.displayName ?? directory.ownUsername ?? ""
-        }
-        return message.authorKeyB64.flatMap { personName(signatureKeyB64: $0) } ?? ""
+        snapshotAuthorName(for: message) ?? ""
     }
 
     func toggleSave(_ message: ChatMessage) {

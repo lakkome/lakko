@@ -150,6 +150,10 @@ public enum NseProcessedKind: Equatable {
     /// this build reads (`MessageBodyKind.unsupported`). It IS a message, so
     /// it previews — as the catalog sentence, never as core prose.
     case unsupported
+    /// ADR-0048 — a profile envelope: the sender's name, applied for the rest
+    /// of the batch only (never persisted, C-59), so a member's profile and
+    /// first message in one wake name them. Never a preview.
+    case profile
     /// An incoming call offer, and whether the caller asked for video.
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
@@ -183,6 +187,9 @@ public struct NseProcessedRow: Equatable {
     public let resendOrigin: NseResendOrigin?
     /// Reactions-and-emoji spec section 12 — a reaction row's op.
     public let reaction: NseReaction?
+    /// ADR-0048 — the display name a ``NseProcessedKind/profile`` row
+    /// carried, `nil` for every other kind or a profile with no name.
+    public let profileName: String?
 
     public init(
         kind: NseProcessedKind,
@@ -192,9 +199,12 @@ public struct NseProcessedRow: Equatable {
         callIdHex: String? = nil,
         senderKeyB64: String? = nil,
         resendOrigin: NseResendOrigin? = nil,
-        reaction: NseReaction? = nil
+        reaction: NseReaction? = nil,
+        profileName: String? = nil
     ) {
         self.reaction = kind == .reaction ? reaction : nil
+        let name = profileName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.profileName = kind == .profile && name?.isEmpty == false ? name : nil
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
@@ -773,6 +783,14 @@ public func decryptPushOutcome(
     // Rows whose sender the person-name mirror does not name (a defect):
     // only the generic banner can stand for them.
     var namelessRows = 0
+    // ADR-0048 — names learned from profile rows earlier in THIS batch, by
+    // the sender key the app keys received profiles under. In memory for the
+    // rest of the batch only; never persisted (C-59).
+    var batchNames: [String: String] = [:]
+    func nameOf(_ key: String) -> String? {
+        if let learned = batchNames[key] { return learned }
+        return deps.personName(accountIdB64: account.accountIdB64, keyB64: key)
+    }
     // Both read once, and only when a row asks.
     lazy var heldIds = deps.heldMessageIds(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex)
     lazy var ownPersonKey = deps.ownPersonKeyB64(accountIdB64: account.accountIdB64)
@@ -803,6 +821,11 @@ public func decryptPushOutcome(
             continue
         }
         switch processed.kind {
+        case .profile:
+            if let key = processed.senderKeyB64, let name = processed.profileName {
+                batchNames[key] = name
+                nseTrace("row \(row.id): profile learned for this batch")
+            }
         case .callOffer, .callEnd:
             latestCall = (row: processed, createdAt: row.createdAt)
         default:
@@ -831,7 +854,7 @@ public func decryptPushOutcome(
                     continue
                 }
                 let title = deps.callerName(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) ?? "Lakko"
-                guard let name = deps.personName(accountIdB64: account.accountIdB64, keyB64: sender) else {
+                guard let name = nameOf(sender) else {
                     // Every sender is a contact or a member whose name the app
                     // mirrors: a miss is a defect. The generic line, never a
                     // made-up name.
@@ -848,9 +871,7 @@ public func decryptPushOutcome(
                 continue
             }
             guard let text = previewBody(of: processed) else { nseTrace("row \(row.id): nothing to preview"); continue }
-            let senderName = processed.senderKeyB64.flatMap {
-                deps.personName(accountIdB64: account.accountIdB64, keyB64: $0)
-            }
+            let senderName = processed.senderKeyB64.flatMap { nameOf($0) }
             // A group body always names its sender with the real name from the
             // app's mirror. A miss is a defect: the generic line, never a
             // group body without the sender and never a made-up name.
@@ -1212,7 +1233,7 @@ private func previewBody(of row: NseProcessedRow) -> String? {
         return nil
     // A service envelope this build cannot read (live walk 2026-09-29: a
     // profile v3 reached v2 clients). Never rendered, whatever text it carries.
-    case .serviceEnvelope:
+    case .serviceEnvelope, .profile:
         return nil
     // A message from a newer version of Lakko: a real message, previewed as
     // the client's own sentence in the interface language.
