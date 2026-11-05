@@ -1366,6 +1366,7 @@ internal fun FeedItemCard(
             seed = me.lakko.app.feed.feedSourceKey(ref.source),
             size = SOURCE_AVATAR_SIZE,
             group = true,
+            groupIdHex = me.lakko.app.feed.feedSourceAvatarId(ref.source),
             modifier = Modifier
                 .clip(CircleShape)
                 .clearAndSetSemantics {}

@@ -63,7 +63,7 @@ import me.lakko.app.calls.inviteContactToCall
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
-import me.lakko.app.contacts.foundOneToOneWith
+import me.lakko.app.calls.ContactInviteOutcome
 import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.contacts.ContactRowModel
@@ -269,6 +269,10 @@ private fun CallInvitePickerDialog(
     var busyKey by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<UiText?>(null) }
     var invited by remember { mutableStateOf(emptySet<String>()) }
+    // `docs/ux/who-can-find-me.md` 6.4 — a contact request went inside a
+    // shared group (no invitation until they accept), or nothing could be sent.
+    var requested by remember { mutableStateOf(emptySet<String>()) }
+    var cannotMessage by remember { mutableStateOf(emptySet<String>()) }
 
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
@@ -302,21 +306,29 @@ private fun CallInvitePickerDialog(
             rows = rows,
             busyKey = busyKey,
             invitedKeys = invited,
+            requestSentKeys = requested,
+            cannotMessageKeys = cannotMessage,
             error = error,
             onBack = onClose,
             onInvite = { row ->
-                if (busyKey == null && row.key !in invited) {
+                if (busyKey == null && row.key !in invited && row.key !in requested) {
                     busyKey = row.key
                     error = null
                     scope.launch {
-                        val sent = try {
+                        val outcome = try {
                             inviteContactToCall(ports, row.key) { send ->
                                 host.sendInvite(identity(), row.name, send)
                             }
                         } finally {
                             busyKey = null
                         }
-                        if (sent) invited = invited + row.key else error = UiText("call.invite.send_failed")
+                        cannotMessage = cannotMessage - row.key
+                        when (outcome) {
+                            ContactInviteOutcome.SENT -> invited = invited + row.key
+                            ContactInviteOutcome.REQUEST_SENT -> requested = requested + row.key
+                            ContactInviteOutcome.CANNOT_MESSAGE -> cannotMessage = cannotMessage + row.key
+                            ContactInviteOutcome.FAILED -> error = UiText("call.invite.send_failed")
+                        }
                     }
                 }
             },
@@ -338,19 +350,8 @@ private fun callInviteContactPorts(
     override fun conversationWith(contact: AcceptedContact): String? =
         chatRepository.chatGroupIdHexFor(contact.groupIdHex, contact.request.fromPubkey)
 
-    override suspend fun foundOneToOne(contact: AcceptedContact): String =
-        foundOneToOneWith(
-            contact = contact,
-            // ADR-0062 — a contact's conversation is a one-to-one for good.
-            startOneToOne = { accountId, signatureKey ->
-                chatRepository.startGroupWith(
-                    recipientAccountId = accountId,
-                    recipientSignaturePubkey = signatureKey,
-                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
-                )
-            },
-            link = { signatureKey, groupIdHex -> contactsRepository.linkOneToOne(signatureKey, groupIdHex) },
-        )
+    override suspend fun messageKnownPerson(contact: AcceptedContact): me.lakko.app.contacts.MessageOutcome =
+        contactsRepository.messageKnownPerson(contact)
 
     override suspend fun sendText(groupIdHex: String, text: String) =
         chatRepository.sendMessage(groupIdHex = groupIdHex, plaintext = text)

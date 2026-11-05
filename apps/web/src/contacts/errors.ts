@@ -32,7 +32,7 @@ export function atLabel(raw: string): string | undefined {
 
 /** Walk the wrap chain (`cause`, or `variant.cause` for the contacts
  *  client's wrapper) for the first value `pick` recognises. */
-function findInChain<T>(err: unknown, pick: (value: unknown) => T | null): T | null {
+export function findInChain<T>(err: unknown, pick: (value: unknown) => T | null): T | null {
   let current: unknown = err;
   for (let depth = 0; depth < 8 && current !== null && current !== undefined; depth += 1) {
     const found = pick(current);

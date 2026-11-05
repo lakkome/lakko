@@ -57,6 +57,17 @@ public interface ContactsInboxStore {
      */
     public fun saveWaiting(accountIdB64: String, waiting: List<IncomingContactRequest>) {}
 
+    /**
+     * `docs/ux/who-can-find-me.md` 6.4 — persist the opened group contact
+     * requests not yet through an inbox pass, DURABLY (the write is on disk
+     * when this returns `true`): the group journal's cursor moves past their
+     * rows only after this. `false` when the write did not land.
+     */
+    public fun saveGroupRequests(accountIdB64: String, requests: List<StoredGroupRequest>): Boolean = true
+
+    /** What [saveGroupRequests] last stored for [accountIdB64]. */
+    public fun loadGroupRequests(accountIdB64: String): List<StoredGroupRequest> = emptyList()
+
     /** Drop every entry for [accountIdB64] (forget device only; log out
      *  keeps them for the next login of the same account). */
     public fun delete(accountIdB64: String)
@@ -130,16 +141,36 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
         }
     }
 
+    override fun saveGroupRequests(accountIdB64: String, requests: List<StoredGroupRequest>): Boolean {
+        var written = false
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val edit = prefs.edit()
+            if (requests.isEmpty()) {
+                edit.remove(groupKey(accountIdB64))
+            } else {
+                edit.putString(groupKey(accountIdB64), encodeGroupRequests(requests))
+            }
+            // `commit`, not `apply`: on disk before the journal cursor moves.
+            written = edit.commit()
+        }
+        return written
+    }
+
+    override fun loadGroupRequests(accountIdB64: String): List<StoredGroupRequest> =
+        prefs.getString(groupKey(accountIdB64), null)?.let { decodeGroupRequests(it) } ?: emptyList()
+
     override fun delete(accountIdB64: String) {
         prefs.edit()
             .remove(cursorKey(accountIdB64))
             .remove(pendingKey(accountIdB64))
             .remove(waitingKey(accountIdB64))
+            .remove(groupKey(accountIdB64))
             .apply()
     }
 
     private companion object {
         const val PREFS = "lakko-contacts-inbox"
+        fun groupKey(accountIdB64: String) = "group-requests.v1:$accountIdB64"
         fun cursorKey(accountIdB64: String) = "cursor.v1:$accountIdB64"
         fun pendingKey(accountIdB64: String) = "pending.v1:$accountIdB64"
         fun waitingKey(accountIdB64: String) = "waiting.v1:$accountIdB64"
@@ -178,10 +209,101 @@ public class InMemoryContactsInboxStore : ContactsInboxStore {
             pendingByAccount[accountIdB64] = encodePendingRequests(pending)
         }
 
+    private val groupByAccount = HashMap<String, String>()
+
+    /** Tests: make the next [saveGroupRequests] fail (a write that did not land). */
+    @Volatile
+    public var failGroupWrites: Boolean = false
+
+    override fun saveGroupRequests(accountIdB64: String, requests: List<StoredGroupRequest>): Boolean =
+        synchronized(this) {
+            if (failGroupWrites) return@synchronized false
+            if (requests.isEmpty()) groupByAccount.remove(accountIdB64) else groupByAccount[accountIdB64] = encodeGroupRequests(requests)
+            true
+        }
+
+    override fun loadGroupRequests(accountIdB64: String): List<StoredGroupRequest> = synchronized(this) {
+        groupByAccount[accountIdB64]?.let { decodeGroupRequests(it) } ?: emptyList()
+    }
+
     override fun delete(accountIdB64: String): Unit = synchronized(this) {
         cursors.remove(accountIdB64)
         pendingByAccount.remove(accountIdB64)
         waitingByAccount.remove(accountIdB64)
+        groupByAccount.remove(accountIdB64)
+    }
+}
+
+/**
+ * `docs/ux/who-can-find-me.md` 6.4 — one opened group contact request waiting
+ * for an inbox pass: the verified request wire (its secret part stays sealed
+ * to this account's key), the group it came in, its row id and stamp.
+ */
+@Serializable
+public data class StoredGroupRequest(
+    val messageId: Long,
+    val groupIdHex: String,
+    val wireB64: String,
+    val createdAt: String,
+)
+
+private fun encodeGroupRequests(requests: List<StoredGroupRequest>): String = inboxJson.encodeToString(requests)
+
+private fun decodeGroupRequests(raw: String): List<StoredGroupRequest>? =
+    try {
+        inboxJson.decodeFromString<List<StoredGroupRequest>>(raw)
+    } catch (_: Exception) {
+        null
+    }
+
+/**
+ * `docs/ux/who-can-find-me.md` 6.4 — the opened group contact requests of one
+ * account between their group row and the inbox pass that lists them. A
+ * request is written to [store] when it is opened ([add]); a write that does
+ * not land keeps it in memory and [flushOrThrow] — called before the journal
+ * cursor moves past its row — throws until it does, so a cursor never passes
+ * an unstored request. The inbox pass reads them ([all]) and, once the
+ * pending list holding them is persisted, lets them go ([remove]).
+ */
+public class GroupRequestQueue(
+    private val store: ContactsInboxStore,
+    private val accountIdB64: String,
+) {
+    private val unstored = ArrayList<StoredGroupRequest>()
+
+    /** Keep [request]; `true` when it is on disk now. */
+    public fun add(request: StoredGroupRequest): Boolean = synchronized(this) {
+        if (unstored.none { it.messageId == request.messageId }) unstored.add(request)
+        flushLocked()
+    }
+
+    /** Write what is held only in memory; throws when that write fails. */
+    public fun flushOrThrow(): Unit = synchronized(this) {
+        if (!flushLocked()) throw IllegalStateException("group contact requests not stored")
+    }
+
+    /** Every request waiting for the inbox pass, stored or not. */
+    public fun all(): List<StoredGroupRequest> = synchronized(this) {
+        val stored = store.loadGroupRequests(accountIdB64)
+        stored + unstored.filter { u -> stored.none { it.messageId == u.messageId } }
+    }
+
+    /** The inbox pass listed (and persisted) [messageIds]: drop them. */
+    public fun remove(messageIds: Set<Long>): Unit = synchronized(this) {
+        if (messageIds.isEmpty()) return@synchronized
+        unstored.removeAll { it.messageId in messageIds }
+        val stored = store.loadGroupRequests(accountIdB64)
+        val next = stored.filterNot { it.messageId in messageIds }
+        if (next.size != stored.size) store.saveGroupRequests(accountIdB64, next)
+    }
+
+    private fun flushLocked(): Boolean {
+        if (unstored.isEmpty()) return true
+        val stored = store.loadGroupRequests(accountIdB64)
+        val next = stored + unstored.filter { u -> stored.none { it.messageId == u.messageId } }
+        if (!store.saveGroupRequests(accountIdB64, next)) return false
+        unstored.clear()
+        return true
     }
 }
 
@@ -231,8 +353,13 @@ public fun mergeFetchedRequests(
     val dropped = ArrayList<IncomingContactRequest>()
     var changed = false
     for (req in fetched) {
-        val duplicateRow = !seenIds.add(req.messageId)
-        val alreadyAccepted = acceptedKeys.any {
+        // One request, two routes (`docs/ux/who-can-find-me.md` 6.4): the same
+        // signed request read from the mailbox and from a group is one row.
+        val sameRequest = rows.any {
+            it.fromPubkey.contentEquals(req.fromPubkey) && it.validAfterMs == req.validAfterMs
+        }
+        val duplicateRow = !seenIds.add(req.messageId) || sameRequest
+        val alreadyAccepted = !askedForChatThroughGroup(req, accepted) && acceptedKeys.any {
             it.contentEquals(req.fromPubkey) || supersedes(req.fromPubkey, it)
         }
         if (duplicateRow || alreadyAccepted) {
@@ -299,7 +426,21 @@ public fun withoutAcceptedSenders(
 ): List<IncomingContactRequest> {
     if (pending.isEmpty() || accepted.isEmpty()) return pending
     val acceptedKeys = accepted.mapTo(HashSet()) { it.request.fromPubkey.toList() }
-    return pending.filterNot { it.fromPubkey.toList() in acceptedKeys }
+    return pending.filterNot { it.fromPubkey.toList() in acceptedKeys && !askedForChatThroughGroup(it, accepted) }
+}
+
+/**
+ * `docs/ux/who-can-find-me.md` section 6.4 — a request that came inside a
+ * shared group from someone who is already a contact with no chat on this
+ * device is how they ask for one (a contact first met in a group holds no
+ * grant to this inbox). Such a request is a request row like any other: Accept
+ * founds the one-to-one through the reply key it carries. A contact who has a
+ * chat here is not asking for one, so theirs goes as before.
+ */
+public fun askedForChatThroughGroup(request: IncomingContactRequest, accepted: List<AcceptedContact>): Boolean {
+    if (request.viaGroupIdHex == null) return false
+    val row = accepted.firstOrNull { it.request.fromPubkey.contentEquals(request.fromPubkey) } ?: return true
+    return row.groupIdHex == null
 }
 
 /**
@@ -364,6 +505,22 @@ public fun applyAnsweringWelcomes(
     return AnsweredRequests(next, withoutSentAnsweredBy(sent, answered.keys), changed)
 }
 
+/**
+ * The Sent list once [signatureKey] became a contact through their joined
+ * one-to-one: a request to them (by the key an ack named, or by their account
+ * id) is answered. Base walk 2026-11-04: an ack no longer retires it by itself.
+ */
+public fun sentAfterOneToOne(
+    sent: List<SentContactRequest>,
+    signatureKey: ByteArray,
+    accountId: ByteArray?,
+): List<SentContactRequest> {
+    val enc = java.util.Base64.getEncoder()
+    val keyB64 = enc.encodeToString(signatureKey)
+    val accountB64 = accountId?.let(enc::encodeToString)
+    return sent.filterNot { it.recipientKeyB64 == keyB64 || (accountB64 != null && it.recipientAccountIdB64 == accountB64) }
+}
+
 /** The length of a contact's account id. */
 internal const val CONTACT_ACCOUNT_ID_LEN: Int = 16
 
@@ -397,10 +554,12 @@ public data class AppliedContactAcks(
 )
 
 /**
- * Fold verified `ContactAck`s into the contact list: the person who pressed
- * Accept on one of this device's outgoing requests becomes a contact on this
- * side too, keyed on their signature key, carrying their account id, and the
- * matching sent request is retired.
+ * Fold verified `ContactAck`s into the contact list. A person who is already
+ * a contact here (their Welcome was joined) gets their account id and the
+ * matching sent request is retired. A person who is not yet a contact stays a
+ * Sent request until their Welcome is joined: a contact always has a
+ * one-to-one (base walk 2026-11-04); the ack only fills in the key the
+ * Welcome will be matched by.
  *
  * Without this the requester never learned the accepter's account id. The
  * chat arrived by Welcome, but the contact row came only from the requester's
@@ -429,9 +588,25 @@ public fun applyContactAcks(
     var changed = false
     for (ack in acks) {
         val accepterAccountIdB64 = encoder.encodeToString(ack.accepterAccountId)
-        nextSent = nextSent.filterNot { it.recipientAccountIdB64 == accepterAccountIdB64 }
         val index = nextAccepted.indexOfFirst { samePerson(it.request.fromPubkey, ack.accepterPubkey) }
-        if (index >= 0) {
+        if (index < 0) {
+            // Base walk 2026-11-04 — an ack is not the conversation. The
+            // person becomes a contact when their Welcome is joined
+            // ([applyAnsweringWelcomes]); until then the request stays in
+            // Sent, so a contact never shows without a one-to-one. The ack
+            // names the key the Welcome will be matched by.
+            val keyB64 = encoder.encodeToString(ack.accepterPubkey)
+            nextSent = nextSent.map {
+                if (it.recipientAccountIdB64 == accepterAccountIdB64 && it.recipientKeyB64 == null) {
+                    it.copy(recipientKeyB64 = keyB64)
+                } else {
+                    it
+                }
+            }
+            continue
+        }
+        nextSent = nextSent.filterNot { it.recipientAccountIdB64 == accepterAccountIdB64 }
+        run {
             val known = nextAccepted[index]
             if (known.request.fromAccountId == null) {
                 nextAccepted = nextAccepted.toMutableList().also {
@@ -441,21 +616,7 @@ public fun applyContactAcks(
                 }
                 changed = true
             }
-            continue
         }
-        nextAccepted = nextAccepted + AcceptedContact(
-            request = IncomingContactRequest(
-                messageId = ack.messageId,
-                fromPubkey = ack.accepterPubkey,
-                fromAccountId = ack.accepterAccountId,
-                fromPseudonym = ack.ackToPseudonym,
-                validAfterMs = ack.acceptedAtMs,
-                intro = null,
-                createdAt = ack.createdAt,
-            ),
-            groupIdHex = null,
-        )
-        changed = true
     }
     return AppliedContactAcks(nextAccepted, nextSent, changed)
 }
@@ -531,6 +692,8 @@ private data class StoredPendingRequest(
     val intro: String?,
     val createdAt: String,
     /** ADR-0079 - the dead-link note, kept with the request. */
+    /** `docs/ux/who-can-find-me.md` 6.4 - the group the request came in. */
+    val viaGroupIdHex: String? = null,
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec
@@ -546,6 +709,7 @@ internal fun encodePendingRequests(pending: List<IncomingContactRequest>): Strin
                 validAfterMs = r.validAfterMs.toLong(),
                 intro = r.intro,
                 createdAt = r.createdAt,
+                viaGroupIdHex = r.viaGroupIdHex,
             )
         },
     )
@@ -562,6 +726,7 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
                 validAfterMs = s.validAfterMs.toULong(),
                 intro = s.intro,
                 createdAt = s.createdAt,
+                viaGroupIdHex = s.viaGroupIdHex,
             )
         }
     } catch (_: Exception) {

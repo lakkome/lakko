@@ -133,7 +133,11 @@ struct CallsScreen: View {
                 onOpenConversation(entry.conversationId, entry.kind)
             } label: {
                 HStack(spacing: 12) {
-                    InitialsAvatar(name: title, identity: entry.conversationId, size: 40)
+                    InitialsAvatar(
+                        name: title, identity: entry.conversationId, size: 40,
+                        isGroup: entry.kind == .group,
+                        photo: conversations.avatarPhoto(
+                            groupIdHex: entry.conversationId, isGroup: entry.kind == .group))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(title)
                             .font(.body)

@@ -25,6 +25,7 @@ import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { ModalLayer } from "../ui/ModalLayer";
+import type { InviteOutcome } from "./invite-route";
 import {
   filterInviteContactRows,
   inviteContactRows,
@@ -34,15 +35,16 @@ import {
 export function InviteContactsPicker(props: {
   readonly open: boolean;
   readonly onClose: () => void;
-  /** Send the invitation to this contact. Resolves once it is published; a
-   *  rejection keeps the layer open with the error shown. */
-  readonly onInvite: (row: InviteContactRow) => Promise<void>;
+  /** Send the invitation to this contact. Resolves with what the row says
+   *  afterwards (`invite-route.ts`); a rejection keeps the layer open with
+   *  the error shown. */
+  readonly onInvite: (row: InviteContactRow) => Promise<InviteOutcome>;
 }): JSX.Element {
   const profiles = useProfiles();
   const [contacts, setContacts] = createSignal<AcceptedContact[]>([]);
   const [query, setQuery] = createSignal("");
   const [busyKey, setBusyKey] = createSignal<string | null>(null);
-  const [doneKeys, setDoneKeys] = createSignal<ReadonlySet<string>>(new Set<string>());
+  const [outcomes, setOutcomes] = createSignal<ReadonlyMap<string, InviteOutcome>>(new Map());
   const [error, setError] = createLiveText();
 
   // Every opening starts clean and reads the contact list as it is now.
@@ -50,7 +52,7 @@ export function InviteContactsPicker(props: {
     if (!props.open) return;
     setQuery("");
     setBusyKey(null);
-    setDoneKeys(new Set<string>());
+    setOutcomes(new Map());
     setError(null);
     setContacts(loadAccepted());
   });
@@ -65,12 +67,12 @@ export function InviteContactsPicker(props: {
   const visible = (): InviteContactRow[] => filterInviteContactRows(rows(), query());
 
   async function invite(row: InviteContactRow): Promise<void> {
-    if (busyKey() !== null || doneKeys().has(row.keyB64)) return;
+    if (busyKey() !== null || rowIsDone(outcomes().get(row.keyB64))) return;
     setError(null);
     setBusyKey(row.keyB64);
     try {
-      await props.onInvite(row);
-      setDoneKeys(new Set([...doneKeys(), row.keyB64]));
+      const outcome = await props.onInvite(row);
+      setOutcomes(new Map([...outcomes(), [row.keyB64, outcome]]));
     } catch (err) {
       // ADR-0061 section 6: the error's code, never its prose.
       console.warn("[call invite] failed", err);
@@ -106,15 +108,13 @@ export function InviteContactsPicker(props: {
           <For each={visible()}>
             {(row) => {
               const busy = (): boolean => busyKey() === row.keyB64;
-              const done = (): boolean => doneKeys().has(row.keyB64);
+              const outcome = (): InviteOutcome | undefined => outcomes().get(row.keyB64);
+              const done = (): boolean => rowIsDone(outcome());
               const sub = (): string =>
                 busy()
                   ? t("common.sending")
-                  : done()
-                    ? t("call.invite.row_invited")
-                    : row.username === null
-                      ? ""
-                      : `@${row.username.replace(/^@/, "")}`;
+                  : (inviteRowLine(outcome(), row.name) ??
+                    (row.username === null ? "" : `@${row.username.replace(/^@/, "")}`));
               return (
                 <li>
                   <button
@@ -133,7 +133,7 @@ export function InviteContactsPicker(props: {
                       </div>
                       <div class="lk-row-line">
                         <span class="lk-row-sub">{sub()}</span>
-                        <Show when={done()}>
+                        <Show when={outcome() === "invited"}>
                           <Icon name="check" size={16} />
                         </Show>
                       </div>
@@ -147,4 +147,25 @@ export function InviteContactsPicker(props: {
       </Show>
     </ModalLayer>
   );
+}
+
+/** Whether a row cannot be pressed again: invited, or a request already went
+ *  to them. A row that could not be messaged stays pressable. */
+export function rowIsDone(outcome: InviteOutcome | undefined): boolean {
+  return outcome === "invited" || outcome === "request-sent";
+}
+
+/** The row's second line after a press (who-can-find-me 6.4), or `null` for
+ *  the username. */
+export function inviteRowLine(outcome: InviteOutcome | undefined, name: string): string | null {
+  switch (outcome) {
+    case "invited":
+      return t("call.invite.row_invited");
+    case "request-sent":
+      return t("search.people.request_sent");
+    case "cannot-message":
+      return t("contacts.detail.cannot_message", { name });
+    case undefined:
+      return null;
+  }
 }

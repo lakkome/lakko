@@ -187,6 +187,25 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertTrue(store.notices(accountIdB64: "a").isEmpty)
     }
 
+    /// UX 9.1 (decided 2026-11-04) — several removals each have their own
+    /// banner, the newest on top; closing one leaves the others. (Base walk:
+    /// an older banner hid a new removal.)
+    func testEveryRemovalHasItsOwnBannerNewestOnTop() throws {
+        let store = MembershipEndStore(defaults: try suite())
+        for (hex, name) in [("aa", "QA Phase A Walk"), ("bb", "QA Base Alone"), ("cc", "Third")] {
+            store.record(
+                OwedMembershipEnd(groupIdHex: hex, endedEpoch: 3, heard: false, oneToOne: false),
+                notice: MembershipEndNotice(groupIdHex: hex, name: name), accountIdB64: "a")
+        }
+        XCTAssertEqual(
+            MembershipEndNoticeCenter.stacked(store.notices(accountIdB64: "a")).map(\.name),
+            ["Third", "QA Base Alone", "QA Phase A Walk"])
+        store.removeNotice(accountIdB64: "a", groupIdHex: "bb")
+        XCTAssertEqual(
+            MembershipEndNoticeCenter.stacked(store.notices(accountIdB64: "a")).map(\.name),
+            ["Third", "QA Phase A Walk"], "closing one leaves the others")
+    }
+
     func testHeldWelcomesAreBoundedAndDeduplicated() throws {
         let store = MembershipEndStore(defaults: try suite())
         let one = HeldWelcome(groupIdHex: "ab", welcome: Data([1]))

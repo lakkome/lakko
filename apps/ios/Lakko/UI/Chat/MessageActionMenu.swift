@@ -264,6 +264,30 @@ public enum MessageMenuLayout {
     /// The least the stack may come to the edge of the safe area.
     public static let margin: CGFloat = 12
 
+    /// The least the reaction row may come to the screen's side.
+    public static let sideMargin: CGFloat = 8
+
+    /// How far the reaction row moves sideways so it stays inside the screen.
+    ///
+    /// The row hangs off the bubble's near side: an incoming bubble's leading
+    /// edge, an outgoing bubble's trailing edge. When that would put its far
+    /// end past ``sideMargin`` from the screen's side it moves back by the
+    /// difference, never past the near side's own margin. `0` when it fits,
+    /// which is the common case. Pure, so a test can run it.
+    public static func rowShift(
+        rowWidth: CGFloat, bubble: CGRect, containerWidth: CGFloat, outgoing: Bool
+    ) -> CGFloat {
+        guard rowWidth > 0, containerWidth > 0 else { return 0 }
+        if outgoing {
+            let start = bubble.maxX - rowWidth
+            let lowest = sideMargin
+            return start < lowest ? min(lowest - start, max(0, containerWidth - sideMargin - bubble.maxX)) : 0
+        }
+        let end = bubble.minX + rowWidth
+        let highest = containerWidth - sideMargin
+        return end > highest ? -min(end - highest, max(0, bubble.minX - sideMargin)) : 0
+    }
+
     public struct Resolved: Equatable {
 
         /// Where the top of the whole stack goes, in the container's own space.
@@ -539,6 +563,7 @@ struct MessageActionMenu: View {
             if request.canReact {
                 MessageReactionRow(
                     model: request.reactionRow,
+                    maxWidth: containerWidth - 2 * MessageMenuLayout.sideMargin,
                     onReact: { emoji in
                         dismiss()
                         request.onReact(emoji)
@@ -549,6 +574,12 @@ struct MessageActionMenu: View {
                     }
                 )
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { rowSize = $0 }
+                // Hung off the bubble's side, the row can run past the screen
+                // edge (a bubble near the far side, a 44 pt target row): it
+                // moves back inside, the bubble and the card stay put.
+                .offset(x: MessageMenuLayout.rowShift(
+                    rowWidth: rowSize.width, bubble: bubble,
+                    containerWidth: containerWidth, outgoing: outgoing))
             }
             // Drawn at the width it had, so the text wraps exactly as it did in
             // the timeline; the height follows from that. Not interactive: the
@@ -589,27 +620,93 @@ struct MessageReactionRow: View {
     /// row itself is ``ReactionRowModel``.
     static let palette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
 
-    /// Each emoji's tap target. Seven of these plus the padding is the row's
-    /// width, and it has to stay inside a phone's screen: at 36 pt the row is
-    /// about 288 pt wide, which fits the narrowest device Lakko supports with
-    /// room for the bubble's own inset.
-    static let target: CGFloat = 36
+    /// Each emoji's tap target at the default text size (the design-system
+    /// "Reaction chip" entry: emoji 28 in a 44 square, 4 apart). The row scales
+    /// both with the person's text size and never grows past ``maxWidth``.
+    static let target: CGFloat = 44
+    /// The emoji's size inside its target at the default text size.
+    static let emojiSize: CGFloat = 28
+    /// Between two targets.
+    static let gap: CGFloat = 4
+    /// The panel's own inset around the targets.
+    static let inset: CGFloat = 6
 
     /// Reactions-and-emoji spec section 5 — the row for this message.
     var model: ReactionRowModel = ReactionRowModel(
         emoji: MessageReactionRow.palette, own: [], capReached: false, showsExpand: true)
+    /// The widest the panel may be, inset included: the screen less its
+    /// margins. A larger text size grows the targets only up to this.
+    var maxWidth: CGFloat = .infinity
     let onReact: (String) -> Void
     let onMore: () -> Void
 
-    /// The emoji row's width: its targets plus the 4 pt gaps between them.
+    @ScaledMetric(relativeTo: .title) private var scaledTarget = MessageReactionRow.target
+    @ScaledMetric(relativeTo: .title) private var scaledEmoji = MessageReactionRow.emojiSize
+    /// `docs/ux/text-size.md` — the emoji follow the chat text size; the tap
+    /// target never goes below 44.
+    @Environment(\.chatTextScale) private var chatTextScale
+
+    private var count: Int { model.emoji.count + (model.showsExpand ? 1 : 0) }
+
+    /// The target's side: the scaled 44, never under 44 (`docs/ux/text-size.md`).
+    private var side: CGFloat {
+        max(Self.target, scaledTarget * chatTextScale)
+    }
+
+    /// The width the targets may take inside the panel.
+    private var visibleWidth: CGFloat {
+        max(Self.target, maxWidth - 2 * Self.inset)
+    }
+
+    /// Wider than the screen less its margins: the row scrolls sideways
+    /// rather than overflowing or shrinking its targets.
+    private var scrolls: Bool { rowWidth > visibleWidth + 0.5 }
+
+    /// The emoji: 28 scaled, kept inside its target.
+    private var emojiPoints: CGFloat {
+        min(scaledEmoji * chatTextScale, side * 0.8)
+    }
+
+    /// The emoji row's width: its targets plus the gaps between them.
     private var rowWidth: CGFloat {
-        let count = model.emoji.count + (model.showsExpand ? 1 : 0)
-        return CGFloat(count) * Self.target + CGFloat(max(0, count - 1)) * 4
+        CGFloat(count) * side + CGFloat(max(0, count - 1)) * Self.gap
     }
 
     var body: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 4) {
+            if scrolls {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    targets
+                }
+                .frame(width: visibleWidth, height: side)
+            } else {
+                targets
+            }
+            if model.capReached {
+                // The panel sizes itself (`fixedSize` below), which gives a
+                // Text its one-line height: the second line spilled out under
+                // the panel. The line takes the emoji row's width and its own
+                // wrapped height, so the panel grows to hold it.
+                Text(Localization.text("chat.reaction.cap_reached"))
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: min(rowWidth, visibleWidth))
+                    .padding(.bottom, 4)
+            }
+        }
+        .padding(.horizontal, Self.inset)
+        .padding(.vertical, 3)
+        .background(Color.lakkoSurface, in: RoundedRectangle(cornerRadius: side / 2 + 3))
+        .overlay(RoundedRectangle(cornerRadius: side / 2 + 3).stroke(Color.lakkoBorder, lineWidth: 0.5))
+        // Its own size, never the space it is offered.
+        .fixedSize()
+    }
+
+    /// The emoji targets and the trailing picker control, in one row.
+    private var targets: some View {
+            HStack(spacing: Self.gap) {
                 ForEach(model.emoji, id: \.self) { emoji in
                     let held = model.own.contains(emoji)
                     let dimmed = model.capReached && !held
@@ -617,8 +714,8 @@ struct MessageReactionRow: View {
                         onReact(emoji)
                     } label: {
                         Text(emoji)
-                            .font(.system(size: 22))
-                            .frame(width: Self.target, height: Self.target)
+                            .font(.system(size: emojiPoints))
+                            .frame(width: side, height: side)
                             .background(Circle().fill(held ? Color.lakkoAccentSoft : Color.clear))
                             .opacity(dimmed ? 0.35 : 1)
                             .contentShape(Rectangle())
@@ -634,9 +731,9 @@ struct MessageReactionRow: View {
                 if model.showsExpand {
                     Button(action: onMore) {
                         Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: side * 18 / Self.target, weight: .semibold))
                             .foregroundStyle(Color.lakkoTextMuted)
-                            .frame(width: Self.target, height: Self.target)
+                            .frame(width: side, height: side)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -644,26 +741,6 @@ struct MessageReactionRow: View {
                     .accessibilityIdentifier("message-reaction-more")
                 }
             }
-            if model.capReached {
-                // The panel sizes itself (`fixedSize` below), which gives a
-                // Text its one-line height: the second line spilled out under
-                // the panel. The line takes the emoji row's width and its own
-                // wrapped height, so the panel grows to hold it.
-                Text(Localization.text("chat.reaction.cap_reached"))
-                    .font(.caption2)
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: rowWidth)
-                    .padding(.bottom, 4)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(Color.lakkoSurface, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.lakkoBorder, lineWidth: 0.5))
-        // Its own size, never the space it is offered.
-        .fixedSize()
     }
 }
 

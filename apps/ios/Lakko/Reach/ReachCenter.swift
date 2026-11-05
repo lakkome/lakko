@@ -424,6 +424,15 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
+    /// The app became active: a `fof` rotation that came due while it was
+    /// closed runs now (the schedule has no background job of its own).
+    public func noteForeground() {
+        guard isActive,
+              ReachRules.fofRotationDue(lastRotatedAtMs: record.fofRotatedAtMs, nowMs: clockMs())
+        else { return }
+        sync()
+    }
+
     /// ``sync()`` when `accountIdB64` is the active account.
     func sync(forAccount accountIdB64: String) {
         if self.accountIdB64 == accountIdB64 { sync() }
@@ -439,7 +448,7 @@ public final class ReachCenter: ObservableObject {
         guard let seed = accountSeed, let signer = mailboxSigner, let pseudonym = mailboxPseudonym,
               let accountIdB64 else { return false }
         status = .applying
-        let now = Self.nowMs()
+        let now = clockMs()
         let groupIds = groupIdsProvider()
         let channelIds = channelIdsProvider()
         // ADR-0078 section 9 — a group or channel left since the last
@@ -479,6 +488,19 @@ public final class ReachCenter: ObservableObject {
             guard await recoverVersions(
                 slots: unchecked, seed: seed, signer: signer, pseudonym: pseudonym,
                 accountIdB64: accountIdB64) else { return false }
+        }
+        // ADR-0060 section 4 — the `fof` key's 7-day schedule, after the
+        // versions are recovered (a due rotation must not establish a version
+        // without looking at the DS): a new version, the old key unregistered
+        // by the diff below, a new record to the contacts (`onGrantsChanged`).
+        // A device that never ran a registration starts its schedule here
+        // rather than rotating at once.
+        if record.fofRotatedAtMs == nil {
+            record.fofRotatedAtMs = now
+            persist()
+        } else if ReachRules.fofRotationDue(lastRotatedAtMs: record.fofRotatedAtMs, nowMs: now) {
+            record.fofRotatedAtMs = now
+            rotateClasses([.fof], sync: false)
         }
         let specs = desiredSpecs()
         var desired: [(publicKey: Data, expiresAtMs: UInt64?)] = []
@@ -710,6 +732,13 @@ public final class ReachCenter: ObservableObject {
             return .notNewer
         }
         if merge.store {
+            // The scheduled `fof` rotation happened on another device: this
+            // one starts its own schedule from here instead of rotating a
+            // second time (web `adoptReachState`).
+            if ReachRules.version(of: .fof, scope: Data(), in: merge.state)
+                > ReachRules.version(of: .fof, scope: Data(), in: reachState) {
+                record.fofRotatedAtMs = max(record.fofRotatedAtMs ?? 0, clockMs())
+            }
             reachState = merge.state
             record.reachStateEnvelopeB64 = composed.base64EncodedString()
             persist()

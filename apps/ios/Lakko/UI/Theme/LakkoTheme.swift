@@ -3,6 +3,7 @@
 
 import LakkoCore
 import SwiftUI
+import UIKit
 
 // MARK: - Colour tokens
 
@@ -84,6 +85,120 @@ enum AppearanceSetting: String, CaseIterable, Identifiable {
         case .light: return .light
         case .dark: return .dark
         }
+    }
+}
+
+// MARK: - Chat text size
+
+/// `docs/ux/text-size.md` — Settings > Appearance > Text size: one step that
+/// scales message text and reactions only, on top of Dynamic Type. Kept in
+/// the standard `UserDefaults` under ``storageKey``: it belongs to this
+/// device, never the App Group, never another device or a server.
+enum ChatTextSize: String, CaseIterable, Identifiable {
+    case small
+    case medium
+    case large
+
+    static let storageKey = "lakko.chat-text-size"
+
+    /// Medium is the design system as it is.
+    static let defaultStep: ChatTextSize = .medium
+
+    var id: String { rawValue }
+
+    /// The multiplier on every scaled size (chosen, not measured).
+    var factor: CGFloat {
+        switch self {
+        case .small: return 0.87
+        case .medium: return 1.0
+        case .large: return 1.2
+        }
+    }
+
+    /// The catalog key of the step's name (ADR-0061).
+    var labelKey: String { "settings.text_size.\(rawValue)" }
+
+    /// A stored value this build does not recognise reads as Medium.
+    static func from(stored raw: String?) -> ChatTextSize {
+        raw.flatMap(ChatTextSize.init(rawValue:)) ?? defaultStep
+    }
+
+    static func read(_ defaults: UserDefaults = .standard) -> ChatTextSize {
+        from(stored: defaults.string(forKey: storageKey))
+    }
+
+    static func write(_ step: ChatTextSize, _ defaults: UserDefaults = .standard) {
+        defaults.set(step.rawValue, forKey: storageKey)
+    }
+}
+
+private struct ChatTextScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1.0
+}
+
+extension EnvironmentValues {
+    /// The ``ChatTextSize`` factor for the message text and reactions below.
+    var chatTextScale: CGFloat {
+        get { self[ChatTextScaleKey.self] }
+        set { self[ChatTextScaleKey.self] = newValue }
+    }
+}
+
+/// Applied once at the root: reads the stored step and hands its factor to
+/// everything below, so a change applies at once, everywhere.
+private struct ChatTextScaleRoot: ViewModifier {
+    @AppStorage(ChatTextSize.storageKey) private var raw = ChatTextSize.defaultStep.rawValue
+
+    func body(content: Content) -> some View {
+        content.environment(\.chatTextScale, ChatTextSize.from(stored: raw).factor)
+    }
+}
+
+/// A text style's Dynamic Type size, multiplied by the chat text size. The
+/// person's system text size still applies; the step multiplies it.
+private struct ChatScaledFont: ViewModifier {
+    let style: UIFont.TextStyle
+    /// A fixed design size scaled like `style` (for a `.system(size:)` font).
+    var base: CGFloat?
+    var weight: Font.Weight?
+    var italic = false
+    var monospacedDigit = false
+
+    @Environment(\.chatTextScale) private var scale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    func body(content: Content) -> some View {
+        let font = Font.system(size: Self.size(style: style, base: base, dynamicTypeSize: dynamicTypeSize) * scale,
+                               weight: weight ?? .regular)
+        let styled = italic ? font.italic() : font
+        return content.font(monospacedDigit ? styled.monospacedDigit() : styled)
+    }
+
+    static func size(style: UIFont.TextStyle, base: CGFloat?, dynamicTypeSize: DynamicTypeSize) -> CGFloat {
+        let traits = UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(dynamicTypeSize))
+        if let base {
+            return UIFontMetrics(forTextStyle: style).scaledValue(for: base, compatibleWith: traits)
+        }
+        return UIFont.preferredFont(forTextStyle: style, compatibleWith: traits).pointSize
+    }
+}
+
+extension View {
+    /// Read the stored chat text size at the root of a window.
+    func chatTextScaleRoot() -> some View { modifier(ChatTextScaleRoot()) }
+
+    /// `docs/ux/text-size.md` — a message-text font: `style`'s Dynamic Type
+    /// size times the chat text size.
+    func chatFont(
+        _ style: UIFont.TextStyle, weight: Font.Weight? = nil, italic: Bool = false,
+        monospacedDigit: Bool = false
+    ) -> some View {
+        modifier(ChatScaledFont(style: style, weight: weight, italic: italic, monospacedDigit: monospacedDigit))
+    }
+
+    /// The same for a fixed design size, scaled with Dynamic Type like `style`.
+    func chatFont(size: CGFloat, relativeTo style: UIFont.TextStyle, weight: Font.Weight? = nil) -> some View {
+        modifier(ChatScaledFont(style: style, base: size, weight: weight))
     }
 }
 

@@ -71,6 +71,10 @@
 //!    [`crate::group_closed::try_unwrap_group_closed`] (ADR-0073 phase 2):
 //!    an admin closed the group and names the recreated one. Never
 //!    rendered.
+//!    Then [`crate::group_contact_request::try_unwrap_group_contact_request`]
+//!    (ADR-0086 §6): a contact request sealed to one member of the group.
+//!    Never rendered; every member tries
+//!    [`crate::group_contact_request::check_group_contact_request`].
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -128,6 +132,9 @@ use crate::conversation_handle::{
 };
 use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
+use crate::group_contact_request::{
+    try_unwrap_group_contact_request, GroupContactRequest, GroupContactRequestError,
+};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::group_photo::{try_unwrap_group_photo, GroupPhoto, GroupPhotoError};
 use crate::group_reactions::{try_unwrap_group_reactions, GroupReactions, GroupReactionsError};
@@ -407,6 +414,17 @@ pub enum IncomingEnvelope<'a> {
     /// channel's owner resolved at receipt, and opening to a seed that
     /// derives the clear public key.
     AdmissionSeed(AdmissionSeedEnvelope),
+    /// A contact request sealed to one member of the group (ADR-0086 §6, UX
+    /// `who-can-find-me.md` 6.4); the envelope names nobody. Never a chat
+    /// bubble. Every member runs
+    /// [`crate::group_contact_request::check_group_contact_request`] with its
+    /// own X25519 secret and the account key the MLS sender resolves to at
+    /// receipt (C-68); a member it does not open for drops it silently. The
+    /// member it opens for drops it unless its "Who can find me" setting
+    /// lets members of this group find it or the sender is already a
+    /// contact, and otherwise hands the request to the ordinary
+    /// incoming-request flow.
+    GroupContactRequest(GroupContactRequest),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -507,6 +525,10 @@ pub enum DispatchError {
     /// The admission-seed domain (ADR-0087) with a malformed payload.
     #[error(transparent)]
     AdmissionSeed(#[from] AdmissionSeedError),
+    /// The group-contact-request domain (ADR-0086 §6) with a malformed
+    /// payload.
+    #[error(transparent)]
+    GroupContactRequest(#[from] GroupContactRequestError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -624,6 +646,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(seed) = try_unwrap_admission_seed(plaintext)? {
         return Ok(IncomingEnvelope::AdmissionSeed(seed));
     }
+    // 7o. Contact request inside a group — ADR-0086 §6.
+    if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {
+        return Ok(IncomingEnvelope::GroupContactRequest(envelope));
+    }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
         return Ok(IncomingEnvelope::IntroductionOffer(record));
@@ -730,6 +756,24 @@ mod tests {
         assert!(matches!(
             dispatch_incoming_envelope(&wire[..wire.len() - 1]),
             Err(DispatchError::CommitterDelegation(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_group_contact_request_and_never_renders_it() {
+        use crate::group_contact_request::{
+            decode_group_contact_request, seal_group_contact_request,
+        };
+        let target = lakko_crypto::agreement::SecretKey::from_bytes([4; 32]);
+        let wire = seal_group_contact_request(&target.public_key(), &[5; 40]).unwrap();
+        let envelope = decode_group_contact_request(&wire).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::GroupContactRequest(envelope)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::GroupContactRequest(_))
         ));
     }
 

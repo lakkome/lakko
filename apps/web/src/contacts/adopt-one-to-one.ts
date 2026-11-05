@@ -51,13 +51,17 @@ export interface OneToOnePeer {
  *     is kept.
  *   * The row is complete: `null`.
  *
- * Never overwrites a recorded chat, a name or an account id. Other rows are
- * returned untouched, in their order.
+ * Never overwrites a name or an account id. A recorded chat is kept unless
+ * `linkHolds` says it is not this person's one-to-one (gone from the device,
+ * a group, a one-to-one with someone else; seen live 2026-11-05 as a row
+ * linked to a group): then the peer's conversation replaces it. Other rows
+ * are returned untouched, in their order.
  */
 export function adoptOneToOnePeer(
   accepted: readonly AcceptedContact[],
   peer: OneToOnePeer,
   samePerson: (a: string, b: string) => boolean = (a, b) => a === b,
+  linkHolds?: (groupIdB64: string, row: AcceptedContact) => boolean,
 ): AcceptedContact[] | null {
   const accountIdHex =
     peer.accountIdHex !== undefined && peer.accountIdHex !== null && peer.accountIdHex.length > 0
@@ -91,7 +95,12 @@ export function adoptOneToOnePeer(
   const aliases = existing.previousSignaturePubkeysB64 ?? [];
   const needsAlias =
     existing.signaturePubkeyB64 !== peer.signatureKey && !aliases.includes(peer.signatureKey);
-  const needsGroup = existing.groupIdB64 === undefined || existing.groupIdB64.length === 0;
+  const needsGroup =
+    existing.groupIdB64 === undefined ||
+    existing.groupIdB64.length === 0 ||
+    (existing.groupIdB64 !== peer.groupIdB64 &&
+      linkHolds !== undefined &&
+      !linkHolds(existing.groupIdB64, existing));
   const needsAccount =
     accountIdHex !== undefined &&
     (existing.accountIdHex === undefined || existing.accountIdHex.length === 0);
@@ -103,4 +112,22 @@ export function adoptOneToOnePeer(
     ...(needsAccount ? { accountIdHex } : {}),
   };
   return accepted.map((c, i) => (i === at ? completed : c));
+}
+
+/**
+ * The peer a conversation makes a contact of, or `null`. Only a conversation
+ * whose kind is one-to-one (ADR-0062) and whose two people are this account
+ * and one other person counts: a GROUP that happens to hold two people is
+ * not a one-to-one, and linking a contact to it made Message open the group
+ * once it grew (seen live 2026-11-05).
+ */
+export function adoptablePeerOf(input: {
+  readonly isOneToOne: boolean;
+  /** The conversation's distinct people, base64 account keys. */
+  readonly people: readonly string[];
+  readonly ownKeyB64: string | null;
+}): string | null {
+  if (!input.isOneToOne || input.ownKeyB64 === null || input.people.length !== 2) return null;
+  const peers = input.people.filter((k) => k !== input.ownKeyB64);
+  return peers.length === 1 ? (peers[0] ?? null) : null;
 }

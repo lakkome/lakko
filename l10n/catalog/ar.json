@@ -3914,8 +3914,8 @@
       "text": "أرسل رسالة أولًا لبدء مكالمة.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "يجري إعداد محادثتك.",
+    "contacts.detail.cannot_message": {
+      "text": "لا يمكنك مراسلة {name} بعد. اطلب منه رابط دعوة.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "أُضيفت جهة الاتصال هذه قبل أن يصبح بدء الدردشات من هنا ممكنًا. اطلب منها أن تراسلك.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "تعذّر إرسال الطلب. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "تم إرسال الطلب. يمكنك الكتابة عندما يقبل {name}.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "تعذّر القبول. حاول مرة أخرى.",
+      "text": "تعذّر القبول.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "شخص ما",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "عبر {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "عبر مجموعة أنتما فيها",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "أرقام الأمان",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "كبير",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "متوسط",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "هل هذا الحجم سهل القراءة؟",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "يمكنك تغييره من هنا في أي وقت.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "صغير",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "حجم النص",
       "status": "machine"
     },
     "settings.translation.delete_all": {

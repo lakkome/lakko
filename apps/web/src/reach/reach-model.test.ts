@@ -23,7 +23,8 @@ import {
   pruneExpired,
   reachClassName,
   reachDiff,
-  rotateFof,
+  advanceFofSchedule,
+  fofScheduleAfterAdoption,
   versionOf,
   type ReachInputs,
 } from "./reach-model";
@@ -172,11 +173,57 @@ describe("the registration diff", () => {
 });
 
 describe("the fof schedule and the persisted form", () => {
-  it("rotates fof on its schedule", () => {
-    expect(fofRotationDue(EMPTY_REACH_BOOK, FOF_ROTATION_MS)).toBe(true);
-    const rotated = rotateFof(EMPTY_REACH_BOOK, FOF_ROTATION_MS);
-    expect(versionOf(rotated, "fof", "")).toBe(1);
-    expect(fofRotationDue(rotated, FOF_ROTATION_MS + 1)).toBe(false);
+  it("the first pass starts the schedule without rotating; 7 days later one pass rotates once", () => {
+    const T0 = 1_800_000_000_000;
+    // A fresh book (install, restore, pairing) has no schedule yet.
+    expect(EMPTY_REACH_BOOK.fofRotatedAtMs).toBeNull();
+    expect(fofRotationDue(EMPTY_REACH_BOOK, T0)).toBe(false);
+    const first = advanceFofSchedule(EMPTY_REACH_BOOK, T0);
+    expect(first.rotated).toBe(false);
+    expect(versionOf(first.book, "fof", "")).toBe(0);
+    expect(first.book.fofRotatedAtMs).toBe(T0);
+    // The start is persisted with the book.
+    expect(decodeReachBook(encodeReachBook(first.book)).fofRotatedAtMs).toBe(T0);
+    // Passes before the 7 days rotate nothing and leave the book as it is.
+    const early = advanceFofSchedule(first.book, T0 + FOF_ROTATION_MS - 1);
+    expect(early.rotated).toBe(false);
+    expect(early.book).toBe(first.book);
+    // At 7 days one pass rotates once, and the next pass does not again.
+    const due = advanceFofSchedule(first.book, T0 + FOF_ROTATION_MS);
+    expect(due.rotated).toBe(true);
+    expect(versionOf(due.book, "fof", "")).toBe(1);
+    expect(due.book.fofRotatedAtMs).toBe(T0 + FOF_ROTATION_MS);
+    const after = advanceFofSchedule(due.book, T0 + FOF_ROTATION_MS + 1);
+    expect(after.rotated).toBe(false);
+    expect(versionOf(after.book, "fof", "")).toBe(1);
+  });
+
+  it("a higher fof version from another device restarts the schedule from then", () => {
+    const T0 = 1_800_000_000_000;
+    const mine = advanceFofSchedule(EMPTY_REACH_BOOK, T0).book;
+    const theirs = bumpVersion(mine, "fof", "");
+    const restarted = fofScheduleAfterAdoption(mine, theirs, T0 + 3 * FOF_ROTATION_MS / 7);
+    expect(restarted.fofRotatedAtMs).toBe(T0 + 3 * FOF_ROTATION_MS / 7);
+    // Not due 7 days after the original start, due 7 days after the restart.
+    expect(advanceFofSchedule(restarted, T0 + FOF_ROTATION_MS).rotated).toBe(false);
+    expect(advanceFofSchedule(restarted, T0 + 3 * FOF_ROTATION_MS / 7 + FOF_ROTATION_MS).rotated).toBe(true);
+    // A state with no higher fof version leaves the schedule alone.
+    expect(fofScheduleAfterAdoption(mine, mine, T0 + 1).fofRotatedAtMs).toBe(T0);
+    // An adoption before this device ever ran a pass starts the schedule too.
+    const fresh = fofScheduleAfterAdoption(EMPTY_REACH_BOOK, bumpVersion(EMPTY_REACH_BOOK, "fof", ""), T0);
+    expect(fresh.fofRotatedAtMs).toBe(T0);
+  });
+
+  it("a clock that went backwards reads as not due", () => {
+    const book = { ...EMPTY_REACH_BOOK, fofRotatedAtMs: 10 * FOF_ROTATION_MS };
+    expect(fofRotationDue(book, 0)).toBe(false);
+    expect(advanceFofSchedule(book, 0).rotated).toBe(false);
+  });
+
+  it("a book stored before the schedule had a start (0, or no field) has not started", () => {
+    expect(decodeReachBook(JSON.stringify({ v: 1, fofRotatedAtMs: 0 })).fofRotatedAtMs).toBeNull();
+    expect(decodeReachBook(JSON.stringify({ v: 1 })).fofRotatedAtMs).toBeNull();
+    expect(advanceFofSchedule(decodeReachBook(JSON.stringify({ v: 1, fofRotatedAtMs: 0 })), 5).rotated).toBe(false);
   });
 
   it("round-trips and reads garbage as empty", () => {

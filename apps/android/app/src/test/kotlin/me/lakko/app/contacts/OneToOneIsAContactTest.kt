@@ -160,7 +160,7 @@ class OneToOneIsAContactTest {
     fun `an accept after the conversation key was adopted leaves one row`() {
         val adopted = adopt(emptyList())!!
         val request = row(alice, 7L, null).request
-        val after = acceptingRequests(adopted, listOf(request), chatWithBob) { _, _ -> true }
+        val after = acceptingRequests(adopted, listOf(request), chatWithBob, samePerson = { _, _ -> true })
         assertEquals(1, after.size)
         assertEquals(7L, after[0].request.messageId)
         assertArrayEquals(alice, after[0].request.fromPubkey)
@@ -172,6 +172,52 @@ class OneToOneIsAContactTest {
         val before = listOf(row(alice, 7L, "a11ce", displayName = "Alice A."))
         val after = acceptingRequests(before, listOf(row(alice, 9L, null).request), chatWithBob)
         assertEquals(before, after)
+    }
+
+    // 2026-11-05 (live on web): a row whose recorded chat is a GROUP the
+    // person is in opened that group from Message.
+
+    @Test
+    fun `a recorded chat that is not their one-to-one gives way to it`() {
+        val before = listOf(row(bob, 7L, "group1"))
+        val after = adoptingOneToOnePeer(
+            accepted = before,
+            signatureKey = bob,
+            accountId = bobAccount,
+            groupIdHex = chatWithBob,
+            nowMs = 5_000uL,
+            createdAt = "2026-11-05T10:00:00Z",
+            linkCounts = { _, hex -> hex == chatWithBob },
+        )!!
+        assertEquals(1, after.size)
+        assertEquals(chatWithBob, after[0].groupIdHex)
+    }
+
+    @Test
+    fun `a recorded chat that is their one-to-one is kept`() {
+        val before = listOf(row(bob, 7L, "other1to1"))
+        val after = adoptingOneToOnePeer(
+            accepted = before,
+            signatureKey = bob,
+            accountId = bobAccount,
+            groupIdHex = chatWithBob,
+            nowMs = 5_000uL,
+            createdAt = "2026-11-05T10:00:00Z",
+            linkCounts = { _, _ -> true },
+        )
+        assertNull(after)
+    }
+
+    @Test
+    fun `an accept replaces a held chat id that is not their one-to-one`() {
+        val before = listOf(row(alice, 7L, "group1"))
+        val after = acceptingRequests(
+            before,
+            listOf(row(alice, 9L, null).request),
+            chatWithBob,
+            linkCounts = { _, hex -> hex != "group1" },
+        )
+        assertEquals(chatWithBob, after.single().groupIdHex)
     }
 
     @Test

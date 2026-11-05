@@ -1059,4 +1059,18 @@ class PushPreviewDecryptTest {
         assertNull(decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
+
+    @Test
+    fun `a contact request sent inside a group is suppressed, never a notification body`() {
+        // `docs/ux/who-can-find-me.md` section 6.4.
+        val envelope = "lakko/group-contact-request/v1\u0000".toByteArray(Charsets.US_ASCII) + ByteArray(120) { 3 }
+        assertTrue(
+            isServiceEnvelope(
+                envelope,
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
+    }
 }

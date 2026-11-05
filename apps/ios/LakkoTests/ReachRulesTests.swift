@@ -346,17 +346,22 @@ final class ReachRulesTests: XCTestCase {
 
     // MARK: - A device that holds nothing asks (ADR-0060 section 4)
 
-    func testOnlyAOneToOneWithNoOfferAndNoBundleAsks() {
+    func testAOneToOneWithNoOfferFromThePersonAsks() {
         let nothing = ReachRules.HeldIntroductions(offer: false, bundle: false, contactGrant: false)
         XCTAssertTrue(ReachRules.asksForIntroductions(isOneToOne: true, held: nothing))
         XCTAssertFalse(ReachRules.asksForIntroductions(isOneToOne: false, held: nothing), "a group")
         for held in [
             ReachRules.HeldIntroductions(offer: true, bundle: false, contactGrant: false),
-            ReachRules.HeldIntroductions(offer: false, bundle: true, contactGrant: false),
             ReachRules.HeldIntroductions(offer: true, bundle: true, contactGrant: true),
         ] {
             XCTAssertFalse(ReachRules.asksForIntroductions(isOneToOne: true, held: held))
         }
+        // 2026-11-04 — a bundle without the person's own offer still asks.
+        XCTAssertTrue(
+            ReachRules.asksForIntroductions(
+                isOneToOne: true,
+                held: ReachRules.HeldIntroductions(offer: false, bundle: true, contactGrant: false)),
+            "a bundle alone does not stand for the person's own offer")
         XCTAssertTrue(
             ReachRules.asksForIntroductions(
                 isOneToOne: true,
@@ -873,5 +878,88 @@ extension ReachRulesTests {
             ReachRules.termsToEvaluate(cached: ["u:vgi", "n:val"], terms: ["u:vgi", "n:val", "n:gon", "n:gon"]),
             ["n:gon"])
         XCTAssertTrue(ReachRules.termsToEvaluate(cached: ["n:val"], terms: ["n:val"]).isEmpty)
+    }
+}
+
+// MARK: - ADR-0060 section 4: the scheduled `fof` rotation
+
+extension ReachRulesTests {
+
+    func testTheFofScheduleIsSevenDaysAndABackwardClockIsNotDue() {
+        let week = ReachRules.fofRotationMs
+        XCTAssertEqual(week, 7 * 24 * 3_600_000)
+        XCTAssertFalse(ReachRules.fofRotationDue(lastRotatedAtMs: nil, nowMs: 10 * week),
+                       "no schedule started yet")
+        XCTAssertFalse(ReachRules.fofRotationDue(lastRotatedAtMs: 1_000, nowMs: 1_000 + week - 1))
+        XCTAssertTrue(ReachRules.fofRotationDue(lastRotatedAtMs: 1_000, nowMs: 1_000 + week))
+        XCTAssertFalse(ReachRules.fofRotationDue(lastRotatedAtMs: 5 * week, nowMs: week),
+                       "a clock that went backwards is not due")
+    }
+
+    /// The first registration starts the schedule without rotating; seven
+    /// days later the next registration rotates `fof`: the new key is
+    /// registered and the old one unregistered in the same pass. The schedule
+    /// is in the persisted record, so a restart keeps it.
+    func testTheFofKeyRotatesOnItsScheduleAndTheScheduleSurvivesARestart() async throws {
+        let ds = FakeReachDs()
+        let persistence = InMemoryReachPersistence()
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
+        let seed = identity.ed25519Seed()
+        var now: UInt64 = 1_000_000
+        let first = ReachCenter(persistence: persistence, ds: ds)
+        first.clockMs = { now }
+        first.activate(accountIdB64: "acct", accountIdentity: identity)
+
+        _ = await first.syncNow()
+        XCTAssertEqual(first.fofGrant()?.version, 0, "the first registration starts the schedule only")
+        XCTAssertEqual(persistence.records["acct"]?.fofRotatedAtMs, now)
+
+        now += ReachRules.fofRotationMs - 1
+        _ = await first.syncNow()
+        XCTAssertEqual(first.fofGrant()?.version, 0, "not due a millisecond early")
+
+        // A restart: a new center over the same stored record.
+        first.deactivate()
+        let second = ReachCenter(persistence: persistence, ds: ds)
+        now += 1
+        second.clockMs = { now }
+        second.activate(accountIdB64: "acct", accountIdentity: identity)
+        ds.updates.removeAll()
+        _ = await second.syncNow()
+
+        XCTAssertEqual(second.fofGrant()?.version, 1, "rotated once the seven days passed")
+        XCTAssertEqual(persistence.records["acct"]?.fofRotatedAtMs, now, "the schedule restarts")
+        let added = Set(ds.updates.flatMap { $0.add.map(\.publicKey) })
+        let removed = Set(ds.updates.flatMap(\.remove))
+        XCTAssertTrue(added.contains(try pk(seed, .fof, Data(), 1)), "the new key is registered")
+        XCTAssertTrue(removed.contains(try pk(seed, .fof, Data(), 0)), "the old key goes at once")
+
+        ds.updates.removeAll()
+        _ = await second.syncNow()
+        XCTAssertEqual(second.fofGrant()?.version, 1, "rotated once, not on every pass")
+    }
+
+    /// Coming back to the foreground runs a pass only when a rotation is due.
+    func testForegroundRunsAPassOnlyWhenTheRotationIsDue() async throws {
+        let ds = FakeReachDs()
+        let persistence = InMemoryReachPersistence()
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
+        var now: UInt64 = 2_000_000
+        let c = ReachCenter(persistence: persistence, ds: ds)
+        c.clockMs = { now }
+        c.activate(accountIdB64: "acct", accountIdentity: identity)
+        _ = await c.syncNow()
+        let updatesAfterFirst = ds.updates.count
+
+        c.noteForeground()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(ds.updates.count, updatesAfterFirst, "nothing due, no pass")
+
+        now += ReachRules.fofRotationMs
+        c.noteForeground()
+        for _ in 0..<40 where c.fofGrant()?.version != 1 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(c.fofGrant()?.version, 1, "the due rotation ran when the app came back")
     }
 }

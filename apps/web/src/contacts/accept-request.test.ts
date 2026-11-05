@@ -143,7 +143,7 @@ describe("acceptContactRequest", () => {
     expect((await acceptContactRequest(s.deps, request())).status).toBe("done");
   });
 
-  it("a legacy request is a contact only when its ack landed", async () => {
+  it("a legacy request (no account id) can found no one-to-one, so it never makes a contact", async () => {
     const failed = setup({ sendContactAck: offline });
     expect((await acceptContactRequest(failed.deps, request({ fromAccountId: null }))).status).toBe("failed");
     expect(loadAccepted()).toEqual([]);
@@ -151,6 +151,24 @@ describe("acceptContactRequest", () => {
     const ok = setup();
     const outcome = await acceptContactRequest(ok.deps, request({ fromAccountId: null }));
     expect(outcome).toMatchObject({ status: "legacy", groupIdB64: null });
+    expect(loadAccepted()).toEqual([]);
+  });
+
+  it("an Accept that cannot found the one-to-one makes no contact and keeps the request; Try again founds it", async () => {
+    let calls = 0;
+    const prepareGroupWith = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("ds down");
+      return { group: { free: () => {} }, welcome: new Uint8Array(), targets: [] };
+    });
+    const s = setup({ prepareGroupWith } as never);
+    const first = await acceptContactRequest(s.deps, request());
+    expect(first.status).toBe("failed");
+    expect(acceptKeepsRequest(first)).toBe(true);
+    expect(loadAccepted()).toEqual([]);
+    const second = await acceptContactRequest(s.deps, request());
+    expect(acceptKeepsRequest(second)).toBe(false);
     expect(loadAccepted()).toHaveLength(1);
+    expect(loadAccepted()[0]?.groupIdB64).toBeDefined();
   });
 });

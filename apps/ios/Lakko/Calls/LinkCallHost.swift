@@ -156,8 +156,8 @@ final class LinkCallHost: ObservableObject {
     var inviteTargets: @MainActor () -> [InviteContactRow] = { [] }
     /// Send a plain text message to a contact (``InviteContactRow/id``): into
     /// the one-to-one with them, founded first when there is none.
-    var sendInvitation: @MainActor (_ contactId: String, _ text: String) async throws -> Void = { _, _ in
-        throw CallInviteOfferError.noSendPath
+    var sendInvitation: @MainActor (_ contactId: String, _ text: String) async throws -> InviteSendOutcome = {
+        _, _ in throw CallInviteOfferError.noSendPath
     }
 
     /// The call occupying the app's one call slot, across all three kinds.
@@ -296,7 +296,7 @@ final class LinkCallHost: ObservableObject {
             contacts: { [weak self] in self?.inviteTargets() ?? [] },
             send: { [weak self] contactId, text in
                 guard let self else { throw CallInviteOfferError.noSendPath }
-                try await self.sendInvitation(contactId, text)
+                return try await self.sendInvitation(contactId, text)
             },
             isGuest: ports.isGuest
         ) : nil
@@ -710,7 +710,7 @@ extension LinkCallHost {
             guard let chat, let contacts, let key = Data(base64Encoded: contactId) else {
                 throw CallInviteOfferError.noSendPath
             }
-            try await InviteContactSend.run(
+            return try await InviteContactSend.run(
                 contactKey: key,
                 text: text,
                 ports: InviteContactSend.Ports(
@@ -725,6 +725,23 @@ extension LinkCallHost {
                     found: { contact in try await contacts.foundOneToOne(with: contact) },
                     send: { groupIdHex, text in
                         try await chat.sendMessage(groupIdHex: groupIdHex, plaintext: text)
+                    },
+                    // `docs/ux/who-can-find-me.md` 6.4 — the order Message on
+                    // a contact card follows.
+                    route: { contact in contacts.requestRoute(toAccountKey: contact.request.fromPubkey) },
+                    hasWaitingRequest: { contact in
+                        contacts.hasWaitingRequest(
+                            toAccountKey: contact.request.fromPubkey, accountId: contact.request.fromAccountId)
+                    },
+                    requestInGroup: { contact, groupIdHex in
+                        guard let accountId = contact.request.fromAccountId else {
+                            throw InviteContactSendError.contactHasNoAccountId
+                        }
+                        let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+                        try await contacts.sendContactRequestInGroup(
+                            groupIdHex: groupIdHex, recipientAccountId: accountId,
+                            recipientAccountKey: contact.request.fromPubkey,
+                            recipientName: resolved.isPlaceholder ? nil : resolved.name)
                     }
                 ))
         }

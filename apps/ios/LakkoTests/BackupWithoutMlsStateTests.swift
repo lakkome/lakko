@@ -290,10 +290,14 @@ final class ContactNoChatLineTests: XCTestCase {
             groupIdHex: nil)
     }
 
-    func testAJustAcceptedContactReadsChatStarting() {
-        XCTAssertEqual(
-            ContactDetailScreen.noChatLineKey(contact(messageId: 4, accountId: Data(repeating: 2, count: 16))),
-            "contacts.detail.chat_starting")
+    /// 2026-11-05 — a contact with an account and no chat here gets no line:
+    /// its Message starts a new one-to-one.
+    func testAContactWithAnAccountAndNoChatHereHasNoLine() {
+        XCTAssertNil(
+            ContactDetailScreen.noChatLineKey(contact(messageId: 4, accountId: Data(repeating: 2, count: 16))))
+        XCTAssertNil(
+            ContactDetailScreen.noChatLineKey(contact(messageId: -3, accountId: Data(repeating: 2, count: 16))),
+            "a contact a backup brought back too")
     }
 
     func testAContactWithNoKnownAccountCannotBeMessagedFromHere() {
@@ -302,11 +306,6 @@ final class ContactNoChatLineTests: XCTestCase {
             "contacts.detail.message_unavailable")
     }
 
-    func testAContactABackupBroughtBackWaits() {
-        XCTAssertEqual(
-            ContactDetailScreen.noChatLineKey(contact(messageId: -3, accountId: Data(repeating: 2, count: 16))),
-            "chats.new_chat.not_available")
-    }
 }
 
 @MainActor

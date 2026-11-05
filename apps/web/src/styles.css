@@ -2592,19 +2592,33 @@ input.lk-sas-code {
   flex-direction: column;
   gap: 2px;
   width: max-content;
-  padding: 4px 6px;
+  /* Design system "Reaction chip" (2026-11-04): six emoji and the plus, each a
+     44px square 4px apart, are 332px; with 4px padding and the border the pill
+     is 342px, inside the 344px a 360px screen leaves after the menu's 8px
+     margins (`MARGIN_PX`). Narrower than that, the pill stops at the window
+     less those margins and its row scrolls. */
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  padding: 4px;
   border-radius: 999px;
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   box-shadow: var(--shadow-2);
 }
 .lk-msg-menu-reactions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
   min-height: 0;
-  padding: 3px 5px;
+  padding: 0;
   border: none;
-  border-radius: 6px;
+  /* The 44px square is the target; the hover and "mine" fill is a circle so
+     it stays inside the pill's rounded ends. */
+  border-radius: var(--radius-pill);
   background: transparent;
-  font-size: 18px;
+  font-size: 28px;
   line-height: 1;
   color: inherit;
   cursor: pointer;
@@ -2614,13 +2628,25 @@ input.lk-sas-code {
 }
 .lk-msg-menu-reaction-row {
   display: flex;
-  gap: 2px;
+  gap: 4px;
+  /* docs/ux/text-size.md: on a window narrower than the bar plus the menu's
+     8px margins (`MARGIN_PX`), the row scrolls sideways; the 44px targets
+     never shrink. */
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.lk-msg-menu-reaction-row::-webkit-scrollbar {
+  display: none;
+}
+.lk-msg-menu-reaction-row > button {
+  flex: 0 0 auto;
 }
 /* docs/ux/reactions-and-emoji.md section 5: an emoji the person already gave
    sits on the accent-soft circle; at three, the others are dimmed. */
 .lk-msg-menu-reactions button.mine {
   background: var(--accent-soft);
-  border-radius: 999px;
 }
 .lk-msg-menu-reactions button.dimmed {
   opacity: 0.35;
@@ -3104,16 +3130,23 @@ input.lk-sas-code {
   height: 100%;
   object-fit: cover;
 }
+/* The "GIF" label: a small pill of its own BELOW the picture, at its leading
+   edge, never drawn over the image (base walk 2026-11-04: over the image it
+   covered the GIF's own caption). */
 .lakko-gif-label {
-  position: absolute;
-  left: 0.35rem;
-  bottom: 0.35rem;
-  padding: 0 0.3rem;
-  border-radius: 3px;
-  font-size: 0.65rem;
-  font-weight: 700;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.55);
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--surface-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
   pointer-events: none;
 }
 .lakko-lightbox {
@@ -4094,6 +4127,8 @@ a.ghost.small:hover {
 }
 .lk-bubble-edit textarea {
   width: 100%;
+  /* It grows with its text (`growEditField`), up to this, then scrolls. */
+  max-height: 40vh;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--surface-border);
@@ -4114,58 +4149,83 @@ a.ghost.small:hover {
   background: var(--surface-elevated);
   color: var(--surface-fg);
 }
-/* Reactions as chips under the bubble. */
+/* Reactions as chips under the bubble. Design system "Reaction chip"
+   (2026-11-04): a 32px capsule, 10px side padding, emoji 18px, 4px between
+   the emoji and the avatars or the count, 6px between chips and between
+   wrapped lines; the "+N" chip is the same capsule. */
 .lk-reactions {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px;
   margin-top: 6px;
 }
 .lk-reaction {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
+  box-sizing: border-box;
+  height: 32px;
   min-height: 0;
-  padding: 1px 8px;
-  font-size: 13px;
-  line-height: 20px;
+  padding: 0 10px;
+  font-size: 14px;
+  line-height: 1;
   border-radius: var(--radius-pill);
   border: 1px solid var(--surface-border);
   background: var(--surface-elevated);
   color: var(--surface-fg);
+}
+.lk-reaction-emoji {
+  font-size: 18px;
+  line-height: 1;
 }
 .lk-bubble.outgoing .lk-reaction {
   border-color: transparent;
   background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
   color: inherit;
 }
-.lk-reaction.mine {
+.lk-reaction.mine,
+.lk-bubble.outgoing .lk-reaction.mine {
+  /* The own chip: 1px accent border, under an own message too (the outgoing
+     rule above used to win here and drop it). */
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--surface-fg);
 }
 .lk-reaction-count {
-  font-size: 12px;
-  opacity: 0.85;
+  font-size: 14px;
+  color: var(--surface-muted);
+}
+/* On an own (accent) bubble the muted grey would not read; the count is the
+   chip's own colour, toned down. */
+.lk-bubble.outgoing .lk-reaction:not(.mine) .lk-reaction-count,
+.lk-bubble.outgoing .lk-reaction.more {
+  color: color-mix(in srgb, currentColor 72%, transparent);
 }
 button.lk-reaction {
   cursor: pointer;
 }
 .lk-reaction.more {
+  font-size: 14px;
   color: var(--surface-muted);
 }
 /* Section 7: a group chip shows up to three reactors' avatars, overlapping. */
 .lk-reaction-avatars {
   display: inline-flex;
 }
+/* Reactor avatars: 22px with a 1px surface ring, overlapping by 4px, at most
+   three (the core's chip rule). Two initials at 10px/600 fit a 22px circle;
+   the 4px overlap leaves the second initial of a covered avatar visible (7px
+   hid it, measured 2026-11-04). */
 .lk-reaction-avatars .lk-reaction-avatar {
-  width: 16px;
-  height: 16px;
-  font-size: 8px;
+  box-sizing: border-box;
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+  letter-spacing: 0;
   border: 1px solid var(--surface-elevated);
 }
 .lk-reaction-avatars .lk-reaction-avatar + .lk-reaction-avatar {
-  margin-left: -5px;
+  margin-left: -4px;
 }
 @media (prefers-reduced-motion: no-preference) {
   .lk-reaction {
@@ -8330,4 +8390,93 @@ button.lk-card-row-button {
 }
 .lk-translate-bar > .lk-translate-bar-text {
   flex: 1 1 auto;
+}
+
+/* ------------------------------------------------------------------------
+   Text size (docs/ux/text-size.md, 2026-11-04). One factor, set on <html> by
+   `ui/text-size.ts` (Small 0.87, Medium 1, Large 1.2), scales the text of
+   messages and the reactions under them and nothing else. The sizes below are
+   the design system's at Medium. Not scaled: bubble widths, the avatars beside
+   bubbles, the header, date separators, attachments and media frames. Kept
+   last so each rule here wins over the one it scales.
+   ------------------------------------------------------------------------ */
+:root {
+  --lk-text-scale: 1;
+}
+.lk-bubble {
+  font-size: calc(15px * var(--lk-text-scale));
+}
+.lk-bubble-meta {
+  font-size: calc(11px * var(--lk-text-scale));
+  line-height: calc(14px * var(--lk-text-scale));
+}
+.lk-bubble-edited {
+  font-size: calc(11px * var(--lk-text-scale));
+}
+.lk-bubble .lk-sender {
+  font-size: calc(12px * var(--lk-text-scale));
+}
+.lk-forward-line {
+  font-size: calc(12px * var(--lk-text-scale));
+  line-height: calc(16px * var(--lk-text-scale));
+}
+.lk-reply-quote,
+.lk-reply-strip-body {
+  font-size: calc(13px * var(--lk-text-scale));
+  line-height: calc(17px * var(--lk-text-scale));
+}
+.lk-reply-quote-name {
+  min-height: calc(17px * var(--lk-text-scale));
+}
+.lk-reply-strip-rule {
+  min-height: calc(34px * var(--lk-text-scale));
+}
+.lk-composer-input {
+  font-size: calc(15px * var(--lk-text-scale));
+  line-height: calc(22px * var(--lk-text-scale));
+  /* One line plus the 10px top and bottom padding; five lines at most. */
+  min-height: calc(22px * var(--lk-text-scale) + 20px);
+  height: calc(22px * var(--lk-text-scale) + 20px);
+  max-height: calc(110px * var(--lk-text-scale) + 20px);
+}
+/* Reaction chips, all values together. */
+.lk-reactions {
+  gap: calc(6px * var(--lk-text-scale));
+  margin-top: calc(6px * var(--lk-text-scale));
+}
+.lk-reaction {
+  gap: calc(4px * var(--lk-text-scale));
+  height: calc(32px * var(--lk-text-scale));
+  padding: 0 calc(10px * var(--lk-text-scale));
+  font-size: calc(14px * var(--lk-text-scale));
+}
+.lk-reaction-emoji {
+  font-size: calc(18px * var(--lk-text-scale));
+}
+.lk-reaction-count,
+.lk-reaction.more {
+  font-size: calc(14px * var(--lk-text-scale));
+}
+.lk-reaction-avatars .lk-reaction-avatar {
+  width: calc(22px * var(--lk-text-scale));
+  height: calc(22px * var(--lk-text-scale));
+  font-size: calc(10px * var(--lk-text-scale));
+}
+.lk-reaction-avatars .lk-reaction-avatar + .lk-reaction-avatar {
+  margin-left: calc(-4px * var(--lk-text-scale));
+}
+/* The quick reaction bar: the emoji scales, the 44px target does not (it
+   never goes below 44, and a larger one would not fit a 360px screen). */
+.lk-msg-menu-reactions button {
+  font-size: calc(28px * var(--lk-text-scale));
+}
+/* The Text size screen's preview (docs/ux/text-size.md): one incoming and one
+   outgoing bubble, the chat's own rules, at the chosen step. */
+.lk-text-size-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }

@@ -224,6 +224,42 @@ final class MediaBubbleLayoutTests: XCTestCase {
         )
     }
 
+    // MARK: - The GIF label never covers the picture
+
+    /// Base walk 2026-11-04 — the `GIF` label drew over the picture's own
+    /// bottom-left corner, over the caption text many GIFs carry. It now sits
+    /// under the picture, so the bubble is the picture plus a line: taller
+    /// than the picture alone. (Drawn on top, the bubble was exactly the
+    /// picture's height.)
+    func testTheGifLabelSitsUnderThePicture() throws {
+        let ref = AttachmentRef(
+            blobId: Data(repeating: 0xB1, count: 32),
+            key: Data(repeating: 0xB2, count: 32),
+            nonce: Data(repeating: 0xB3, count: 12),
+            mime: "image/gif",
+            size: 50_000,
+            name: "gif.gif",
+            kind: "gif",
+            width: 200,
+            height: 200
+        )
+        let host = UIHostingController(
+            rootView: GifBubble(
+                ref: ref, mediaKey: ChatMediaController.key(for: ref), upload: nil,
+                localReady: false, onRetry: {})
+                .environmentObject(controller)
+                .environmentObject(controller.live)
+        )
+        let size = host.sizeThatFits(in: proposal)
+        // A square GIF is drawn `maxWidth` square (the column is wider).
+        let picture = GifBubble.maxWidth
+        let label = UIHostingController(rootView: GifLabel()).sizeThatFits(in: proposal).height
+        XCTAssertGreaterThan(label, 8, "the GIF label measured nothing")
+        XCTAssertEqual(
+            size.height, picture + GifBubble.lineSpacing + label, accuracy: 0.5,
+            "the GIF bubble measured \(size): the label is not under the picture")
+    }
+
     // MARK: - Harness
 
     /// One `AttachmentRef` for a received voice message, with the waveform and

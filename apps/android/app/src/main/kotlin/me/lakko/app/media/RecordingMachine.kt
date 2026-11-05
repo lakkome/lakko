@@ -585,11 +585,12 @@ public fun formatClock(ms: Long): String {
  * length rounds UP to whole seconds, so a 0.7 s take reads `0:01`, not `0:00`.
  * Zero or negative reads `0:00`. Live / elapsed counters keep [formatClock].
  */
-public fun formatTotalClock(ms: Long): String {
-    if (ms <= 0L) return formatClock(0L)
-    val seconds = ms / 1000L + if (ms % 1000L == 0L) 0L else 1L
-    return formatClock(seconds * 1000L)
-}
+public fun formatTotalClock(ms: Long): String = formatClock(totalSeconds(ms) * 1000L)
+
+/** The one rounding of a TOTAL length: whole seconds, any part rounding up;
+ *  zero or negative is 0. The visible clock and the spoken label share it. */
+internal fun totalSeconds(ms: Long): Long =
+    if (ms <= 0L) 0L else ms / 1000L + if (ms % 1000L == 0L) 0L else 1L
 
 /**
  * §2 — the string the voice row's clock RESERVES space for.
@@ -603,12 +604,17 @@ public fun formatTotalClock(ms: Long): String {
  */
 public fun voiceClockReservation(durationMs: Long): String = formatTotalClock(durationMs)
 
-/** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */
+/**
+ * Spoken duration for labels: "12 seconds", "1 minute 5 seconds". A TOTAL
+ * length, rounded the way [formatTotalClock] shows it (any part of a second
+ * rounds UP), so the label never says "3 seconds" beside a visible `0:04`
+ * (base walk 2026-11-04).
+ */
 public fun spokenDuration(
     ms: Long,
     strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
 ): String {
-    val total = maxOf(0L, Math.round(ms / 1000.0))
+    val total = totalSeconds(ms)
     val minutes = total / 60L
     val seconds = total % 60L
     val s = strings.format("common.duration.seconds", counts = mapOf("count" to seconds.toULong()))

@@ -51,10 +51,35 @@ final class ComposerCaret: ObservableObject {
     }
 }
 
+/// Base scenario 10 — a hardware keyboard works in the composer and in every
+/// dialog: Return submits (send, save), Shift+Return or Option+Return breaks
+/// the line. The on-screen keyboard's Return reaches no key handler and keeps
+/// breaking the line.
+enum HardwareReturn {
+    /// Whether a hardware Return with these modifiers submits.
+    static func submits(_ modifiers: EventModifiers) -> Bool {
+        !modifiers.contains(.shift) && !modifiers.contains(.option)
+    }
+}
+
+extension View {
+    /// Return on a hardware keyboard runs `action`; with Shift or Option it
+    /// is left to the field, which breaks the line.
+    func submitOnHardwareReturn(_ action: @escaping () -> Void) -> some View {
+        onKeyPress(keys: [.return], phases: .down) { press in
+            guard HardwareReturn.submits(press.modifiers) else { return .ignored }
+            action()
+            return .handled
+        }
+    }
+}
+
 struct ComposerTextField: View {
     @Binding var text: String
     let caret: ComposerCaret
     var disabled: Bool
+    /// A hardware Return sends (``HardwareReturn``).
+    var onReturn: () -> Void = {}
     /// The screen's focus for this field, so it can be given the keyboard
     /// programmatically (choosing Reply focuses the composer,
     /// `docs/ux/message-actions.md` section 3.1). `nil` leaves focus to the
@@ -64,12 +89,14 @@ struct ComposerTextField: View {
     var body: some View {
         if #available(iOS 18.0, *) {
             SelectionTrackingField(text: $text, caret: caret, disabled: disabled, focus: focus)
+                .submitOnHardwareReturn(onReturn)
         } else {
             TextField(Localization.text("chat.composer.placeholder"), text: $text, axis: .vertical)
                 .lineLimit(1...5)
                 .disabled(disabled)
                 .composerFieldChrome()
                 .composerFocus(focus)
+                .submitOnHardwareReturn(onReturn)
         }
     }
 }
@@ -93,7 +120,8 @@ extension View {
     func composerFieldChrome() -> some View {
         self
             .textFieldStyle(.plain)
-            .font(.body)
+            // `docs/ux/text-size.md` — the composer follows the chat text size.
+            .chatFont(.body)
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .background(Color.lakkoSurfaceSunken)

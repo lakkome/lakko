@@ -123,7 +123,10 @@ mod tests {
             Some("VG3".to_string())
         );
         let unnamed = compose_profile(&profile(None, Some("vg3_user"))).expect("compose");
-        assert_eq!(profile_envelope_display_name(unnamed).expect("decode"), None);
+        assert_eq!(
+            profile_envelope_display_name(unnamed).expect("decode"),
+            None
+        );
         assert!(profile_envelope_display_name(b"hello".to_vec()).is_err());
     }
 

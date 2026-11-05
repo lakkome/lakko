@@ -335,6 +335,94 @@ of the setting would have nothing to point at for channels. This is a change
 to channels in its own right, with its own section in the ADR, and it ships
 before or with this feature.
 
+### 6.4 A request inside a group you share (decided 2026-11-05)
+
+A contact can stand on this device without anything that reaches their
+inbox: someone first met in a group, or a contact row older than the
+grant it should carry. Message on their card must start a chat, and a chat
+needs them to accept. **In that case the contact request goes inside a
+group both people are in**, as a message for that one person
+([ADR-0086](../adr/0086-circle-directories.md) section 6; built ahead of the
+rest of that ADR). It is sealed to that person, so the other members cannot
+tell whom it is for: each device tries it, and every device but the
+person's drops it unread. Only a current member can write in a group, so
+someone who left cannot be asked through it.
+
+**Which way a request goes.** One order, everywhere a request is sent or a
+one-to-one is started (Message on a contact card, Add to contacts on a
+person's card, Add contact on a search row):
+
+1. A grant this device holds still reaches the person: the request (or the
+   chat) goes to their inbox, as today.
+2. Otherwise, both people are current members of a group (not a
+   one-to-one): the request goes inside that group. With several, the one
+   with the newest message.
+3. Otherwise: nothing is sent; the card shows the cannot-message line below.
+
+Entry points as of 2026-11-05: **Message on a contact card** is the case
+found live and the one this section is for. Add contact on a group member
+row stays as section 6.2 says (shown only where the person lets group
+members find you); it uses the same order, so a grant that stopped working
+falls back to the group. No new button appears anywhere.
+
+**What the sender sees.**
+
+| State | What it shows |
+|---|---|
+| Sent | The card shows "Request sent. You can write once {name} accepts." under Message. The request stands in Contacts > Sent with **Waiting**, as any request. No chat is created. |
+| Message pressed again | The same line; nothing is sent again. One request per person until it is answered or removed from Sent. |
+| Accepted | The chat opens as for any accepted request; the line goes away. |
+| Declined, ignored, or refused by the person's setting | Nothing changes: the request stays **Waiting** until the sender removes it from Sent. The sender is never told which, as with search (section 6.1). |
+| Cannot be sent (no grant, no shared group, or the sender left the group) | "You can't message {name} yet. Ask them for an invite link." under Message. |
+| Sending failed (network) | "Couldn't send the request. Try again." with Message available again. |
+
+**What the person asked sees.** An ordinary request in Contacts >
+Requests, with Accept and Decline, and one more line naming where it came
+from: "Via {group}" (the group's name, or "Via a group you're both in" when
+it has none). Accept does what accepting any request does: the chat is
+started through the inbox key the request carries, so the reply does not go
+through the group. Decline and ignore are as today. A request through a
+group from someone who is already a contact, while this device holds no
+one-to-one with them, is shown the same way and its Accept starts the
+chat; it is never answered silently, as a mailbox request from a contact
+is, which would leave both people without a chat. An opened request is
+stored on the device before the group is read past it, so closing the app
+in between does not lose it.
+
+**When the person does not want it.** A request through a group is shown
+only when the person's own setting lets the members of that group find
+them (section 1, part 2.2, or Everyone), or when the sender is already
+their contact. Otherwise their device drops it without a trace, and the
+sender sees **Waiting** as above. This is a filter on the person's own
+device, not a refusal before it reaches them (section 10 is amended
+accordingly): the sender is already able to write to them in that group,
+so nothing new is reachable.
+
+**What the other members can tell** (decided 2026-11-05: they must not learn
+whom it is for). Their devices see that one member posted a request of some
+size, cannot tell to whom, and drop it; nothing is shown to them.
+
+**Checks the person's device makes** before showing it: the request opens
+with this device's key (a device it does not open for drops it and logs
+nothing that names anyone); the member who sent it in the group is the
+person the request says it is from; the request's signature holds and it is
+not stale (the ordinary request checks). Any failure drops it.
+
+Catalog keys (proposed; to be added with the client work):
+
+| Key | Text |
+|---|---|
+| `contacts.detail.request_sent` | Request sent. You can write once {name} accepts. |
+| `contacts.detail.cannot_message` | You can't message {name} yet. Ask them for an invite link. |
+| `contacts.detail.request_failed` | Couldn't send the request. Try again. |
+| `contacts.request.via_group` | Via {group} |
+| `contacts.request.via_unnamed_group` | Via a group you're both in |
+
+**Per platform:** the line sits under the Message button on the web card,
+in the iOS `ContactDetailScreen` header section, and under the Android
+`ContactDetailScreen` actions; the Requests row's second line carries the
+via line on all three.
+
 ## 7. Signup
 
 The last signup step gains one line under the username field's success
@@ -405,6 +493,13 @@ anyone not found.
 - Refusal of a contact request from anyone the setting does not allow, and
   from anyone who does not hold a link from the person, **before it
   reaches them** - not a filter on their device that the sender can defeat.
+  **Amended 2026-11-05 for requests inside a group (section 6.4):** a
+  request sent inside a group both people are in is filtered by the
+  person's own device against their setting, since the sender can already
+  write to them there.
+- For section 6.4: per group, whether the other person is a current
+  member (from the group's roster), and per request, the group it came
+  through.
 - An apply status (applied / pending offline / failed) and, for contacts of
   contacts, whether it has spread.
 - A channel member list visible to members (section 6.3).
@@ -432,7 +527,8 @@ person hidden from, or shown to, people they did not choose.
 The rule of section 1 is about reaching a person, not about one screen, so
 it covers every way a non-contact could put something in front of them:
 
-- **A contact request** - section 6.
+- **A contact request** - section 6, including one sent inside a group both
+  are in (section 6.4).
 - **Being added to a group** by someone who is not a contact: allowed only
   if that someone can find the person, or the person asked to join (a
   group link they opened). A contact can always add them.

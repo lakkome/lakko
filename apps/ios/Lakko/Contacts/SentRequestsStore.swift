@@ -164,8 +164,24 @@ public enum SentRequests {
         let person = current(peer)
         func matches(_ row: SentContactRequest) -> Bool {
             keyOfAccount(row.recipientAccountIdB64).map(current) == person
+                || row.ackedKeyB64.flatMap(base64Decode).map(current) == person
         }
         return (sent.filter { !matches($0) }, sent.first(where: matches)?.recipientAccountIdB64)
+    }
+
+    /// The list after the person holding `recipientAccountIdB64` sent their
+    /// ContactAck: the row stays, pending, and carries the key that signed it
+    /// (the key the Welcome is matched by). No row for them leaves the list as
+    /// it is.
+    public static func acknowledged(
+        recipientAccountIdB64: String, byKey key: Data, in sent: [SentContactRequest]
+    ) -> [SentContactRequest] {
+        sent.map { row in
+            guard row.recipientAccountIdB64 == recipientAccountIdB64 else { return row }
+            var next = row
+            next.ackedKeyB64 = base64Encode(key)
+            return next
+        }
     }
 
     /// The list after the person holding `recipientAccountIdB64` answered.

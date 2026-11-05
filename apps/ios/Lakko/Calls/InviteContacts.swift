@@ -99,6 +99,19 @@ enum InviteContactSendError: Error, Equatable {
     case chatUnavailable
 }
 
+/// What became of an invitation to a contact (`docs/ux/who-can-find-me.md`
+/// 6.4, the order Message on a contact card follows).
+public enum InviteSendOutcome: Equatable {
+    /// The link went into the one-to-one with them.
+    case sent
+    /// No chat could be started: a contact request went inside a group both
+    /// are in (or one was already waiting). No link was sent; they get the
+    /// call link once they accept and someone invites them again.
+    case requestSent
+    /// No grant reaches them and no group is shared: nothing was sent.
+    case cannotMessage
+}
+
 /// Send a call's invitation to a contact: into the one-to-one conversation
 /// with them, founding it first when this device holds none.
 ///
@@ -119,13 +132,27 @@ enum InviteContactSend {
         /// Send a plain text message into a conversation through the normal
         /// send path, which also records the sent row there.
         var send: @MainActor (_ groupIdHex: String, _ text: String) async throws -> Void
+        /// Which way a request to the contact goes
+        /// (``ContactsRepository/requestRoute(toAccountKey:)``).
+        var route: @MainActor (_ contact: AcceptedContact) -> ContactRequestRoute = { _ in .inbox }
+        /// A request to the contact stands unanswered under Sent.
+        var hasWaitingRequest: @MainActor (_ contact: AcceptedContact) -> Bool = { _ in false }
+        /// Send the contact request inside the group
+        /// (``ContactsRepository/sendContactRequestInGroup(groupIdHex:recipientAccountId:recipientAccountKey:recipientName:recipientUsername:)``).
+        var requestInGroup: @MainActor (_ contact: AcceptedContact, _ groupIdHex: String) async throws -> Void = {
+            _, _ in throw InviteContactSendError.chatUnavailable
+        }
     }
 
-    /// The existing conversation is used. With none, one is founded, once,
-    /// and only for a contact whose record holds an account id (every contact
-    /// accepted since ADR-0021 does); then the message goes out. Any failure
-    /// throws and the caller reports the invitation as not sent.
-    static func run(contactKey: Data, text: String, ports: Ports) async throws {
+    /// The existing conversation is used. With none, and only for a contact
+    /// whose record holds an account id (every contact accepted since
+    /// ADR-0021 does), the order of section 6.4: a request already waiting
+    /// sends nothing new; a grant reaching their inbox founds the one-to-one
+    /// and the message goes out; else a contact request goes inside a group
+    /// both are in and the message does NOT; else nothing is sent. Any
+    /// failure throws and the caller reports the invitation as not sent.
+    @discardableResult
+    static func run(contactKey: Data, text: String, ports: Ports) async throws -> InviteSendOutcome {
         guard let contact = ports.contact(contactKey) else {
             throw InviteContactSendError.unknownContact
         }
@@ -136,8 +163,18 @@ enum InviteContactSend {
             guard contact.request.fromAccountId?.count == 16 else {
                 throw InviteContactSendError.contactHasNoAccountId
             }
-            conversation = try await ports.found(contact)
+            if ports.hasWaitingRequest(contact) { return .requestSent }
+            switch ports.route(contact) {
+            case .inbox:
+                conversation = try await ports.found(contact)
+            case .group(let groupIdHex):
+                try await ports.requestInGroup(contact, groupIdHex)
+                return .requestSent
+            case .none:
+                return .cannotMessage
+            }
         }
         try await ports.send(conversation, text)
+        return .sent
     }
 }

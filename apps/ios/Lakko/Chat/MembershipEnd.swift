@@ -320,4 +320,11 @@ public final class MembershipEndNoticeCenter: ObservableObject {
     func replace(_ notices: [MembershipEndNotice]) {
         if notices != self.notices { self.notices = notices }
     }
+
+    /// The banners at the top of Chats, top to bottom: one per removal not
+    /// yet closed, the newest on top (UX 9.1, decided 2026-11-04). A newer
+    /// removal never hides an older one; closing one leaves the others.
+    public static func stacked(_ notices: [MembershipEndNotice]) -> [MembershipEndNotice] {
+        notices.reversed()
+    }
 }

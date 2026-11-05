@@ -321,6 +321,21 @@ public enum ReachRules {
         return FfiReachState(entries: entries, updatedAtMs: max(nowMs, state.updatedAtMs &+ 1))
     }
 
+    // MARK: - The scheduled `fof` rotation (ADR-0060 section 4)
+
+    /// How often the `fof` key rotates on a schedule: 7 days (chosen, not
+    /// measured; web `FOF_ROTATION_MS`). A removed contact's contacts keep a
+    /// relayed record of the owner until this rotation retires its key.
+    public static let fofRotationMs: UInt64 = 7 * 24 * 3_600_000
+
+    /// Whether the `fof` key is due for its scheduled rotation: the schedule
+    /// started (`lastRotatedAtMs` set) and a full period passed. A clock that
+    /// went backwards reads as not due.
+    public static func fofRotationDue(lastRotatedAtMs: UInt64?, nowMs: UInt64) -> Bool {
+        guard let last = lastRotatedAtMs, nowMs >= last else { return false }
+        return nowMs - last >= fofRotationMs
+    }
+
     /// The group scope of a group id, as the setting names it.
     public static func groupScope(_ groupId: Data) -> FfiScopeId {
         FfiScopeId(kind: .group, id: groupId)
@@ -606,12 +621,15 @@ public enum ReachRules {
     }
 
     /// Whether this device has anything to ask for in a conversation: only a
-    /// one-to-one, and only when it holds neither an offer nor a bundle from
-    /// the other person. A `contact` grant does not stop it, or a device that
-    /// once got a profile would never ask; it only slows it down
+    /// one-to-one, and only while it holds no offer from the other person. A
+    /// bundle from them does not stop it (2026-11-04: a bundle usually carries
+    /// this device's own record back, so a device that missed the person's
+    /// offer but kept their bundle never asked again). A `contact` grant does
+    /// not stop it either, or a device that once got a profile would never ask;
+    /// it only slows it down
     /// (``ProfileRequester/noteIntroductionsMissing(groupIdHex:holdsContactGrant:)``).
     public static func asksForIntroductions(isOneToOne: Bool, held: HeldIntroductions) -> Bool {
-        isOneToOne && !held.offer && !held.bundle
+        isOneToOne && !held.offer
     }
 
     /// Whether a device holding a `contact` grant may ask now: never asked

@@ -267,6 +267,13 @@ private fun isServiceEnvelopeOtherThanCall(
     // C-59).
     if (me.lakko.app.chat.groupSettingKindOf(payload) != null) return true
 
+    // Kind 5d — `docs/ux/who-can-find-me.md` section 6.4, a contact request
+    // sent inside the group and sealed to one member. The same NUL-terminated
+    // prefix peek the foreground classifier uses. Suppressed only, never a
+    // notification body: opening it and adding it to Requests is the
+    // foreground's (C-59), which reads the journal again when it next runs.
+    if (me.lakko.app.chat.looksLikeGroupContactRequestEnvelope(payload)) return true
+
     // Kind 6 — ADR-0048 trigger 4, the "introduce yourselves" request. The
     // same NUL-terminated-prefix shape again, and the same foreground peek.
     // Suppressed only: ANSWERING is a publish (an MLS application message,

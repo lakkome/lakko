@@ -74,4 +74,31 @@ class MessageMenuPlacementTest {
         val noRow = place(top = 800, bottom = 900, row = 0)
         assertEquals(920, noRow.cardY)
     }
+
+    @Test
+    fun `the taller quick reaction bar is still kept clear of the card`() {
+        // 44dp targets + 4dp padding top and bottom, at a Pixel's 2.625 density;
+        // a card of eight 40dp rows.
+        val row = (52 * 2.625).toInt()
+        val card = (8 * 40 * 2.625).toInt()
+        val h = 2400
+        for (top in 0..2300 step 20) {
+            for (bubble in listOf(120, 400, 1600)) {
+                val bottom = (top + bubble).coerceAtMost(h)
+                assertClear(place(top, bottom, row = row, card = card, h = h), row = row, card = card, h = h)
+            }
+        }
+    }
+
+    @Test
+    fun `the widest reaction chip fits a phone bubble`() {
+        // Padding, emoji, gap, three overlapping avatars, padding (dp).
+        val widest = REACTION_CHIP_PADDING.value + 22f + REACTION_CHIP_INNER_GAP.value +
+            (REACTION_CHIP_MAX_AVATARS * REACTION_AVATAR_SIZE.value -
+                (REACTION_CHIP_MAX_AVATARS - 1) * REACTION_AVATAR_OVERLAP.value) +
+            REACTION_CHIP_PADDING.value
+        // A 360dp phone's bubble is at most 78% of the width.
+        assertTrue("widest chip $widest dp", widest <= 360f * 0.78f)
+        assertEquals(32f, REACTION_CHIP_HEIGHT.value)
+    }
 }

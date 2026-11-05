@@ -383,6 +383,17 @@ class RecordingMachineTest {
     }
 
     @Test
+    fun spokenLengthUsesTheVisibleRounding() {
+        // Base walk 2026-11-04: `0:04` was shown beside "3 seconds".
+        assertEquals("0:04", formatTotalClock(3_200))
+        assertEquals("4 seconds", spokenDuration(3_200))
+        for (ms in listOf(1L, 999L, 1_000L, 3_400L, 3_600L, 59_001L, 61_500L, 120_000L)) {
+            val shown = formatTotalClock(ms).split(":").let { it[0].toLong() * 60 + it[1].toLong() }
+            assertEquals(shown, totalSeconds(ms))
+        }
+    }
+
+    @Test
     fun totalClockRoundsAnyPositiveDurationUp() {
         assertEquals("0:00", formatTotalClock(0))
         assertEquals("0:00", formatTotalClock(-250))

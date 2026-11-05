@@ -70,6 +70,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -392,7 +393,8 @@ internal fun MessageActionMenuOverlay(
                     }
                 },
                 card = {
-                    if (actions.any) {
+                    // The card is a menu: system text size, not the chat's.
+                    if (actions.any) me.lakko.app.ui.theme.SystemTextScale {
                         MessageActionCard(
                             actions = actions,
                             onReply = onReply,
@@ -451,7 +453,7 @@ internal fun MessageReactionRow(
             modifier = Modifier
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 6.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(REACTION_BAR_SPACING),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             for (emoji in reactions) {
@@ -461,7 +463,7 @@ internal fun MessageReactionRow(
                 val enabled = mine || !capReached
                 Box(
                     modifier = Modifier
-                        .size(REACTION_TAP_SIZE)
+                        .size(reactionTapSize())
                         .then(
                             if (mine) {
                                 Modifier.background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
@@ -474,7 +476,10 @@ internal fun MessageReactionRow(
                 ) {
                     Text(
                         text = emoji,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = REACTION_BAR_EMOJI_SP,
+                            lineHeight = REACTION_BAR_EMOJI_LINE_SP,
+                        ),
                         modifier = Modifier.alpha(if (enabled) 1f else 0.35f),
                     )
                 }
@@ -482,12 +487,18 @@ internal fun MessageReactionRow(
             if (showExpand) {
                 Box(
                     modifier = Modifier
-                        .size(REACTION_TAP_SIZE)
+                        .size(reactionTapSize())
                         .semantics { contentDescription = moreReactions }
                         .clickable { onOpenPicker() },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(text = "+", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "+",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = REACTION_BAR_EMOJI_SP,
+                            lineHeight = REACTION_BAR_EMOJI_LINE_SP,
+                        ),
+                    )
                 }
             }
         }
@@ -503,9 +514,20 @@ internal fun MessageReactionRow(
     }
 }
 
-/** Each emoji's own tap target. 40dp keeps six of them plus the picker within a
- *  narrow phone while clearing the 40dp minimum in `docs/ux/navigation.md`. */
-private val REACTION_TAP_SIZE: Dp = 40.dp
+/** design-system.md "Reaction chip", quick reaction bar: each emoji 28 in a
+ *  44 square tap target, 4 apart. Six emoji plus the picker take 344dp with
+ *  the padding, inside a 360dp phone less the window margins; a narrower
+ *  window scrolls the row rather than clipping the picker. */
+private val REACTION_TAP_SIZE: Dp = 44.dp
+
+/** docs/ux/text-size.md — the quick bar's emoji follow the text size (the
+ *  `sp` scale), the tap target grows with them and never goes below 44. */
+@Composable
+private fun reactionTapSize(): Dp =
+    REACTION_TAP_SIZE * maxOf(1f, me.lakko.app.ui.theme.LocalChatTextFactor.current)
+private val REACTION_BAR_SPACING: Dp = 4.dp
+private val REACTION_BAR_EMOJI_SP = 28.sp
+private val REACTION_BAR_EMOJI_LINE_SP = 34.sp
 
 /**
  * Section 2 — the action card, sized by its own content and nothing else.

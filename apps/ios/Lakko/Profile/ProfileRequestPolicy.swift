@@ -100,7 +100,7 @@ final class ProfileRequester {
     }
 
     /// ADR-0060 section 4, "A device that holds nothing asks": this device
-    /// holds no offer and no bundle from the other person of this one-to-one.
+    /// holds no offer from the other person of this one-to-one.
     /// The answer also sends them again. Nobody needs to be unnamed. With no
     /// `contact` grant it asks by the rule's interval; with one, every
     /// ``ReachRules/introductionsAskWithGrantMinMs``. Both read and write the

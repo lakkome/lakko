@@ -366,7 +366,7 @@ struct RecordingBar: View {
             active?.playing == true
                 ? Localization.text("chat.record.pause")
                 : Localization.text(
-                    "chat.record.play", texts: ["duration": RecordingMachine.spokenDuration(ms: durationMs)])
+                    "chat.record.play", texts: ["duration": RecordingMachine.spokenTotalDuration(ms: durationMs)])
         )
         WaveformBars(
             waveform: take.waveform,

@@ -157,6 +157,15 @@ names; iOS / Android use the same names.
   accent fill + accent-fg; incoming = sunken surface + fg. Timestamp and
   delivery state (sent / read) 11px inside the bubble corner. Max width
   65% of the pane.
+- **Reaction chip** (under a message or post; maintainer, 2026-11-04): a
+  capsule (radius-pill) on every client, 32 tall, 10 horizontal padding;
+  emoji 18; reactor avatars 22 with a 1 surface-coloured ring, overlapping
+  by 4 (7 hid the second initial of a covered avatar), at most 3; 4 between
+  the emoji and the avatars or the count; count
+  14, muted; 6 between chips and between wrapped lines; the own chip has a
+  1 accent border. The "+N" overflow chip has the same height and padding.
+  Quick reaction bar in the message menu: emoji 28, each in a 44 square
+  tap target, 4 apart. Units are pt (iOS), dp/sp (Android), px (web).
 - **Composer**: elevated surface, hairline top, attach button, growing
   text field (radius-pill, sunken), mic / send swap depending on content.
 - **Card / section**: elevated surface, radius-md, hairline border, 20px

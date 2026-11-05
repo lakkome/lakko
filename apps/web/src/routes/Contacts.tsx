@@ -51,6 +51,7 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { useGroupNames } from "../chat/GroupNameContext";
 import { useMembershipEnd } from "../chat/MembershipEndContext";
 import { useLineage } from "../chat/use-lineage";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
@@ -77,7 +78,12 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { useMailbox } from "../contacts/MailboxContext";
-import { forgetSentRequest, loadSentRequests, sentRequestsVersion } from "../contacts/sent-requests";
+import {
+  forgetSentRequest,
+  loadSentRequests,
+  recordSentRequest,
+  sentRequestsVersion,
+} from "../contacts/sent-requests";
 import { forgetSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
@@ -91,6 +97,10 @@ import { conversationWithContact } from "../contacts/contact-conversation";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
+import { runMessage, type MessageNote, type SharedGroup } from "../contacts/message-action";
+import { sharedGroupsFor } from "../contacts/shared-groups";
+import { heldGrantReaches } from "../search/wiring";
+import { startChatFailureReason } from "../contacts/start-chat-failure";
 import { acceptContactRequest, acceptKeepsRequest } from "../contacts/accept-request";
 import {
   loadPendingContacts,
@@ -147,6 +157,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const lineageView = useLineage();
   const membershipEnd = useMembershipEnd();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   const navigate = useNavigate();
   // The Show wrapper above guarantees identitySecrets() is non-null on every
   // read inside this subtree, but TS doesn't narrow across component
@@ -206,8 +217,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // Welcomes into joined groups, whether or not this route is mounted.
   const [acceptError, setAcceptError] = createLiveText();
   /** Found the 1x1 chat with a contact and link it back to the contact
-   *  record (ADR-0021 follow-up). Shared by Accept and by Message on a
-   *  contact that has no chat yet. */
+   *  record (ADR-0021 follow-up), for Message on a contact that has no chat
+   *  on this device yet. */
   async function foundChatWith(
     contact: AcceptedContact,
     peerAccountId: Uint8Array,
@@ -552,28 +563,63 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     ),
   );
 
-  /** Message: open the chat, or create it first when this device has none
-   *  and the contact's account id is known. */
+  /** Message: open the chat, or start a new one-to-one when this device has
+   *  none and the contact's account id is known (`contacts/message-action.ts`). */
   async function onMessage(c: AcceptedContact): Promise<void> {
-    const existing = chatWith(c);
-    if (existing !== null) {
-      navigate(existing);
-      return;
-    }
-    if (c.accountIdHex === undefined) return;
-    setDetailError(null);
+    const accountIdHex = c.accountIdHex;
+    const forKey = c.signaturePubkeyB64;
     // The chat is created and recorded whether or not the person waits; only
     // opening it is addressed to this screen and this contact.
-    const stillOn = beginDetailAction();
-    try {
-      const href = await foundChatWith(
-        c,
-        hexToBytes(c.accountIdHex),
-        base64Decode(c.signaturePubkeyB64),
-      );
-      if (stillOn()) navigate(href);
-    } catch (err) {
-      if (stillOn()) {
+    let stillOn: () => boolean = () => true;
+    await runMessage({
+      chatHref: chatWith(c),
+      accountKnown: accountIdHex !== undefined,
+      grantReaches: () => heldGrantReaches(base64Decode(c.signaturePubkeyB64)),
+      requestWaiting: () => sentRequestTo(c) !== undefined,
+      sharedGroups: () => sharedGroupsOf(c),
+      found: () =>
+        foundChatWith(c, hexToBytes(accountIdHex ?? ""), base64Decode(c.signaturePubkeyB64)),
+      sendInGroup: async (groupIdB64) => {
+        const entry = chats.get(groupIdB64);
+        if (entry === undefined || accountIdHex === undefined) throw new Error("the shared group is gone");
+        await props.client.sendContactRequestInGroup(
+          auth.identitySecrets(),
+          hexToBytes(accountIdHex),
+          base64Decode(c.signaturePubkeyB64),
+          entry.group,
+        );
+        const account = accountIdB64();
+        if (account !== null) {
+          const name = profiles.resolve(c.signaturePubkeyB64);
+          recordSentRequest(account, {
+            recipientUsername: name.username ?? "",
+            recipientName: memberNameOf(name),
+            recipientAccountIdHex: accountIdHex,
+            sentAtMs: Date.now(),
+            recipientKeyB64: c.signaturePubkeyB64,
+            throughGroupIdB64: groupIdB64,
+          });
+        }
+      },
+      setNote: (note) => setMessageNote(note === null ? null : { key: forKey, note }),
+      navigate,
+      setBusy: (busy) => {
+        if (busy) stillOn = beginDetailAction();
+        else setDetailBusy(false);
+      },
+      logFailure: (err) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[contacts] starting a chat failed: ${startChatFailureReason(err)}`);
+      },
+      setError: (err, what) => {
+        if (err === null) {
+          setDetailError(null);
+          return;
+        }
+        if (what === "request") {
+          setDetailError(() => t("contacts.detail.request_failed"));
+          return;
+        }
         setDetailError(
           contactsErrorText(
             err,
@@ -581,10 +627,42 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
             memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
           ),
         );
-      }
-    } finally {
-      if (stillOn()) setDetailBusy(false);
-    }
+      },
+      stillOn: () => stillOn(),
+    });
+  }
+
+  /** The request to this contact standing in Sent, if any. */
+  function sentRequestTo(c: AcceptedContact): SentRequestRecord | undefined {
+    sentRequestsVersion();
+    const account = accountIdB64();
+    if (account === null || c.accountIdHex === undefined) return undefined;
+    return loadSentRequests(account).find((r) => r.recipientAccountIdHex === c.accountIdHex);
+  }
+
+  /** The groups this account shares with the contact (who-can-find-me 6.4),
+   *  each with its newest message's time from the message log. */
+  function sharedGroupsOf(c: AcceptedContact): Promise<SharedGroup[]> {
+    return sharedGroupsFor({
+      groups: chats.groups(),
+      accountIdB64: accountIdB64(),
+      ownKeyB64: ownPersonKeyB64(chats.identity()),
+      personKeysB64: [c.signaturePubkeyB64, ...(c.previousSignaturePubkeysB64 ?? [])],
+    });
+  }
+
+  /** The line under Message for the contact shown (who-can-find-me 6.4): a
+   *  request standing in Sent, else what the last press found. */
+  const [messageNote, setMessageNote] = createSignal<{ readonly key: string; readonly note: MessageNote } | null>(null);
+  function messageLineFor(c: AcceptedContact): string | null {
+    if (chatWith(c) !== null) return null;
+    const name = memberNameOf(profiles.resolve(c.signaturePubkeyB64));
+    if (sentRequestTo(c) !== undefined) return t("contacts.detail.request_sent", { name });
+    const held = messageNote();
+    if (held === null || held.key !== c.signaturePubkeyB64) return null;
+    return held.note === "request-sent"
+      ? t("contacts.detail.request_sent", { name })
+      : t("contacts.detail.cannot_message", { name });
   }
 
   /** Call / Video: the chat's own call buttons, pressed on arrival. */
@@ -623,6 +701,9 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         onAccept={(req) => void onAccept(req)}
         accepting={(req) => accepting().has(req.messageId)}
         acceptFailed={(req) => acceptFailed().has(req.messageId)}
+        viaGroupName={(req) =>
+          req.viaGroupIdB64 === undefined ? null : (groupNames.nameOf(req.viaGroupIdB64)?.trim() ?? "")
+        }
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}
@@ -668,8 +749,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               personKeyB64={c().signaturePubkeyB64}
               localName={c().displayName}
               chatHref={chatWith(c())}
-              canStartChat={c().accountIdHex !== undefined}
-              acceptedAtMs={c().acceptedAtMs}
+              accountKnown={c().accountIdHex !== undefined}
+              messageLine={() => messageLineFor(c())}
               busy={detailBusy}
               error={detailError}
               myPubkey={() => chats.identity()?.signaturePublicKey ?? null}

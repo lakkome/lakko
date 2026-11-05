@@ -700,6 +700,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
+  // docs/ux/text-size.md: the message text size is chosen per device.
+  "lakko.textSize": "device",
   // ADR-0061: the interface language is chosen per device.
   "lakko.language": "device",
   // ADR-0082 / UX section 6: the translation settings are per device.

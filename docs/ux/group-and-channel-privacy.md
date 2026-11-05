@@ -542,6 +542,8 @@ Saying nothing would look like a fault, so the person is told once.
 
 Each device shows it once. It never says who.
 
+Several removals (decided 2026-11-04): each has its own banner, the newest on top, each with its own close icon; closing one leaves the others. A newer removal never hides or replaces an older one the person has not closed.
+
 The banner's `{name}` is held only for this. When it closes the name is gone too. If
 the person sees nothing because the app was closed, the banner waits for the next start.
 

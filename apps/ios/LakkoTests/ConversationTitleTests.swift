@@ -79,4 +79,21 @@ final class ConversationTitleTests: XCTestCase {
             InitialsAvatar(name: "QA Phase A", identity: "x", size: 32).initials,
             avatarInitials(name: "QA Phase A"))
     }
+
+    // MARK: - Conversation avatar photo
+
+    /// Base walk 2026-11-04 — Feed and Calls drew a group's initials while
+    /// Chats drew its photo. One rule now names the photo everywhere: a
+    /// group's own photo, a one-to-one's person.
+    func testAConversationAvatarShowsItsPhotoWherever() {
+        let peer = Data(repeating: 0x07, count: 32)
+        XCTAssertEqual(
+            AvatarPhoto.conversation(isGroup: true, groupIdHex: "ab12", peerKey: nil), .group("ab12"))
+        XCTAssertEqual(
+            AvatarPhoto.conversation(isGroup: true, groupIdHex: "ab12", peerKey: peer), .group("ab12"),
+            "a group is drawn by its own photo, never one member's")
+        XCTAssertEqual(
+            AvatarPhoto.conversation(isGroup: false, groupIdHex: "ab12", peerKey: peer), .person(peer))
+        XCTAssertNil(AvatarPhoto.conversation(isGroup: false, groupIdHex: "ab12", peerKey: nil))
+    }
 }

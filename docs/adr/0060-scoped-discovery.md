@@ -237,7 +237,13 @@ filters by the whole query, runs the reach check, and shows the result.
   unregistered at once (so the reach check fails immediately), a new record to
   the remaining contacts. Carol removes Bob: Bob keeps Alice's record until
   Alice's scheduled rotation, then his refreshed bundles stop carrying her.
-  The schedule is 7 days, chosen and not measured.
+  The schedule is 7 days, chosen and not measured. The time of the last
+  rotation is kept per device and not shared between devices. A device's
+  first registration pass (install, restore, pairing) only starts the
+  schedule and rotates nothing, so a new device does not invalidate the
+  records the person's contacts already hold. A reach state from another
+  device with a higher `fof` version restarts the schedule instead of
+  rotating again (2026-11-04).
 - **Widening spreads as contacts' devices come online**, which is the UX
   section 8 "once your contacts next open Lakko" state; the client counts
   acknowledgements from its contacts to know when to clear it.

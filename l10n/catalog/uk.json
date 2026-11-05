@@ -3914,8 +3914,8 @@
       "text": "Щоб подзвонити, спершу надішліть повідомлення.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "Чат створюється.",
+    "contacts.detail.cannot_message": {
+      "text": "Ви поки не можете написати {name}. Попросіть у нього посилання-запрошення.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "Цей контакт додано ще до того, як звідси можна було починати чати. Попросіть його написати вам.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "Не вдалося надіслати запит. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "Запит надіслано. Ви зможете написати, коли {name} прийме його.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "Не вдалося прийняти. Спробуйте ще раз.",
+      "text": "Не вдалося прийняти.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "Хтось",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "Через {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "Через групу, у якій ви обоє",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Коди безпеки",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "Великий",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "Середній",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "Чи зручно читати такий розмір?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Його можна змінити тут будь-коли.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "Дрібний",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "Розмір тексту",
       "status": "machine"
     },
     "settings.translation.delete_all": {

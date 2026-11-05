@@ -73,6 +73,9 @@ export interface StoredMailboxRow {
   readonly createdAt: string;
   /** ADR-0079: absent for every request that answers no link. */
   readonly link?: LinkRowState;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the group the request
+   *  arrived inside (standard base64 of its id); absent for the inbox. */
+  readonly viaGroupIdB64?: string;
 }
 
 /** What the store holds for one account. */
@@ -122,7 +125,9 @@ function storageKey(accountIdB64: string): string {
 
 function isStoredRow(r: unknown): r is StoredMailboxRow {
   const link = (r as StoredMailboxRow | null)?.link;
+  const via = (r as StoredMailboxRow | null)?.viaGroupIdB64;
   return (
+    (via === undefined || typeof via === "string") &&
     typeof r === "object" &&
     r !== null &&
     typeof (r as StoredMailboxRow).messageId === "number" &&
@@ -228,11 +233,17 @@ export function toStoredRow(row: MailboxRow, link?: LinkRowState): StoredMailbox
     payloadB64: base64Encode(row.payload),
     createdAt: row.createdAt,
     ...(link !== undefined ? { link } : {}),
+    ...(row.viaGroupIdB64 !== undefined ? { viaGroupIdB64: row.viaGroupIdB64 } : {}),
   };
 }
 
 export function fromStoredRow(row: StoredMailboxRow): MailboxRow {
-  return { messageId: row.messageId, payload: base64Decode(row.payloadB64), createdAt: row.createdAt };
+  return {
+    messageId: row.messageId,
+    payload: base64Decode(row.payloadB64),
+    createdAt: row.createdAt,
+    ...(row.viaGroupIdB64 !== undefined ? { viaGroupIdB64: row.viaGroupIdB64 } : {}),
+  };
 }
 
 /** A freshly polled request with the row it came from. */
@@ -282,6 +293,11 @@ export interface PendingInboxDeps {
   readonly accountIdB64: string;
   /** Whether a sender (base64 signature key) is already an accepted contact. */
   readonly isAccepted: (signaturePubkeyB64: string) => boolean;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - a request that is kept
+   *  although its sender is already a contact: one that came inside a group
+   *  from a contact this device holds no one-to-one with (a contact first met
+   *  in a group). Absent: none is. */
+  readonly keepsFromContact?: (request: IncomingContactRequest) => boolean;
   /** Called after every change to `pending()`. */
   readonly onChange: () => void;
   readonly storage?: StorageLike | null;
@@ -373,7 +389,9 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
       const added: FetchedRequest[] = [];
       for (const f of fetched) {
         if (ids.has(f.request.messageId)) continue;
-        if (deps.isAccepted(base64Encode(f.request.fromPubkey))) continue;
+        if (deps.isAccepted(base64Encode(f.request.fromPubkey)) && deps.keepsFromContact?.(f.request) !== true) {
+          continue;
+        }
         ids.add(f.request.messageId);
         added.push(f);
       }
@@ -423,7 +441,10 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
       const drop = new Set<number>();
       toDecode.forEach((row, i) => {
         const req = results[i] ?? null;
-        if (req === null || deps.isAccepted(base64Encode(req.fromPubkey))) {
+        if (
+          req === null ||
+          (deps.isAccepted(base64Encode(req.fromPubkey)) && deps.keepsFromContact?.(req) !== true)
+        ) {
           drop.add(row.messageId);
         } else if (rows.some((r) => r.messageId === row.messageId)) {
           decoded.set(row.messageId, req);

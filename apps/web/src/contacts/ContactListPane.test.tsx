@@ -58,12 +58,12 @@ describe("an incoming request", () => {
     createdAt: "2026-10-30T10:00:00Z",
   } as never;
 
-  it("stays listed after a failed Accept, with the line, and Accept works again", () => {
+  it("stays listed after a failed Accept, with the line and a Try again that accepts again", () => {
     const onAccept = vi.fn();
     mount({ pending: () => [request], onAccept, acceptFailed: () => true });
     expect(document.body.textContent).toContain(t("contacts.request.accept_failed"));
     const accept = all<HTMLButtonElement>("button").find(
-      (b) => b.textContent?.trim() === t("contacts.request.accept"),
+      (b) => b.textContent?.trim() === t("common.try_again"),
     );
     expect(accept?.disabled).toBe(false);
     accept!.click();

@@ -40,7 +40,10 @@ function isRecord(value: unknown): value is SentRequestRecord {
     typeof v["recipientUsername"] === "string" &&
     typeof v["recipientAccountIdHex"] === "string" &&
     typeof v["sentAtMs"] === "number" &&
-    (v["recipientName"] === undefined || typeof v["recipientName"] === "string")
+    (v["recipientName"] === undefined || typeof v["recipientName"] === "string") &&
+    (v["accepterKeyB64"] === undefined || typeof v["accepterKeyB64"] === "string") &&
+    (v["accepterX25519B64"] === undefined || typeof v["accepterX25519B64"] === "string") &&
+    (v["throughGroupIdB64"] === undefined || typeof v["throughGroupIdB64"] === "string")
   );
 }
 
@@ -70,6 +73,26 @@ export function recordSentRequest(
   record: SentRequestRecord,
 ): SentRequestRecord[] {
   const next = upsertSentRequest(loadSentRequests(accountIdB64), record);
+  save(accountIdB64, next);
+  return next;
+}
+
+/** A verified ContactAck for the request to `recipientAccountIdHex`: keep
+ *  the accepter's keys on the record. The request stays waiting until this
+ *  device joins the one-to-one (base walk 2026-11-04). */
+export function recordAckOnSentRequest(
+  accountIdB64: string,
+  recipientAccountIdHex: string,
+  accepterKeyB64: string,
+  accepterX25519B64: string,
+): SentRequestRecord[] {
+  const list = loadSentRequests(accountIdB64);
+  if (!list.some((r) => r.recipientAccountIdHex === recipientAccountIdHex)) return list;
+  const next = list.map((r) =>
+    r.recipientAccountIdHex === recipientAccountIdHex
+      ? { ...r, accepterKeyB64, accepterX25519B64 }
+      : r,
+  );
   save(accountIdB64, next);
   return next;
 }

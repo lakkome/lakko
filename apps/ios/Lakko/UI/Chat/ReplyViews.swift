@@ -29,12 +29,11 @@ struct ReplyStrip: View {
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 1) {
                 Text(lines.name)
-                    .font(.caption)
-                    .fontWeight(.semibold)
+                    .chatFont(.caption1, weight: .semibold)
                     .foregroundStyle(Color.lakkoAccent)
                     .lineLimit(1)
                 Text(lines.excerpt)
-                    .font(.footnote)
+                    .chatFont(.footnote)
                     .foregroundStyle(Color.lakkoText)
                     .lineLimit(1)
             }
@@ -90,11 +89,10 @@ struct ReplyQuoteBlock: View {
                     // An empty name still takes its line, so a reply with no
                     // snapshot has the same shape as one with.
                     Text(lines.name.isEmpty ? " " : lines.name)
-                        .font(.caption)
-                        .fontWeight(.semibold)
+                        .chatFont(.caption1, weight: .semibold)
                         .lineLimit(1)
                     Text(lines.excerpt)
-                        .font(.caption)
+                        .chatFont(.caption1)
                         .lineLimit(1)
                 }
                 .foregroundStyle(foreground)

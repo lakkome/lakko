@@ -718,6 +718,27 @@ private fun decodePinOrNull(bytes: ByteArray): FfiPinOp? =
         null
     }
 
+/** `docs/ux/who-can-find-me.md` section 6.4 — the domain a contact request
+ *  sent inside a shared group opens with. Ends in a NUL, so no chat envelope
+ *  and no text a person typed opens with it. */
+private val GROUP_CONTACT_REQUEST_DOMAIN: ByteArray =
+    "lakko/group-contact-request/v1\u0000".toByteArray(Charsets.US_ASCII)
+
+/**
+ * Section 6.4 — whether this application plaintext is a contact request sent
+ * inside the group. A plaintext opening with the domain IS one, whether or not
+ * it opens for this device: it is classified here and never handed to the
+ * chat parser, whose lossy-UTF-8 fallback would render it as a bubble. Pure,
+ * host-testable; the opening ([checkGroupContactRequest]) is the repository's.
+ */
+internal fun looksLikeGroupContactRequestEnvelope(bytes: ByteArray): Boolean {
+    if (bytes.size < GROUP_CONTACT_REQUEST_DOMAIN.size) return false
+    for (i in GROUP_CONTACT_REQUEST_DOMAIN.indices) {
+        if (bytes[i] != GROUP_CONTACT_REQUEST_DOMAIN[i]) return false
+    }
+    return true
+}
+
 /** ADR-0048 trigger 4 — the authoritative, fail-closed profile-request decode,
  *  reported as a boolean because the request carries nothing to hand back: a
  *  clean return IS the verdict. A bad length or an unknown schema version
@@ -976,6 +997,18 @@ internal fun toEvent(
                 IncomingChatEvent.SharedChannels(
                     messageId = messageId,
                     list = decodeSharedChannels(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeGroupContactRequestEnvelope(processed.data)) {
+                // `docs/ux/who-can-find-me.md` section 6.4 — a contact request
+                // sent inside this group, sealed to one member. Never a
+                // timeline bubble and never a notification. The sender is
+                // resolved to its account KEY here (C-68): the opening checks
+                // the request is from the member who posted it.
+                IncomingChatEvent.GroupContactRequest(
+                    messageId = messageId,
+                    envelope = processed.data,
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1675,6 +1708,18 @@ public sealed interface IncomingChatEvent {
         val wellFormed: Boolean,
         val senderKey: MemberIdentity?,
         val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** `docs/ux/who-can-find-me.md` section 6.4 — a contact request a member
+     *  sent inside the group, sealed to one member. Never a timeline row.
+     *  [envelope] is the whole plaintext, opened by the repository with this
+     *  account's key; [senderKey] the poster's account key resolved at
+     *  receipt (C-68), `null` when unresolvable (then dropped). */
+    public class GroupContactRequest(
+        public val messageId: Long,
+        public val envelope: ByteArray,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
     ) : IncomingChatEvent
 
     /** ADR-0060 — one of the scoped-discovery service envelopes

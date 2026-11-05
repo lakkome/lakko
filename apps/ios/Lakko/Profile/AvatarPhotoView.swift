@@ -16,6 +16,14 @@ enum AvatarPhoto: Equatable {
     /// A photo named directly (a public group's or channel's record, found by
     /// search), not yet held by any conversation on this device.
     case avatar(ProfileAvatar)
+
+    /// The photo of a conversation's avatar, wherever the conversation is drawn
+    /// (Chats, Feed, Calls): a one-to-one shows its person, a group its group
+    /// photo when this device holds one. `nil` draws initials.
+    static func conversation(isGroup: Bool, groupIdHex: String, peerKey: Data?) -> AvatarPhoto? {
+        if let peerKey, !isGroup { return .person(peerKey) }
+        return isGroup ? .group(groupIdHex) : nil
+    }
 }
 
 /// ADR-0087 section 18 — the group photos the avatar component draws, for the

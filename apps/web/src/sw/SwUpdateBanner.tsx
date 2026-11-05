@@ -14,6 +14,7 @@
  *      transitions to controlling the page.
  *   2. Posts `{ type: "SKIP_WAITING" }` to the waiting SW.
  *   3. SW activates → `controllerchange` fires → `location.reload()`.
+ *   (`update-reload.ts` reloads too when that never comes.)
  *
  * The reload is the load-bearing piece: without it the page
  * would keep running the prior JS while a new SW serves new
@@ -27,6 +28,7 @@
  */
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { SW_UPDATE_EVENT, waitingServiceWorker } from "./register";
+import { reloadIntoUpdate } from "./update-reload";
 import { t } from "../l10n";
 
 export function SwUpdateBanner(): JSX.Element {
@@ -55,24 +57,23 @@ export function SwUpdateBanner(): JSX.Element {
     const w = waiting();
     if (w === null) return;
     setReloading(true);
-
-    // Subscribe to controllerchange BEFORE sending SKIP_WAITING
-    // so the listener is in place when the swap completes. `once:
-    // true` removes itself after the first fire — if the user
-    // somehow triggers a second skip we don't double-reload.
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      () => {
-        window.location.reload();
+    // `update-reload.ts`: the SKIP_WAITING handshake, and a reload however
+    // the swap goes, including when it never signals (base walk
+    // 2026-11-04: "Reloading..." stood still).
+    reloadIntoUpdate(
+      {
+        worker: w,
+        container: typeof navigator !== "undefined" && "serviceWorker" in navigator ? navigator.serviceWorker : null,
+        reload: () => window.location.reload(),
+        setTimer: (fn, ms) => setTimeout(fn, ms),
       },
-      { once: true },
+      (why) => {
+        if (why !== "took-control") {
+          // eslint-disable-next-line no-console
+          console.warn(`[sw] update reload without the handshake: ${why}`);
+        }
+      },
     );
-
-    // Hand the new SW the SKIP_WAITING handshake; the message
-    // handler in `sw.js` calls `self.skipWaiting()`. The browser
-    // then activates the worker, controllerchange fires, the
-    // reload listener above kicks in.
-    w.postMessage({ type: "SKIP_WAITING" });
   }
 
   return (

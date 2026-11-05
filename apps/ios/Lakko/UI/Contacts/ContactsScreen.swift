@@ -279,6 +279,7 @@ public struct ContactsScreen: View {
                 ForEach(incoming, id: \.messageId) { request in
                     IncomingRequestRow(
                         request: request,
+                        viaGroupName: request.viaGroupIdHex.flatMap { viewModel.groupName(groupIdHex: $0) },
                         failed: viewModel.acceptFailed.contains(request.messageId),
                         accepting: viewModel.accepting.contains(request.messageId),
                         onAccept: { viewModel.onAcceptClicked(messageId: request.messageId) },
@@ -465,9 +466,34 @@ private struct ContactRow: View {
 /// An incoming request: who is asking (from the profile the request carried,
 /// bound to its signed key; "Someone" when nothing is known), their intro, and
 /// Accept / Decline.
-private struct IncomingRequestRow: View {
+struct IncomingRequestRow: View {
     @ObservedObject private var l10n = Localization.shared
+
+    /// The first button's word: `Accept`, or `Try again` after an accept that
+    /// founded no chat (decided 2026-11-04: no contact appears then, the
+    /// request stays with a plain error line, and trying again founds the
+    /// chat, which makes the contact and retires the request).
+    static func acceptTitleKey(failed: Bool) -> String {
+        failed ? "common.try_again" : "contacts.request.accept"
+    }
+
+    /// `docs/ux/who-can-find-me.md` 6.4 — the line naming the group a request
+    /// came inside: its name, or the unnamed form. `nil` for a mailbox
+    /// request.
+    static func viaLine(
+        viaGroupIdHex: String?, groupName: String?
+    ) -> (key: String, texts: [String: String])? {
+        guard viaGroupIdHex != nil else { return nil }
+        if let groupName = groupName?.trimmingCharacters(in: .whitespacesAndNewlines), !groupName.isEmpty {
+            return ("contacts.request.via_group", ["group": groupName])
+        }
+        return ("contacts.request.via_unnamed_group", [:])
+    }
+
     let request: IncomingContactRequest
+    /// The name of the group the request came inside, when it did and the
+    /// group has one.
+    var viaGroupName: String? = nil
     /// The last Accept failed: the row says so, and Accept works again.
     let failed: Bool
     let accepting: Bool
@@ -492,6 +518,11 @@ private struct IncomingRequestRow: View {
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
+                    if let via = Self.viaLine(viaGroupIdHex: request.viaGroupIdHex, groupName: viaGroupName) {
+                        Text(l10n.t(via.key, texts: via.texts))
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
                     if let intro = request.intro?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !intro.isEmpty {
                         Text(intro)
@@ -500,7 +531,7 @@ private struct IncomingRequestRow: View {
                     }
                     HStack(spacing: 8) {
                         Button(action: onAccept) {
-                            Text(l10n.t("contacts.request.accept")).frame(minWidth: 72)
+                            Text(l10n.t(Self.acceptTitleKey(failed: failed))).frame(minWidth: 72)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)

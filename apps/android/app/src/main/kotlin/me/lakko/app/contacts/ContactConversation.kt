@@ -17,14 +17,18 @@ package me.lakko.app.contacts
  *
  * ## The rule
  *
+ * A person's chat is a conversation whose kind is one-to-one (ADR-0062) and
+ * whose PEOPLE are exactly this account and the contact. People, not leaves: a
+ * person is every one of their devices (ADR-0050), so a roster of three leaves
+ * can be two people, and the contact is known by the account key (or a key of
+ * the same person across a proven rotation, ADR-0074 section 3.7).
+ *
  * 1. The conversation linked on the contact record, when the registry still
- *    holds it. A linked id whose chat is gone (deleted here, or never on this
- *    device) is not an address: seen live on web 2026-09-26 as a contact
- *    whose Message opened "Conversation not found".
- * 2. Else a conversation whose kind is one-to-one (ADR-0062) and whose PEOPLE
- *    are exactly this account and the contact. People, not leaves: a person
- *    is every one of their devices (ADR-0050), so a roster of three leaves
- *    can be two people, and the contact is known by the account key.
+ *    holds it AND it is such a one-to-one. A linked id whose chat is gone
+ *    (seen live on web 2026-09-26 as "Conversation not found"), that is a
+ *    group, or that is a one-to-one with someone else is not an address
+ *    (seen live on web 2026-11-05: Message opened a group the person is in).
+ * 2. Else the first held conversation that is such a one-to-one.
  *
  * A two-person GROUP is never the answer: it is a group that happens to hold
  * two people, and writing an invitation there is not writing to the contact.
@@ -44,6 +48,8 @@ package me.lakko.app.contacts
  * @param peopleOf the distinct people of a conversation; a torn handle reads
  *   as empty.
  * @param isOneToOne whether the conversation's kind is one-to-one.
+ * @param samePerson whether two person keys are one person (proven
+ *   rotations); defaults to equality.
  */
 internal fun <G> conversationWithContact(
     contactKey: String,
@@ -53,17 +59,20 @@ internal fun <G> conversationWithContact(
     ownKey: String?,
     peopleOf: (G) -> List<String>,
     isOneToOne: (G) -> Boolean,
+    samePerson: (String, String) -> Boolean = { a, b -> a == b },
 ): G? {
-    if (linkedId != null) {
-        conversations.firstOrNull { idOf(it) == linkedId }?.let { return it }
-    }
     if (ownKey == null) return null
-    for (conversation in conversations) {
-        if (!isOneToOne(conversation)) continue
+    fun isTheirs(conversation: G): Boolean {
+        if (!isOneToOne(conversation)) return false
         val people = peopleOf(conversation)
-        if (people.size == 2 && contactKey in people && ownKey in people) return conversation
+        if (people.size != 2 || ownKey !in people) return false
+        val other = people.firstOrNull { it != ownKey } ?: return false
+        return samePerson(other, contactKey)
     }
-    return null
+    if (linkedId != null) {
+        conversations.firstOrNull { idOf(it) == linkedId }?.takeIf(::isTheirs)?.let { return it }
+    }
+    return conversations.firstOrNull(::isTheirs)
 }
 
 /**

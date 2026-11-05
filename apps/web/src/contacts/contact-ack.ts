@@ -2,23 +2,26 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * What a verified ContactAck does on the requester's device: the accepter
- * becomes a contact and the sent record goes, and the name they were found
- * under stands until their own profile arrives (`docs/ux/who-can-find-me.md`
- * section 6.1).
+ * What a verified ContactAck does on the requester's device (base walk
+ * 2026-11-04, the rule Android has): it makes NO contact. The request stays
+ * waiting in Sent, and the ack only records on it the accepter's keys, which
+ * the one-to-one's Welcome is matched by. Joining that one-to-one makes the
+ * contact and retires the Sent request (`OneToOneContactAdoption.tsx`,
+ * `retireAnsweredSentRequests`). So a contact always has its one-to-one: an
+ * ack whose Welcome never joins leaves a waiting request, never a contact
+ * that nothing can reach.
  *
- * The Welcome usually lands before the ack, and the one-to-one rule then makes
- * the contact row first (`OneToOneContactAdoption.tsx`), so the name is filed
- * on either path. The sent record stands until the ack, which is why both can
- * read it.
+ * The name they were found under stands until their own profile arrives
+ * (`docs/ux/who-can-find-me.md` section 6.1); it is filed on the ack, and
+ * again by the one-to-one rule, whichever comes first.
  */
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
 import type { IncomingContactAck } from "./client";
-import { foundNameOf, type FoundName } from "./contact-list-model";
+import { foundNameOf, sentRequestsAnsweredBy, type FoundName } from "./contact-list-model";
 import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
 import { forgetSentIntro } from "./sent-request-intros";
-import { forgetSentRequest, loadSentRequests } from "./sent-requests";
+import { forgetSentRequest, loadSentRequests, recordAckOnSentRequest } from "./sent-requests";
 
 /** The session the ack is being applied in. */
 export interface ContactAckSession {
@@ -48,25 +51,43 @@ export function applyContactAck(
 ): void {
   const keyB64 = base64Encode(ack.accepterPubkey);
   const accountIdHex = groupIdHex(ack.accepterAccountId);
-  const accepter: AcceptedContact = {
-    signaturePubkeyB64: keyB64,
-    x25519PubkeyB64: base64Encode(ack.accepterX25519Pubkey),
-    // ADR-0048 — the name comes from the resolver; a re-delivered ack must
-    // not wipe a rename the user already gave this contact.
-    displayName: loadAccepted(accountIdB64).find((c) => c.signaturePubkeyB64 === keyB64)?.displayName ?? "",
-    acceptedAtMs: Date.now(),
-    // The peer's account_id (hex), kept with the contact (founding a
-    // one-to-one, the backup).
-    accountIdHex,
-  };
-  // Read before the record goes.
   const found = foundNameOf(
     loadSentRequests(accountIdB64).find((r) => r.recipientAccountIdHex === accountIdHex),
     ack.accepterPubkey,
   );
   if (found !== null && session.current()) session.fileFoundName(keyB64, found);
-  upsertAccepted(accepter, accountIdB64);
-  // Answered: the sent record and the intro kept for a re-send go.
-  forgetSentRequest(accountIdB64, accountIdHex);
-  void forgetSentIntro(accountIdB64, accountIdHex);
+  recordAckOnSentRequest(accountIdB64, accountIdHex, keyB64, base64Encode(ack.accepterX25519Pubkey));
+}
+
+/**
+ * The one-to-one with `peerKeyB64` is on this device: every Sent request it
+ * answers goes (with its kept intro), and what the ack told about the person
+ * (their X25519 key, the account id the request went to) is carried onto the
+ * contact row when the row lacks it. Returns how many requests were retired.
+ */
+export function retireAnsweredSentRequests(
+  accountIdB64: string,
+  peerKeyB64: string,
+  peerAccountIdHex: string | null,
+): number {
+  const answered = sentRequestsAnsweredBy(loadSentRequests(accountIdB64), peerKeyB64, peerAccountIdHex);
+  if (answered.length === 0) return 0;
+  const contact = loadAccepted(accountIdB64).find((c) => c.signaturePubkeyB64 === peerKeyB64);
+  if (contact !== undefined) {
+    const x25519 = contact.x25519PubkeyB64 ?? answered.find((r) => r.accepterX25519B64 !== undefined)?.accepterX25519B64;
+    const accountIdHex = contact.accountIdHex ?? answered[0]?.recipientAccountIdHex;
+    if (x25519 !== contact.x25519PubkeyB64 || accountIdHex !== contact.accountIdHex) {
+      const next: AcceptedContact = {
+        ...contact,
+        ...(x25519 === undefined ? {} : { x25519PubkeyB64: x25519 }),
+        ...(accountIdHex === undefined ? {} : { accountIdHex }),
+      };
+      upsertAccepted(next, accountIdB64);
+    }
+  }
+  for (const r of answered) {
+    forgetSentRequest(accountIdB64, r.recipientAccountIdHex);
+    void forgetSentIntro(accountIdB64, r.recipientAccountIdHex);
+  }
+  return answered.length;
 }

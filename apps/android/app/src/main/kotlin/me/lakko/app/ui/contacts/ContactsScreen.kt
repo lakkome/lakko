@@ -222,8 +222,9 @@ public fun ContactsScreen(
     val openPerson: (String) -> Unit = { keyB64 ->
         val key = runCatching { java.util.Base64.getDecoder().decode(keyB64) }.getOrNull()
         val contact = key?.let { k -> accepted.firstOrNull { it.request.fromPubkey.contentEquals(k) } }
+        val chat = contact?.let(viewModel::chatOf)
         when {
-            contact?.groupIdHex != null && onOpenChat != null -> onOpenChat(contact.groupIdHex)
+            chat != null && onOpenChat != null -> onOpenChat(chat)
             key != null && onOpenContact != null -> onOpenContact(contactRouteKey(key))
         }
     }
@@ -308,6 +309,7 @@ public fun ContactsScreen(
                             name = nameVersion.let { directory.resolve(req.fromPubkey) },
                             accepting = req.messageId in state.acceptingIds,
                             acceptFailed = req.messageId in state.acceptFailedIds,
+                            via = viaGroupLine(req.viaGroupIdHex, req.viaGroupIdHex?.let(viewModel::groupNameOf)),
                             onAccept = { viewModel.onAcceptClicked(req.messageId) },
                             onDecline = { viewModel.onDeclineClicked(req.messageId) },
                         )
@@ -370,8 +372,8 @@ public fun ContactsScreen(
                                         row.key.startsWith(INVITED_ROW_PREFIX) ->
                                             onOpenPendingChat?.invoke(row.key.removePrefix(INVITED_ROW_PREFIX))
                                         onOpenContact != null -> onOpenContact(row.key)
-                                        contact?.groupIdHex != null && onOpenChat != null ->
-                                            onOpenChat(contact.groupIdHex)
+                                        onOpenChat != null && contact?.let(viewModel::chatOf) != null ->
+                                            contact.let(viewModel::chatOf)?.let(onOpenChat)
                                     }
                                 },
                             )
@@ -515,6 +517,7 @@ private fun RequestRow(
     name: ResolvedName,
     accepting: Boolean,
     acceptFailed: Boolean,
+    via: ViaLine?,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
@@ -540,6 +543,14 @@ private fun RequestRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // `docs/ux/who-can-find-me.md` 6.4 — where it came from.
+                via?.let { line ->
+                    Text(
+                        if (line.groupName != null) t(line.key, mapOf("group" to line.groupName)) else t(line.key),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
         if (!req.intro.isNullOrBlank()) {
@@ -555,7 +566,7 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            Button(onClick = onAccept, enabled = !accepting) { Text(t("contacts.request.accept")) }
+            Button(onClick = onAccept, enabled = !accepting) { Text(t(acceptButtonKey(acceptFailed))) }
             OutlinedButton(onClick = onDecline, enabled = !accepting) { Text(t("contacts.request.decline")) }
         }
         if (acceptFailed) {
@@ -971,4 +982,21 @@ internal fun copyToClipboard(context: Context, text: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText(me.lakko.app.l10n.Localization.strings.value["common.clipboard.link"], text))
 }
 
+/**
+ * The request row's main button: Accept, or Try again once an accept could not
+ * found the one-to-one (no contact was made; pressing it founds the chat, and
+ * success makes the contact and retires the request).
+ */
+/** The "Via" line of a request that arrived inside a group. */
+internal data class ViaLine(val key: String, val groupName: String?)
 
+/** `docs/ux/who-can-find-me.md` 6.4 — "Via {group}", or "Via a group you're
+ *  both in" when the group has no name; `null` for a mailbox request. */
+internal fun viaGroupLine(viaGroupIdHex: String?, groupName: String?): ViaLine? = when {
+    viaGroupIdHex == null -> null
+    !groupName.isNullOrBlank() -> ViaLine("contacts.request.via_group", groupName)
+    else -> ViaLine("contacts.request.via_unnamed_group", null)
+}
+
+internal fun acceptButtonKey(acceptFailed: Boolean): String =
+    if (acceptFailed) "common.try_again" else "contacts.request.accept"

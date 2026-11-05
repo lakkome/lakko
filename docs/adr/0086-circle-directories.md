@@ -191,6 +191,25 @@ person from is refused by the person's client rather than by the server, which i
 change to UX section 10; a co-member can already post to them in the group, so
 nothing new is reachable.
 
+**Built ahead of the rest of this ADR (2026-11-05, core and FFI only, host-tested,
+no client uses it yet).** Found live on `test.lakko.me`: a contact row can stand on a
+device that holds no reach grant for the person, and Message on the card then cannot
+deliver the one-to-one Welcome. The maintainer decided that the contact request goes
+inside a group both are in in that case, and that the other members must not learn
+whom it is for. Built: `lakko_contacts::group_contact_request`, the envelope
+`lakko/group-contact-request/v1\0 ‖ 0x01 ‖ sealed_len(4, BE) ‖ sealed`, where `sealed`
+is the whole ordinary contact-request wire (1 to `MAILBOX_MAX_BODY_LEN` bytes) sealed
+to the target's X25519 key with the crate's sealed box under labels of its own. It
+names nobody; every member tries to open it, and `check_group_contact_request` returns
+`NotForMe` where it does not open, else checks that the request verifies and that its
+sender is the account the MLS sender resolves to at receipt (C-68). The dispatch kind
+is `GroupContactRequest`; the receiver then applies its own setting for that group. On UniFFI and wasm; recognised and
+suppressed on the NSE surface; fuzz target `group_contact_request_decode`. The `group`
+and `member` reach keys of ADR-0060 are not removed by this: delivery tries a held
+grant first and falls back to the group (UX `who-can-find-me.md` section 6.4). Other
+members learn that the sender posted one such box, when, and its length (not padded),
+not whom it is for.
+
 ### 7. Channels: one card, no epoch
 
 A subscriber's card is stored once, sealed under a stable per-channel member key

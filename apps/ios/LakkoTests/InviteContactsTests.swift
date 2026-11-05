@@ -66,10 +66,43 @@ final class ContactConversationTests: XCTestCase {
         XCTAssertNil(find(nil, [Conv(id: "g", people: [], oneToOne: true)]))
     }
 
+    // 2026-11-05 — a link stored on the contact row is a hint, never the
+    // answer by itself (seen on web: Message opened a group the person is in).
+
+    func testALinkedGroupIsNotTheirChat() {
+        let group = Conv(id: "g", people: [me, anna, "boris"], oneToOne: false)
+        XCTAssertNil(find("g", [group]))
+        let twoPersonGroup = Conv(id: "g2", people: [me, anna], oneToOne: false)
+        XCTAssertNil(find("g2", [twoPersonGroup]))
+    }
+
+    func testALinkedOneToOneWithSomeoneElseIsNotTheirChat() {
+        let boris = Conv(id: "gb", people: [me, "boris"], oneToOne: true)
+        XCTAssertNil(find("gb", [boris]))
+    }
+
+    func testAWrongLinkGivesWayToTheirOneToOne() {
+        let group = Conv(id: "g", people: [me, anna, "boris"], oneToOne: false)
+        let mine = Conv(id: "g1", people: [me, anna], oneToOne: true)
+        XCTAssertEqual(find("g", [group, mine]), mine)
+    }
+
+    func testAProvenRotationIsOnePerson() {
+        let conv = Conv(id: "g1", people: [me, "anna-new"], oneToOne: true)
+        let found = ContactConversation.find(
+            contactKey: anna, linkedId: "g1", conversations: [conv], idOf: { $0.id }, ownKey: me,
+            peopleOf: { $0.people }, isOneToOne: { $0.oneToOne },
+            samePerson: { $0 == $1 || Set([$0, $1]) == Set([anna, "anna-new"]) })
+        XCTAssertEqual(found, conv)
+    }
+
     func testOnlyTheLinkedConversationAnswersBeforeASessionKnowsItsOwnKey() {
         let conv = Conv(id: "g1", people: [me, anna], oneToOne: true)
         XCTAssertNil(find(nil, [conv], own: nil))
         XCTAssertEqual(find("g1", [conv], own: nil), conv)
+        // Even then a linked group, or a one-to-one with someone else, is not.
+        XCTAssertNil(find("g1", [Conv(id: "g1", people: [me, anna], oneToOne: false)], own: nil))
+        XCTAssertNil(find("g1", [Conv(id: "g1", people: [me, "boris"], oneToOne: true)], own: nil))
     }
 
     /// People are counted, not device leaves (ADR-0050): the readers hand the
@@ -190,6 +223,8 @@ final class InviteContactSendTests: XCTestCase {
         var existing: String?
         var foundError: Error?
         var sendError: Error?
+        var route: ContactRequestRoute = .inbox
+        var waiting = false
 
         var ports: InviteContactSend.Ports {
             InviteContactSend.Ports(
@@ -204,6 +239,12 @@ final class InviteContactSendTests: XCTestCase {
                 send: { [self] groupIdHex, text in
                     log.append("send \(groupIdHex) \(text)")
                     if let sendError { throw sendError }
+                },
+                route: { [self] _ in route },
+                hasWaitingRequest: { [self] _ in waiting },
+                requestInGroup: { [self] _, groupIdHex in
+                    log.append("request in \(groupIdHex)")
+                    waiting = true
                 })
         }
     }
@@ -281,7 +322,7 @@ final class InviteContactSendTests: XCTestCase {
             },
             send: { contactId, text in
                 guard let key = Data(base64Encoded: contactId) else { throw Boom() }
-                try await InviteContactSend.run(contactKey: key, text: text, ports: world.ports)
+                return try await InviteContactSend.run(contactKey: key, text: text, ports: world.ports)
             },
             hold: { _ in })
     }
@@ -349,6 +390,97 @@ final class InviteContactSendTests: XCTestCase {
         XCTAssertEqual(offer.invited, [target.id])
     }
 
+    // MARK: The order Message follows (`docs/ux/who-can-find-me.md` 6.4)
+
+    func testWithAGrantTheChatIsFoundedAndTheLinkSent() async throws {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .inbox
+        let outcome = try await InviteContactSend.run(contactKey: annaKey, text: "link", ports: world.ports)
+        XCTAssertEqual(outcome, .sent)
+        XCTAssertEqual(world.log, ["found", "send new-1x1 link"])
+    }
+
+    func testWithoutAGrantARequestGoesInsideTheSharedGroupAndNoLink() async throws {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .group(groupIdHex: "shared")
+        let outcome = try await InviteContactSend.run(contactKey: annaKey, text: "link", ports: world.ports)
+        XCTAssertEqual(outcome, .requestSent)
+        XCTAssertEqual(world.log, ["request in shared"], "nothing founded, no call link sent")
+    }
+
+    func testAWaitingRequestSendsNothingNew() async throws {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .group(groupIdHex: "shared")
+        world.waiting = true
+        let outcome = try await InviteContactSend.run(contactKey: annaKey, text: "link", ports: world.ports)
+        XCTAssertEqual(outcome, .requestSent)
+        XCTAssertEqual(world.log, [])
+    }
+
+    func testWithNeitherNothingIsSent() async throws {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .none
+        let outcome = try await InviteContactSend.run(contactKey: annaKey, text: "link", ports: world.ports)
+        XCTAssertEqual(outcome, .cannotMessage)
+        XCTAssertEqual(world.log, [])
+    }
+
+    func testAHeldChatIsUsedWhateverTheRoute() async throws {
+        let world = World()
+        world.contacts = [contact(linked: "aa11")]
+        world.existing = "aa11"
+        world.route = .none
+        let outcome = try await InviteContactSend.run(contactKey: annaKey, text: "link", ports: world.ports)
+        XCTAssertEqual(outcome, .sent)
+        XCTAssertEqual(world.log, ["send aa11 link"])
+    }
+
+    func testThroughTheOfferARequestMarksTheRowRequestSentAndRefusesASecondPick() async {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .group(groupIdHex: "shared")
+        var mints = 0
+        let offer = offer(world) { mints += 1 }
+        offer.openPicker()
+
+        let sent = await offer.sendInvite(to: target)
+
+        XCTAssertFalse(sent, "no call invitation went out")
+        XCTAssertEqual(offer.requestSent, [target.id])
+        XCTAssertTrue(offer.invited.isEmpty)
+        XCTAssertNil(offer.pickerError)
+        XCTAssertNil(offer.statusLine, "no call-invite line")
+        XCTAssertEqual(offer.state, .ready(url: "https://lakko.me/c/one#secret", delivery: .kept))
+        XCTAssertTrue(offer.pickerOpen)
+
+        let again = await offer.sendInvite(to: target)
+        XCTAssertFalse(again)
+        XCTAssertEqual(world.log, ["request in shared"], "one request per person")
+        XCTAssertEqual(mints, 1)
+    }
+
+    func testThroughTheOfferNothingToSendSaysTheyCannotBeMessagedYet() async {
+        let world = World()
+        world.contacts = [contact()]
+        world.route = .none
+        let offer = offer(world) {}
+        offer.openPicker()
+
+        let sent = await offer.sendInvite(to: target)
+
+        XCTAssertFalse(sent)
+        XCTAssertEqual(
+            offer.pickerError,
+            Localization.text("contacts.detail.cannot_message", texts: ["name": "Anna"]))
+        XCTAssertTrue(offer.requestSent.isEmpty)
+        XCTAssertTrue(offer.invited.isEmpty, "the row stays pressable")
+        XCTAssertEqual(world.log, [])
+    }
+
     // MARK: Linking the founded conversation on the contact record
 
     func testTheFoundedConversationIsLinkedOnTheContactAndReplacesAStaleLink() {
@@ -370,5 +502,13 @@ final class InviteContactSendTests: XCTestCase {
         named.displayName = "Anya"
         let linked = ContactsRepository.linking([named], signatureKey: annaKey, groupIdHex: "new-1x1")
         XCTAssertEqual(linked?.first?.displayName, "Anya")
+    }
+
+    func testLinkingKeepsTheContactsEarlierKeys() {
+        var held = contact(linked: "group")
+        held.previousKeysB64 = ["old"]
+        let linked = ContactsRepository.linking([held], signatureKey: annaKey, groupIdHex: "new-1x1")
+        XCTAssertEqual(linked?.first?.previousKeysB64, ["old"])
+        XCTAssertEqual(linked?.first?.groupIdHex, "new-1x1")
     }
 }

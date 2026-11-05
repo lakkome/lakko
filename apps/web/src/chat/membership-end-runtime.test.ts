@@ -194,3 +194,24 @@ describe("running", () => {
     expect(store.record(KEY)?.title).toBe("Book club");
   });
 });
+
+describe("each removal tells the person once, with its own banner (base walk 2026-11-04)", () => {
+  it("a second removal adds its own notice; an earlier one still waiting stays beside it", async () => {
+    const store = await storeOn(disk());
+    const runtime = new MembershipEndRuntime(store, port([]));
+    await runtime.begin(end({ idHex: "aa", title: "QA Phase A Walk", routeIdsB64: ["qg=="], segmentsB64: ["qg=="] }));
+    await runtime.begin(end({ idHex: "bb", title: "QA Base Alone", routeIdsB64: ["uw=="], segmentsB64: ["uw=="] }));
+    expect(store.notices().map((n) => n.title)).toEqual(["QA Phase A Walk", "QA Base Alone"]);
+    // Closing one leaves the other.
+    await store.dismiss(endKey(2, "aa"));
+    expect(store.notices().map((n) => n.title)).toEqual(["QA Base Alone"]);
+  });
+
+  it("a removal heard from the account's other device tells this device too; leaving tells nobody", async () => {
+    const store = await storeOn(disk());
+    const runtime = new MembershipEndRuntime(store, port([]));
+    await runtime.begin(end({ idHex: "cc", title: "Heard", origin: "heard" }));
+    await runtime.begin(end({ idHex: "dd", title: "Left", left: true }));
+    expect(store.notices().map((n) => n.title)).toEqual(["Heard"]);
+  });
+});

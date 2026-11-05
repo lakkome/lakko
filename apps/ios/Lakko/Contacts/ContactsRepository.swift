@@ -148,6 +148,12 @@ public final class ContactsRepository: ObservableObject {
                 self?.noteAnsweredByWelcome(groupIdHex: groupIdHex)
                 self?.handOverJoinedPendingContacts()
             }
+            // `docs/ux/who-can-find-me.md` 6.4 — a contact request one member
+            // sent inside a group: opened here or dropped.
+            chatRepository?.onGroupContactRequest = { [weak self] groupIdHex, envelope, senderKeyB64 in
+                self?.receiveGroupContactRequest(
+                    groupIdHex: groupIdHex, envelope: envelope, senderKeyB64: senderKeyB64)
+            }
         }
     }
 
@@ -377,13 +383,27 @@ public final class ContactsRepository: ObservableObject {
         // The request below carries the own profile and a reply key, both
         // read from what is bound NOW: never another account's.
         try bound.require()
-        let result = try await sendRequestToBundle(
-            client: client, secrets: secrets,
-            recipientAccountId: accountId,
-            recipientSignaturePubkey: bundle.signaturePubkey,
-            recipientX25519Pubkey: bundle.x25519Pubkey,
-            introMessage: Data(introMessage.utf8),
-            link: person.mailbox.map { RequestLink(seed: person.writeSeed, target: $0) })
+        // Section 6.4 — the order Message on a card follows: the inbox when a
+        // grant reaches it; when every grant is refused or no inbox address
+        // is known, inside a group both are in (it then stands under Sent as
+        // Waiting, recorded there); else the refusal stands.
+        let sent = try await fallingBackToSharedGroup(
+            accountKey: person.accountKey, accountId: accountId,
+            name: person.displayName, username: person.username
+        ) {
+            try await self.sendRequestToBundle(
+                client: client, secrets: secrets,
+                recipientAccountId: accountId,
+                recipientSignaturePubkey: bundle.signaturePubkey,
+                recipientX25519Pubkey: bundle.x25519Pubkey,
+                introMessage: Data(introMessage.utf8),
+                link: person.mailbox.map { RequestLink(seed: person.writeSeed, target: $0) })
+        }
+        guard let result = sent else {
+            return SendResult(
+                recipientUsername: person.username ?? "", recipientAccountId: accountId,
+                messageId: 0, createdAt: ISO8601DateFormatter().string(from: Date()))
+        }
         guard bound.isCurrent else { return result }
         state = state.with(sent: SentRequests.adding(
             SentContactRequest(
@@ -902,12 +922,269 @@ public final class ContactsRepository: ObservableObject {
         let next = Self.adopting(
             state.accepted, signatureKey: signatureKey, accountId: accountId,
             groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt,
-            samePerson: samePerson) ?? state.accepted
+            samePerson: samePerson,
+            keepsLink: { held in
+                linkIsOneToOne(held, with: signatureKey, samePerson: samePerson)
+            }) ?? state.accepted
         // A request from them is gone with it (a process that died inside an
         // accept left both), carried on the row so its ack can still go out.
         let rows = Self.reconciled(accepted: next, pending: state.pending, samePerson: samePerson)
         guard rows.accepted != state.accepted || rows.pending != state.pending else { return false }
         state = state.with(pending: rows.pending, accepted: rows.accepted)
+        return true
+    }
+
+    // MARK: - A request inside a shared group (`docs/ux/who-can-find-me.md` 6.4)
+
+    /// Which way a request to the person holding `accountKey` goes: their
+    /// inbox when a grant this device holds still reaches it, else inside a
+    /// group both are current members of, else nowhere
+    /// (``ContactRequestRoute``).
+    public func requestRoute(toAccountKey accountKey: Data) -> ContactRequestRoute {
+        ContactRequestRoute.decide(
+            reachesInbox: ReachCenter.shared.writePlan(toAccountKey: accountKey) != nil,
+            sharedGroups: sharedGroups(with: accountKey))
+    }
+
+    /// The groups (not one-to-ones) this device is an active member of and
+    /// the person holding `accountKey` is a current member of, each with the
+    /// time of its newest message.
+    func sharedGroups(with accountKey: Data) -> [SharedGroup] {
+        guard let chatRepository else { return [] }
+        let samePerson = provenSamePerson
+        let threads = Dictionary(
+            chatRepository.state.threads.map { ($0.groupIdHex, $0) }, uniquingKeysWith: { first, _ in first })
+        return chatRepository.conversationHeadIdHexes.compactMap { groupIdHex in
+            guard chatRepository.groupKind(groupIdHex: groupIdHex) == .group,
+                  chatRepository.isActive(groupIdHex: groupIdHex) == true,
+                  let members = chatRepository.members(groupIdHex: groupIdHex),
+                  members.contains(where: { samePerson($0.signaturePublicKey, accountKey) })
+            else { return nil }
+            let newest = threads[groupIdHex]?.messages.last
+                .flatMap { ChatRepository.parseDsTimestampMs($0.createdAt) } ?? 0
+            return SharedGroup(groupIdHex: groupIdHex, newestMessageMs: newest)
+        }
+    }
+
+    /// Whether a request to this person stands unanswered under Sent: Message
+    /// sends nothing new then (one request per person).
+    public func hasWaitingRequest(toAccountKey accountKey: Data, accountId: Data?) -> Bool {
+        SentRequests.holds(state.sent, accountKey: accountKey, accountId: accountId)
+    }
+
+    /// Send a contact request to a known person inside `groupIdHex`, a group
+    /// both are in: the ordinary request (own profile, a fresh reply grant so
+    /// the accept goes through the inbox, not the group), sealed whole to
+    /// their key so the other members cannot tell whom it is for. It then
+    /// stands under Sent as Waiting; no chat is created.
+    public func sendContactRequestInGroup(
+        groupIdHex: String,
+        recipientAccountId: Data,
+        recipientAccountKey: Data,
+        recipientName: String?,
+        recipientUsername: String? = nil
+    ) async throws {
+        guard let chatRepository else { throw ContactsError.requestRefused }
+        guard let secrets = authRepository.identitySecrets else {
+            throw ContactsError.wrap(
+                ContactsError.simple("no identity secrets — please re-enter your password"))
+        }
+        let bound = binding.capture()
+        let client = clientFactory()
+        // The key the request is sealed to comes from the verified directory
+        // bundle, which must name the person this device knows.
+        let bundle = try await client.resolveVerifiedBundle(accountId: recipientAccountId)
+        ReachCenter.shared.reloadKeyResolver()
+        let resolver = ReachCenter.shared
+        guard bundle.signaturePubkey == recipientAccountKey
+                || resolver.currentAccountKey(of: recipientAccountKey)
+                    == resolver.currentAccountKey(of: bundle.signaturePubkey)
+        else { throw ContactsError.requestRefused }
+        try bound.require()
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let replyGrant = try await ReachCenter.shared.newReplyGrant(
+            purpose: ReplyPurpose.contact(recipientAccountId))
+        try bound.require()
+        let wire = try ContactsClient.composeRequestWire(
+            senderSigningSeed: identity.ed25519Seed(),
+            senderAccountId: secrets.accountId,
+            recipientX25519Pubkey: bundle.x25519Pubkey,
+            profile: ProfileDirectory.shared.ownProfileForRequest(),
+            introMessage: Data(),
+            replyGrant: replyGrant)
+        let envelope = try composeGroupContactRequestEnvelope(
+            recipientX25519Pub: bundle.x25519Pubkey, request: wire)
+        do {
+            try await chatRepository.publishApplicationMessage(
+                groupIdHex: groupIdHex, plaintextBytes: envelope)
+        } catch {
+            // Never delivered: its reply grant goes with it.
+            ReachCenter.shared.retireReplies(purpose: ReplyPurpose.contact(recipientAccountId))
+            throw error
+        }
+        guard bound.isCurrent else { return }
+        recordGroupRequestSent(
+            recipientAccountId: recipientAccountId, recipientAccountKey: recipientAccountKey,
+            recipientName: recipientName, recipientUsername: recipientUsername)
+    }
+
+    /// A request that went inside a group stands under Sent as Waiting, as
+    /// any request: one per person until answered or removed. It has no
+    /// mailbox row, so its id is 0.
+    func recordGroupRequestSent(
+        recipientAccountId: Data, recipientAccountKey: Data, recipientName: String?,
+        recipientUsername: String? = nil
+    ) {
+        state = state.with(sent: SentRequests.adding(
+            SentContactRequest(
+                recipientUsername: recipientUsername ?? "",
+                recipientAccountIdB64: base64Encode(recipientAccountId),
+                messageId: 0,
+                createdAt: ISO8601DateFormatter().string(from: Date()),
+                recipientName: recipientName,
+                recipientKeyB64: base64Encode(recipientAccountKey)),
+            to: state.sent))
+    }
+
+    /// The groups shared with a person (``sharedGroups(with:)``). A seam for
+    /// tests.
+    lazy var sharedGroupsOf: (Data) -> [SharedGroup] = { [weak self] key in
+        self?.sharedGroups(with: key) ?? []
+    }
+
+    /// Sends a request inside a shared group
+    /// (``sendContactRequestInGroup(groupIdHex:recipientAccountId:recipientAccountKey:recipientName:recipientUsername:)``).
+    /// A seam for tests.
+    lazy var groupRequestSender: (
+        _ groupIdHex: String, _ accountId: Data, _ accountKey: Data, _ name: String?, _ username: String?
+    ) async throws -> Void = { [weak self] groupIdHex, accountId, accountKey, name, username in
+        guard let self else { throw ContactsError.requestRefused }
+        try await self.sendContactRequestInGroup(
+            groupIdHex: groupIdHex, recipientAccountId: accountId, recipientAccountKey: accountKey,
+            recipientName: name, recipientUsername: username)
+    }
+
+    /// Section 6.4 for a request to a person found by search: `send` (the
+    /// inbox) first; when it is refused (every grant refused, or no inbox
+    /// address known) and a group is shared, the request goes inside the
+    /// group with the newest message and `nil` is returned (the Sent row is
+    /// recorded by the group send); with no shared group the refusal stands.
+    /// Any other failure is not a refusal and stands as it is.
+    func fallingBackToSharedGroup(
+        accountKey: Data, accountId: Data, name: String?, username: String?,
+        send: () async throws -> SendResult
+    ) async throws -> SendResult? {
+        do {
+            return try await send()
+        } catch ContactsError.requestRefused {
+            guard case .group(let groupIdHex) = ContactRequestRoute.decide(
+                reachesInbox: false, sharedGroups: sharedGroupsOf(accountKey))
+            else { throw ContactsError.requestRefused }
+            try await groupRequestSender(groupIdHex, accountId, accountKey, name, username)
+            return nil
+        }
+    }
+
+    /// Whether the members of a group may find this account (its "Who can
+    /// find me" setting). A seam for tests.
+    var allowsGroupMembers: (Data) -> Bool = { ReachCenter.shared.allowsGroup($0) }
+
+    /// The one-to-one this device holds with a person (``ContactConversation``
+    /// for a contact row, else a live one-to-one with them). A seam for tests.
+    lazy var heldOneToOne: (Data) -> String? = { [weak self] key in
+        guard let self, let chatRepository = self.chatRepository else { return nil }
+        let samePerson = self.provenSamePerson
+        if let row = self.state.accepted.first(where: { samePerson($0.request.fromPubkey, key) }) {
+            return chatRepository.oneToOneConversation(
+                contactKey: row.request.fromPubkey, linkedGroupIdHex: row.groupIdHex)
+        }
+        return self.liveOneToOne(with: key)
+    }
+
+    /// A group request from a contact this device already has a chat with
+    /// goes the mailbox's way (``handleKnownContactRequest(_:client:)``):
+    /// nothing is shown. A seam for tests.
+    lazy var knownContactRequestHandler: (IncomingContactRequest) -> Void = { [weak self] request in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.handleKnownContactRequest(request, client: self.clientFactory())
+        }
+    }
+
+    /// A contact request one member posted inside `groupIdHex`. Dropped
+    /// unless it opens with this account's key, verifies, comes from the
+    /// member who posted it, and this account lets that group's members find
+    /// it (or the sender is a contact already). Otherwise it joins Requests
+    /// with a "Via {group}" line. Nothing is logged that names anyone.
+    func receiveGroupContactRequest(groupIdHex: String, envelope: Data, senderKeyB64: String) {
+        guard let secrets = authRepository.identitySecrets,
+              let identity = try? Identity.fromSeed(seed: secrets.accountIdentitySeed),
+              let senderKey = base64Decode(senderKeyB64)
+        else { return }
+        fileGroupContactRequest(
+            groupIdHex: groupIdHex, envelope: envelope, senderKey: senderKey,
+            ownX25519Secret: identity.x25519SecretKey(),
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+    }
+
+    /// The body of ``receiveGroupContactRequest(groupIdHex:envelope:senderKeyB64:)``
+    /// with its inputs explicit. Returns whether a request was added.
+    @discardableResult
+    func fileGroupContactRequest(
+        groupIdHex: String, envelope: Data, senderKey: Data, ownX25519Secret: Data, createdAt: String
+    ) -> Bool {
+        let wire: Data
+        do {
+            guard let opened = try checkGroupContactRequest(
+                plaintext: envelope, recipientX25519Priv: ownX25519Secret, senderAccountKey: senderKey)
+            else { return false }
+            wire = opened
+        } catch {
+            NSLog("contacts: a group contact request was dropped: \(type(of: error))")
+            return false
+        }
+        let samePerson = provenSamePerson
+        let isContact = state.accepted.contains { samePerson($0.request.fromPubkey, senderKey) }
+        guard GroupContactRequestGate.shows(
+            allowsGroupMembers: ChatRepository.hexToBytes(groupIdHex).map(allowsGroupMembers) ?? false,
+            senderIsContact: isContact)
+        else { return false }
+        // A contact this device already has a chat with: the mailbox's way,
+        // nothing shown. A contact WITHOUT one here is shown as a request
+        // whose Accept founds the one-to-one: answering it silently with an
+        // ack, as the mailbox does for a known contact, would leave no chat
+        // on either side and the next Message would ask again, forever.
+        let hasChat = heldOneToOne(senderKey) != nil
+        guard let opened = ContactsClient.incomingRequest(
+            wire: wire, messageId: GroupContactRequestGate.messageId(envelope: envelope),
+            createdAt: createdAt, myX25519Secret: ownX25519Secret, viaGroupIdHex: groupIdHex)
+        else { return false }
+        let request = opened.request
+        if hasChat {
+            if isContact { knownContactRequestHandler(request) }
+            return false
+        }
+        if let replyGrant = opened.replyGrant {
+            ReachCenter.shared.keep(
+                replyGrant, carrier: .request,
+                fromAccountKeyB64: base64Encode(request.fromPubkey), scopeHex: nil)
+        }
+        if let profile = request.profile {
+            ProfileDirectory.shared.acceptReceived(
+                profile, signatureKeyB64: base64Encode(request.fromPubkey),
+                accountIdB64: boundAccountIdB64)
+        }
+        // A contact with no chat here asks for one: their row does not hide
+        // the request, as it does for a mailbox request. Filed into `state`
+        // synchronously, whose `didSet` writes the inbox store: this runs
+        // inside the group's event fold, before the group cursor moves past
+        // the row, so the app dying in between does not lose it.
+        let merged = ContactsInboxMerge.merge(
+            fetched: [request], pending: state.pending,
+            accepted: state.accepted.filter { !samePerson($0.request.fromPubkey, senderKey) },
+            currentKey: { ReachCenter.shared.currentAccountKey(of: $0) })
+        guard !merged.kept.isEmpty else { return false }
+        state = state.with(pending: merged.applied(to: state.pending))
         return true
     }
 
@@ -945,6 +1222,50 @@ public final class ContactsRepository: ObservableObject {
     /// Whether the viewer removed this person from their contact list.
     public func isRemovedContact(_ signatureKey: Data) -> Bool {
         removedKeys.contains(signatureKey)
+    }
+
+    /// Whether `groupIdHex`, a link stored on a contact row, may stay: `false`
+    /// only when this device holds it and it is not a one-to-one with the
+    /// person (a group by its ADR-0062 kind, or a one-to-one whose other
+    /// person is someone else). Unknown here (not held, a torn read) keeps
+    /// it: the read rule (``ContactConversation``) never answers it anyway.
+    func linkIsOneToOne(
+        _ groupIdHex: String, with signatureKey: Data, samePerson: (Data, Data) -> Bool
+    ) -> Bool {
+        guard let chatRepository, let kind = chatRepository.groupKind(groupIdHex: groupIdHex) else {
+            return true
+        }
+        guard kind == .oneToOne else { return false }
+        guard let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return true }
+        return samePerson(peer, signatureKey)
+    }
+
+    /// Clear every stored chat link that names a conversation this device
+    /// holds and that is not the person's one-to-one (2026-11-05: on web a
+    /// row linked to a group the person is in, and Message opened the
+    /// group). Returns whether anything changed.
+    @discardableResult
+    public func dropMisdirectedLinks() -> Bool {
+        let samePerson = provenSamePerson
+        guard let next = Self.unlinking(state.accepted, keepsLink: { row, held in
+            linkIsOneToOne(held, with: row.request.fromPubkey, samePerson: samePerson)
+        }) else { return false }
+        state = state.with(accepted: next)
+        return true
+    }
+
+    /// The pure half of ``dropMisdirectedLinks()``: the list with every link
+    /// `keepsLink` refuses cleared, or `nil` when none is.
+    nonisolated static func unlinking(
+        _ accepted: [AcceptedContact], keepsLink: (AcceptedContact, String) -> Bool
+    ) -> [AcceptedContact]? {
+        var changed = false
+        let rows = accepted.map { row -> AcceptedContact in
+            guard let held = row.groupIdHex, !keepsLink(row, held) else { return row }
+            changed = true
+            return row.withGroupIdHex(nil)
+        }
+        return changed ? rows : nil
     }
 
     /// The live one-to-one this device holds with a person, if any: a
@@ -996,8 +1317,11 @@ public final class ContactsRepository: ObservableObject {
             return accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)]
         }
         var rows = accepted
-        rows[idx] = merging(
+        let merged = merging(
             accepted[idx], with: AcceptedContact(request: request, groupIdHex: groupIdHex))
+        // The accept has just founded the one-to-one with them: that is their
+        // chat, whatever the row held before.
+        rows[idx] = groupIdHex.map { merged.withGroupIdHex($0) } ?? merged
         return rows
     }
 
@@ -1044,7 +1368,8 @@ public final class ContactsRepository: ObservableObject {
         groupIdHex: String,
         nowMs: UInt64,
         createdAt: String,
-        samePerson: (Data, Data) -> Bool = { $0 == $1 }
+        samePerson: (Data, Data) -> Bool = { $0 == $1 },
+        keepsLink: (String) -> Bool = { _ in true }
     ) -> [AcceptedContact]? {
         if let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, signatureKey) }) {
             let old = accepted[idx]
@@ -1055,10 +1380,13 @@ public final class ContactsRepository: ObservableObject {
             let alias = base64Encode(signatureKey)
             let newAlias = old.request.fromPubkey != signatureKey && !previous.contains(alias)
             if newAlias { previous.append(alias) }
-            guard old.groupIdHex == nil || newAlias else { return nil }
+            // A held link that is not their one-to-one (a group, or a
+            // one-to-one with someone else) gives way to this one, which is.
+            let held = old.groupIdHex.flatMap { keepsLink($0) ? $0 : nil }
+            guard held == nil || newAlias else { return nil }
             var rows = accepted
             rows[idx] = AcceptedContact(
-                request: old.request, groupIdHex: old.groupIdHex ?? groupIdHex,
+                request: old.request, groupIdHex: held ?? groupIdHex,
                 displayName: old.displayName, previousKeysB64: previous.isEmpty ? nil : previous)
             return rows
         }
@@ -1121,9 +1449,7 @@ public final class ContactsRepository: ObservableObject {
         guard let idx = accepted.firstIndex(where: { $0.request.fromPubkey == signatureKey }),
               accepted[idx].groupIdHex != groupIdHex else { return nil }
         var rows = accepted
-        rows[idx] = AcceptedContact(
-            request: accepted[idx].request, groupIdHex: groupIdHex,
-            displayName: accepted[idx].displayName)
+        rows[idx] = accepted[idx].withGroupIdHex(groupIdHex)
         return rows
     }
 
@@ -1177,12 +1503,16 @@ public final class ContactsRepository: ObservableObject {
     }
 
     /// An ack from the recipient of one of this account's outgoing requests:
-    /// they pressed Accept. The signature was verified in the UniFFI layer,
-    /// so this is the moment the person becomes a contact on this side too:
-    /// the Welcome that follows creates the chat, never the contact row (a
-    /// requester whose request was accepted on Android had a named chat and
-    /// an empty Contacts tab, seen live on 2026-09-16). One row per person;
-    /// the matching sent request is retired.
+    /// they pressed Accept. The signature was verified in the UniFFI layer.
+    ///
+    /// The ack makes no contact (decided 2026-11-04): a person becomes a
+    /// contact only when this device joins the one-to-one with them, so a
+    /// contact always has a conversation. Until the Welcome is joined the
+    /// request stays under Sent, as pending, with the key that signed the ack
+    /// recorded on it: the Welcome is matched to the row by that key
+    /// (``noteAnsweredByWelcome(groupIdHex:)``), which then makes the contact
+    /// and retires the row. A person already a contact (the Welcome came
+    /// first) only loses the row.
     func applyContactAck(_ ack: IncomingContactAck) {
         let samePerson = provenSamePerson
         let alreadyKnown = state.accepted.contains {
@@ -1196,29 +1526,17 @@ public final class ContactsRepository: ObservableObject {
         fileFoundName(
             answering: SentRequests.row(recipientAccountIdB64: accepterAccountIdB64, in: state.sent),
             signatureKey: ack.accepterPubkey)
-        let remainingSent = SentRequests.answered(
-            recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
-        if alreadyKnown {
+        if alreadyKnown || liveOneToOne(with: ack.accepterPubkey) != nil {
+            let remainingSent = SentRequests.answered(
+                recipientAccountIdB64: accepterAccountIdB64, in: state.sent)
             if remainingSent.count != state.sent.count {
                 state = state.with(sent: remainingSent)
             }
             return
         }
-        let syntheticRequest = IncomingContactRequest(
-            messageId: ack.messageId,
-            fromPubkey: ack.accepterPubkey,
-            fromAccountId: ack.accepterAccountId,
-            fromPseudonym: ack.ackToPseudonym,
-            validAfterMs: ack.acceptedAtMs,
-            intro: nil,
-            createdAt: ack.createdAt
-        )
-        state = state.with(
-            accepted: state.accepted + [
-                AcceptedContact(request: syntheticRequest, groupIdHex: nil)
-            ],
-            sent: remainingSent
-        )
+        let acked = SentRequests.acknowledged(
+            recipientAccountIdB64: accepterAccountIdB64, byKey: ack.accepterPubkey, in: state.sent)
+        if acked != state.sent { state = state.with(sent: acked) }
     }
 
     /// `docs/ux/who-can-find-me.md` section 6.1 — the person holding
@@ -2239,8 +2557,12 @@ public final class ContactsRepository: ObservableObject {
             return .own
         case .established:
             guard let established else { return .opened(opened) }
+            // Their chat is the one-to-one with them, never the stored link
+            // by itself (it may name a group they are in).
+            let chat = chatRepository?.oneToOneConversation(
+                contactKey: established.request.fromPubkey, linkedGroupIdHex: established.groupIdHex)
             return .knownContact(
-                contactMessageId: established.request.messageId, groupIdHex: established.groupIdHex,
+                contactMessageId: established.request.messageId, groupIdHex: chat,
                 statedName: opened.statedName, invite: opened)
         case .pending:
             return .pendingInviter(accountIdHex: ownerHex, statedName: opened.statedName, invite: opened)
@@ -2519,6 +2841,10 @@ public final class ContactsRepository: ObservableObject {
                     self.state = self.state.with(accepted: self.state.accepted + [
                         AcceptedContact(request: request, groupIdHex: groupIdHex)
                     ])
+                } else if let groupIdHex, let next = Self.linking(
+                    self.state.accepted, signatureKey: request.fromPubkey, groupIdHex: groupIdHex) {
+                    // The one-to-one just founded for them is their chat.
+                    self.state = self.state.with(accepted: next)
                 }
                 do {
                     _ = try await self.sendContactAck(request: request)
@@ -3048,6 +3374,14 @@ public struct AcceptedContact: Equatable, Codable {
         self.previousKeysB64 = previousKeysB64
     }
 
+    /// This contact with its chat link replaced (`nil` clears it); the rest
+    /// of the row stays.
+    func withGroupIdHex(_ groupIdHex: String?) -> AcceptedContact {
+        AcceptedContact(
+            request: request, groupIdHex: groupIdHex, displayName: displayName,
+            previousKeysB64: previousKeysB64)
+    }
+
     /// The contact's stable account id (base64), when the request carried
     /// one. What the reset record is found by across the key change.
     public var accountIdB64: String? {
@@ -3118,6 +3452,10 @@ public struct SentContactRequest: Equatable, Codable {
     /// The person's account key (base64) as found: the Sent row's photo, and
     /// one of the two things a search row is matched to this list by.
     public let recipientKeyB64: String?
+    /// The key that signed their ContactAck (base64), once it came: what the
+    /// Welcome of the one-to-one they found is matched to this row by. The ack
+    /// makes no contact; joining that Welcome does (2026-11-04).
+    public var ackedKeyB64: String?
 
     public init(
         recipientUsername: String,
@@ -3126,8 +3464,10 @@ public struct SentContactRequest: Equatable, Codable {
         createdAt: String,
         intro: String = "",
         recipientName: String? = nil,
-        recipientKeyB64: String? = nil
+        recipientKeyB64: String? = nil,
+        ackedKeyB64: String? = nil
     ) {
+        self.ackedKeyB64 = ackedKeyB64
         self.recipientUsername = recipientUsername
         self.recipientAccountIdB64 = recipientAccountIdB64
         self.messageId = messageId
@@ -3292,3 +3632,65 @@ public struct RequestLink: Equatable {
 /// An invite link whose record could not be kept in the account's synced
 /// state: it is revoked instead of handed out.
 struct InviteLinkNotRecorded: Error {}
+
+
+// MARK: - A request inside a shared group (`docs/ux/who-can-find-me.md` 6.4)
+
+/// A group both people are current members of, with the time of its newest
+/// message (0 when none is held).
+public struct SharedGroup: Equatable {
+    public let groupIdHex: String
+    public let newestMessageMs: Int64
+
+    public init(groupIdHex: String, newestMessageMs: Int64) {
+        self.groupIdHex = groupIdHex
+        self.newestMessageMs = newestMessageMs
+    }
+}
+
+/// Which way a contact request to a known person goes (section 6.4): one
+/// order, wherever a request is sent or a one-to-one is started.
+public enum ContactRequestRoute: Equatable {
+    /// A grant this device holds still reaches their inbox: today's path.
+    case inbox
+    /// Inside this group, which both are current members of.
+    case group(groupIdHex: String)
+    /// Nothing can be sent.
+    case none
+
+    /// The inbox first; else the shared group with the newest message (the
+    /// lower id on a tie, so the choice does not depend on the order the
+    /// groups were listed in); else none.
+    public static func decide(reachesInbox: Bool, sharedGroups: [SharedGroup]) -> ContactRequestRoute {
+        if reachesInbox { return .inbox }
+        let best = sharedGroups.min { a, b in
+            a.newestMessageMs != b.newestMessageMs
+                ? a.newestMessageMs > b.newestMessageMs
+                : a.groupIdHex < b.groupIdHex
+        }
+        return best.map { .group(groupIdHex: $0.groupIdHex) } ?? .none
+    }
+}
+
+/// The receiver's own rules for a request that came inside a group.
+public enum GroupContactRequestGate {
+    /// Shown only when this account lets that group's members find it, or
+    /// the sender is a contact already; otherwise dropped without a trace.
+    public static func shows(allowsGroupMembers: Bool, senderIsContact: Bool) -> Bool {
+        allowsGroupMembers || senderIsContact
+    }
+
+    /// The row id of a request that came inside a group: no mailbox id
+    /// exists, so a negative id derived from the envelope (the same envelope
+    /// read twice is one row, and a mailbox id, always positive, never meets
+    /// it).
+    public static func messageId(envelope: Data) -> Int64 {
+        var hasher = SHA256()
+        hasher.update(data: Data("lakko/ios/group-contact-request-row/v1".utf8))
+        hasher.update(data: envelope)
+        let digest = Array(hasher.finalize())
+        var value: UInt64 = 0
+        for byte in digest.prefix(8) { value = (value << 8) | UInt64(byte) }
+        return -Int64(value & 0x3FFF_FFFF_FFFF_FFFF) - 1
+    }
+}

@@ -873,10 +873,22 @@ public class ReachManager internal constructor(
             val versions = decided.versions
             val wire = decided.storeWire
             if (versions != null && wire != null) {
+                val fofSlot = ReachSlot(ReachKind.FOF, "")
+                val fofBefore = versionOf(doc, fofSlot)
                 // Persisted exactly as the core returned it, stamp included.
                 doc = doc.copy(
                     versions = versions.map { (slot, v) -> StoredVersion(slot.kind.name, slot.scopeHex, v) },
                     reachStateHex = reachHex(wire),
+                )
+                // ADR-0060 §4 — the other device rotated `fof` (its schedule
+                // or a removal): this one restarts its schedule from now.
+                doc = doc.copy(
+                    fofRotatedAtMs = fofRotatedAtAfterAdopt(
+                        fofBefore = fofBefore,
+                        fofAfter = versionOf(doc, fofSlot),
+                        fofRotatedAtMs = doc.fofRotatedAtMs,
+                        nowMs = System.currentTimeMillis(),
+                    ),
                 )
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
@@ -906,10 +918,65 @@ public class ReachManager internal constructor(
         }
     }
 
-    /** Reconcile the mailbox with the desired key set, in the background. */
+    /** Reconcile the mailbox with the desired key set, in the background.
+     *  A due scheduled `fof` rotation ([rotateFofIfDue]) goes first. */
     public fun launchSync() {
         val b = binding.get() ?: return
-        scope.launch { lock.withLock { syncLocked(b, System.currentTimeMillis()) } }
+        scope.launch {
+            if (rotateFofIfDue(b)) return@launch
+            lock.withLock { syncLocked(b, System.currentTimeMillis()) }
+        }
+    }
+
+    /**
+     * The app became active (MainActivity.onResume): run the scheduled `fof`
+     * rotation if it is due. This and [launchSync] (every bind, so every
+     * start) are the only places it fires; there is no background job of its
+     * own, so a schedule that came due while the app was closed fires here.
+     */
+    public fun onAppActive() {
+        val b = binding.get() ?: return
+        scope.launch { rotateFofIfDue(b) }
+    }
+
+    /**
+     * ADR-0060 §4, "Narrowing" — the `fof` key rotates every
+     * [FOF_ROTATION_MS] as well as on a contact's removal, so a person who
+     * stopped being a contact of a contact stops finding this account once
+     * the relayed record ages out. As on web: a new `fof` version, the old
+     * key unregistered at once (the reconcile inside), the ReachState to the
+     * other devices, and the profiles and the introduction record (whose offer
+     * key carries the `fof` version) to the contacts. The schedule is
+     * persisted in [ReachDoc.fofRotatedAtMs], so it survives a restart.
+     *
+     * The first pass on a device (no "rotated at" held: install, restore,
+     * pairing) only starts the schedule. Waits for the version recovery of a
+     * fresh install, so it never establishes a version without looking at
+     * the mailbox. Returns `true` when it rotated (and reconciled).
+     */
+    private suspend fun rotateFofIfDue(b: Binding): Boolean {
+        val envelope = lock.withLock {
+            if (binding.get() !== b) return false
+            val now = System.currentTimeMillis()
+            // The first pass on this device (install, restore, pairing) only
+            // starts the schedule; it rotates nothing.
+            fofScheduleStart(doc.fofRotatedAtMs, now)?.let { start ->
+                doc = doc.copy(fofRotatedAtMs = start)
+                store.save(b.accountIdB64, doc)
+                return false
+            }
+            if (!fofRotationDue(doc.fofRotatedAtMs, now)) return false
+            if (ensureVersionRecoveryLocked(b) != null) return false
+            if (binding.get() !== b) return false
+            doc = withScheduledFofRotation(doc, now)
+            val envelope = stampReachStateLocked()
+            store.save(b.accountIdB64, doc)
+            Log.i(LOG_TAG, "fof key rotated on its schedule")
+            syncLocked(b, now)
+            envelope
+        }
+        afterRotation(b, envelope)
+        return true
     }
 
     /** Reconcile now. `true` when the mailbox holds the desired set. */

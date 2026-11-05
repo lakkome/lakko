@@ -99,6 +99,8 @@ public fun SettingsScreen(
     onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
     onOpenLanguage: () -> Unit,
+    /** docs/ux/text-size.md — Settings > Appearance > Text size. */
+    onOpenTextSize: () -> Unit = {},
     onLogout: () -> Unit,
     /** ADR-0059 section 6 — Security -> Channels I share. */
     onOpenChannelsIShare: () -> Unit = {},
@@ -269,6 +271,8 @@ public fun SettingsScreen(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // docs/ux/text-size.md — below Theme.
+            TextSizeSettingsRow(onClick = onOpenTextSize)
             // reactions-and-emoji D4 — the quick reaction lives in Appearance.
             QuickReactionSettingRow(onSet = onSetQuickReaction)
             // docs/ux/localization.md section 1: a top-level row after Appearance.

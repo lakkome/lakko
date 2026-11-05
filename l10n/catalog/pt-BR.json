@@ -3914,8 +3914,8 @@
       "text": "Envie uma mensagem primeiro para iniciar uma chamada.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "Sua conversa está sendo preparada.",
+    "contacts.detail.cannot_message": {
+      "text": "Você ainda não pode enviar mensagens para {name}. Peça um link de convite.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "Este contato foi adicionado antes de ser possível iniciar conversas por aqui. Peça para ele enviar uma mensagem para você.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "Não foi possível enviar a solicitação. Tente novamente.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "Solicitação enviada. Você poderá escrever quando {name} aceitar.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "Não foi possível aceitar. Tente novamente.",
+      "text": "Não foi possível aceitar.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "Alguém",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "Via {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "Via um grupo em que vocês dois estão",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Números de segurança",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "Grande",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "Médio",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "Este tamanho é fácil de ler?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Você pode mudar isso aqui a qualquer momento.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "Pequeno",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "Tamanho do texto",
       "status": "machine"
     },
     "settings.translation.delete_all": {

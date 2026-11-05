@@ -286,9 +286,25 @@ public enum RecordingMachine {
         return formatClock(ms: (remainder == 0 ? quotient : quotient + 1) * 1000)
     }
 
-    /// Spoken duration for accessibility labels: "12 seconds", "1 minute 5 seconds".
+    /// Spoken duration for an elapsed time or a playback position, rounded
+    /// DOWN like ``formatClock(ms:)``: "12 seconds", "1 minute 5 seconds".
+    /// The visible time and the spoken label use one rounding rule, the
+    /// visible one (base walk 2026-11-04).
     public static func spokenDuration(ms: Int64) -> String {
-        let total = max(0, Int64((Double(ms) / 1000).rounded()))
+        spoken(seconds: max(0, ms) / 1000)
+    }
+
+    /// Spoken TOTAL duration of a recording or received media message,
+    /// rounded UP like ``formatTotalClock(ms:)``, so a 3.2 s message shown as
+    /// `0:04` is also read as "4 seconds".
+    public static func spokenTotalDuration(ms: Int64) -> String {
+        guard ms > 0 else { return spoken(seconds: 0) }
+        let (quotient, remainder) = ms.quotientAndRemainder(dividingBy: 1000)
+        return spoken(seconds: remainder == 0 ? quotient : quotient + 1)
+    }
+
+    private static func spoken(seconds totalSeconds: Int64) -> String {
+        let total = max(0, totalSeconds)
         let minutes = total / 60
         let seconds = total % 60
         let s = Localization.text("common.duration.seconds", counts: ["count": UInt64(seconds)])

@@ -3914,8 +3914,8 @@
       "text": "कॉल शुरू करने के लिए पहले एक मैसेज भेजें।",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "आपकी चैट तैयार हो रही है।",
+    "contacts.detail.cannot_message": {
+      "text": "आप अभी {name} को संदेश नहीं भेज सकते। उनसे आमंत्रण लिंक माँगें।",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "यह संपर्क तब जोड़ा गया था जब यहाँ से चैट शुरू नहीं की जा सकती थी। उनसे आपको मैसेज करने को कहें।",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "अनुरोध नहीं भेजा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "अनुरोध भेजा गया। {name} के स्वीकार करने पर आप लिख सकेंगे।",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "text": "स्वीकार नहीं हो सका।",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "कोई",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "{group} के ज़रिए",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "एक समूह के ज़रिए जिसमें आप दोनों हैं",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "सुरक्षा नंबर",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "बड़ा",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "मध्यम",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "क्या यह आकार पढ़ने में आसान है?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "आप इसे कभी भी यहाँ बदल सकते हैं।",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "छोटा",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "टेक्स्ट का आकार",
       "status": "machine"
     },
     "settings.translation.delete_all": {

@@ -997,9 +997,6 @@ function ChatView(props: {
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editText, setEditText] = createSignal("");
-  /** The open edit was started from the keyboard (desktop `Up` in an empty
-   *  composer), so its field takes the focus. */
-  const [editFromKeyboard, setEditFromKeyboard] = createSignal(false);
   // ADR-0052 / message-actions.md section 3.1 — the reply the composer is
   // armed with: the target's DS id and the snapshot taken when Reply was
   // chosen. Session-scoped by construction: this view is keyed on the group
@@ -4403,6 +4400,9 @@ function ChatView(props: {
       // ADR-0057 — consumed at receipt by the chat client; a stray one is
       // dropped here, never shown.
       if (e.kind === "registrarSeed") continue;
+      // Who-can-find-me 6.4 — a contact request sealed to one member: the
+      // same.
+      if (e.kind === "groupContactRequest") continue;
       // An unrecognised `lakko/…` service envelope: never a row.
       if (e.kind === "serviceEnvelope") continue;
       if (incomingIds.has(e.messageId)) continue;
@@ -8043,13 +8043,11 @@ function ChatView(props: {
                 editingId={editingId()}
                 editText={editText()}
                 setEditText={setEditText}
-                focusEditOnOpen={editFromKeyboard()}
                 onStartEdit={(id, current) => {
                   // ADR-0052 — replying and editing are exclusive: starting
                   // an edit drops an armed reply.
                   setReplyingTo(null);
                   setEditText(current);
-                  setEditFromKeyboard(false);
                   setEditingId(id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
@@ -8660,7 +8658,6 @@ function ChatView(props: {
                 e.preventDefault();
                 setReplyingTo(null);
                 setEditText(last.text);
-                setEditFromKeyboard(true);
                 setEditingId(last.messageId);
               }
             }
@@ -10317,9 +10314,10 @@ function timelineRowToPersisted(
     // delegation, an introduction record). Never a row, never persisted.
     return null;
   }
-  if (row.event.kind === "registrarSeed") {
-    // ADR-0057 — consumed at receipt by the chat client and never a row.
-    // Never persist it: it carries a sealed registrar seed.
+  if (row.event.kind === "registrarSeed" || row.event.kind === "groupContactRequest") {
+    // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
+    // client and never a row. Never persisted: it carries a sealed seed or a
+    // sealed contact request.
     return null;
   }
   if (row.event.kind === "serviceEnvelope") {

@@ -76,6 +76,11 @@ public struct ReachRecord: Codable, Equatable {
     /// last registration, so the next one sees which it left and rotates
     /// that class's one key. `nil` until the first registration.
     public var memberOf: ReachRules.Membership?
+    /// ADR-0060 section 4, "Narrowing" — when this device last rotated the
+    /// `fof` key on its 7-day schedule (or adopted a rotation another device
+    /// made). Device-local bookkeeping, not part of the shared reach state.
+    /// `nil` until the first registration starts the schedule.
+    public var fofRotatedAtMs: UInt64?
     /// ADR-0060 section 6, "An add of a person found by search" — the people
     /// this device proposed to add to a group after finding them in
     /// Everyone, with the mailbox binding their public record carried. A

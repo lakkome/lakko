@@ -6,7 +6,7 @@
  * contact" (`adopt-one-to-one.ts`), pure, against fixed lists.
  */
 import { describe, expect, it } from "vitest";
-import { adoptOneToOnePeer } from "./adopt-one-to-one";
+import { adoptOneToOnePeer, adoptablePeerOf } from "./adopt-one-to-one";
 import type { AcceptedContact } from "./local-store";
 import { oneToOnePeerKey } from "../chat/person-key";
 
@@ -159,5 +159,36 @@ describe("oneToOnePeerKey", () => {
     expect(oneToOnePeerKey([ALICE, BOB], ME)).toBeNull();
     expect(oneToOnePeerKey([ME], ME)).toBeNull();
     expect(oneToOnePeerKey([ME, BOB], null)).toBeNull();
+  });
+});
+
+describe("a contact is linked only to their one-to-one (seen live 2026-11-05)", () => {
+  it("a GROUP that holds two people makes no contact and no link", () => {
+    // NewGroup founds with its first pick and adds the rest afterwards, so a
+    // group passes through two people.
+    expect(adoptablePeerOf({ isOneToOne: false, people: [ME, BOB], ownKeyB64: ME })).toBeNull();
+    expect(adoptablePeerOf({ isOneToOne: true, people: [ME, BOB], ownKeyB64: ME })).toBe(BOB);
+    expect(adoptablePeerOf({ isOneToOne: true, people: [ME, BOB, ALICE], ownKeyB64: ME })).toBeNull();
+    expect(adoptablePeerOf({ isOneToOne: true, people: [ME, BOB], ownKeyB64: null })).toBeNull();
+  });
+
+  it("a row linked to something that is not their one-to-one is relinked to it", () => {
+    const row: AcceptedContact = { signaturePubkeyB64: BOB, displayName: "Bob", acceptedAtMs: 1, groupIdB64: GROUP };
+    const next = adoptOneToOnePeer(
+      [row],
+      { signatureKey: BOB, groupIdB64: OTHER_GROUP, nowMs: 2 },
+      undefined,
+      (id) => id === OTHER_GROUP,
+    );
+    expect(next).not.toBeNull();
+    expect(next?.[0]?.groupIdB64).toBe(OTHER_GROUP);
+    expect(next?.[0]?.displayName).toBe("Bob");
+  });
+
+  it("a row whose link is still their one-to-one keeps it", () => {
+    const row: AcceptedContact = { signaturePubkeyB64: BOB, displayName: "Bob", acceptedAtMs: 1, groupIdB64: GROUP };
+    expect(
+      adoptOneToOnePeer([row], { signatureKey: BOB, groupIdB64: OTHER_GROUP, nowMs: 2 }, undefined, () => true),
+    ).toBeNull();
   });
 });

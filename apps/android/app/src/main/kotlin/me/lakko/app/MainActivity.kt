@@ -173,6 +173,7 @@ class MainActivity : ComponentActivity() {
         // every screen pads by its own Scaffold / safe-drawing insets.
         enableEdgeToEdge()
         ThemePreference.init(applicationContext)
+        me.lakko.app.ui.theme.TextSizePreference.init(applicationContext)
         // ADR-0061 — the interface language: stored choice, else the system
         // language, else English. Loaded before the first frame.
         me.lakko.app.l10n.Localization.init(applicationContext)
@@ -409,6 +410,9 @@ class MainActivity : ComponentActivity() {
         me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
         me.lakko.app.devices.DeviceCardCenter.foreground = true
+        // ADR-0060 §4 — the scheduled `fof` rotation fires when the app is
+        // active, never from a background job of its own.
+        me.lakko.app.reach.ReachManager.peek()?.onAppActive()
     }
 
     /** ADR-0080 section 3: the person's touches and keys on this device are
@@ -2461,6 +2465,7 @@ private fun SessionRoot(
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
                         onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
+                        onOpenTextSize = { navController.navigate(Routes.TEXT_SIZE) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -2944,6 +2949,9 @@ private fun SessionRoot(
                 composable(Routes.LANGUAGE) {
                     me.lakko.app.ui.settings.LanguageScreen(onBack = { navController.popBackStack() })
                 }
+                composable(Routes.TEXT_SIZE) {
+                    me.lakko.app.ui.settings.TextSizeScreen(onBack = { navController.popBackStack() })
+                }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
                         manager = antiCensorship,
@@ -3098,6 +3106,7 @@ private object Routes {
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
     const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
+    const val TEXT_SIZE = "settings/text-size"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
     const val SAVED = "chats/saved"

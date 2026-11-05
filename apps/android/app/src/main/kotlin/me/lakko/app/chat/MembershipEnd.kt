@@ -191,6 +191,9 @@ public data class OwedEnd(
     val stage: EndStage,
     /** The person closed the notice while the steps were still running. */
     val noticeClosed: Boolean = false,
+    /** When this device recorded the end (unix ms): orders the notices, since
+     *  the store hands rows back in no order. `0` on a row stored before. */
+    val recordedAtMs: Long = 0L,
 ) {
     /** A person who asked to go gets no notice; everyone else, once. */
     val noticeOwed: Boolean
@@ -200,16 +203,22 @@ public data class OwedEnd(
 }
 
 /** The first row of an end this device applied itself. */
-internal fun appliedEnd(idHex: String, name: String, left: Boolean, epoch: ULong): OwedEnd =
-    OwedEnd(idHex.lowercase(), name, left, epoch.toString(), EndSource.APPLIED, EndStage.RECORDED)
+internal fun appliedEnd(
+    idHex: String,
+    name: String,
+    left: Boolean,
+    epoch: ULong,
+    nowMs: Long = System.currentTimeMillis(),
+): OwedEnd =
+    OwedEnd(idHex.lowercase(), name, left, epoch.toString(), EndSource.APPLIED, EndStage.RECORDED, recordedAtMs = nowMs)
 
 /** The first row of an end this device heard of: steps 3 and 4 only. */
-internal fun heardEnd(idHex: String, name: String, epoch: ULong): OwedEnd =
-    OwedEnd(idHex.lowercase(), name, false, epoch.toString(), EndSource.HEARD, EndStage.PUBLISHED)
+internal fun heardEnd(idHex: String, name: String, epoch: ULong, nowMs: Long = System.currentTimeMillis()): OwedEnd =
+    OwedEnd(idHex.lowercase(), name, false, epoch.toString(), EndSource.HEARD, EndStage.PUBLISHED, recordedAtMs = nowMs)
 
 /** The first row of a `Delete this chat`: the wipe alone. */
-internal fun chosenEnd(idHex: String, epoch: ULong): OwedEnd =
-    OwedEnd(idHex.lowercase(), "", true, epoch.toString(), EndSource.CHOSEN, EndStage.STOPPED)
+internal fun chosenEnd(idHex: String, epoch: ULong, nowMs: Long = System.currentTimeMillis()): OwedEnd =
+    OwedEnd(idHex.lowercase(), "", true, epoch.toString(), EndSource.CHOSEN, EndStage.STOPPED, recordedAtMs = nowMs)
 
 /** Where owed ends live. */
 internal interface MembershipEndStore {
@@ -397,15 +406,29 @@ internal suspend fun runMembershipEnd(
 public data class MembershipEndNotice(
     val idHex: String,
     val name: String,
+    /** When the end was recorded, unix ms (`0` when not known). */
+    val recordedAtMs: Long = 0L,
 )
 
-/** The notices [rows] owe, oldest row order kept. */
+/** The notices [rows] owe, oldest first. */
 internal fun endNoticesOf(rows: List<OwedEnd>): List<MembershipEndNotice> =
-    rows.filter { it.noticeOwed }.map { MembershipEndNotice(it.idHex, it.name) }
+    rows.filter { it.noticeOwed }
+        .sortedWith(compareBy<OwedEnd> { it.recordedAtMs }.thenBy { it.idHex })
+        .map { MembershipEndNotice(it.idHex, it.name, it.recordedAtMs) }
 
 /** The conversations that are on their way out: gone from the list at once. */
 internal fun endingIdsOf(rows: List<OwedEnd>): Set<String> =
     rows.filter { it.stage != EndStage.NOTICE_ONLY }.map { it.idHex }.toSet()
+
+/**
+ * ADR-0087 UX 9.1 — the Chats banners: one per removal still owed, the newest
+ * on top, each with its own close; closing one leaves the others, and a newer
+ * removal never hides an older one not yet closed (seen 2026-11-04: only the
+ * older group's banner showed and the new removal said nothing).
+ */
+internal fun bannerNotices(notices: List<MembershipEndNotice>): List<MembershipEndNotice> =
+    notices.distinctBy { it.idHex }
+        .sortedWith(compareByDescending<MembershipEndNotice> { it.recordedAtMs }.thenBy { it.idHex })
 
 /** The notice's sentence. An unnamed group reads by the catalog's own word. */
 internal fun endNoticeLine(name: String, fallbackName: String): UiText =

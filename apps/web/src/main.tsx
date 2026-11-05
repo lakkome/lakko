@@ -19,6 +19,7 @@ import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
+import { bootstrapTextSize } from "./ui/text-size";
 import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
 import { publishNotificationStrings } from "./l10n/notification-strings";
 import { installOriginHistory } from "./routes/origin-history";
@@ -55,6 +56,8 @@ if (root === null) {
 // theme. Synchronous reads of localStorage + a single
 // setAttribute; ~0.5 ms typical.
 bootstrapTheme();
+// docs/ux/text-size.md — the message text size, before the first paint.
+bootstrapTextSize();
 
 // The address bar shows the origin only: read the entry path (an invite
 // link, a notification's `/?wake=`) and clear the URL before any screen

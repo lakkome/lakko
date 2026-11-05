@@ -71,10 +71,50 @@ class ContactConversationTest {
     }
 
     @Test
-    fun `before a session knows its own key only the linked conversation answers`() {
+    fun `before a session knows its own key nothing answers`() {
+        // A linked id cannot be shown to be this person's one-to-one.
         val conv = Conv("g1", listOf(me, anna), oneToOne = true)
         assertNull(find(anna, null, listOf(conv), own = null))
-        assertSame(conv, find(anna, "g1", listOf(conv), own = null))
+        assertNull(find(anna, "g1", listOf(conv), own = null))
+    }
+
+    @Test
+    fun `a linked GROUP the person is in is not their chat`() {
+        // Seen live on web 2026-11-05: Message opened a group the person is in.
+        val group = Conv("grp", listOf(me, anna, "boris"), oneToOne = false)
+        assertNull(find(anna, "grp", listOf(group)))
+        val mine = Conv("g2", listOf(me, anna), oneToOne = true)
+        assertSame(mine, find(anna, "grp", listOf(group, mine)))
+    }
+
+    @Test
+    fun `a linked two-person group is not their chat either`() {
+        val group = Conv("grp", listOf(me, anna), oneToOne = false)
+        assertNull(find(anna, "grp", listOf(group)))
+    }
+
+    @Test
+    fun `a linked one-to-one with someone else is not their chat`() {
+        val boris = Conv("gb", listOf(me, "boris"), oneToOne = true)
+        assertNull(find(anna, "gb", listOf(boris)))
+    }
+
+    @Test
+    fun `a one-to-one under a proven rotated key of the person is theirs`() {
+        // ADR-0074 section 3.7: the row is under the key they asked with, the
+        // conversation under the key their leaves are bound to.
+        val conv = Conv("g1", listOf(me, "anna-old"), oneToOne = true)
+        val found = conversationWithContact(
+            contactKey = anna,
+            linkedId = "g1",
+            conversations = listOf(conv),
+            idOf = { it.id },
+            ownKey = me,
+            peopleOf = { it.people },
+            isOneToOne = { it.oneToOne },
+            samePerson = { a, b -> setOf(a, b) == setOf("anna", "anna-old") || a == b },
+        )
+        assertSame(conv, found)
     }
 
     // ---- founding ----------------------------------------------------------

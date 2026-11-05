@@ -1051,30 +1051,18 @@ public final class ContactsClient {
         return Data(bytes)
     }
 
-    /// Shared compose-and-publish path used by both send surfaces.
-    /// Mirror of the Kotlin private method — pulled out so the two
-    /// public flows don't drift on subtle details (mailbox-pseudonym
-    /// derivation, envelope-kind wrapping, sender-pseudonym choice).
-    private func composeAndPublishContactRequest(
+    /// The signed contact-request wire for one recipient, sealed to its
+    /// X25519 key: what a mailbox row carries, and what a request sent inside
+    /// a shared group (`docs/ux/who-can-find-me.md` 6.4) seals once more.
+    static func composeRequestWire(
         senderSigningSeed: Data,
         senderAccountId: Data,
-        senderSignaturePubkey: Data,
-        recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         profile: FfiProfile?,
         introMessage: Data,
         replyGrant: FfiReachGrant?,
-        plan: MailboxWritePlan?,
         linkAnswer: FfiLinkAnswer? = nil
-    ) async throws -> PublishedRequest {
-        // ADR-0078 — the recipient's mailbox comes from a binding verified
-        // against the key the envelope is sealed for (a link's grant, a
-        // search result's record, a grant held for them); with none there is
-        // nowhere to write, and nothing is sent.
-        guard let plan, plan.target.accountKey == recipientSignaturePubkey else {
-            NSLog("ADR-0078: no verified mailbox for the recipient; the request was not sent")
-            throw ContactsError.requestRefused
-        }
+    ) throws -> Data {
         // ADR-0078 — the request's `fromPseudonym` is 32 fresh random bytes.
         // It routes nothing (the ack goes back under the reply grant's
         // binding) and nothing matches an ack against it (an ack is paired
@@ -1127,6 +1115,41 @@ public final class ContactsClient {
         } catch {
             throw ContactsError.wrap(error)
         }
+        return wireBytes
+    }
+
+    /// Shared compose-and-publish path used by both send surfaces.
+    /// Mirror of the Kotlin private method — pulled out so the two
+    /// public flows don't drift on subtle details (mailbox-pseudonym
+    /// derivation, envelope-kind wrapping, sender-pseudonym choice).
+    private func composeAndPublishContactRequest(
+        senderSigningSeed: Data,
+        senderAccountId: Data,
+        senderSignaturePubkey: Data,
+        recipientSignaturePubkey: Data,
+        recipientX25519Pubkey: Data,
+        profile: FfiProfile?,
+        introMessage: Data,
+        replyGrant: FfiReachGrant?,
+        plan: MailboxWritePlan?,
+        linkAnswer: FfiLinkAnswer? = nil
+    ) async throws -> PublishedRequest {
+        // ADR-0078 — the recipient's mailbox comes from a binding verified
+        // against the key the envelope is sealed for (a link's grant, a
+        // search result's record, a grant held for them); with none there is
+        // nowhere to write, and nothing is sent.
+        guard let plan, plan.target.accountKey == recipientSignaturePubkey else {
+            NSLog("ADR-0078: no verified mailbox for the recipient; the request was not sent")
+            throw ContactsError.requestRefused
+        }
+        let wireBytes = try Self.composeRequestWire(
+            senderSigningSeed: senderSigningSeed,
+            senderAccountId: senderAccountId,
+            recipientX25519Pubkey: recipientX25519Pubkey,
+            profile: profile,
+            introMessage: introMessage,
+            replyGrant: replyGrant,
+            linkAnswer: linkAnswer)
 
         let publish: PublishResult
         do {
@@ -1304,6 +1327,69 @@ public final class ContactsClient {
             mailboxKey: mailboxKey, myX25519Secret: myX25519Secret)
     }
 
+    /// One contact-request wire, verified and opened with this account's
+    /// X25519 secret: the request row, its reply grant and its link answer.
+    /// `nil` when the wire does not verify. Shared by the mailbox and by a
+    /// request that came inside a shared group (`docs/ux/who-can-find-me.md`
+    /// 6.4), so the two read a request alike.
+    static func incomingRequest(
+        wire body: Data, messageId: Int64, createdAt: String, myX25519Secret: Data,
+        viaGroupIdHex: String? = nil
+    ) -> (request: IncomingContactRequest, replyGrant: FfiReachGrant?, linkAnswer: FfiLinkAnswer?)? {
+        let parsed: ContactRequest
+        do {
+            parsed = try ContactRequest.decodeAndVerify(wire: body)
+        } catch {
+            return nil
+        }
+
+        let intro: String?
+        let profile: ProfileClaim?
+        var replyGrant: FfiReachGrant?
+        var linkAnswer: FfiLinkAnswer?
+        do {
+            let opened = try parsed.openEnvelope(
+                recipientX25519Priv: myX25519Secret
+            )
+            intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
+            replyGrant = opened.replyGrant
+            // ADR-0079 section 2 — the link this request answers.
+            linkAnswer = opened.linkAnswer
+            // ADR-0048 — `nil` when the request carried no profile, or
+            // one that failed its bounds (the request itself stays
+            // valid). Bound by the caller to `fromPubkey`, which the
+            // request signature authenticates.
+            profile = opened.profile.map {
+                ProfileClaim(
+                    displayName: $0.displayName,
+                    username: $0.username,
+                    updatedAtMs: $0.updatedAtMs,
+                    // Envelope v2 — the requester's account id, or
+                    // `nil` when it sent none (ADR-0021 tile match).
+                    accountId: $0.accountId,
+                    usernameCertificate: $0.usernameCertificate,
+                    avatar: ProfileAvatar($0.avatar)
+                )
+            }
+        } catch {
+            intro = nil
+            profile = nil
+        }
+
+        let req = IncomingContactRequest(
+            messageId: messageId,
+            fromPubkey: parsed.fromPubkey(),
+            fromAccountId: parsed.fromAccountId(),
+            fromPseudonym: parsed.fromPseudonym(),
+            validAfterMs: parsed.validAfterMs(),
+            intro: intro,
+            profile: profile,
+            createdAt: createdAt,
+            viaGroupIdHex: viaGroupIdHex
+        )
+        return (req, replyGrant, linkAnswer)
+    }
+
     /// ADR-0078 — open every fetched row with the own mailbox key and
     /// dispatch it by the kind inside the seal. A row that does not open is
     /// dropped (it may be garbage); a Welcome rendezvous (the channel
@@ -1355,61 +1441,15 @@ public final class ContactsClient {
                 )
                 events.append(.contactAck(ack))
             case .contactRequest:
-                let parsed: ContactRequest
-                do {
-                    parsed = try ContactRequest.decodeAndVerify(wire: body)
-                } catch {
-                    // Bad signature, malformed wire bytes, or some
-                    // other verifier failure. Drop and move on —
-                    // the cursor advances so we won't re-process
-                    // the same row.
-                    continue
-                }
-
-                let intro: String?
-                let profile: ProfileClaim?
-                var replyGrant: FfiReachGrant?
-                var linkAnswer: FfiLinkAnswer?
-                do {
-                    let opened = try parsed.openEnvelope(
-                        recipientX25519Priv: myX25519Secret
-                    )
-                    intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
-                    replyGrant = opened.replyGrant
-                    // ADR-0079 section 2 — the link this request answers.
-                    linkAnswer = opened.linkAnswer
-                    // ADR-0048 — `nil` when the request carried no profile, or
-                    // one that failed its bounds (the request itself stays
-                    // valid). Bound by the caller to `fromPubkey`, which the
-                    // request signature authenticates.
-                    profile = opened.profile.map {
-                        ProfileClaim(
-                            displayName: $0.displayName,
-                            username: $0.username,
-                            updatedAtMs: $0.updatedAtMs,
-                            // Envelope v2 — the requester's account id, or
-                            // `nil` when it sent none (ADR-0021 tile match).
-                            accountId: $0.accountId,
-                            usernameCertificate: $0.usernameCertificate,
-                            avatar: ProfileAvatar($0.avatar)
-                        )
-                    }
-                } catch {
-                    intro = nil
-                    profile = nil
-                }
-
-                let req = IncomingContactRequest(
-                    messageId: message.id,
-                    fromPubkey: parsed.fromPubkey(),
-                    fromAccountId: parsed.fromAccountId(),
-                    fromPseudonym: parsed.fromPseudonym(),
-                    validAfterMs: parsed.validAfterMs(),
-                    intro: intro,
-                    profile: profile,
-                    createdAt: message.createdAt
-                )
-                events.append(.contactRequest(req, replyGrant: replyGrant, linkAnswer: linkAnswer))
+                // Bad signature, malformed wire bytes, or some other verifier
+                // failure: dropped; the cursor advances so the row is not
+                // processed again.
+                guard let opened = incomingRequest(
+                    wire: body, messageId: message.id, createdAt: message.createdAt,
+                    myX25519Secret: myX25519Secret)
+                else { continue }
+                events.append(.contactRequest(
+                    opened.request, replyGrant: opened.replyGrant, linkAnswer: opened.linkAnswer))
             }
         }
         return PollResult(events: events, cursor: cursor, hasMore: hasMore)
@@ -1501,6 +1541,10 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// request through an invite link it decides the link's expiry (ADR-0079
     /// amendment of 2026-10-19); persisted with the request.
     public let createdAt: String
+    /// `docs/ux/who-can-find-me.md` 6.4 — the group the request came inside,
+    /// when it came that way and not through the mailbox: the Requests row
+    /// says "Via {group}". `nil` for a mailbox request.
+    public let viaGroupIdHex: String?
 
     public init(
         messageId: Int64,
@@ -1510,7 +1554,8 @@ public struct IncomingContactRequest: Equatable, Codable {
         validAfterMs: UInt64,
         intro: String?,
         profile: ProfileClaim? = nil,
-        createdAt: String
+        createdAt: String,
+        viaGroupIdHex: String? = nil
     ) {
         self.messageId = messageId
         self.fromPubkey = fromPubkey
@@ -1520,6 +1565,7 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.intro = intro
         self.profile = profile
         self.createdAt = createdAt
+        self.viaGroupIdHex = viaGroupIdHex
     }
 
     /// The DS stamp as Unix ms, or `nil` when it does not parse.

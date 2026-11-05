@@ -149,6 +149,10 @@ import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { ContactsClient } from "../contacts/client";
 import { conversationWithContact } from "../contacts/contact-conversation";
+import { inviteContactToCall, type InviteOutcome } from "./invite-route";
+import { sharedGroupsFor } from "../contacts/shared-groups";
+import { heldGrantReaches } from "../search/wiring";
+import { loadSentRequests, recordSentRequest } from "../contacts/sent-requests";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
 import { InviteContactsPicker } from "./InviteContactsPicker";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
@@ -376,7 +380,7 @@ export interface CallHostApi {
   closeLinkCallInvitePicker(): void;
   /** Send the invitation into the picked conversation. Rejects when it was
    *  not sent; the call is untouched either way. */
-  sendLinkCallInvite(target: { readonly keyB64: string; readonly name: string }): Promise<void>;
+  sendLinkCallInvite(target: { readonly keyB64: string; readonly name: string }): Promise<InviteOutcome>;
   /** What `Invite` is doing for the call in the link slot. */
   readonly linkCallInvite: Accessor<InCallInvite>;
   /** The one line the call screen shows about it, or `null` once it has been
@@ -2808,7 +2812,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   async function sendLinkCallInvite(target: {
     readonly keyB64: string;
     readonly name: string;
-  }): Promise<void> {
+  }): Promise<InviteOutcome> {
     const s = auth.state();
     const secrets = auth.identitySecrets();
     const contact = loadAccepted().find((c) => c.signaturePubkeyB64 === target.keyB64);
@@ -2824,33 +2828,70 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       const now = untrack(linkSlot);
       return now !== null && linkCallOccupiesSlot(now.phase) && now.callIdHex === forCallIdHex;
     };
+    const accountIdHex = contact.accountIdHex;
+    const accountIdOf = (hex: string | undefined): Uint8Array => {
+      const bytes = hex === undefined ? null : hexToBytes(hex);
+      if (bytes === null) throw new Error("contact has no account id");
+      return bytes;
+    };
+    let outcome: InviteOutcome;
     try {
-      let entry = conversationWithContact({
-        contact,
-        conversations: chats.groups(),
-        ownKeyB64: ownPersonKeyB64(chats.identity()),
-        peopleOf: (g) => personKeysOf(g.group),
-        isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+      outcome = await inviteContactToCall({
+        existing: () =>
+          conversationWithContact({
+            contact,
+            conversations: chats.groups(),
+            ownKeyB64: ownPersonKeyB64(chats.identity()),
+            peopleOf: (g) => personKeysOf(g.group),
+            isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+          }),
+        accountKnown: accountIdHex !== undefined,
+        grantReaches: () => heldGrantReaches(base64Decode(contact.signaturePubkeyB64)),
+        requestWaiting: () =>
+          loadSentRequests(s.account.accountId).some((r) => r.recipientAccountIdHex === accountIdHex),
+        sharedGroups: () =>
+          sharedGroupsFor({
+            groups: chats.groups(),
+            accountIdB64: s.account.accountId,
+            ownKeyB64: ownPersonKeyB64(chats.identity()),
+            personKeysB64: [contact.signaturePubkeyB64, ...(contact.previousSignaturePubkeysB64 ?? [])],
+          }),
+        found: async () =>
+          (
+            await foundOneToOneWith({
+              client: contactsClient,
+              identity: secrets,
+              chats,
+              profiles,
+              contact,
+              peerAccountId: accountIdOf(accountIdHex),
+              peerPubkey: base64Decode(contact.signaturePubkeyB64),
+            })
+          ).conversation,
+        sendLink: (entry) => sendTextToConversation({ chat, accountId: s.account.accountId, entry, text: url }),
+        // Who-can-find-me 6.4 - no inbox reaches them: the contact request
+        // goes inside a group both are in; the call link waits until they
+        // accept.
+        sendInGroup: async (groupIdB64) => {
+          const shared = chats.get(groupIdB64);
+          if (shared === undefined || accountIdHex === undefined) throw new Error("the shared group is gone");
+          await contactsClient.sendContactRequestInGroup(
+            secrets,
+            accountIdOf(accountIdHex),
+            base64Decode(contact.signaturePubkeyB64),
+            shared.group,
+          );
+          const name = profiles.resolve(contact.signaturePubkeyB64);
+          recordSentRequest(s.account.accountId, {
+            recipientUsername: name.username ?? "",
+            recipientName: memberNameOf(name),
+            recipientAccountIdHex: accountIdHex,
+            sentAtMs: Date.now(),
+            recipientKeyB64: contact.signaturePubkeyB64,
+            throughGroupIdB64: groupIdB64,
+          });
+        },
       });
-      if (entry === undefined) {
-        // No conversation with this contact on this device yet. Founding one
-        // needs the contact's account id, which the record holds for every
-        // contact accepted since ADR-0021.
-        const accountId =
-          contact.accountIdHex === undefined ? null : hexToBytes(contact.accountIdHex);
-        if (accountId === null) throw new Error("contact has no account id");
-        const founded = await foundOneToOneWith({
-          client: contactsClient,
-          identity: secrets,
-          chats,
-          profiles,
-          contact,
-          peerAccountId: accountId,
-          peerPubkey: base64Decode(contact.signaturePubkeyB64),
-        });
-        entry = founded.conversation;
-      }
-      await sendTextToConversation({ chat, accountId: s.account.accountId, entry, text: url });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("call host: could not send the call invitation", err);
@@ -2859,9 +2900,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
     // The picker stays open: several contacts can be invited one after
     // another, and it is closed by the person.
-    if (sameCall()) {
+    if (outcome === "invited" && sameCall()) {
       showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.name } });
     }
+    return outcome;
   }
 
   // The embedded in-call UI's End button moves the store to `ended`. A session

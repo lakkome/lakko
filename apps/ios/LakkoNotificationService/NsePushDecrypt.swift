@@ -1594,9 +1594,20 @@ public func nseIsServiceEnvelope(
     // knock and admission seeds. Each rides an ordinary group journal row;
     // recognised and suppressed like every service envelope, never stored
     // (C-59). A yes / no from the slim FFI. Defaulted for the reason above.
-    isGroupSetting: (Data) -> Bool = { _ in false }
+    isGroupSetting: (Data) -> Bool = { _ in false },
+    // `docs/ux/who-can-find-me.md` 6.4 — a contact request one member sent
+    // inside the group, sealed to one member. Never a notification body on
+    // any device, the person's own included: the foreground app opens it and
+    // files it under Requests. A yes / no from the slim FFI
+    // (`isGroupContactRequestEnvelope`). Defaulted for the reason above.
+    isGroupContactRequest: (Data) -> Bool = { _ in false },
+    groupContactRequestEnvelopeLens: ClosedRange<Int> = 0...0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikeGroupContactRequest(bytes, envelopeLens: groupContactRequestEnvelopeLens),
+       isGroupContactRequest(bytes) {
+        return true
+    }
     if bytes.first == 0x6C, isGroupSetting(bytes) { return true }
     if nseLooksLikeLinkFounded(bytes, envelopeLens: linkFoundedEnvelopeLens), isLinkFounded(bytes) {
         return true
@@ -1644,6 +1655,19 @@ public func nseIsServiceEnvelope(
         return true
     }
     return false
+}
+
+/// First byte of the group-contact-request domain separator
+/// (`"lakko/group-contact-request/v1\0"`), as for every other envelope.
+private let groupContactRequestEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for a contact request carried inside a group: the length
+/// range injected from the slim FFI (`groupContactRequestEnvelopeMinLen()` /
+/// `MaxLen()`) plus the first domain byte. The peek decides nothing;
+/// `isGroupContactRequestEnvelope` is the verdict.
+public func nseLooksLikeGroupContactRequest(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
+        && bytes.first == groupContactRequestEnvelopeFirstByte
 }
 
 /// First byte of the ADR-0080 device-card domain separator

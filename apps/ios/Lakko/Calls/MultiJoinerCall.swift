@@ -748,6 +748,11 @@ final class MultiJoinerCall {
             // in `ChatRepository.answerProfileRequest`), never the SFU
             // signal-relay. Out of place here — drop.
             break
+        case .groupContactRequest:
+            // `docs/ux/who-can-find-me.md` 6.4 — a contact request rides a
+            // GROUP JOURNAL (opened in `ContactsRepository`), never the SFU
+            // signal-relay. Out of place here — drop.
+            break
         case .pin:
             // ADR-0052 decision 3 — a shared-pin envelope rides the GROUP
             // JOURNAL (standing-gated in `ChatRepository.receivePin`), never

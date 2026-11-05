@@ -53,6 +53,12 @@ import { groupIdHex } from "../devices/sync/state";
 import { isDsNetworkFailure } from "../ds/client";
 import { journalHex } from "../ds/access";
 import { installAddressRecheck } from "../reach/mailbox-write";
+import {
+  duplicateOfHeld,
+  groupRequestHandling,
+  installGroupContactRequestSink,
+  openArrivedGroupRequest,
+} from "./group-contact-request";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -89,6 +95,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   ContactsClient,
   ContactsError,
+  decodeContactRequestBody,
   SupersessionRefused,
   type IncomingContactRequest,
   type MailboxRow,
@@ -125,7 +132,8 @@ import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
-import { personKeysOf } from "../chat/person-key";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { conversationWithContact } from "./contact-conversation";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
 import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
@@ -276,6 +284,68 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   installAddressRecheck((accountKey) => client.recheckAddress(accountKey));
   onCleanup(() => installAddressRecheck(null));
 
+  // `docs/ux/who-can-find-me.md` section 6.4 - a contact request sealed to
+  // this account inside a group it shares with the sender. The chat receive
+  // path hands every such envelope here; only this account's device opens
+  // it, and it joins the request list as an inbox request would, with the
+  // group it came through.
+  installGroupContactRequestSink(async (arrived) => {
+    const polled = scope;
+    if (polled === null) return false;
+    const own = chats.accountIdentity();
+    if (own === null) return false;
+    const wasm = await loadWasm();
+    const x25519Secret = own.x25519SecretKey;
+    const opened = openArrivedGroupRequest(arrived, {
+      check: (plaintext, secret, sender) => wasm.checkGroupContactRequest(plaintext, secret, sender),
+      x25519Secret,
+      decode: (wire, rowId, createdAt, via) =>
+        decodeContactRequestBody(wasm, rowId, wire, createdAt, x25519Secret, via),
+      allowsGroupMembers: (groupId) => reachSession()?.allowsGroupMembers(groupId) ?? false,
+      isContact: (keyB64) => loadAccepted(polled.accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
+      keyB64: base64Encode,
+    });
+    if (opened === null) return true;
+    if (scope !== polled) return false;
+    const { request, row } = opened;
+    if (request.profile !== null) profiles.ingest(base64Encode(request.fromPubkey), request.profile);
+    // A contact this device already talks to in a one-to-one: answered
+    // silently, as from the inbox (ADR-0073 R.7 case 1). A contact with NO
+    // one-to-one here (first met in a group) is the case this request exists
+    // for: it is listed, and Accept starts the chat.
+    const keyB64 = base64Encode(request.fromPubkey);
+    const handling = groupRequestHandling({
+      senderIsContact: loadAccepted(polled.accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
+      holdsOneToOne: holdsOneToOneWith(keyB64),
+    });
+    if (handling === "answer-silently" && (await handleKnownContactRequest(request, polled.accountIdB64, row))) {
+      return true;
+    }
+    // The same request through the inbox, or one already listed from this
+    // person: one request per person.
+    if (duplicateOfHeld(request, polled.inbox.pending())) return true;
+    if (scope !== polled) return false;
+    // Written BEFORE this returns, and the journal poll moves its cursor only
+    // after: a reload in between reads the row again (a failed write throws,
+    // which reports it unhandled).
+    polled.inbox.addFetched([{ request, row }]);
+    return true;
+  });
+  onCleanup(() => installGroupContactRequestSink(null));
+
+  /** Whether this device holds a live one-to-one with the person. */
+  function holdsOneToOneWith(keyB64: string): boolean {
+    return (
+      conversationWithContact({
+        contact: { signaturePubkeyB64: keyB64 },
+        conversations: chats.groups(),
+        ownKeyB64: ownPersonKeyB64(chats.identity()),
+        peopleOf: (g) => personKeysOf(g.group),
+        isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+      }) !== undefined
+    );
+  }
+
   // ADR-0074 section 3.5a rule 5 - what was granted before a rotation of
   // this account's keys is spent. The two owed steps of the rotation record
   // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
@@ -350,6 +420,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     },
   });
   onCleanup(() => installSpentRunners(null));
+
 
   // The spend round on a KEPT device (rule 5): a device that adopted keys
   // rotated elsewhere owes the two steps over its own links and requests.
@@ -1070,6 +1141,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // the sender's account, and the request is answered silently (the
           // conversation continues by itself) or dropped.
           if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
+          // Who-can-find-me 6.4 - the same request already listed through a
+          // group it was also sent into.
+          if (duplicateOfHeld(ev.request, [...target.pending(), ...fresh.map((f) => f.request)])) continue;
           // ADR-0079 section 3 (reworked 2026-10-17) - a request sent
           // through one of this account's invite links is kept undecided
           // (stored, not listed) and decided after this batch by
@@ -1278,6 +1352,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdB64,
       isAccepted: (keyB64) =>
         loadAccepted(accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
+      keepsFromContact: (request) =>
+        request.viaGroupIdB64 !== undefined && !holdsOneToOneWith(base64Encode(request.fromPubkey)),
       onChange: () => setPending(opened.pending()),
     });
     inbox = opened;

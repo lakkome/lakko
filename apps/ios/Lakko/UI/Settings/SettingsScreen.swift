@@ -54,6 +54,11 @@ struct SettingsScreen: View {
     @AppStorage(AppearanceSetting.storageKey)
     private var appearanceRaw = AppearanceSetting.system.rawValue
 
+    /// `docs/ux/text-size.md` — the chat text size, per device.
+    @AppStorage(ChatTextSize.storageKey)
+    private var chatTextSizeRaw = ChatTextSize.defaultStep.rawValue
+    @State private var choosingTextSize = false
+
     @State private var confirmingLogout = false
     /// Reactions-and-emoji spec section 6 — the quick-reaction picker.
     @State private var choosingQuickReaction = false
@@ -214,6 +219,22 @@ struct SettingsScreen: View {
                     options: AppearanceSetting.allCases.map {
                         LakkoPickerOption(value: $0, label: l10n.t($0.labelKey))
                     })
+                // `docs/ux/text-size.md` — below Theme, the current step as
+                // trailing text; opening it shows the steps and a preview.
+                Button { choosingTextSize = true } label: {
+                    HStack {
+                        Label(l10n.t("settings.text_size.title"), systemImage: "textformat.size")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(l10n.t(ChatTextSize.from(stored: chatTextSizeRaw).labelKey))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("settings-text-size")
                 // Section 6 (D4) — the quick reaction: the current emoji,
                 // tapping opens the picker; a pick saves and closes.
                 Button { choosingQuickReaction = true } label: {
@@ -232,6 +253,19 @@ struct SettingsScreen: View {
                 Text(l10n.t("settings.section.appearance"))
             } footer: {
                 Text(l10n.t("settings.appearance.quick_reaction_sub"))
+            }
+            .sheet(isPresented: $choosingTextSize) {
+                NavigationStack {
+                    TextSizeScreen(raw: $chatTextSizeRaw)
+                        .navigationTitle(l10n.t("settings.text_size.title"))
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button(l10n.t("common.done")) { choosingTextSize = false }
+                            }
+                        }
+                }
+                .presentationDetents([.medium, .large])
             }
             .sheet(isPresented: $choosingQuickReaction) {
                 NavigationStack {
@@ -418,5 +452,74 @@ private struct DevicesSettingsRow: View {
         .buttonStyle(.plain)
         .accessibilityLabel(
             attention ? l10n.t("settings.devices.attention_a11y") : l10n.t("settings.devices.title"))
+    }
+}
+
+/// `docs/ux/text-size.md` — the three steps as one choice with a check mark,
+/// under a preview drawn at the selected step: an incoming bubble with a
+/// reaction chip under it and an outgoing bubble. A choice applies at once.
+struct TextSizeScreen: View {
+    @Binding var raw: String
+    @ObservedObject private var l10n = Localization.shared
+
+    private var selected: ChatTextSize { ChatTextSize.from(stored: raw) }
+
+    var body: some View {
+        List {
+            Section {
+                TextSizePreview()
+                    .environment(\.chatTextScale, selected.factor)
+                    .listRowInsets(EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12))
+                    .accessibilityElement(children: .combine)
+            }
+            Section {
+                ForEach(ChatTextSize.allCases) { step in
+                    Button {
+                        raw = step.rawValue
+                    } label: {
+                        HStack {
+                            Text(l10n.t(step.labelKey)).foregroundStyle(Color.lakkoText)
+                            Spacer()
+                            if step == selected {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(Color.lakkoAccent)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(step == selected ? .isSelected : [])
+                    .accessibilityIdentifier("text-size-\(step.rawValue)")
+                }
+            }
+        }
+    }
+}
+
+/// The two bubbles of the preview, drawn with the chat's own fonts and chip.
+private struct TextSizePreview: View {
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                bubble(l10n.t("settings.text_size.preview_incoming"), outgoing: false)
+                ReactionChipLabel(emoji: "👍", content: .count(1.formatted(.number.locale(l10n.locale))))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            bubble(l10n.t("settings.text_size.preview_outgoing"), outgoing: true)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private func bubble(_ text: String, outgoing: Bool) -> some View {
+        Text(text)
+            .chatFont(.body)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(outgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+            .foregroundStyle(outgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
     }
 }

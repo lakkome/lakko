@@ -406,12 +406,15 @@ public fun ChatListScreen(
                     onQueryChange = { query = it },
                 )
                 // ADR-0087 UX 9.1 — "You are no longer in {name}.", once per
-                // device, one at a time. It waits here across a restart.
-                state.endNotices.firstOrNull()?.let { notice ->
-                    MembershipEndBanner(
-                        notice = notice,
-                        onClose = { repository.dismissEndNotice(notice.idHex) },
-                    )
+                // device and per removal: a banner each, newest on top, each
+                // closed on its own. They wait here across a restart.
+                for (notice in me.lakko.app.chat.bannerNotices(state.endNotices)) {
+                    androidx.compose.runtime.key(notice.idHex) {
+                        MembershipEndBanner(
+                            notice = notice,
+                            onClose = { repository.dismissEndNotice(notice.idHex) },
+                        )
+                    }
                 }
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.

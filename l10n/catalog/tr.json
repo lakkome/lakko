@@ -3914,8 +3914,8 @@
       "text": "Arama başlatmak için önce bir mesaj gönderin.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "Sohbetiniz hazırlanıyor.",
+    "contacts.detail.cannot_message": {
+      "text": "{name} kişisine henüz mesaj gönderemezsiniz. Ondan bir davet bağlantısı isteyin.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "Bu kişi, buradan sohbet başlatılabilmesinden önce eklendi. Size mesaj göndermesini isteyin.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "İstek gönderilemedi. Yeniden deneyin.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "İstek gönderildi. {name} kabul ettiğinde yazabilirsiniz.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "Kabul edilemedi. Yeniden deneyin.",
+      "text": "Kabul edilemedi.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "Biri",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "{group} üzerinden",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "İkinizin de bulunduğu bir grup üzerinden",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Güvenlik numaraları",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "Büyük",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "Orta",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "Bu boyut kolay okunuyor mu?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Bunu istediğiniz zaman buradan değiştirebilirsiniz.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "Küçük",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "Metin boyutu",
       "status": "machine"
     },
     "settings.translation.delete_all": {

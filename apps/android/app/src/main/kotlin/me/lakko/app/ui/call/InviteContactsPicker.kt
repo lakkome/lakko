@@ -69,6 +69,11 @@ internal fun InviteContactsPicker(
     invitedKeys: Set<String>,
     error: UiText?,
     onBack: () -> Unit,
+    /** `docs/ux/who-can-find-me.md` 6.4 — rows whose contact request went
+     *  inside a shared group (no invitation until they accept). */
+    requestSentKeys: Set<String> = emptySet(),
+    /** Rows nothing could be sent to (no grant, no shared group). */
+    cannotMessageKeys: Set<String> = emptySet(),
     onInvite: (ContactRowModel) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -123,7 +128,9 @@ internal fun InviteContactsPicker(
                             row = row,
                             sending = busyKey == row.key,
                             invited = row.key in invitedKeys,
-                            enabled = !busy && row.key !in invitedKeys,
+                            requestSent = row.key in requestSentKeys,
+                            cannotMessage = row.key in cannotMessageKeys,
+                            enabled = !busy && row.key !in invitedKeys && row.key !in requestSentKeys,
                             onClick = { onInvite(row) },
                         )
                     }
@@ -131,6 +138,17 @@ internal fun InviteContactsPicker(
             }
         }
     }
+}
+
+/** The line under a row: sending, invited, a contact request sent inside a
+ *  shared group (`docs/ux/who-can-find-me.md` 6.4; the request lines take the
+ *  person's name), nothing sendable, or `null` for the username. */
+internal fun inviteRowLineKey(sending: Boolean, invited: Boolean, requestSent: Boolean, cannotMessage: Boolean): String? = when {
+    sending -> "common.sending"
+    invited -> "call.invite.row_invited"
+    requestSent -> "contacts.detail.request_sent"
+    cannotMessage -> "contacts.detail.cannot_message"
+    else -> null
 }
 
 /** One contact: the picture, the name, and under it what is happening to the
@@ -142,13 +160,17 @@ private fun InviteContactRow(
     invited: Boolean,
     enabled: Boolean,
     onClick: () -> Unit,
+    requestSent: Boolean = false,
+    cannotMessage: Boolean = false,
 ) {
     val sendingLabel = t("common.sending")
     val invitedLabel = t("call.invite.row_invited")
-    val sub: String? = when {
-        sending -> sendingLabel
-        invited -> invitedLabel
-        else -> row.username?.takeIf { row.name != "@$it" }?.let { "@$it" }
+    val line = inviteRowLineKey(sending = sending, invited = invited, requestSent = requestSent, cannotMessage = cannotMessage)
+    val sub: String? = when (line) {
+        null -> row.username?.takeIf { row.name != "@$it" }?.let { "@$it" }
+        "common.sending" -> sendingLabel
+        "call.invite.row_invited" -> invitedLabel
+        else -> t(line, mapOf("name" to row.name))
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,

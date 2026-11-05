@@ -221,7 +221,7 @@ struct VoiceBubble: View {
                 ? Localization.text("chat.voice.pause")
                 : Localization.text(
                     "chat.voice.play",
-                    texts: ["duration": RecordingMachine.spokenDuration(ms: durationMs)])
+                    texts: ["duration": RecordingMachine.spokenTotalDuration(ms: durationMs)])
         )
     }
 
@@ -664,7 +664,7 @@ struct VideoNoteBubble: View {
     }
 
     private var accessibilityLabel: String {
-        let spoken = RecordingMachine.spokenDuration(ms: Int64(ref.durationMs ?? 0))
+        let spoken = RecordingMachine.spokenTotalDuration(ms: Int64(ref.durationMs ?? 0))
         if busy { return Localization.text("chat.video_note.loading") }
         switch model.mode {
         case .sound:
@@ -679,8 +679,25 @@ struct VideoNoteBubble: View {
 
 // MARK: - GIF
 
+/// The `GIF` label drawn under a GIF (base walk 2026-11-04: never on the
+/// picture).
+struct GifLabel: View {
+    var body: some View {
+        // `docs/ux/media-messages.md` — muted 11/600 text.
+        Text(Localization.text("chat.media.gif"))
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Color.lakkoTextMuted)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.lakkoSurfaceSunken))
+            .accessibilityHidden(true)
+    }
+}
+
 struct GifBubble: View {
     static let maxWidth: CGFloat = 240
+    /// Between the picture and the line under it (the column's spacing).
+    static let lineSpacing: CGFloat = 4
 
     let ref: AttachmentRef
     let mediaKey: String
@@ -707,7 +724,7 @@ struct GifBubble: View {
     private var inline: InlineMediaType? { InlineMedia.inlineType(mime: ref.mime) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Self.lineSpacing) {
             Button { if fileURL != nil { fullScreen = true } } label: {
                 ZStack(alignment: .bottomLeading) {
                     RoundedRectangle(cornerRadius: 12).fill(Color(.tertiarySystemFill))
@@ -717,13 +734,6 @@ struct GifBubble: View {
                     } else if !failed {
                         ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    Text(Localization.text("chat.media.gif"))
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
-                        .foregroundStyle(.white)
-                        .padding(6)
                     if case .uploading(let fraction) = upload {
                         ProgressRing(fraction: fraction, lineWidth: 3, color: .white)
                             .frame(width: 32, height: 32)
@@ -734,6 +744,10 @@ struct GifBubble: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Localization.text("chat.gif.open_full"))
+            // Base walk 2026-11-04 — the `GIF` label sits under the picture,
+            // never on it: a GIF often carries its own caption text in the
+            // corner a badge would cover.
+            GifLabel()
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if failed {

@@ -246,18 +246,32 @@ class ContactsInboxStoreTest {
     }
 
     @Test
-    fun an_ack_from_a_stranger_adds_a_contact_with_their_account_id_and_retires_the_sent_request() {
+    fun an_ack_alone_adds_no_contact_and_keeps_the_request_pending_until_the_welcome() {
+        // Base walk 2026-11-04: a contact must have a one-to-one. The ack is
+        // not the conversation; the request stays in Sent and learns the key
+        // its Welcome will be matched by.
         val applied = applyContactAcks(
             accepted = listOf(accepted(1)),
             sent = listOf(sentTo(5), sentTo(6)),
             acks = listOf(ack(5)),
         )
-        assertTrue(applied.acceptedChanged)
-        assertEquals(2, applied.accepted.size)
-        val added = applied.accepted.last().request
-        assertTrue(added.fromPubkey.contentEquals(ByteArray(32) { 5 }))
-        assertTrue(added.fromAccountId!!.contentEquals(ByteArray(16) { 45 }))
-        assertEquals(listOf(sentTo(6)), applied.sent)
+        assertEquals(false, applied.acceptedChanged)
+        assertEquals(1, applied.accepted.size)
+        val key = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 5 })
+        assertEquals(listOf(sentTo(5).copy(recipientKeyB64 = key), sentTo(6)), applied.sent)
+        // The Welcome then makes the person a contact with the account id the
+        // request holds, and retires the request.
+        val answered = applyAnsweringWelcomes(
+            accepted = applied.accepted,
+            sent = applied.sent,
+            answered = mapOf(key to "ab".repeat(32)),
+            nowMs = 1uL,
+            createdAt = "2026-11-04T10:00:00Z",
+        )
+        assertEquals(2, answered.accepted.size)
+        val added = answered.accepted.single { it.request.fromPubkey.contentEquals(ByteArray(32) { 5 }) }
+        assertTrue(added.request.fromAccountId!!.contentEquals(ByteArray(16) { 45 }))
+        assertEquals(listOf(sentTo(6)), answered.sent)
     }
 
     @Test
@@ -297,13 +311,22 @@ class ContactsInboxStoreTest {
     }
 
     @Test
-    fun a_repeated_ack_adds_the_person_once() {
+    fun a_joined_one_to_one_answers_the_request_sent_to_that_person() {
+        val key = ByteArray(32) { 5 }
+        val byKey = sentTo(5).copy(recipientKeyB64 = java.util.Base64.getEncoder().encodeToString(key))
+        assertEquals(listOf(sentTo(6)), sentAfterOneToOne(listOf(byKey, sentTo(6)), key, null))
+        assertEquals(listOf(sentTo(6)), sentAfterOneToOne(listOf(sentTo(5), sentTo(6)), key, ByteArray(16) { 45 }))
+        assertEquals(listOf(sentTo(5), sentTo(6)), sentAfterOneToOne(listOf(sentTo(5), sentTo(6)), ByteArray(32) { 9 }, null))
+    }
+
+    @Test
+    fun repeated_acks_without_a_welcome_add_nobody() {
         val applied = applyContactAcks(
             accepted = emptyList(),
             sent = emptyList(),
             acks = listOf(ack(5, messageId = 1L), ack(5, messageId = 2L)),
         )
-        assertEquals(1, applied.accepted.size)
+        assertTrue(applied.accepted.isEmpty())
     }
 
     @Test

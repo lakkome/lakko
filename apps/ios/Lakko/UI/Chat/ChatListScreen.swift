@@ -1280,6 +1280,14 @@ public final class ChatListViewModel: ObservableObject {
         repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
     }
 
+    /// The avatar photo of a conversation, as the Chats row draws it (base
+    /// walk 2026-11-04: Feed and Calls drew initials over a group photo).
+    func avatarPhoto(groupIdHex: String, isGroup: Bool) -> AvatarPhoto? {
+        AvatarPhoto.conversation(
+            isGroup: isGroup, groupIdHex: groupIdHex,
+            peerKey: isGroup ? nil : peerSignatureKey(groupIdHex: groupIdHex))
+    }
+
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared
@@ -1415,34 +1423,40 @@ struct InvitedChatRow: View {
 
 /// UX 9.1 — "You are no longer in {name}." with a close icon, at the top of
 /// Chats. It observes the notices itself, so the list is not re-evaluated by
-/// them. One at a time: closing one shows the next.
+/// them. One banner per removal, the newest on top, each with its own close.
 struct MembershipEndBanner: View {
     @ObservedObject var center: MembershipEndNoticeCenter
     let onClose: (String) -> Void
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        if let notice = center.notices.first {
-            HStack(alignment: .center, spacing: 12) {
-                Text(l10n.t("chat.ended.notice", texts: ["name": notice.name]))
-                    .font(.subheadline)
-                    .foregroundStyle(Color.lakkoText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Button {
-                    onClose(notice.groupIdHex)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.footnote)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel(l10n.t("common.dismiss"))
+        VStack(spacing: 0) {
+            ForEach(MembershipEndNoticeCenter.stacked(center.notices)) { notice in
+                banner(notice)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
-            .background(Color.lakkoSurface)
         }
+    }
+
+    private func banner(_ notice: MembershipEndNotice) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(l10n.t("chat.ended.notice", texts: ["name": notice.name]))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                onClose(notice.groupIdHex)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel(l10n.t("common.dismiss"))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+        .background(Color.lakkoSurface)
     }
 }
 

@@ -3914,8 +3914,8 @@
       "text": "Envía primero un mensaje para poder llamar.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "Tu chat se está preparando.",
+    "contacts.detail.cannot_message": {
+      "text": "Aún no puedes escribir a {name}. Pídele un enlace de invitación.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "Este contacto se añadió antes de que se pudieran iniciar chats desde aquí. Pídele que te escriba.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "No se pudo enviar la solicitud. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "Solicitud enviada. Podrás escribir cuando {name} la acepte.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "No se pudo aceptar. Inténtalo de nuevo.",
+      "text": "No se pudo aceptar.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "Alguien",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "Vía {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "Vía un grupo en el que estáis ambos",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Números de seguridad",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "Grande",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "Mediano",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "¿Se lee bien este tamaño?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Puedes cambiarlo aquí en cualquier momento.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "Pequeño",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "Tamaño del texto",
       "status": "machine"
     },
     "settings.translation.delete_all": {

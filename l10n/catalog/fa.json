@@ -3914,8 +3914,8 @@
       "text": "برای شروع تماس ابتدا پیامی بفرستید.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "گفتگوی شما در حال آماده شدن است.",
+    "contacts.detail.cannot_message": {
+      "text": "هنوز نمی‌توانید به {name} پیام دهید. از او یک پیوند دعوت بخواهید.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "این مخاطب پیش از آنکه بتوان از اینجا گفتگو را شروع کرد اضافه شده است. از او بخواهید به شما پیام بدهد.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "فرستادن درخواست ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "درخواست فرستاده شد. وقتی {name} بپذیرد می‌توانید بنویسید.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "پذیرفتن ممکن نشد. دوباره تلاش کنید.",
+      "text": "پذیرفتن ممکن نشد.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "یک نفر",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "از طریق {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "از طریق گروهی که هر دو در آن هستید",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "شماره‌های امنیتی",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "بزرگ",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "متوسط",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "آیا این اندازه راحت خوانده می‌شود؟",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "هر زمان بخواهید می‌توانید آن را اینجا تغییر دهید.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "کوچک",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "اندازهٔ متن",
       "status": "machine"
     },
     "settings.translation.delete_all": {

@@ -449,7 +449,11 @@ struct FeedScreen: View {
             // The circle of this conversation's row in Chats: the same
             // component, the same name and the same conversation id, so one
             // conversation has one colour on both screens.
-            InitialsAvatar(name: ref.source.title, identity: ref.source.key, size: FeedLayout.avatarSize)
+            InitialsAvatar(
+                name: ref.source.title, identity: ref.source.key, size: FeedLayout.avatarSize,
+                isGroup: ref.source.kind == .group,
+                photo: AvatarPhoto.conversation(
+                    isGroup: ref.source.kind == .group, groupIdHex: ref.source.idHex, peerKey: nil))
                 .accessibilityHidden(true)
             itemColumn(item, viewportHeight: viewportHeight)
         }

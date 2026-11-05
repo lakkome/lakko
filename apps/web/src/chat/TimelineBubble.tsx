@@ -129,9 +129,6 @@ export interface BubbleHost {
   readersOf: (messageId: number) => MemberIdentity[];
   editingId: number | null;
   editText: string;
-  /** The edit was opened from the keyboard (desktop): its field takes the
-   *  focus. Unset, the edit opens as it always did. */
-  focusEditOnOpen?: boolean;
   setEditText: (v: string) => void;
   onStartEdit: (messageId: number, current: string) => void;
   onCancelEdit: () => void;
@@ -338,8 +335,9 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
-    if (ev.kind === "registrarSeed") {
-      // ADR-0057 — consumed at receipt by the chat client, never a row.
+    if (ev.kind === "registrarSeed" || ev.kind === "groupContactRequest") {
+      // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
+      // client, never a row.
       // Defensive.
       return null;
     }
@@ -447,6 +445,33 @@ function startsOnControl(target: EventTarget | null): boolean {
  * undefined` (an un-acked outgoing bubble has no DS id to
  * reference yet).
  */
+/** What a key in the inline edit field does (base scenario 10): Enter saves,
+ *  Shift+Enter is a line break, Escape cancels; nothing while an input
+ *  method is composing. */
+export function editFieldKeyAction(e: {
+  readonly key: string;
+  readonly shiftKey: boolean;
+  readonly isComposing?: boolean;
+  readonly keyCode?: number;
+}): "save" | "cancel" | null {
+  // 229: the key an input method reports while it composes.
+  if (e.isComposing === true || e.keyCode === 229) return null;
+  if (e.key === "Escape") return "cancel";
+  if (e.key === "Enter" && !e.shiftKey) return "save";
+  return null;
+}
+
+/** Grow the edit field to its text and bring the whole edit block (the field
+ *  and its Save / Cancel) into view in the timeline. */
+function growEditField(el: HTMLTextAreaElement): void {
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+  const box = el.closest(".lk-bubble-edit");
+  if (box !== null && typeof box.scrollIntoView === "function") {
+    box.scrollIntoView({ block: "nearest" });
+  }
+}
+
 function ChatBubbleBody(
   props: BubbleHost & {
     messageId: number | undefined;
@@ -1111,15 +1136,39 @@ function ChatBubbleBody(
             <div class="lk-bubble-edit">
               <textarea
                 ref={(el) => {
-                  if (props.focusEditOnOpen === true) {
-                    queueMicrotask(() => {
-                      el.focus();
-                      el.setSelectionRange(el.value.length, el.value.length);
-                    });
-                  }
+                  // However Edit was chosen (the menu, a long press, `Up` in
+                  // an empty composer), the field takes the focus with the
+                  // caret at the end, so typing edits at once (base walk
+                  // 2026-11-04: from the menu it opened unfocused). After the
+                  // menu that chose it has closed. The whole field and its
+                  // buttons are brought into view (the bottom message's field
+                  // ran under the composer).
+                  queueMicrotask(() => {
+                    el.focus();
+                    el.setSelectionRange(el.value.length, el.value.length);
+                    growEditField(el);
+                  });
                 }}
                 value={props.editText}
-                onInput={(e) => props.setEditText(e.currentTarget.value)}
+                onInput={(e) => {
+                  props.setEditText(e.currentTarget.value);
+                  growEditField(e.currentTarget);
+                }}
+                onKeyDown={(e) => {
+                  // Base scenario 10: the composer sends on Enter, so the edit
+                  // field saves on Enter, takes a line break on Shift+Enter,
+                  // and Escape cancels. Never mid-composition (an IME's Enter
+                  // picks a candidate).
+                  const action = editFieldKeyAction(e);
+                  if (action === null) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (action === "save") {
+                    if (props.messageId !== undefined) void props.onSaveEdit(props.messageId);
+                  } else {
+                    props.onCancelEdit();
+                  }
+                }}
                 rows={2}
               />
               <div class="lk-bubble-edit-actions">

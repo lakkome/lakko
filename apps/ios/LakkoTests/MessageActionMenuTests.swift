@@ -439,9 +439,182 @@ final class MessageActionMenuTests: XCTestCase {
 
     // MARK: - Harness
 
+    // MARK: - The design-system sizes (reaction chip, quick reaction bar)
+
+    /// Design system "Reaction chip": emoji 28 in a 44 square, 4 apart. Seven
+    /// targets, six gaps and the panel's inset on each side.
+    func testTheReactionRowIsDrawnAtTheDesignSystemSize() {
+        let size = measure(
+            MessageReactionRow(onReact: { _ in }, onMore: {}).environment(\.dynamicTypeSize, .large))
+        let expected = 7 * MessageReactionRow.target + 6 * MessageReactionRow.gap
+            + 2 * MessageReactionRow.inset
+        XCTAssertEqual(MessageReactionRow.target, 44)
+        XCTAssertEqual(MessageReactionRow.emojiSize, 28)
+        XCTAssertEqual(MessageReactionRow.gap, 4)
+        XCTAssertEqual(size.width, expected, accuracy: 0.5, "the row measured \(size)")
+        XCTAssertGreaterThanOrEqual(size.height, MessageReactionRow.target)
+    }
+
+    /// `docs/ux/text-size.md` — where the row is wider than the screen less
+    /// its margins (a narrow phone, a large text size) it scrolls sideways:
+    /// the panel is the width it is given and the targets keep at least 44.
+    func testTheReactionRowScrollsWhenItDoesNotFit() {
+        for (width, size) in [(CGFloat(320), DynamicTypeSize.large), (375, .accessibility5)] {
+            let row = MessageReactionRow(maxWidth: width - 16, onReact: { _ in }, onMore: {})
+                .environment(\.dynamicTypeSize, size)
+            let measured = measure(row)
+            XCTAssertEqual(measured.width, width - 16, accuracy: 0.5, "the row measured \(measured) at \(width)")
+            XCTAssertGreaterThanOrEqual(measured.height, MessageReactionRow.target)
+        }
+    }
+
+    /// A row that fits does not scroll: it keeps its own width.
+    func testTheReactionRowThatFitsKeepsItsOwnWidth() {
+        let row = MessageReactionRow(maxWidth: 375 - 16, onReact: { _ in }, onMore: {})
+            .environment(\.dynamicTypeSize, .large)
+        let expected = 7 * MessageReactionRow.target + 6 * MessageReactionRow.gap + 2 * MessageReactionRow.inset
+        XCTAssertEqual(measure(row).width, expected, accuracy: 0.5)
+    }
+
+    /// The row hung off an incoming bubble near the far side moves back inside
+    /// the screen; one that fits does not move.
+    func testTheReactionRowMovesBackInsideTheScreen() {
+        let width: CGFloat = 375
+        let row: CGFloat = 344
+        let near = CGRect(x: 52, y: 0, width: 120, height: 40)
+        let shift = MessageMenuLayout.rowShift(
+            rowWidth: row, bubble: near, containerWidth: width, outgoing: false)
+        XCTAssertEqual(near.minX + shift + row, width - MessageMenuLayout.sideMargin, accuracy: 0.01)
+        XCTAssertEqual(
+            MessageMenuLayout.rowShift(
+                rowWidth: row, bubble: CGRect(x: 8, y: 0, width: 120, height: 40),
+                containerWidth: width, outgoing: false),
+            0)
+        let outgoing = CGRect(x: 250, y: 0, width: 117, height: 40)
+        XCTAssertEqual(
+            MessageMenuLayout.rowShift(
+                rowWidth: row, bubble: outgoing, containerWidth: width, outgoing: true),
+            0, "an outgoing bubble at the trailing side has room for the row on its left")
+        let shortOutgoing = CGRect(x: 200, y: 0, width: 100, height: 40)
+        let right = MessageMenuLayout.rowShift(
+            rowWidth: row, bubble: shortOutgoing, containerWidth: width, outgoing: true)
+        XCTAssertEqual(shortOutgoing.maxX + right - row, MessageMenuLayout.sideMargin, accuracy: 0.01)
+    }
+
+    /// Design system "Reaction chip": 32 tall, at the default text size, for
+    /// every face; the "+N" chip the same height.
+    func testAReactionChipIsThirtyTwoTall() {
+        XCTAssertEqual(ReactionChipMetrics.height, 32)
+        XCTAssertEqual(ReactionChipMetrics.chipSpacing, 6)
+        let faces: [ReactionChipLabel] = [
+            ReactionChipLabel(emoji: "👍", content: .emojiOnly),
+            ReactionChipLabel(emoji: "👍", content: .count("12")),
+            ReactionChipLabel(
+                emoji: "👍",
+                content: .avatars([
+                    (name: "Alice", identity: "a", photo: nil),
+                    (name: "Bob", identity: "b", photo: nil),
+                    (name: "Carol", identity: "c", photo: nil),
+                ]),
+                mine: true),
+            ReactionChipLabel(emoji: nil, content: .count("+3")),
+        ]
+        for chip in faces {
+            let size = measure(chip.environment(\.dynamicTypeSize, .large))
+            XCTAssertEqual(size.height, 32, accuracy: 0.5, "a chip measured \(size)")
+        }
+    }
+
+    /// A larger text size grows the chip: the sizes scale, they are not fixed.
+    func testAReactionChipGrowsWithTheTextSize() {
+        let chip = ReactionChipLabel(emoji: "👍", content: .count("2"))
+        let normal = measure(chip.environment(\.dynamicTypeSize, .large))
+        let large = measure(chip.environment(\.dynamicTypeSize, .accessibility3))
+        XCTAssertGreaterThan(large.height, normal.height)
+        XCTAssertGreaterThan(large.width, normal.width)
+    }
+
     /// Lay a production view out without letting it appear, the technique
     /// `MediaBubbleLayoutTests` established.
     private func measure<V: View>(_ view: V, in proposal: CGSize? = nil) -> CGSize {
         UIHostingController(rootView: view).sizeThatFits(in: proposal ?? roomy)
+    }
+}
+
+/// `docs/ux/text-size.md` — the per-device chat text size.
+final class ChatTextSizeTests: XCTestCase {
+
+    private func freshDefaults() -> UserDefaults {
+        let name = "ChatTextSizeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    func testNothingStoredReadsAsMedium() {
+        XCTAssertEqual(ChatTextSize.read(freshDefaults()), .medium)
+        XCTAssertEqual(ChatTextSize.from(stored: nil), .medium)
+    }
+
+    func testAnUnknownStoredValueReadsAsMedium() {
+        let defaults = freshDefaults()
+        defaults.set("huge", forKey: ChatTextSize.storageKey)
+        XCTAssertEqual(ChatTextSize.read(defaults), .medium)
+        XCTAssertEqual(ChatTextSize.from(stored: ""), .medium)
+        XCTAssertEqual(ChatTextSize.from(stored: "Large"), .medium, "the stored value is the exact raw value")
+    }
+
+    func testAStoredStepReadsBack() {
+        let defaults = freshDefaults()
+        for step in ChatTextSize.allCases {
+            ChatTextSize.write(step, defaults)
+            XCTAssertEqual(ChatTextSize.read(defaults), step)
+        }
+    }
+
+    func testTheFactorsAreTheSpecs() {
+        XCTAssertEqual(ChatTextSize.small.factor, 0.87)
+        XCTAssertEqual(ChatTextSize.medium.factor, 1.0)
+        XCTAssertEqual(ChatTextSize.large.factor, 1.2)
+        XCTAssertEqual(ChatTextSize.allCases.map(\.labelKey), [
+            "settings.text_size.small", "settings.text_size.medium", "settings.text_size.large",
+        ])
+    }
+
+    /// The chip's sizes move together with the step.
+    func testALargeStepGrowsAReactionChip() {
+        let chip = ReactionChipLabel(emoji: "👍", content: .count("2"))
+        let medium = measure(chip.environment(\.dynamicTypeSize, .large))
+        let large = measure(
+            chip.environment(\.dynamicTypeSize, .large).environment(\.chatTextScale, ChatTextSize.large.factor))
+        XCTAssertEqual(medium.height, 32, accuracy: 0.5)
+        XCTAssertEqual(large.height, 32 * 1.2, accuracy: 0.5)
+        XCTAssertGreaterThan(large.width, medium.width)
+    }
+
+    /// The quick reaction bar's targets never go below 44 at the small step.
+    func testASmallStepKeepsTheReactionTargetsAtFortyFour() {
+        let row = MessageReactionRow(onReact: { _ in }, onMore: {})
+            .environment(\.dynamicTypeSize, .large)
+            .environment(\.chatTextScale, ChatTextSize.small.factor)
+        let size = measure(row)
+        let expected = 7 * MessageReactionRow.target + 6 * MessageReactionRow.gap + 2 * MessageReactionRow.inset
+        XCTAssertEqual(size.width, expected, accuracy: 0.5, "the row measured \(size)")
+    }
+
+    private func measure<V: View>(_ view: V) -> CGSize {
+        UIHostingController(rootView: view).sizeThatFits(in: CGSize(width: 2_000, height: 2_000))
+    }
+}
+
+/// Base scenario 10 — what a hardware Return does in the composer and the
+/// edit sheet.
+final class HardwareReturnTests: XCTestCase {
+    func testReturnSubmitsAndShiftOrOptionReturnBreaksTheLine() {
+        XCTAssertTrue(HardwareReturn.submits([]))
+        XCTAssertTrue(HardwareReturn.submits(.command) == true)
+        XCTAssertFalse(HardwareReturn.submits(.shift))
+        XCTAssertFalse(HardwareReturn.submits(.option))
+        XCTAssertFalse(HardwareReturn.submits([.shift, .option]))
     }
 }

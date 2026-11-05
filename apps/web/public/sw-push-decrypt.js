@@ -257,6 +257,12 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {() => number} [registrarSeedEnvelopeLen]
  *   ADR-0057 — the one on-wire length of a registrar-seed envelope, read from
  *   the FFI. Optional; absent means the arm is off.
+ * @property {(bytes: Uint8Array) => boolean} [isGroupContactRequestEnvelope]
+ *   Who-can-find-me 6.4 — recognises a contact request sealed to one member
+ *   of the group. Used ONLY to classify the row out of the preview path; the
+ *   SW never opens it (C-59). Optional; absent means the arm is off.
+ * @property {() => number} [groupContactRequestEnvelopeMinLen]
+ * @property {() => number} [groupContactRequestEnvelopeMaxLen]
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -1191,7 +1197,37 @@ function isServiceEnvelope(wasm, bytes) {
   if (isDispatchKind(wasm, bytes, ["GroupPhoto", "GroupReactions", "ConversationHandle", "KnockSeed", "AdmissionSeed"])) {
     return true;
   }
+  // 13. A contact request sealed to one member of the group
+  //     (`docs/ux/who-can-find-me.md` section 6.4). Suppressed, never opened:
+  //     only the app tries it, and only the device it is sealed to can.
+  if (isGroupContactRequestEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * Arm 13 of {@link isServiceEnvelope}: the length bounds and the first byte,
+ * then the codec's recogniser. Classification only (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isGroupContactRequestEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== 0x6c) return false;
+  if (
+    typeof wasm.isGroupContactRequestEnvelope !== "function" ||
+    typeof wasm.groupContactRequestEnvelopeMinLen !== "function" ||
+    typeof wasm.groupContactRequestEnvelopeMaxLen !== "function"
+  ) {
+    return false;
+  }
+  try {
+    if (bytes.length < wasm.groupContactRequestEnvelopeMinLen()) return false;
+    if (bytes.length > wasm.groupContactRequestEnvelopeMaxLen()) return false;
+    return wasm.isGroupContactRequestEnvelope(bytes) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**

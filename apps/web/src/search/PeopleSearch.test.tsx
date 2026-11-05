@@ -95,7 +95,12 @@ vi.mock("./wiring", async () => {
   };
 });
 vi.mock("./people-search", () => ({ searchPeople: (q: string) => searchPeople(q) }));
-vi.mock("./send-request", () => ({ sendFoundRequest: (p: PersonResult) => sendFoundRequest(p) }));
+vi.mock("./send-request", () => ({
+  sendFoundRequest: (p: PersonResult) => sendFoundRequest(p),
+  // Who-can-find-me 6.4 - no shared group in these rows: the outcome stands
+  // (`send-request-group-fallback.test.ts` covers the fallback itself).
+  withSharedGroupFallback: async (outcome: unknown) => ({ outcome, groupIdB64: null }),
+}));
 
 import { PeopleSearch } from "./PeopleSearch";
 

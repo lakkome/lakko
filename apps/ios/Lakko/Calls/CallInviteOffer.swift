@@ -90,6 +90,10 @@ public enum CallInviteDelivery: Equatable {
     case shown
     /// Sent as an invitation into a conversation; `name` is its title.
     case sent(name: String)
+    /// Minted, but the pick it was minted for sent no link (a contact request
+    /// went instead, or nothing could be sent): kept for the next pick, with
+    /// no line of its own (`docs/ux/who-can-find-me.md` 6.4).
+    case kept
 }
 
 /// Why `Invite` did not do what was asked.
@@ -178,6 +182,7 @@ public enum CallInviteOfferRules {
             case .copied: return Localization.text("call.invite.copied")
             case .shown: return Localization.text("call.invite.shown", texts: ["url": url])
             case .sent(let name): return Localization.text("call.invite.sent", texts: ["name": name])
+            case .kept: return nil
             }
         case .failed(let failure, _):
             switch failure {
@@ -230,6 +235,12 @@ public enum CallInviteOfferRules {
 
     /// What a failed send says, in the picker and on the call screen.
     public static var sendFailedMessage: String { Localization.text("call.invite.send_failed") }
+
+    /// `docs/ux/who-can-find-me.md` 6.4 — no grant reaches the contact and
+    /// no group is shared, so nothing could be sent.
+    public static func cannotMessage(name: String) -> String {
+        Localization.text("contacts.detail.cannot_message", texts: ["name": name])
+    }
 
     /// The kind of a mint failure. The failure's own prose goes to the log
     /// only (ADR-0061).
@@ -293,6 +304,11 @@ public final class CallInviteOffer: ObservableObject {
     /// ``InviteContactRow/id``. Their rows show a check and cannot be picked
     /// again, so the list can stay open while several people are invited.
     @Published public private(set) var invited: Set<String> = []
+    /// `docs/ux/who-can-find-me.md` 6.4 — the contacts no chat could be
+    /// started with, to whom a contact request went inside a shared group
+    /// (or was already waiting) instead of the link. Their rows show
+    /// "Request sent" and cannot be picked again during the call.
+    @Published public private(set) var requestSent: Set<String> = []
     /// A send is in flight; the picker refuses a second pick.
     @Published public private(set) var sending = false
     /// Whether the state's line is on the call screen right now.
@@ -300,7 +316,7 @@ public final class CallInviteOffer: ObservableObject {
 
     private let mint: @MainActor () async throws -> String
     private let copy: ((String) throws -> Void)?
-    private let send: @MainActor (_ contactId: String, _ text: String) async throws -> Void
+    private let send: @MainActor (_ contactId: String, _ text: String) async throws -> InviteSendOutcome
     private let contacts: @MainActor () -> [InviteContactRow]
     private let isGuest: @MainActor () -> Bool
     private let hold: @MainActor (_ ms: UInt64) async -> Void
@@ -321,8 +337,8 @@ public final class CallInviteOffer: ObservableObject {
         mint: @MainActor @escaping () async throws -> String,
         copy: ((String) throws -> Void)? = nil,
         contacts: @MainActor @escaping () -> [InviteContactRow] = { [] },
-        send: @MainActor @escaping (_ contactId: String, _ text: String) async throws -> Void = { _, _ in
-            throw CallInviteOfferError.noSendPath
+        send: @MainActor @escaping (_ contactId: String, _ text: String) async throws -> InviteSendOutcome = {
+            _, _ in throw CallInviteOfferError.noSendPath
         },
         isGuest: @MainActor @escaping () -> Bool = { false },
         hold: @MainActor @escaping (_ ms: UInt64) async -> Void = { ms in
@@ -406,7 +422,7 @@ public final class CallInviteOffer: ObservableObject {
     /// - Returns: whether the invitation was sent.
     @discardableResult
     public func sendInvite(to target: CallInviteTarget) async -> Bool {
-        guard !sending, !invited.contains(target.id) else { return false }
+        guard !sending, !invited.contains(target.id), !requestSent.contains(target.id) else { return false }
         sending = true
         defer { sending = false }
         pickerError = nil
@@ -414,12 +430,27 @@ public final class CallInviteOffer: ObservableObject {
             pickerError = CallInviteOfferRules.sendFailedMessage
             return false
         }
+        let outcome: InviteSendOutcome
         do {
-            try await send(target.id, url)
+            outcome = try await send(target.id, url)
         } catch {
             NSLog("call invite: the invitation was not sent")
             show(.failed(failure: .notSent, url: url))
             pickerError = CallInviteOfferRules.sendFailedMessage
+            return false
+        }
+        switch outcome {
+        case .sent:
+            break
+        case .requestSent:
+            // No link went out: the row says a request is waiting, and no
+            // call-invite line is shown.
+            requestSent.insert(target.id)
+            show(.ready(url: url, delivery: .kept))
+            return false
+        case .cannotMessage:
+            show(.ready(url: url, delivery: .kept))
+            pickerError = CallInviteOfferRules.cannotMessage(name: target.title)
             return false
         }
         invited.insert(target.id)

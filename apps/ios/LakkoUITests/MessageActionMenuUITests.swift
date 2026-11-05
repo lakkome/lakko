@@ -208,6 +208,27 @@ final class MessageActionMenuUITests: XCTestCase {
         )
     }
 
+    /// Base walk 2026-11-04 — Edit opens the field WITH the keyboard and the
+    /// caret at the end: what is typed right away lands after the old text,
+    /// with no tap on the field first.
+    func testEditTakesTheKeyboardWithTheCaretAtTheEnd() throws {
+        openMenu(on: myMessage)
+        app.buttons["Edit"].tap()
+
+        let field = app.textFields["edit-message-field"].firstMatch
+        let exists = field.waitForExistence(timeout: 5)
+            || app.textViews["edit-message-field"].firstMatch.waitForExistence(timeout: 1)
+        XCTAssertTrue(exists, "the edit sheet did not appear")
+        // Typed at the application, not at the field: only a focused field gets
+        // it (XCUITest refuses `typeText` when nothing has keyboard focus).
+        app.typeText(" edited")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(
+            app.staticTexts["fixture: saved \(myMessage) edited"].waitForExistence(timeout: 5),
+            "the text typed after Edit did not go to the end of the field"
+        )
+    }
+
     // MARK: - Harness
 
     /// Hold a finger on a message until the menu opens.

@@ -133,7 +133,14 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
-import { consumeKnockSeed, consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
+import {
+  consumeGroupContactRequest,
+  consumeKnockSeed,
+  consumeRegistrarSeed,
+  ChatClient,
+  rosterOf,
+  toEvent,
+} from "../chat/client";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { keepFoundGrant } from "../reach/found-grant";
 import {
@@ -149,6 +156,7 @@ import { reachSession } from "../reach/reach-service";
 import {
   accountKeyOfKeyPackage,
   accountKeyOfLeaf,
+  hasWelcomeCandidate,
   MailboxUnreachableError,
   writeToPerson,
   writeWelcome,
@@ -321,6 +329,10 @@ export interface IncomingContactRequest {
   linkAnswer: LinkAnswer | null;
   /** ISO-8601 timestamp the DS recorded on receive. */
   createdAt: string;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the group the request
+   *  arrived inside (standard base64 of its id), shown as "Via {group}";
+   *  absent for a request from the inbox. */
+  viaGroupIdB64?: string;
 }
 
 /** ADR-0079 section 2 — the `/i/` link a contact request answers. SECRET. */
@@ -431,6 +443,9 @@ export interface MailboxRow {
   readonly messageId: number;
   readonly payload: Uint8Array;
   readonly createdAt: string;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the group a request arrived
+   *  inside (standard base64 of its id); absent for the inbox. */
+  readonly viaGroupIdB64?: string;
 }
 
 /** Result of `ContactsClient.pollMailbox`. */
@@ -936,6 +951,8 @@ function sweepPortsFor(
           // ADR-0057 — consumed at receipt, like the poll does, never shown.
           if (event.kind === "registrarSeed") {
             await consumeRegistrarSeed(group, event);
+          } else if (event.kind === "groupContactRequest") {
+            await consumeGroupContactRequest(group, event);
           } else if (event.kind === "group-setting" && event.setting?.kind === "knockSeed") {
             await consumeKnockSeed(group, event.setting.plaintext, event.senderKey);
           } else if (event.kind === "serviceEnvelope") {
@@ -2665,23 +2682,74 @@ export class ContactsClient {
     };
   }
 
-  /** Inner helper extracted from `sendContactRequest` (and reused
-   *  by `sendContactRequestToBundle`) — given a pre-resolved
-   *  recipient bundle (Ed25519 + X25519 pubkeys), compose the
-   *  envelope and publish it to the recipient's stranger-inbox.
-   *  Returns the DS receipt fields (`messageId` + `createdAt`).
-   *
-   *  Pulled out so the two public flows don't drift on subtle
-   *  details (e.g. the `from_pseudonym` derivation, the
-   *  `KIND_CONTACT_REQUEST` envelope wrap, the canonical
-   *  Identity gate from 1.16e6c2). */
-  private async composeAndPublishContactRequest(
+  /**
+   * `docs/ux/who-can-find-me.md` section 6.4 - send a contact request INSIDE a
+   * group both people are in, for a person this device cannot reach through
+   * their inbox. The ordinary request (profile, `reply` grant for the answer)
+   * is sealed to the person's X25519 key and posted to the group as one
+   * application message, so the other members cannot tell whom it is for and
+   * every device but the person's drops it unread. No chat is created; the
+   * answer arrives as for any request, through the `reply` grant.
+   */
+  async sendContactRequestInGroup(
+    identity: IdentitySecrets | null,
+    recipientAccountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+    group: WasmGroup,
+  ): Promise<void> {
+    let bundle: IdentityFetchResponse | null;
+    try {
+      bundle = await this.discovery.identityFetch(recipientAccountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (bundle === null) throw ContactsError.noIdentityBundle(recipientAccountId);
+    // The same identity gate as a request to a bundle: an unproven changed
+    // key is refused, a proven successor's keys are used.
+    await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
+    const target = await this.currentRequestTarget(
+      recipientAccountId,
+      recipientSignaturePubkey,
+      base64Decode(bundle.x25519_pubkey),
+    );
+    const wire = await this.composeContactRequestWire(
+      identity,
+      target.signaturePubkey,
+      target.x25519Pubkey,
+      new Uint8Array(0),
+    );
+    const wasm = await loadWasm();
+    let envelope: Uint8Array;
+    try {
+      envelope = wasm.composeGroupContactRequestEnvelope(target.x25519Pubkey, wire);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const chat = new ChatClient(undefined, {
+      ...(this.identityProvider === undefined ? {} : { identityProvider: this.identityProvider }),
+      ...(this.onPersist === undefined ? {} : { onPersist: this.onPersist }),
+    });
+    try {
+      await chat.broadcastControl(identity, group, envelope);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
+   * Compose one signed ContactRequest wire for the recipient, sealed to
+   * `recipientX25519Pubkey`, with this account's profile and a fresh `reply`
+   * grant registered for the answer. Shared by the inbox send and by the
+   * request sent inside a group (`docs/ux/who-can-find-me.md` section 6.4),
+   * so the two never differ in what the request carries.
+   */
+  private async composeContactRequestWire(
     identity: IdentitySecrets | null,
     recipientSignaturePubkey: Uint8Array,
     recipientX25519Pubkey: Uint8Array,
     introMessage: Uint8Array,
     options?: ContactRequestOptions,
-  ): Promise<{ messageId: number; createdAt: string }> {
+  ): Promise<Uint8Array> {
     // The canonical Identity (1.16e6c2) is the same instance the
     // ChatProvider holds — using it here keeps Ed25519 + X25519
     // keys consistent across operations and avoids the
@@ -2774,6 +2842,35 @@ export class ContactsClient {
         /* moved into the request */
       }
     }
+
+    return wireBytes;
+  }
+
+  /** Inner helper extracted from `sendContactRequest` (and reused
+   *  by `sendContactRequestToBundle`) — given a pre-resolved
+   *  recipient bundle (Ed25519 + X25519 pubkeys), compose the
+   *  envelope and publish it to the recipient's stranger-inbox.
+   *  Returns the DS receipt fields (`messageId` + `createdAt`).
+   *
+   *  Pulled out so the two public flows don't drift on subtle
+   *  details (e.g. the `from_pseudonym` derivation, the
+   *  `KIND_CONTACT_REQUEST` envelope wrap, the canonical
+   *  Identity gate from 1.16e6c2). */
+  private async composeAndPublishContactRequest(
+    identity: IdentitySecrets | null,
+    recipientSignaturePubkey: Uint8Array,
+    recipientX25519Pubkey: Uint8Array,
+    introMessage: Uint8Array,
+    options?: ContactRequestOptions,
+  ): Promise<{ messageId: number; createdAt: string }> {
+    const wasm = await loadWasm();
+    const wireBytes = await this.composeContactRequestWire(
+      identity,
+      recipientSignaturePubkey,
+      recipientX25519Pubkey,
+      introMessage,
+      options,
+    );
 
     // ADR-0078: sealed as a ContactRequest row (the kind rides inside the
     // seal) to the mailbox key the grant used for the attempt binds. ADR-0060:
@@ -3074,7 +3171,7 @@ export class ContactsClient {
     const myIdentity = await this.resolveAccountIdentity(identity);
     const x25519Secret = myIdentity.x25519SecretKey;
     return rows.map((row) =>
-      decodeContactRequestBody(wasm, row.messageId, row.payload, row.createdAt, x25519Secret),
+      decodeContactRequestBody(wasm, row.messageId, row.payload, row.createdAt, x25519Secret, row.viaGroupIdB64),
     );
   }
 
@@ -3458,6 +3555,12 @@ export class ContactsClient {
    * Create a group with one other person and deliver its Welcome:
    * {@link prepareGroupWith} then {@link deliverPreparedWelcomes}.
    */
+  /** Whether a Welcome to this person could be signed at all
+   *  ({@link hasWelcomeCandidate}). Replaceable in tests. */
+  protected welcomeCanReach(recipientAccountKey: Uint8Array): Promise<boolean> {
+    return hasWelcomeCandidate(recipientAccountKey);
+  }
+
   async startGroupWith(
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
@@ -3469,6 +3572,14 @@ export class ContactsClient {
       readonly replyGrantB64?: string | null;
     } = {},
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
+    // Seen live 2026-11-05: Message on a contact this device holds no grant
+    // for founded a group, claimed its journal, and only then failed to write
+    // the Welcome, with nothing logged. Nothing is founded when the Welcome
+    // has nothing to be signed with (an answer to a request carries its own
+    // `reply` grant and is not held back).
+    if (options.replyGrantB64 == null && !(await this.welcomeCanReach(recipientSignaturePubkey))) {
+      throw ContactsError.wrap(new MailboxUnreachableError(0));
+    }
     const prepared = await this.prepareGroupWith(
       identity,
       recipientAccountId,
@@ -5147,12 +5258,13 @@ export function dispatchMailboxRows(
  * envelope that does not open for `x25519Secret` still yields a request
  * (the signature is verified) with no intro and no profile.
  */
-function decodeContactRequestBody(
+export function decodeContactRequestBody(
   wasm: Wasm,
   messageId: number,
   body: Uint8Array,
   createdAt: string,
   x25519Secret: Uint8Array,
+  viaGroupIdB64?: string,
 ): IncomingContactRequest | null {
   let parsed;
   try {
@@ -5235,6 +5347,7 @@ function decodeContactRequestBody(
     replyGrantB64,
     linkAnswer,
     createdAt,
+    ...(viaGroupIdB64 !== undefined ? { viaGroupIdB64 } : {}),
   };
 }
 

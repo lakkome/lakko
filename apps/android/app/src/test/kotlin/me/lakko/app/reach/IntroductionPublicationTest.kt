@@ -136,6 +136,36 @@ class IntroductionPublicationTest {
     }
 
     @Test
+    fun `a failure building the own record still relays the contacts' records, then is thrown`() = runTest {
+        val r = Recorder()
+        val failing = ops(r).let { base ->
+            IntroPublicationOps(
+                nameSearchTerms = base.nameSearchTerms,
+                oprfNameTerm = { error("token refused") },
+                oprfUsername = { error("token refused") },
+                composeIntroduction = base.composeIntroduction,
+                composeOffer = base.composeOffer,
+                composeBundle = base.composeBundle,
+                maxBundleRecords = base.maxBundleRecords,
+                send = base.send,
+                save = {},
+            )
+        }
+        val offered = listOf(reachHex("a".toByteArray()))
+        val thrown = runCatching { publishIntroductions(IntroPublicationState(), inputs(offered = offered), failing) }
+        assertTrue(thrown.isFailure)
+        assertEquals(listOf("g1" to "bundle", "g2" to "bundle"), r.sent)
+    }
+
+    @Test
+    fun `a record built under another mailbox binding is rebuilt`() = runTest {
+        assertFalse(
+            introductionOfferKey(2, "Anna", "anna", "aa") == introductionOfferKey(2, "Anna", "anna", "bb"),
+        )
+        assertFalse(introductionOfferKey(2, "Anna", "anna") == introductionOfferKey(2, "Anna", "anna", reachHex(fof.binding)))
+    }
+
+    @Test
     fun `a rate limited term waits and is asked once more`() = runTest {
         var calls = 0
         val answer = waitingOutRateLimit {
@@ -175,11 +205,12 @@ class IntroductionPublicationTest {
     private val nothing = IntroductionsHeld(offer = false, bundle = false, contactGrant = false)
 
     @Test
-    fun `a conversation lacks introductions while no offer and no bundle came, whatever the grant`() {
+    fun `a conversation lacks introductions while no offer came, whatever the bundle or the grant`() {
         assertTrue(lacksIntroductions(nothing))
         assertTrue("a contact grant does not stop the ask", lacksIntroductions(nothing.copy(contactGrant = true)))
         assertFalse(lacksIntroductions(nothing.copy(offer = true)))
-        assertFalse(lacksIntroductions(nothing.copy(bundle = true)))
+        // A bundle does not stand in for the contact's own offer.
+        assertTrue(lacksIntroductions(nothing.copy(bundle = true)))
         assertFalse("a group, or a roster that could not be read", lacksIntroductions(null))
     }
 
@@ -235,9 +266,14 @@ class IntroductionPublicationTest {
             send = { g -> sent += g; true },
             record = { g, stamp -> recorded += g to stamp },
         )
-        assertEquals(listOf("empty", "with-grant"), sent)
-        assertEquals(listOf("empty" to 7uL, "with-grant" to 7uL), recorded)
-        assertEquals("the rule is told about the grant", listOf(nothing, withGrant, nothing), decided)
+        // A bundle without the contact's own offer still asks.
+        assertEquals(listOf("empty", "with-grant", "has-bundle"), sent)
+        assertEquals(listOf("empty" to 7uL, "with-grant" to 7uL, "has-bundle" to 7uL), recorded)
+        assertEquals(
+            "the rule is told about the grant",
+            listOf(nothing, withGrant, nothing, nothing.copy(bundle = true)),
+            decided,
+        )
     }
 
     @Test

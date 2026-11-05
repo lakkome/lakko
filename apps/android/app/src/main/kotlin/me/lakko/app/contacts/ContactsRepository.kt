@@ -965,6 +965,17 @@ public class ContactsRepository(
             me.lakko.app.devices.StateBundle.pendingContactsSink = { accountIdB64, incoming ->
                 mergePendingFor(accountIdB64, incoming)
             }
+            // The chat id each carried contact gets: their one-to-one here.
+            if (chatRepo != null) {
+                me.lakko.app.devices.StateBundle.contactChat = { accountIdB64, contact ->
+                    bindAccountIfSignedIn()
+                    if (boundAccountB64 == AcceptedContactsStore.canonicalAccountB64(accountIdB64)) {
+                        bundleChatFor(contact)
+                    } else {
+                        contact.groupIdHex
+                    }
+                }
+            }
         }
     }
 
@@ -988,6 +999,260 @@ public class ContactsRepository(
         updateInvited(accountB64) { list -> fresh.fold(list) { acc, c -> PendingContacts.adding(c, acc) } }
         return fresh.size
     }
+
+    /**
+     * Whether [groupIdHex], recorded on [row], is that person's one-to-one on
+     * this device ([ChatRepository.chatGroupIdHexFor] keeps a recorded id only
+     * then). Without a chat layer (tests, contacts-only) a record is kept.
+     */
+    private fun chatLinkCounts(row: AcceptedContact, groupIdHex: String): Boolean {
+        val chat = chatRepo ?: return true
+        return chat.chatGroupIdHexFor(groupIdHex, row.request.fromPubkey)
+            ?.equals(groupIdHex, ignoreCase = true) == true
+    }
+
+    /** Section 6.4 — the opened group requests of each account, durable
+     *  until an inbox pass has listed them. */
+    private val groupRequestQueues = HashMap<String, GroupRequestQueue>()
+
+    private fun groupRequestQueue(accountB64: String): GroupRequestQueue? {
+        val store = inboxStore ?: return null
+        return synchronized(groupRequestQueues) {
+            groupRequestQueues.getOrPut(accountB64) { GroupRequestQueue(store, accountB64) }
+        }
+    }
+
+    /** Write the opened group requests held only in memory, or throw: the
+     *  chat repository calls this before a journal cursor moves past them. */
+    private fun flushGroupRequestsOrThrow() {
+        val accountB64 = boundAccountB64 ?: return
+        groupRequestQueue(accountB64)?.flushOrThrow()
+    }
+
+    /** The opened group requests waiting for this inbox pass, read as
+     *  ordinary requests (their sealed part opened with [x25519Secret]). */
+    private fun groupRequestsForPass(accountB64: String, x25519Secret: ByteArray): Pair<List<IncomingContactRequest>, Set<Long>> {
+        val stored = groupRequestQueue(accountB64)?.all().orEmpty()
+        val requests = stored.mapNotNull { entry ->
+            val wire = try {
+                java.util.Base64.getDecoder().decode(entry.wireB64)
+            } catch (_: IllegalArgumentException) {
+                return@mapNotNull null
+            }
+            incomingContactRequestFromWire(
+                wire = wire,
+                messageId = entry.messageId,
+                createdAt = entry.createdAt,
+                myX25519Secret = x25519Secret,
+                viaGroupIdHex = entry.groupIdHex,
+            )
+        }
+        return requests to stored.mapTo(HashSet()) { it.messageId }
+    }
+
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.4 — a contact request a member
+     * posted inside [groupIdHex]. Opened with this account's key; one that is
+     * not for this account is dropped without a trace, and so is one the
+     * person's own setting hides from that group's members (unless the sender
+     * is already a contact). Kept, it joins the next inbox pass as an ordinary
+     * request carrying the group it came in.
+     */
+    private fun receiveGroupContactRequest(
+        groupIdHex: String,
+        senderKeyB64: String,
+        envelope: ByteArray,
+        dsMessageId: Long,
+        createdAt: String,
+    ) {
+        val secrets = authRepo.identitySecrets.value ?: return
+        val senderKey = try {
+            me.lakko.app.auth.base64Decode(senderKeyB64)
+        } catch (_: IllegalArgumentException) {
+            return
+        }
+        var openedWire: ByteArray? = null
+        val request = try {
+            me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
+                val secret = identity.x25519SecretKey()
+                try {
+                    openGroupContactRequest(
+                        envelope = envelope,
+                        senderKey = senderKey,
+                        check = { env, key -> uniffi.lakko_ffi_uniffi.checkGroupContactRequest(env, secret, key) },
+                        toRequest = { wire ->
+                            openedWire = wire
+                            incomingContactRequestFromWire(
+                                wire = wire,
+                                messageId = groupRequestMessageId(groupIdHex, dsMessageId),
+                                createdAt = createdAt,
+                                myX25519Secret = secret,
+                                viaGroupIdHex = groupIdHex,
+                            )
+                        },
+                    )
+                } finally {
+                    secret.fill(0)
+                }
+            }
+        } catch (e: Throwable) {
+            // The code only: nothing that names anyone.
+            Log.w(TAG, "group contact request dropped: ${groupRequestErrorCode(e)}")
+            null
+        } ?: return
+        val onePerson = provenSamePerson()
+        val senderIsContact = mutableState.value.accepted.any { onePerson(it.request.fromPubkey, senderKey) }
+        if (!groupRequestShown(allowsGroupScope(groupIdHex), senderIsContact)) return
+        val wire = openedWire ?: return
+        // Durable before this returns, so before the group cursor moves past
+        // the row; a write that does not land is retried by the cursor gate
+        // ([flushGroupRequestsOrThrow]), which holds the cursor meanwhile.
+        val accountB64 = boundAccountB64 ?: return
+        val stored = groupRequestQueue(accountB64)?.add(
+            StoredGroupRequest(
+                messageId = request.messageId,
+                groupIdHex = groupIdHex,
+                wireB64 = java.util.Base64.getEncoder().encodeToString(wire),
+                createdAt = createdAt,
+            ),
+        )
+        if (stored == false) Log.w(TAG, "group contact request kept in memory; stored before the cursor moves")
+        reachScope.launch {
+            try {
+                refreshInbox()
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                Log.w(TAG, "group contact request: inbox pass failed (${e.javaClass.simpleName})")
+            }
+        }
+    }
+
+    /** Whether this person's "Who can find me" setting lets the members of
+     *  [groupIdHex] find them (the default setting when none is held, as the
+     *  reach keys use it). */
+    private fun allowsGroupScope(groupIdHex: String): Boolean {
+        val id = me.lakko.app.reach.reachUnhex(groupIdHex) ?: return false
+        val setting = reach()?.currentVisibility() ?: uniffi.lakko_ffi_uniffi.defaultVisibilitySetting()
+        return try {
+            uniffi.lakko_ffi_uniffi.allowsScope(
+                setting,
+                uniffi.lakko_ffi_uniffi.FfiScopeId(uniffi.lakko_ffi_uniffi.FfiScopeKind.GROUP, id),
+            )
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * The contact's chat on this device: the person's one-to-one
+     * ([ChatRepository.chatGroupIdHexFor]), never a recorded id that is a
+     * group, a one-to-one with someone else or gone. Every screen that opens
+     * "their chat" asks this. Without a chat layer (tests) the record.
+     */
+    public fun chatOf(contact: AcceptedContact): String? {
+        val chat = chatRepo ?: return contact.groupIdHex
+        return chat.chatGroupIdHexFor(contact.groupIdHex, contact.request.fromPubkey)
+    }
+
+    /**
+     * A person in contacts can always be messaged (maintainer, 2026-11-05):
+     * with no chat on this device, Message on the card and a pick in New chat
+     * found a new one-to-one ([foundOneToOneWith] over
+     * `ChatRepository.startGroupWith`, linked onto the row with
+     * [linkOneToOne]). One starter for both, so a founding and its progress
+     * are shared and a second tap anywhere founds nothing.
+     */
+    private val chatStarter: me.lakko.app.ui.contacts.ContactChatStarter? by lazy {
+        if (chatRepo == null) return@lazy null
+        me.lakko.app.ui.contacts.ContactChatStarter(found = { contact -> messageKnownPerson(contact) })
+    }
+
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.4 — Message on a known person with
+     * no chat on this device, in the one order:
+     *
+     * 0. A request to them is already waiting in Sent: nothing new is sent.
+     * 1. A grant this device holds still reaches them: the one-to-one is
+     *    founded (its Welcome goes to their inbox) and opened.
+     * 2. Else both are current members of a group (not a one-to-one): the
+     *    contact request goes inside it, sealed to them; no chat is created
+     *    and the request stands in Sent as Waiting.
+     * 3. Else nothing is sent.
+     *
+     * A failed founding throws; a request that could not be sent is
+     * [MessageOutcome.RequestFailed].
+     */
+    public suspend fun messageKnownPerson(contact: AcceptedContact): MessageOutcome {
+        val chat = chatRepo ?: throw IllegalStateException("no chat layer")
+        val accountId = contact.request.fromAccountId ?: throw ContactHasNoAccountId()
+        val secrets = authRepo.identitySecrets.value ?: throw IllegalStateException("no session")
+        val peerKey = contact.request.fromPubkey
+        return runMessageOrder(
+            waiting = requestWaiting(mutableState.value.sent, base64Encode(accountId)),
+            grantReaches = {
+                val candidates = reach()?.reachAuthCandidates(peerKey, me.lakko.app.reach.WritePurpose.WELCOME).orEmpty()
+                useClientWith(secrets) { client, _ ->
+                    me.lakko.app.reach.anyCandidateOpens(candidates) { dest: MailboxDest -> client.checkReach(dest) }
+                }
+            },
+            sharedGroup = { chat.sharedGroupWith(peerKey) },
+            found = {
+                foundOneToOneWith(
+                    contact = contact,
+                    // ADR-0062 — a contact's conversation is a one-to-one for good.
+                    startOneToOne = { id, signatureKey ->
+                        chat.startGroupWith(
+                            recipientAccountId = id,
+                            recipientSignaturePubkey = signatureKey,
+                            kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                        )
+                    },
+                    link = { signatureKey, groupIdHex -> linkOneToOne(signatureKey, groupIdHex) },
+                )
+            },
+            sendInGroup = { groupIdHex ->
+                sendFoundRequestInGroup(accountId, groupIdHex, null, contact.displayName, secrets) != null
+            },
+            noteFailure = { what -> Log.w(TAG, "message: $what") },
+        )
+    }
+
+
+
+    /** Runs the founding past the screen that asked; results land on main. */
+    private val startChatScope by lazy {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate)
+    }
+
+    private val noStarts = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
+
+    /** Contacts (route keys) whose founding is running. */
+    public val startingChat: kotlinx.coroutines.flow.StateFlow<Set<String>>
+        get() = chatStarter?.starting ?: noStarts
+
+    private val noNotices =
+        kotlinx.coroutines.flow.MutableStateFlow<Map<String, me.lakko.app.ui.contacts.MessageNotice>>(emptyMap())
+
+    /** The line each contact's last Message left (route key -> notice). */
+    public val messageNotices: kotlinx.coroutines.flow.StateFlow<Map<String, me.lakko.app.ui.contacts.MessageNotice>>
+        get() = chatStarter?.notices ?: noNotices
+
+    /** Section 6.4 — whether a request to [contact] is waiting in Sent. */
+    public fun requestWaitingFor(contact: AcceptedContact): Boolean {
+        val accountId = contact.request.fromAccountId ?: return false
+        return requestWaiting(mutableState.value.sent, base64Encode(accountId))
+    }
+
+    /** Found the one-to-one with [contact], then [onFounded] with its id. */
+    public fun startChatWith(routeKey: String, contact: AcceptedContact, onFounded: (String) -> Unit) {
+        val starter = chatStarter ?: return
+        startChatScope.launch { starter.start(routeKey, contact)?.let(onFounded) }
+    }
+
+    /** The chat id a pairing bundle carries for [contact]: the person's
+     *  one-to-one on this device, never a stored id that is a group or gone. */
+    private fun bundleChatFor(contact: AcceptedContact): String? =
+        chatRepo?.chatGroupIdHexFor(contact.groupIdHex, contact.request.fromPubkey)
 
     /** [mergeAccepted] into [accountIdB64]'s live list, or `null` when this
      *  repository is not bound to that account (the caller then writes the
@@ -1082,10 +1347,15 @@ public class ContactsRepository(
         val onePerson = provenSamePerson()
         if (removedContactKeys.any { onePerson(keyOfHex(it), signatureKey) }) return false
         var changed = false
+        var sentChanged = false
         mutableState.update { state ->
             // `update` may re-run the lambda on a lost CAS; the verdict is the
             // last attempt's, so reset before deciding.
             changed = false
+            sentChanged = false
+            // The joined one-to-one answers a request sent to this person.
+            val sent = sentAfterOneToOne(state.sent, signatureKey, accountId)
+            sentChanged = sent.size != state.sent.size
             val next = adoptingOneToOnePeer(
                 accepted = state.accepted,
                 signatureKey = signatureKey,
@@ -1094,11 +1364,14 @@ public class ContactsRepository(
                 nowMs = nowMs,
                 createdAt = createdAt,
                 samePerson = onePerson,
-            ) ?: return@update state
-            changed = true
-            state.copy(accepted = next)
+                linkCounts = ::chatLinkCounts,
+            )
+            if (next == null && !sentChanged) return@update state
+            changed = next != null
+            state.copy(accepted = next ?: state.accepted, sent = sent)
         }
         if (changed) persistAccepted()
+        if (sentChanged) persistSent()
         return changed
     }
 
@@ -1199,6 +1472,14 @@ public class ContactsRepository(
         // device runs over its own links and requests after adopting.
         chatRepo?.spendPreRotationGrants = { spendPreRotationGrants() }
         chatRepo?.contactAccountId = { peerKey -> contactAccountId(peerKey) }
+        // A contact's chat is a one-to-one with that PERSON, across a proven
+        // rotation of their key ([conversationWithContact]).
+        chatRepo?.samePersonKey = { a, b -> sameProvenPerson(a, b) }
+        // `docs/ux/who-can-find-me.md` 6.4 — a request sent inside a group.
+        chatRepo?.groupContactRequestIntake = { groupIdHex, senderKey, envelope, messageId, createdAt ->
+            receiveGroupContactRequest(groupIdHex, senderKey, envelope, messageId, createdAt)
+        }
+        chatRepo?.groupContactRequestsFlush = { flushGroupRequestsOrThrow() }
         // ADR-0074 (a device paired after a rotation) - a pairing state
         // bundle that moved the conversation key rebuilds a chat layer that
         // was already loaded under the current key.
@@ -1474,28 +1755,82 @@ public class ContactsRepository(
         )
         val replyGrant = reach()?.mintReply(recipientSignaturePubkey)
         val bound = sessionBinding.capture()
-        return useClientWith(secrets) { client, sender ->
-            val result = client.sendContactRequestToBundle(
-                senderSigningSeed = sender.signingSeed,
-                senderAccountId = secrets.accountId,
-                senderSignaturePubkey = sender.signaturePubkey,
+        return try {
+            useClientWith(secrets) { client, sender ->
+                val result = client.sendContactRequestToBundle(
+                    senderSigningSeed = sender.signingSeed,
+                    senderAccountId = secrets.accountId,
+                    senderSignaturePubkey = sender.signaturePubkey,
+                    recipientAccountId = recipientAccountId,
+                    recipientSignaturePubkey = recipientSignaturePubkey,
+                    recipientX25519Pubkey = recipientX25519Pubkey,
+                    introMessage = introMessage,
+                    senderProfile = ownProfileForWire(secrets.accountId),
+                    replyGrant = replyGrant,
+                    reachCandidates = reach()?.writeDestCandidates(
+                        recipientSignaturePubkey,
+                        me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
+                        first = explicit,
+                    ) ?: listOfNotNull(explicit?.let { held -> { held } }),
+                )
+                // A person found by name alone has no username: the Sent row
+                // shows the name, and it is what makes a search row read
+                // Request sent.
+                if (bound.isCurrent) recordSent(shownUsername.orEmpty(), shownName, result, introMessage)
+                result
+            }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            // `docs/ux/who-can-find-me.md` 6.4 — the same order everywhere: no
+            // grant that reaches them, so a group both are in carries it.
+            if (!noGrantReaches(e)) throw e
+            val shared = chatRepo?.sharedGroupWith(recipientSignaturePubkey) ?: throw e
+            sendFoundRequestInGroup(recipientAccountId, shared, shownUsername, shownName, secrets) ?: throw e
+        }
+    }
+
+    /** Whether [e] says no grant this device holds reaches the person (a
+     *  `401` on every candidate, or no mailbox key known at all). */
+    private fun noGrantReaches(e: Throwable): Boolean =
+        isMailboxRefusal(e) ||
+            ((e as? ContactsError)?.variant as? ContactsError.Variant.Wrapped)?.cause is MailboxUnknown
+
+    /** Section 6.4 for a search row: the request inside [groupIdHex], then
+     *  Sent. `null` when it could not be sent. */
+    private suspend fun sendFoundRequestInGroup(
+        recipientAccountId: ByteArray,
+        groupIdHex: String,
+        shownUsername: String?,
+        shownName: String?,
+        secrets: IdentitySecrets,
+    ): SendResult? {
+        val chat = chatRepo ?: return null
+        val bound = sessionBinding.capture()
+        return try {
+            val composed = useClientWith(secrets) { client, sender ->
+                client.composeGroupContactRequest(
+                    senderSigningSeed = sender.signingSeed,
+                    senderAccountId = secrets.accountId,
+                    recipientAccountId = recipientAccountId,
+                    introMessage = ByteArray(0),
+                    senderProfile = ownProfileForWire(secrets.accountId),
+                    mintReply = { key -> reach()?.mintReply(key) },
+                )
+            }
+            val sent = chat.sendGroupContactRequest(groupIdHex, composed.envelope)
+            val result = SendResult(
+                recipientUsername = shownUsername.orEmpty(),
                 recipientAccountId = recipientAccountId,
-                recipientSignaturePubkey = recipientSignaturePubkey,
-                recipientX25519Pubkey = recipientX25519Pubkey,
-                introMessage = introMessage,
-                senderProfile = ownProfileForWire(secrets.accountId),
-                replyGrant = replyGrant,
-                reachCandidates = reach()?.writeDestCandidates(
-                    recipientSignaturePubkey,
-                    me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
-                    first = explicit,
-                ) ?: listOfNotNull(explicit?.let { held -> { held } }),
+                messageId = sent.messageId,
+                createdAt = sent.createdAt,
+                recipientSignaturePubkey = composed.recipientSignaturePubkey,
             )
-            // A person found by name alone has no username: the Sent row
-            // shows the name, and it is what makes a search row read
-            // Request sent.
-            if (bound.isCurrent) recordSent(shownUsername.orEmpty(), shownName, result, introMessage)
+            if (bound.isCurrent) recordSent(shownUsername.orEmpty(), shownName, result, ByteArray(0))
             result
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "search: request inside a group not sent (${e.javaClass.simpleName})")
+            null
         }
     }
 
@@ -1621,9 +1956,12 @@ public class ContactsRepository(
                     // name directory, which by now belong to nobody or to the
                     // next account.
                     if (!bound.isCurrent) return@useClientWith
+                    // `docs/ux/who-can-find-me.md` 6.4 — requests that came
+                    // inside a shared group run through the same steps.
+                    val (groupRequests, groupRequestIds) = groupRequestsForPass(accountB64, sender.x25519Secret)
                     val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
-                    ).map { it.request }
+                    ).map { it.request } + groupRequests
                     // ADR-0048 §3 — a request's profile is bound to its
                     // signature-verified `from_pubkey`; store it (strictly newer
                     // only) for EVERY fetched request, before any is set aside.
@@ -1650,7 +1988,13 @@ public class ContactsRepository(
                     // waited for a verdict are judged again first.
                     val newIncoming = triageLinkAnswers(
                         retryWaitingKnownRequests() +
-                            fetchedRequests.filterNot { handleKnownContactRequest(it) },
+                            // Section 6.4 — a contact asking for a chat
+                            // inside a group is a request row, not a silent
+                            // answer.
+                            fetchedRequests.filterNot {
+                                !askedForChatThroughGroup(it, mutableState.value.accepted) &&
+                                    handleKnownContactRequest(it)
+                            },
                     )
                     val welcomes = result.events.filterIsInstance<
                         IncomingMailboxEvent.Welcome>(
@@ -1847,6 +2191,9 @@ public class ContactsRepository(
                     // dedupe above absorbs it) rather than losing it.
                     if (acceptedChanged) persistAccepted()
                     if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
+                    // Section 6.4 — listed (or dealt with) and persisted: the
+                    // group requests of this pass wait no longer.
+                    groupRequestQueue(accountB64)?.remove(groupRequestIds)
                     // An answered request leaves the durable Sent list.
                     if (acks.isNotEmpty() || answeredBy.isNotEmpty()) persistSent()
                     persistInboxCursor()
@@ -1901,7 +2248,7 @@ public class ContactsRepository(
             val onePerson = provenSamePerson()
             state.copy(
                 pending = remaining,
-                accepted = acceptingRequests(state.accepted, accepted, groupIdHex, onePerson),
+                accepted = acceptingRequests(state.accepted, accepted, groupIdHex, onePerson, ::chatLinkCounts),
                 sent = sentAfterAccepting(state.sent, accepted),
             )
         }
@@ -2341,7 +2688,7 @@ public class ContactsRepository(
                 val existing = established ?: return InviteOpenResult.Opened(invite)
                 InviteOpenResult.KnownContact(
                     routeKey = base64UrlEncodeNoPad(existing.request.fromPubkey),
-                    groupIdHex = existing.groupIdHex,
+                    groupIdHex = chatOf(existing),
                     statedName = invite.statedName,
                     invite = invite,
                 )

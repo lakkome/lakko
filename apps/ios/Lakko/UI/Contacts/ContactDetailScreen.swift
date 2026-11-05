@@ -87,13 +87,28 @@ struct ContactDetailScreen: View {
         removedHere ? nil : person
     }
 
-    /// The line under the name of a contact with no chat on this device.
-    /// Right after an accept the Welcome is on its way; a contact whose
-    /// account is not known cannot be messaged from here; a contact a backup
-    /// brought back waits for a member to add this device.
-    static func noChatLineKey(_ contact: AcceptedContact) -> String {
-        if contact.request.fromAccountId == nil { return "contacts.detail.message_unavailable" }
-        return contact.request.messageId >= 0 ? "contacts.detail.chat_starting" : "chats.new_chat.not_available"
+    /// The line under the name of a contact with no chat on this device, or
+    /// `nil` for none. Only a contact whose account is not known gets one:
+    /// it cannot be messaged from here. Any other contact's Message starts a
+    /// new one-to-one (maintainer, 2026-11-05), so there is nothing to say.
+    static func noChatLineKey(_ contact: AcceptedContact) -> String? {
+        contact.request.fromAccountId == nil ? "contacts.detail.message_unavailable" : nil
+    }
+
+    /// `docs/ux/who-can-find-me.md` 6.4 — the line under Message of a contact
+    /// with no chat here, after Message: the request inside a group is
+    /// waiting, nothing could be sent, or the send failed. `nil` for none.
+    /// A waiting request wins: it is what stands.
+    static func messageLineKey(
+        hasChat: Bool, waitingRequest: Bool, notice: ContactMessageNotice?
+    ) -> (key: String, danger: Bool)? {
+        guard !hasChat else { return nil }
+        if waitingRequest { return ("contacts.detail.request_sent", false) }
+        switch notice {
+        case .cannotMessage: return ("contacts.detail.cannot_message", false)
+        case .requestFailed: return ("contacts.detail.request_failed", true)
+        case nil: return nil
+        }
     }
 
     @ViewBuilder
@@ -139,10 +154,19 @@ struct ContactDetailScreen: View {
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    if chat == nil {
-                        Text(l10n.t(Self.noChatLineKey(contact)))
+                    if chat == nil, let key = Self.noChatLineKey(contact) {
+                        Text(l10n.t(key))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    if let line = Self.messageLineKey(
+                        hasChat: chat != nil,
+                        waitingRequest: viewModel.hasWaitingRequest(for: contact),
+                        notice: viewModel.messageNotice[contact.request.messageId]) {
+                        Text(l10n.t(line.key, texts: ["name": resolved.name]))
+                            .font(.footnote)
+                            .foregroundStyle(line.danger ? Color.lakkoDanger : Color.lakkoTextMuted)
+                            .multilineTextAlignment(.center)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -160,11 +184,23 @@ struct ContactDetailScreen: View {
                 Section {
                     HStack(spacing: 12) {
                         if sections.contains(.message) {
+                            // Maintainer, 2026-11-05: Message opens the chat
+                            // this device holds, or starts a new one-to-one
+                            // with the contact and opens it.
                             ContactActionButton(
                                 title: l10n.t("contacts.detail.message"), systemImage: "bubble.left.fill",
-                                enabled: chat != nil
+                                enabled: chat != nil || contact.request.fromAccountId != nil,
+                                busy: viewModel.startingChat.contains(contact.request.messageId)
                             ) {
-                                if let chat { onOpenChat(chat) }
+                                if let chat {
+                                    onOpenChat(chat)
+                                } else {
+                                    Task {
+                                        if let started = await viewModel.openOrStartChat(for: contact) {
+                                            onOpenChat(started)
+                                        }
+                                    }
+                                }
                             }
                         }
                         if sections.contains(.call) {
@@ -182,6 +218,11 @@ struct ContactDetailScreen: View {
                     }
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
+                } footer: {
+                    if viewModel.startChatFailed.contains(contact.request.messageId) {
+                        Text(l10n.t("contacts.error.start_chat"))
+                            .foregroundStyle(Color.lakkoDanger)
+                    }
                 }
             }
 
@@ -320,13 +361,19 @@ private struct ContactActionButton: View {
     let title: String
     let systemImage: String
     let enabled: Bool
+    /// Work started by this button is running: a spinner in place of the icon.
+    var busy: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.title3)
+                if busy {
+                    ProgressView().frame(height: 22)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.title3)
+                }
                 Text(title)
                     .font(.caption.weight(.medium))
             }
@@ -337,7 +384,7 @@ private struct ContactActionButton: View {
             .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
         }
         .buttonStyle(.plain)
-        .disabled(!enabled)
+        .disabled(!enabled || busy)
         .accessibilityLabel(title)
     }
 }

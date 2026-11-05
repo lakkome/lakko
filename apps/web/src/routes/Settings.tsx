@@ -13,9 +13,10 @@
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
+import { TEXT_SIZE_LABEL_KEY, TEXT_SIZES, setTextSize, useTextSize } from "../ui/text-size";
 import { chooseQuickReaction, quickReactionOf } from "../chat/quick-reaction-register";
 import { EmojiPicker } from "../media/EmojiPicker";
-import { createSignal, onMount, Show, type JSX } from "solid-js";
+import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -64,7 +65,7 @@ type Section =
   | "media"
   | "about"
   | "account";
-type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "translation";
+type Page = Section | "recovery" | "privacy-groups" | "privacy-contacts" | "translation" | "text-size";
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
 const ALL_SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
@@ -96,6 +97,8 @@ function pageOf(s: string | undefined): Page | null {
   if (s === "privacy-groups" || s === "privacy-contacts") return s;
   // ADR-0082 / UX section 6 - a sub-screen of Language.
   if (s === "translation") return "translation";
+  // docs/ux/text-size.md - a sub-screen of Appearance.
+  if (s === "text-size") return "text-size";
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -123,6 +126,7 @@ export default function Settings(): JSX.Element {
     const p = shown();
     if (p === "recovery") return "security";
     if (p === "translation") return "language";
+    if (p === "text-size") return "appearance";
     return p === "privacy-groups" || p === "privacy-contacts" ? "privacy" : p;
   };
 
@@ -220,6 +224,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "translation"}>
             <TranslationSettingsSection />
+          </Show>
+          <Show when={shown() === "text-size"}>
+            <TextSizeSection />
           </Show>
           <Show when={shown() === "media"}>
             <MediaSection />
@@ -385,7 +392,77 @@ function AppearanceSection(): JSX.Element {
           ))}
         </div>
       </section>
+      {/* docs/ux/text-size.md - below Theme, the current step trailing. */}
+      <section class="lk-card">
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="lines" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">{t("settings.text_size.title")}</span>
+          </div>
+          <A href={paths.settingsSection("text-size")} class="lk-card-row-action">
+            {t(TEXT_SIZE_LABEL_KEY[useTextSize()])}
+          </A>
+        </div>
+      </section>
       <QuickReactionCard />
+    </>
+  );
+}
+
+/** `docs/ux/text-size.md` - the three steps as one choice, a preview above
+ *  them drawn at the chosen step. A pick applies at once (no Save). */
+function TextSizeSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>{t("settings.text_size.title")}</h1>
+      </div>
+      <section class="lk-card lk-text-size-preview" aria-hidden="true">
+        <ul class="lk-text-size-preview-list">
+          <li class="lk-bubble-row incoming run-start run-end">
+            <div class="lk-bubble incoming run-start run-end">
+              <div class="lk-bubble-text" dir="auto">{t("settings.text_size.preview_incoming")}</div>
+              <div class="lk-reactions">
+                <span class="lk-reaction">
+                  <span class="lk-reaction-emoji">{"\u{1F44D}"}</span>
+                  <span class="lk-reaction-count">2</span>
+                </span>
+              </div>
+            </div>
+          </li>
+          <li class="lk-bubble-row outgoing run-start run-end">
+            <div class="lk-bubble outgoing run-start run-end">
+              <div class="lk-bubble-text" dir="auto">{t("settings.text_size.preview_outgoing")}</div>
+            </div>
+          </li>
+        </ul>
+      </section>
+      <section class="lk-card">
+        <div class="lk-lang-list" role="radiogroup" aria-label={t("settings.text_size.title")}>
+          <For each={TEXT_SIZES}>
+            {(size) => (
+              <button
+                type="button"
+                role="radio"
+                class="lk-lang-row"
+                aria-checked={useTextSize() === size}
+                onClick={() => setTextSize(size)}
+              >
+                <span class="lk-lang-text">
+                  <span class="lk-lang-title">{t(TEXT_SIZE_LABEL_KEY[size])}</span>
+                </span>
+                <span class="lk-lang-mark" aria-hidden="true">
+                  <Show when={useTextSize() === size}>
+                    <Icon name="check" size={20} />
+                  </Show>
+                </span>
+              </button>
+            )}
+          </For>
+        </div>
+      </section>
     </>
   );
 }

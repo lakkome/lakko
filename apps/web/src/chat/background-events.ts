@@ -278,8 +278,10 @@ export function planBackgroundEvents(
         scoped.push(e);
         break;
       case "registrarSeed":
-        // ADR-0057 — consumed at receipt by the chat client and never handed
-        // on; a stray one is dropped here rather than rendered.
+      case "groupContactRequest":
+        // ADR-0057 / who-can-find-me 6.4 — consumed at receipt by the chat
+        // client and never handed on; a stray one is dropped here rather than
+        // rendered or notified.
         break;
       case "serviceEnvelope":
         // An unrecognised `lakko/…` service envelope: dropped at receipt by

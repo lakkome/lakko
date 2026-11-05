@@ -688,6 +688,20 @@ export async function writeToPerson<T>(
 }
 
 /**
+ * Whether a Welcome write to `targetAccountKey` (as `ContactsClient.sendWelcome`
+ * makes it, into a group not founded yet) has anything to be signed with: a
+ * grant or a delegation this device holds for the person. `false` means the
+ * write would fail with {@link MailboxUnreachableError} before reaching the
+ * network, so a caller founding a one-to-one checks this first and founds
+ * nothing (no journal claimed, no group left behind). A `true` is no promise:
+ * the mailbox may still refuse every candidate.
+ */
+export async function hasWelcomeCandidate(targetAccountKey: Uint8Array): Promise<boolean> {
+  const plan = await planWriteToPerson(targetAccountKey, { allowMember: true });
+  return plan.candidates.length > 0;
+}
+
+/**
  * A Welcome write to `targetAccountKey`'s account mailbox that is never sent
  * unsigned (ADR-0050 section 2.5a item 7):
  *

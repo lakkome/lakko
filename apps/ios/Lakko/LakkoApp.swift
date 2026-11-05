@@ -610,7 +610,8 @@ struct LakkoApp: App {
             // ADR-0061 — the interface language: locale + layout direction
             // for everything below, switched live (no restart).
             LocalizedRoot {
-                windowContent
+                // `docs/ux/text-size.md` — the chat text size, live.
+                windowContent.chatTextScaleRoot()
             }
         }
         // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
@@ -736,6 +737,9 @@ struct LakkoApp: App {
                     DeviceCardCenter.shared.noteForeground()
                     // ADR-0087 section 9 — an end a wake only recorded.
                     services.chatRepository.resumeOwedEnds()
+                    // ADR-0060 section 4 — a `fof` rotation that came due
+                    // while the app was closed.
+                    ReachCenter.shared.noteForeground()
                 }
             }
             // ADR-0061 — the mirrored names carry words of the interface

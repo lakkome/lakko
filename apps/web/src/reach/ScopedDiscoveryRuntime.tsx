@@ -18,6 +18,7 @@
  * for what this device never received, and answers such an ask by sending
  * its own again (ADR-0060 section 4, "A device that holds nothing asks").
  */
+import { runPublicationSteps } from "./publication-steps";
 import { createEffect, onCleanup, untrack, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -199,128 +200,160 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const usernameTerms = (u: string | null): Term[] =>
       u === null ? [] : [{ key: `u:${u}`, kind: "username" as const, value: u }];
 
-    // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
-    //    reach session's; this is the discovery half: the lookup keys of the
-    //    name terms, and the public record sealed under the OUTPUTS of the
-    //    name terms plus the username.
-    const everyone = setting.mode === wasm.VisibilityMode.Everyone;
-    const pubKey = everyoneKey(
-      name,
-      username,
-      certificate === null ? null : base64Encode(certificate),
-      session.accountKeyHex,
-    );
-    const action = everyoneAction(state.everyone, everyone, pubKey);
-    if (action.kind === "publish") {
-      const names = nameTerms(name);
-      const all = [...names, ...usernameTerms(username)];
-      if (all.length === 0) {
-        // A public record needs a term, and discovery refuses Everyone
-        // without one: nothing to publish until a name or a username exists.
-        // Said out loud: this person stays unfindable while it holds.
-        // eslint-disable-next-line no-console
-        console.warn("[reach] Everyone not published: no name and no username yet; this account cannot be found");
-      } else {
-        const outputs = await outputsOf(all);
-        const nameLookupKeys = lookupKeysOf(outputs.slice(0, names.length));
-        const payload = wasm.IntroductionPayload.forPublicRecord(
-          session.accountKey,
-          base64Decode(account),
-          name ?? undefined,
-          username ?? undefined,
-          certificate ?? undefined,
-          // ADR-0078 - the public record carries this account's mailbox
-          // binding (not an identity-derived address), so a finder learns
-          // where to write and verifies it against the key it pins.
-          session.mailboxBinding(),
-        );
-        let publicRecord: Uint8Array;
-        try {
-          publicRecord = wasm.composePublicRecord(payload, outputs, BigInt(Date.now()));
-        } finally {
-          payload.free();
-        }
-        await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
-        await save({ ...state, everyone: { public: true, key: pubKey } });
-      }
-    } else if (action.kind === "withdraw") {
-      await scoped.putVisibility({ public: false });
-      await save({ ...state, everyone: { public: false, key: null } });
-    }
-
-    // 2. The introduction record (section 4), rebuilt when an input moved.
     const fof = wasm.allowsContactsOfContacts(setting);
-    const key = offerKey(session.currentVersion("fof"), name, username);
-    if (offerNeedsRebuild(state.offer, fof, key)) {
-      const terms = [...nameTerms(name), ...usernameTerms(username)];
-      if (terms.length > 0) {
-        const outputs = await outputsOf(terms);
-        const grant = session.grant("fof");
-        const accountId = base64Decode(account);
-        const payload = new wasm.IntroductionPayload(
-          session.accountKey,
-          accountId,
-          name ?? undefined,
-          username ?? undefined,
-          certificate ?? undefined,
-          grant,
-        );
-        grant.free();
-        try {
-          const record = wasm.composeIntroduction(payload, outputs, BigInt(Date.now()));
-          await save({ ...state, offer: { key, recordB64: base64Encode(record) }, offerSentTo: {} });
-        } finally {
-          payload.free();
-        }
-      }
-    }
-
-    // 3. Offer the record to every contact the setting allows who was not
-    //    sent this version yet. An ask reaches this step like a new contact:
-    //    a contact not allowed gets no offer for it either.
-    const offer = state.offer;
-    if (offer !== null) {
-      const offerBytes = wasm.composeIntroductionOffer(base64Decode(offer.recordB64));
-      const contacts = loadAccepted(account).map((c) => ({
-        keyHex: journalHex(base64Decode(c.signaturePubkeyB64)),
-        accountIdHex: c.accountIdHex ?? null,
-      }));
-      const allowsContact = (hex: string | null): boolean =>
-        wasm.allowsContact(setting, (hex === null ? null : accountIdBytes(hex)) ?? NO_ACCOUNT_ID);
-      const allowed = (g: string): boolean => {
-        const entry = byId.get(g);
-        const peer = entry === undefined ? null : peerOf(entry.group);
-        return peer !== null && mayOfferTo(personKeysHex(peer), contacts, allowsContact);
-      };
-      for (const g of offerTargets(state, fof, [...byId.keys()], allowed)) {
-        const entry = byId.get(g);
-        if (entry === undefined) continue;
-        await publisher.broadcastControl(secrets, entry.group, offerBytes);
-        await save({ ...state, offerSentTo: { ...state.offerSentTo, [g]: offer.key } });
-      }
-    }
-
-    // 4. Relay the records our contacts offered, as one padded bundle, to
-    //    every contact (a contact may receive its own record back; it is
-    //    harmless and hides nothing the bundle size does not).
-    const intros = await loadIntroductions(account);
-    const records = Object.values(intros.offers).map((o) => o.recordB64);
-    if (records.length > 0) {
-      const digest = recordsDigest(records);
-      const targets = bundleTargets(state, digest, [...byId.keys()]);
-      if (targets.length > 0) {
-        const bundle = wasm.composeIntroductionsBundle(
-          records.map((r) => base64Decode(r)).slice(0, wasm.maxBundleRecords()),
-          BigInt(Date.now()),
-        );
-        for (const g of targets) {
-          const entry = byId.get(g);
-          if (entry === undefined) continue;
-          await publisher.broadcastControl(secrets, entry.group, bundle);
-          await save({ ...state, bundleSentTo: { ...state.bundleSentTo, [g]: digest } });
-        }
-      }
-    }
+    // Each step on its own (`publication-steps.ts`): the relay of the
+    // contacts' records runs even when this device could not rebuild its own.
+    await runPublicationSteps(
+      [
+        {
+          name: "everyone",
+          run: async () => {
+          // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
+          //    reach session's; this is the discovery half: the lookup keys of the
+          //    name terms, and the public record sealed under the OUTPUTS of the
+          //    name terms plus the username.
+          const everyone = setting.mode === wasm.VisibilityMode.Everyone;
+          const pubKey = everyoneKey(
+            name,
+            username,
+            certificate === null ? null : base64Encode(certificate),
+            session.accountKeyHex,
+          );
+          const action = everyoneAction(state.everyone, everyone, pubKey);
+          if (action.kind === "publish") {
+            const names = nameTerms(name);
+            const all = [...names, ...usernameTerms(username)];
+            if (all.length === 0) {
+              // A public record needs a term, and discovery refuses Everyone
+              // without one: nothing to publish until a name or a username exists.
+              // Said out loud: this person stays unfindable while it holds.
+              // eslint-disable-next-line no-console
+              console.warn("[reach] Everyone not published: no name and no username yet; this account cannot be found");
+            } else {
+              const outputs = await outputsOf(all);
+              const nameLookupKeys = lookupKeysOf(outputs.slice(0, names.length));
+              const payload = wasm.IntroductionPayload.forPublicRecord(
+                session.accountKey,
+                base64Decode(account),
+                name ?? undefined,
+                username ?? undefined,
+                certificate ?? undefined,
+                // ADR-0078 - the public record carries this account's mailbox
+                // binding (not an identity-derived address), so a finder learns
+                // where to write and verifies it against the key it pins.
+                session.mailboxBinding(),
+              );
+              let publicRecord: Uint8Array;
+              try {
+                publicRecord = wasm.composePublicRecord(payload, outputs, BigInt(Date.now()));
+              } finally {
+                payload.free();
+              }
+              await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
+              await save({ ...state, everyone: { public: true, key: pubKey } });
+            }
+          } else if (action.kind === "withdraw") {
+            await scoped.putVisibility({ public: false });
+            await save({ ...state, everyone: { public: false, key: null } });
+          }
+          },
+        },
+        {
+          name: "own-record",
+          run: async () => {
+          // 2. The introduction record (section 4), rebuilt when an input moved.
+          const key = offerKey(
+            session.currentVersion("fof"),
+            name,
+            username,
+            base64Encode(session.mailboxBinding()),
+          );
+          if (offerNeedsRebuild(state.offer, fof, key)) {
+            const terms = [...nameTerms(name), ...usernameTerms(username)];
+            if (terms.length > 0) {
+              const outputs = await outputsOf(terms);
+              const grant = session.grant("fof");
+              const accountId = base64Decode(account);
+              const payload = new wasm.IntroductionPayload(
+                session.accountKey,
+                accountId,
+                name ?? undefined,
+                username ?? undefined,
+                certificate ?? undefined,
+                grant,
+              );
+              grant.free();
+              try {
+                const record = wasm.composeIntroduction(payload, outputs, BigInt(Date.now()));
+                await save({ ...state, offer: { key, recordB64: base64Encode(record) }, offerSentTo: {} });
+              } finally {
+                payload.free();
+              }
+            }
+          }
+          },
+        },
+        {
+          name: "offer",
+          run: async () => {
+          // 3. Offer the record to every contact the setting allows who was not
+          //    sent this version yet. An ask reaches this step like a new contact:
+          //    a contact not allowed gets no offer for it either.
+          const offer = state.offer;
+          if (offer !== null) {
+            const offerBytes = wasm.composeIntroductionOffer(base64Decode(offer.recordB64));
+            const contacts = loadAccepted(account).map((c) => ({
+              keyHex: journalHex(base64Decode(c.signaturePubkeyB64)),
+              accountIdHex: c.accountIdHex ?? null,
+            }));
+            const allowsContact = (hex: string | null): boolean =>
+              wasm.allowsContact(setting, (hex === null ? null : accountIdBytes(hex)) ?? NO_ACCOUNT_ID);
+            const allowed = (g: string): boolean => {
+              const entry = byId.get(g);
+              const peer = entry === undefined ? null : peerOf(entry.group);
+              return peer !== null && mayOfferTo(personKeysHex(peer), contacts, allowsContact);
+            };
+            for (const g of offerTargets(state, fof, [...byId.keys()], allowed)) {
+              const entry = byId.get(g);
+              if (entry === undefined) continue;
+              await publisher.broadcastControl(secrets, entry.group, offerBytes);
+              await save({ ...state, offerSentTo: { ...state.offerSentTo, [g]: offer.key } });
+            }
+          }
+          },
+        },
+        {
+          name: "relay",
+          run: async () => {
+          // 4. Relay the records our contacts offered, as one padded bundle, to
+          //    every contact (a contact may receive its own record back; it is
+          //    harmless and hides nothing the bundle size does not).
+          const intros = await loadIntroductions(account);
+          const records = Object.values(intros.offers).map((o) => o.recordB64);
+          if (records.length > 0) {
+            const digest = recordsDigest(records);
+            const targets = bundleTargets(state, digest, [...byId.keys()]);
+            if (targets.length > 0) {
+              const bundle = wasm.composeIntroductionsBundle(
+                records.map((r) => base64Decode(r)).slice(0, wasm.maxBundleRecords()),
+                BigInt(Date.now()),
+              );
+              for (const g of targets) {
+                const entry = byId.get(g);
+                if (entry === undefined) continue;
+                await publisher.broadcastControl(secrets, entry.group, bundle);
+                await save({ ...state, bundleSentTo: { ...state.bundleSentTo, [g]: digest } });
+              }
+            }
+          }
+          },
+        },
+      ],
+      (step, err) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[reach] publication step ${step} failed; the next step runs`, err instanceof Error ? err.name : "");
+      },
+    );
   }
 
   createEffect(() => {

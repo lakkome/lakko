@@ -148,3 +148,90 @@ struct ReactionsListSheet: View {
         }
     }
 }
+
+/// The design-system "Reaction chip" (`.claude/skills/ux-ui/design-system.md`
+/// section 3): every size the chip is drawn at, at the default text size. The
+/// view scales each one with the person's text size (``ReactionChipLabel``);
+/// these are the values a test and a reader compare with the spec.
+enum ReactionChipMetrics {
+    static let height: CGFloat = 32
+    static let horizontalPadding: CGFloat = 10
+    static let emojiSize: CGFloat = 18
+    static let avatarSize: CGFloat = 22
+    static let avatarRing: CGFloat = 1
+    static let avatarOverlap: CGFloat = 4
+    static let maxAvatars = 3
+    static let contentGap: CGFloat = 4
+    static let countSize: CGFloat = 14
+    /// Between chips and between wrapped lines.
+    static let chipSpacing: CGFloat = 6
+    static let ownBorder: CGFloat = 1
+}
+
+/// What a chip shows after its emoji.
+enum ReactionChipContent {
+    case emojiOnly
+    case count(String)
+    /// Reactor keys (base64), at most ``ReactionChipMetrics/maxAvatars``
+    /// drawn, each with its display name and photo.
+    case avatars([(name: String, identity: String, photo: AvatarPhoto?)])
+}
+
+/// One reaction chip, or the "+N" overflow chip (`emoji` nil, the count
+/// alone): a capsule of the design-system sizes, each scaled with the
+/// person's text size so a larger Dynamic Type setting grows the chip, and
+/// all of them together by the chat text size (`docs/ux/text-size.md`).
+struct ReactionChipLabel: View {
+    /// `nil` for the "+N" chip.
+    let emoji: String?
+    let content: ReactionChipContent
+    /// The own chip: accent-soft fill and a 1 accent border.
+    var mine: Bool = false
+
+    @ScaledMetric(relativeTo: .subheadline) private var height = ReactionChipMetrics.height
+    @ScaledMetric(relativeTo: .subheadline) private var padding = ReactionChipMetrics.horizontalPadding
+    @ScaledMetric(relativeTo: .body) private var emojiSize = ReactionChipMetrics.emojiSize
+    @ScaledMetric(relativeTo: .subheadline) private var avatarSize = ReactionChipMetrics.avatarSize
+    @ScaledMetric(relativeTo: .subheadline) private var overlap = ReactionChipMetrics.avatarOverlap
+    @ScaledMetric(relativeTo: .subheadline) private var gap = ReactionChipMetrics.contentGap
+    @ScaledMetric(relativeTo: .subheadline) private var countSize = ReactionChipMetrics.countSize
+    @Environment(\.chatTextScale) private var scale
+
+    var body: some View {
+        HStack(spacing: gap * scale) {
+            if let emoji {
+                Text(emoji).font(.system(size: emojiSize * scale))
+            }
+            switch content {
+            case .emojiOnly:
+                EmptyView()
+            case .count(let text):
+                Text(text)
+                    .font(.system(size: countSize * scale))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .lineLimit(1)
+            case .avatars(let reactors):
+                HStack(spacing: -overlap * scale) {
+                    ForEach(Array(reactors.prefix(ReactionChipMetrics.maxAvatars).enumerated()), id: \.offset) { _, r in
+                        InitialsAvatar(name: r.name, identity: r.identity, size: avatarSize * scale, photo: r.photo)
+                            // The ring sits outside the avatar, so the avatar
+                            // keeps its full size and the overlap reads as a cut.
+                            .background(
+                                Circle()
+                                    .fill(Color.lakkoSurface)
+                                    .padding(-ReactionChipMetrics.avatarRing))
+                    }
+                }
+                .padding(.horizontal, ReactionChipMetrics.avatarRing)
+            }
+        }
+        .padding(.horizontal, padding * scale)
+        .frame(minHeight: height * scale)
+        .background(mine ? Color.lakkoAccentSoft : Color.lakkoSurfaceSunken)
+        .overlay(
+            Capsule()
+                .strokeBorder(mine ? Color.lakkoAccent : Color.clear, lineWidth: ReactionChipMetrics.ownBorder)
+        )
+        .clipShape(Capsule())
+    }
+}

@@ -127,6 +127,11 @@ private struct MessageActionsFixture: View {
     @State private var clipboard: String?
     @State private var edited = false
     @State private var deleted = false
+    /// The production edit sheet, opened by Edit: its field must take the
+    /// keyboard by itself.
+    @State private var editing = false
+    @State private var editText = ""
+    @State private var savedEdit: String?
 
     var body: some View {
         MessageMenuHost {
@@ -146,6 +151,9 @@ private struct MessageActionsFixture: View {
                 if edited {
                     Text("fixture: edit")
                 }
+                if let savedEdit {
+                    Text("fixture: saved \(savedEdit)")
+                }
                 if deleted {
                     Text("fixture: delete")
                 }
@@ -162,6 +170,15 @@ private struct MessageActionsFixture: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
+        .sheet(isPresented: $editing) {
+            EditMessageSheet(
+                text: $editText,
+                onCancel: { editing = false },
+                onSave: {
+                    savedEdit = editText
+                    editing = false
+                })
+        }
     }
 
     private func row(_ message: ChatMessage) -> some View {
@@ -173,7 +190,11 @@ private struct MessageActionsFixture: View {
             actionsAvailable: true,
             readState: message.direction == .outgoing ? .sent : nil,
             onPreview: { _ in },
-            onEdit: { edited = true },
+            onEdit: {
+                edited = true
+                editText = message.text
+                editing = true
+            },
             onDelete: { deleted = true },
             onReact: { reacted = $0 },
             // The row production draws (`ChatViewModel.reactionRow(for:)`):

@@ -518,6 +518,16 @@ public object StateBundle {
         )
     }
 
+    /** The chat id to carry for [contact] ([contactChat]). */
+    internal fun carriedChatId(accountIdB64: String, contact: me.lakko.app.contacts.AcceptedContact): String? {
+        val hook = contactChat ?: return contact.groupIdHex
+        return try {
+            hook(accountIdB64, contact)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     /** The account key of [accountIdB64] on this device, standard base64, or
      *  `null` when its seed is not held (or cannot be read). */
     private fun currentAccountKeyB64(context: Context, accountIdB64: String): String? {
@@ -561,7 +571,7 @@ public object StateBundle {
                 displayName = c.displayName.orEmpty(),
                 acceptedAtMs = c.request.validAfterMs.toLong(),
                 accountIdHex = c.request.fromAccountId?.let { hexOf(it) },
-                groupIdB64 = c.groupIdHex?.let { bytesOfHex(it) }?.let { enc.encodeToString(it) },
+                groupIdB64 = carriedChatId(accountIdB64, c)?.let { bytesOfHex(it) }?.let { enc.encodeToString(it) },
             )
         }
         val pins = accepted.mapNotNull { c ->
@@ -1122,6 +1132,16 @@ public object StateBundle {
      */
     @Volatile
     public var contactsSink: ((String, List<me.lakko.app.contacts.AcceptedContact>) -> Int?)? = null
+
+    /**
+     * The chat id a bundle carries for a contact of `accountIdB64`: the
+     * person's one-to-one on this device (a stored id that is a group, a
+     * one-to-one with someone else or gone is not carried). Installed by the
+     * contacts repository; absent, the stored id is carried and the receiver's
+     * resolver still ignores one that is not the person's one-to-one.
+     */
+    @Volatile
+    public var contactChat: ((String, me.lakko.app.contacts.AcceptedContact) -> String?)? = null
 
     /**
      * v3 — the receiving half for pending contacts, set like [contactsSink]

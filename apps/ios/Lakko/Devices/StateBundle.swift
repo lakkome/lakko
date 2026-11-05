@@ -387,10 +387,13 @@ public enum StateBundle {
             intro: nil,
             createdAt: createdAt
         )
-        let groupIdHex = carried.groupIdB64.flatMap { base64Decode($0) }.map { hexEncode($0) }
+        // The carried chat link is not taken (2026-11-05): another client may
+        // have linked a group the person is in. This device links the
+        // one-to-one it joins with them by its own roster
+        // (`ContactsViewModel.adoptOneToOnePeers`).
         return AcceptedContact(
             request: request,
-            groupIdHex: groupIdHex,
+            groupIdHex: nil,
             displayName: carried.displayName.isEmpty ? nil : carried.displayName
         )
     }

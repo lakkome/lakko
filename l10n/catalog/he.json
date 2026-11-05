@@ -3914,8 +3914,8 @@
       "text": "כדי להתחיל שיחה, שלחו קודם הודעה.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "הצ׳אט שלכם בהקמה.",
+    "contacts.detail.cannot_message": {
+      "text": "עדיין אי אפשר לשלוח הודעה ל-{name}. בקשו ממנו קישור הזמנה.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "איש הקשר הזה נוסף לפני שאפשר היה להתחיל צ׳אטים מכאן. בקשו ממנו לשלוח לכם הודעה.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "לא ניתן היה לשלוח את הבקשה. נסו שוב.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "הבקשה נשלחה. אפשר לכתוב אחרי ש-{name} יאשר.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "לא ניתן היה לאשר. נסו שוב.",
+      "text": "לא ניתן היה לאשר.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "מישהו",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "דרך {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "דרך קבוצה ששניכם חברים בה",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "מספרי בטיחות",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "גדול",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "בינוני",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "האם קל לקרוא בגודל הזה?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "אפשר לשנות את זה כאן בכל עת.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "קטן",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "גודל טקסט",
       "status": "machine"
     },
     "settings.translation.delete_all": {

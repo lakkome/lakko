@@ -288,7 +288,7 @@ The Lakko server sees what is searched for. The picker shows no note about it
 ### Timeline
 
 A GIF message renders as the animation itself, auto-looping and muted, sized to its
-aspect ratio within the bubble width, with a small `GIF` label. Tap opens it full-screen.
+aspect ratio within the bubble width, with a small `GIF` label under the picture, never on it (decided 2026-11-04, a label on the image covered GIF captions): a capsule at the leading edge, sunken surface, muted 11/600 text, the same on every client. Tap opens it full-screen.
 On iOS and Android it must actually animate (not the first frame only).
 
 ### States

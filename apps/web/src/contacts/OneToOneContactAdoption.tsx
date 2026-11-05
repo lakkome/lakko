@@ -28,9 +28,12 @@ import { createEffect, createMemo, on, type Component } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { sessionAccountOf } from "../chat/persist-hooks";
-import { oneToOnePeerKey, ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useProfiles } from "../profile/ProfileContext";
-import { foundNameForKey } from "./contact-ack";
+import { foundNameForKey, retireAnsweredSentRequests } from "./contact-ack";
+import { adoptablePeerOf } from "./adopt-one-to-one";
+import { isOneToOneWithContact } from "./contact-conversation";
 import { adoptOneToOne } from "./local-store";
 
 export const OneToOneContactAdoption: Component = () => {
@@ -54,20 +57,44 @@ export const OneToOneContactAdoption: Component = () => {
       const own = ownPersonKeyB64(chats.identity());
       if (own === null) return;
       const nowMs = Date.now();
-      for (const g of chats.groups()) {
-        const peer = oneToOnePeerKey(personKeysOf(g.group), own);
+      const groups = chats.groups();
+      const isOneToOne = (g: (typeof groups)[number]): boolean => conversationKindOf(g.group) === "chat";
+      // A row's recorded chat still counts only while it is that person's
+      // one-to-one on this device; otherwise this conversation replaces it.
+      const linkHolds = (groupIdB64: string, row: Parameters<typeof isOneToOneWithContact>[0]["contact"]): boolean => {
+        const linked = groups.find((g) => g.groupIdB64 === groupIdB64);
+        return (
+          linked !== undefined &&
+          isOneToOneWithContact({
+            conversation: linked,
+            contact: row,
+            ownKeyB64: own,
+            peopleOf: (g) => personKeysOf(g.group),
+            isOneToOne,
+          })
+        );
+      };
+      for (const g of groups) {
+        const peer = adoptablePeerOf({ isOneToOne: isOneToOne(g), people: personKeysOf(g.group), ownKeyB64: own });
         if (peer === null) continue;
-        const wrote = adoptOneToOne({
-          signatureKey: peer,
-          accountIdHex: profiles.accountIdHexOf(peer),
-          groupIdB64: g.groupIdB64,
-          nowMs,
-        });
+        const wrote = adoptOneToOne(
+          {
+            signatureKey: peer,
+            accountIdHex: profiles.accountIdHexOf(peer),
+            groupIdB64: g.groupIdB64,
+            nowMs,
+          },
+          undefined,
+          linkHolds,
+        );
+        const session = sessionAccountOf(auth.state());
         // A Welcome ahead of the ack makes the row: it is not a stand-in
         // either (`contact-ack.ts`).
-        const account = wrote ? sessionAccountOf(auth.state()) : null;
-        const found = account === null ? null : foundNameForKey(account, peer);
+        const found = wrote && session !== null ? foundNameForKey(session, peer) : null;
         if (found !== null) profiles.fileFoundName(peer, found);
+        // The one-to-one is here: the Sent request it answers is answered
+        // (base walk 2026-11-04: the ack alone makes no contact).
+        if (session !== null) retireAnsweredSentRequests(session, peer, profiles.accountIdHexOf(peer) ?? null);
       }
     }),
   );

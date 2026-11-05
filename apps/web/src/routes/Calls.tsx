@@ -41,6 +41,8 @@ import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
 import { useChats } from "../chat/ChatContext";
 import { conversationTitle } from "../chat/conversation-title";
+import { conversationAvatarKeys, type ConversationAvatarKeys } from "../chat/conversation-avatar";
+import { conversationKindOf } from "../chat/conversation-kind";
 import { groupTitle } from "../chat/group-title";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -90,15 +92,18 @@ export default function Calls(): JSX.Element {
     });
   };
 
-  /** ADR-0084 - the other person of a one-to-one call row, whose photo it
-   *  shows; `undefined` for a group. */
-  const personKeyOf = (groupIdB64: string): string | undefined => {
+  /** ADR-0084 / ADR-0087 section 18 - what a call row's avatar shows: the
+   *  other person's photo in a one-to-one, the group's own photo in a group
+   *  (`chat/conversation-avatar.ts`). */
+  const avatarKeysOf = (groupIdB64: string): ConversationAvatarKeys => {
     const entry = chats.get(groupIdB64);
-    if (entry === undefined) return undefined;
-    const memberKeysB64 = personKeysOf(entry.group);
-    if (memberKeysB64.length > 2) return undefined;
+    if (entry === undefined) return {};
     const ownB64 = ownPersonKeyB64(chats.identity());
-    return memberKeysB64.find((k) => k !== ownB64);
+    return conversationAvatarKeys({
+      kind: conversationKindOf(entry.group),
+      groupIdB64,
+      peerKeyB64: personKeysOf(entry.group).find((k) => k !== ownB64),
+    });
   };
 
   /** Why `New call` could not start, or `null`. */
@@ -203,7 +208,12 @@ export default function Calls(): JSX.Element {
                           class="lk-row-open"
                           onClick={() => open(row.groupIdB64)}
                         >
-                          <Avatar label={title()} id={row.groupIdB64} personKey={personKeyOf(row.groupIdB64)} />
+                          <Avatar
+                            label={title()}
+                            id={row.groupIdB64}
+                            personKey={avatarKeysOf(row.groupIdB64).personKey}
+                            conversationKey={avatarKeysOf(row.groupIdB64).conversationKey}
+                          />
                           <div class="lk-row-body">
                             <div class="lk-row-line">
                               <span class="lk-row-title">

@@ -745,6 +745,9 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.LINK_CLAIM -> Unit
             // ADR-0079 (order of 2026-10-17) - a link-founded note, the same.
             FfiIncomingEnvelopeKind.LINK_FOUNDED -> Unit
+            // `docs/ux/who-can-find-me.md` 6.4 - a contact request sealed to
+            // one member rides a GROUP JOURNAL; on the relay it is dropped.
+            FfiIncomingEnvelopeKind.GROUP_CONTACT_REQUEST -> Unit
         }
     }
 

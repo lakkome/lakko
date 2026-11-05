@@ -43,6 +43,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSignal } from "solid-js";
 
 vi.mock("./ChatContext", () => ({ useChats: () => ({ identity: () => null }) }));
 vi.mock("../profile/ProfileContext", () => ({
@@ -57,7 +58,7 @@ vi.mock("../profile/ProfileContext", () => ({
   }),
 }));
 
-import { TimelineBubble, type BubbleHost } from "./TimelineBubble";
+import { editFieldKeyAction, TimelineBubble, type BubbleHost } from "./TimelineBubble";
 import { LONG_PRESS_MS, SURFACE_GAP_PX } from "./MessageMenu";
 import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
 import { shortTime } from "./timeline-layout";
@@ -905,6 +906,112 @@ describe("a group bubble's sender line", () => {
       expect(errors.mock.calls.filter((c) => String(c[0]).startsWith("[names]"))).toHaveLength(0);
     } finally {
       errors.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Base walk 2026-11-04 — choosing Edit focuses the field, caret at the end.
+// ---------------------------------------------------------------------------
+
+describe("choosing Edit", () => {
+  it("from the menu, the edit field takes the focus with the caret at the end", async () => {
+    renderUi(() => {
+      const [editing, setEditing] = createSignal<number | null>(null);
+      const [text, setText] = createSignal("");
+      return (
+        <TimelineBubble
+          row={ownMessage("hello world")}
+          isGroup={false}
+          startsRun={true}
+          endsRun={true}
+          {...host({
+            onStartEdit: (id, current) => {
+              setText(current);
+              setEditing(id);
+            },
+            setEditText: setText,
+          })}
+          editingId={editing()}
+          editText={text()}
+        />
+      );
+    });
+    mouse(one(".lk-bubble"), "contextmenu", { clientX: 40, clientY: 60 });
+    const edit = all<HTMLButtonElement>("[role='menu'] button").find((b) => b.textContent?.includes("Edit"));
+    expect(edit, "no Edit item").toBeDefined();
+    edit?.click();
+    await settle();
+    const field = one<HTMLTextAreaElement>(".lk-bubble-edit textarea");
+    expect(document.activeElement).toBe(field);
+    expect(field.value).toBe("hello world");
+    expect(field.selectionStart).toBe(field.value.length);
+    expect(field.selectionEnd).toBe(field.value.length);
+  });
+});
+
+describe("the inline edit field and the keyboard (base scenario 10)", () => {
+  function openEdit(over: Partial<BubbleHost> = {}): HTMLTextAreaElement {
+    renderUi(() => {
+      const [text, setText] = createSignal("hello world");
+      return (
+        <TimelineBubble
+          row={ownMessage("hello world")}
+          isGroup={false}
+          startsRun={true}
+          endsRun={true}
+          {...host({ setEditText: setText, ...over })}
+          editingId={42}
+          editText={text()}
+        />
+      );
+    });
+    return one<HTMLTextAreaElement>(".lk-bubble-edit textarea");
+  }
+  const key = (el: Element, init: KeyboardEventInit): void => {
+    el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  };
+
+  it("Enter saves, Shift+Enter does not, Escape cancels", () => {
+    const onSaveEdit = vi.fn();
+    const onCancelEdit = vi.fn();
+    const field = openEdit({ onSaveEdit, onCancelEdit });
+    key(field, { key: "Enter", shiftKey: true });
+    expect(onSaveEdit).not.toHaveBeenCalled();
+    key(field, { key: "Enter" });
+    expect(onSaveEdit).toHaveBeenCalledWith(42);
+    key(field, { key: "Escape" });
+    expect(onCancelEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("an input method's Enter picks a candidate, it does not save", () => {
+    expect(editFieldKeyAction({ key: "Enter", shiftKey: false, isComposing: true })).toBeNull();
+    expect(editFieldKeyAction({ key: "Enter", shiftKey: false, keyCode: 229 })).toBeNull();
+    expect(editFieldKeyAction({ key: "Enter", shiftKey: false })).toBe("save");
+    expect(editFieldKeyAction({ key: "Enter", shiftKey: true })).toBeNull();
+    expect(editFieldKeyAction({ key: "Escape", shiftKey: false })).toBe("cancel");
+    expect(editFieldKeyAction({ key: "a", shiftKey: false })).toBeNull();
+  });
+
+  it("the whole edit block is brought into view when it opens and as it grows", async () => {
+    const seen: Array<{ el: Element; opts: unknown }> = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView(this: Element, opts?: unknown): void {
+      seen.push({ el: this, opts });
+    };
+    try {
+      const field = openEdit();
+      await settle();
+      const box = one(".lk-bubble-edit");
+      expect(seen.some((s) => s.el === box)).toBe(true);
+      expect(seen[0]?.opts).toEqual({ block: "nearest" });
+      const before = seen.length;
+      field.value = "hello world\nand a second line";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(seen.length).toBeGreaterThan(before);
+      expect(seen[seen.length - 1]?.el).toBe(box);
+    } finally {
+      Element.prototype.scrollIntoView = original;
     }
   });
 });

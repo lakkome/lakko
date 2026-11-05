@@ -86,7 +86,11 @@ export function requestsToResend(
   rotatedAtMs: number,
 ): SentRequestRecord[] {
   return waiting
-    .filter((r) => r.sentAtMs < rotatedAtMs)
+    // An acked request was answered; it only waits for its one-to-one to
+    // join (`contact-ack.ts`), and a re-send would ask again.
+    // A request sent inside a group (who-can-find-me 6.4) has no inbox to be
+    // re-sent to; the next Message press after a rotation sends a fresh one.
+    .filter((r) => r.sentAtMs < rotatedAtMs && r.accepterKeyB64 === undefined && r.throughGroupIdB64 === undefined)
     .sort((a, b) => a.sentAtMs - b.sentAtMs);
 }
 

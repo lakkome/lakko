@@ -348,4 +348,30 @@ final class RecordingMachineTests: XCTestCase {
         XCTAssertEqual(RecordingMachine.spokenDuration(ms: 65_000).withoutIsolates, "1 minute 5 seconds")
         XCTAssertEqual(RecordingMachine.spokenDuration(ms: 1_000), "1 second")
     }
+
+    /// Base walk 2026-11-04 — a voice message showed "0:04" and was read as
+    /// "3 seconds". The spoken label follows the visible rounding: a total
+    /// rounds up, an elapsed time or a position rounds down.
+    func testTheSpokenDurationUsesTheVisibleRounding() {
+        for ms: Int64 in [0, 1, 400, 999, 1_000, 3_200, 3_500, 3_999, 59_001, 61_700] {
+            let visibleTotal = RecordingMachine.formatTotalClock(ms: ms)
+            let visibleSeconds = Self.seconds(of: visibleTotal)
+            XCTAssertEqual(
+                RecordingMachine.spokenTotalDuration(ms: ms).withoutIsolates,
+                RecordingMachine.spokenDuration(ms: visibleSeconds * 1_000).withoutIsolates,
+                "total \(ms) ms shown as \(visibleTotal)")
+            let visiblePosition = RecordingMachine.formatClock(ms: ms)
+            XCTAssertEqual(
+                RecordingMachine.spokenDuration(ms: ms).withoutIsolates,
+                RecordingMachine.spokenDuration(ms: Self.seconds(of: visiblePosition) * 1_000).withoutIsolates,
+                "position \(ms) ms shown as \(visiblePosition)")
+        }
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 3_200), "0:04")
+        XCTAssertEqual(RecordingMachine.spokenTotalDuration(ms: 3_200), "4 seconds")
+    }
+
+    private static func seconds(of clock: String) -> Int64 {
+        let parts = clock.split(separator: ":").compactMap { Int64($0) }
+        return parts.count == 2 ? parts[0] * 60 + parts[1] : -1
+    }
 }

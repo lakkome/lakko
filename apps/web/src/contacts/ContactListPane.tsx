@@ -73,6 +73,10 @@ export interface ContactListPaneProps {
   readonly accepting?: (request: IncomingContactRequest) => boolean;
   /** The last Accept of this request failed; it is still listed. */
   readonly acceptFailed?: (request: IncomingContactRequest) => boolean;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the name of the group a
+   *  request arrived inside: `""` for a group with no name, `null` for a
+   *  request from the inbox (no line). */
+  readonly viaGroupName?: (request: IncomingContactRequest) => string | null;
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
   readonly onDismissSent: (record: SentRequestRecord) => void;
@@ -206,6 +210,12 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                    <Show when={props.viaGroupName?.(req) ?? null}>
+                      {(name) => <span class="lk-row-sub">{viaGroupLine(name())}</span>}
+                    </Show>
+                    <Show when={props.viaGroupName?.(req) === ""}>
+                      <span class="lk-row-sub">{t("contacts.request.via_unnamed_group")}</span>
+                    </Show>
                     <span class="lk-request-intro">
                       {req.intro !== null && req.intro !== "" ? req.intro : t("contacts.request.no_intro")}
                     </span>
@@ -216,7 +226,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                         disabled={props.pendingBusy() || props.accepting?.(req) === true}
                         onClick={() => props.onAccept(req)}
                       >
-                        {t("contacts.request.accept")}
+                        {/* A failed Accept founded no chat and made no
+                            contact: the request stays, and the same button
+                            tries again. */}
+                        {props.acceptFailed?.(req) === true ? t("common.try_again") : t("contacts.request.accept")}
                       </button>
                       <button class="small" type="button" onClick={() => props.onDecline(req)}>
                         {t("contacts.request.decline")}
@@ -336,4 +349,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       </div>
     </aside>
   );
+}
+
+/** "Via {group}" for a request that arrived inside a named group. */
+export function viaGroupLine(groupName: string): string {
+  return t("contacts.request.via_group", { group: groupName });
 }

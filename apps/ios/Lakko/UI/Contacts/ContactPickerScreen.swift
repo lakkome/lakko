@@ -7,8 +7,11 @@ import SwiftUI
 /// contacts, one row each, tapping opens that contact's conversation through
 /// the same path the Contacts screen's "Open" uses.
 ///
-/// A contact whose chat was never created (the accept-time handshake failed)
-/// is listed but cannot be picked; the row says so instead of hiding it.
+/// A contact's chat is the one-to-one with them (``ContactConversation``),
+/// never the id stored on the row by itself; a contact with an account and
+/// no chat here gets a new one-to-one when picked, as Message on the card
+/// does (2026-11-05). A contact with no known account cannot be picked; the
+/// row says so instead of hiding it.
 struct ContactPickerScreen: View {
     @ObservedObject var viewModel: ContactsViewModel
     let title: String
@@ -36,8 +39,19 @@ struct ContactPickerScreen: View {
                 Section {
                     ForEach(viewModel.repositoryState.accepted, id: \.request.fromPubkey) { entry in
                         ResolvedName(signatureKey: entry.request.fromPubkey) { resolved in
+                            let chat = viewModel.chatGroupIdHex(for: entry)
+                            let pickable = chat != nil || entry.request.fromAccountId != nil
+                            let rowId = entry.request.messageId
                             Button {
-                                if let groupIdHex = entry.groupIdHex { onPick(groupIdHex) }
+                                if let chat {
+                                    onPick(chat)
+                                } else {
+                                    Task {
+                                        if let started = await viewModel.openOrStartChat(for: entry) {
+                                            onPick(started)
+                                        }
+                                    }
+                                }
                             } label: {
                                 HStack(spacing: 12) {
                                     InitialsAvatar(
@@ -49,15 +63,31 @@ struct ContactPickerScreen: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(resolved.listLabel)
                                             .foregroundStyle(Color.lakkoText)
-                                        if entry.groupIdHex == nil {
+                                        if !pickable {
                                             Text(l10n.t("chats.new_chat.not_available"))
                                                 .font(.footnote)
                                                 .foregroundStyle(Color.lakkoTextMuted)
+                                        } else if let line = ContactDetailScreen.messageLineKey(
+                                            hasChat: chat != nil,
+                                            waitingRequest: viewModel.hasWaitingRequest(for: entry),
+                                            notice: viewModel.messageNotice[rowId]) {
+                                            Text(l10n.t(line.key, texts: ["name": resolved.name]))
+                                                .font(.footnote)
+                                                .foregroundStyle(
+                                                    line.danger ? Color.lakkoDanger : Color.lakkoTextMuted)
+                                        } else if viewModel.startChatFailed.contains(rowId) {
+                                            Text(l10n.t("contacts.error.start_chat"))
+                                                .font(.footnote)
+                                                .foregroundStyle(Color.lakkoDanger)
                                         }
+                                    }
+                                    Spacer(minLength: 0)
+                                    if viewModel.startingChat.contains(rowId) {
+                                        ProgressView()
                                     }
                                 }
                             }
-                            .disabled(entry.groupIdHex == nil)
+                            .disabled(!pickable || viewModel.startingChat.contains(rowId))
                         }
                     }
                 }

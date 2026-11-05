@@ -95,6 +95,7 @@ internal fun senderActOf(
     is IncomingChatEvent.ScopedDiscovery -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.GroupSetting -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.ProfileRequest -> SenderAct.CONTROL to event.senderKey
+    is IncomingChatEvent.GroupContactRequest -> SenderAct.CONTROL to event.senderKey
     is IncomingChatEvent.PushRoutingSecret -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.CommitterBeacon -> SenderAct.CONTROL to personKeyOfLeaf(event.senderLeaf)
     is IncomingChatEvent.System,

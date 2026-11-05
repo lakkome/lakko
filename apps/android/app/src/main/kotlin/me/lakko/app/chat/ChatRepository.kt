@@ -6130,7 +6130,10 @@ public class ChatRepository(
                     // Only from the other participant of a one-to-one.
                     val people = personKeysOf(group.members())
                     if (people.size == 2 && people.contains(senderKey) && senderKey != ownIdentity(group)) {
-                        introductionSink?.invoke(senderBytes, kind, bytes)
+                        // Kept even when no activity set the sink yet: the
+                        // receive cursor moves past this row, so a drop here
+                        // was a loss for good.
+                        (introductionSink ?: defaultIntroductionSink)(senderBytes, kind, bytes)
                     }
                 }
                 me.lakko.app.reach.ScopedEnvelopeKind.VISIBILITY,
@@ -6142,9 +6145,22 @@ public class ChatRepository(
     }
 
     /** ADR-0060 §4 — where an introduction offer / bundle from a contact goes
-     *  (the contacts-of-contacts store). `null` drops it. */
+     *  (the contacts-of-contacts store). `null` until an activity sets it: the
+     *  store's own keep ([defaultIntroductionSink]) runs then, never a drop. */
     @Volatile
     public var introductionSink: ((ByteArray, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null
+
+    /** The same keep the activity installs, for a row handled before one exists. */
+    private val defaultIntroductionSink: (ByteArray, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit =
+        { sender, kind, bytes ->
+            me.lakko.app.reach.IntroductionIntake.keepInBackground(
+                reach = me.lakko.app.reach.ReachManager.get(applicationContext),
+                senderKey = sender,
+                kind = kind,
+                bytes = bytes,
+                then = { runIntroductionsBestEffort() },
+            )
+        }
 
     /** ADR-0048 §2 — republish on growth when the roster gained a member. */
     private fun republishProfileIfGrown(
@@ -10290,6 +10306,9 @@ public class ChatRepository(
                     // is read off the role table as it stands at receipt.
                     receiveRegistrarSeed(record.group, groupIdHex, senderKey, envelope)
                 },
+                groupContactRequestSink = { senderKey, envelope, messageId, createdAt ->
+                    receiveGroupContactRequest(groupIdHex, senderKey, envelope, messageId, createdAt)
+                },
                 profileRequestSink = { senderKey ->
                     // ADR-0048 trigger 4 — inside the poll's provider critical
                     // section, where the own-identity read is safe; the answer
@@ -10371,7 +10390,13 @@ public class ChatRepository(
             applyDurableCursorBatch(
                 gate = cursorGate,
                 touchedMlsState = result.touchedMlsState,
-                persist = { persistSnapshotDurableOrThrow() },
+                // Section 6.4 — an opened group contact request is stored
+                // before the snapshot that consumed its row, so a failure
+                // holds the cursor with the row still readable.
+                persist = {
+                    groupContactRequestsFlush?.invoke()
+                    persistSnapshotDurableOrThrow()
+                },
                 advance = { record.advanceCursor(result.cursor) },
                 onHeld = { cause ->
                     android.util.Log.w(
@@ -13571,7 +13596,76 @@ public class ChatRepository(
             // account key; a roster that cannot be read is nobody.
             peopleOf = { hex -> members(hex)?.map { outboxB64(it.signaturePublicKey) }.orEmpty() },
             isOneToOne = { hex -> groupKind(hex) == GroupKind.ONE_TO_ONE },
+            samePerson = { a, b -> a == b || samePersonKey?.invoke(a, b) == true },
         )
+
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.4 — where a contact request that
+     * arrived inside [groupIdHex] goes: the contacts repository opens it with
+     * this account's key and runs the person's setting. Installed by it; the
+     * hand-over is all that happens here (no network, no lock taken).
+     */
+    @Volatile
+    internal var groupContactRequestIntake:
+        ((groupIdHex: String, senderKey: MemberIdentity, envelope: ByteArray, messageId: Long, createdAt: String) -> Unit)? = null
+
+    /** Section 6.4 — write the opened group requests held only in memory, or
+     *  throw. Run before a journal cursor moves past their rows, so the row
+     *  is either read again or its request already stored. Installed by the
+     *  contacts repository. */
+    @Volatile
+    internal var groupContactRequestsFlush: (() -> Unit)? = null
+
+    private fun receiveGroupContactRequest(
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        envelope: ByteArray,
+        messageId: Long,
+        createdAt: String,
+    ) {
+        // An unattributable request cannot be checked against its sender.
+        if (senderKey == null) return
+        groupContactRequestIntake?.invoke(groupIdHex, senderKey, envelope, messageId, createdAt)
+    }
+
+    /**
+     * Section 6.4, step 2 — the group (not a one-to-one) this account and the
+     * person holding [peerKey] are both current members of, the one with the
+     * newest message when several; `null` when there is none.
+     */
+    public fun sharedGroupWith(peerKey: ByteArray): String? {
+        val peer = outboxB64(peerKey)
+        val own = ownPersonKeyB64() ?: return null
+        val lastAt = state.value.threads.associate { it.groupIdHex.lowercase() to threadNewestAtMs(it) }
+        return pickSharedGroup(
+            candidates = groups.keys.toList(),
+            isGroup = { hex -> groupKind(hex) == GroupKind.GROUP && isGroupActive(hex) == true },
+            people = { hex -> members(hex)?.map { outboxB64(it.signaturePublicKey) } },
+            own = own,
+            isPeer = { key -> key == peer || samePersonKey?.invoke(key, peer) == true },
+            newestAt = { hex -> lastAt[hex.lowercase()] },
+        )
+    }
+
+    /** Section 6.4 — post [envelope] (a sealed contact request) into
+     *  [groupIdHex]. Returns the DS row id and stamp; throws on failure. */
+    public suspend fun sendGroupContactRequest(groupIdHex: String, envelope: ByteArray): SendMessageResult =
+        forSession {
+            val identity = canonicalIdentity.get()
+                ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+            val record = groups[groupIdHex] ?: throw IllegalStateException("conversation gone")
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = envelope,
+            ) ?: throw IllegalStateException("the group takes no request")
+        }
+
+    /** ADR-0074 section 3.7 — whether two standard-base64 person keys are one
+     *  person across proven rotations. Installed by the contacts repository. */
+    @Volatile
+    internal var samePersonKey: ((String, String) -> Boolean)? = null
 
     /**
      * The live one-to-one with the person holding [peerKey]: a conversation
@@ -14907,6 +15001,9 @@ public class ChatRepository(
                             registrarSeedSink = { senderKey, envelope ->
                                 receiveRegistrarSeed(record.group, groupIdHex, senderKey, envelope)
                             },
+                            groupContactRequestSink = { senderKey, envelope, messageId, createdAt ->
+                                receiveGroupContactRequest(groupIdHex, senderKey, envelope, messageId, createdAt)
+                            },
                             membershipProposalSink = { proposal, createdAt ->
                                 // The sweep's own apply pass consumes rows the
                                 // poll will never fetch again, so a proposal
@@ -15127,6 +15224,14 @@ public class ChatRepository(
                 override fun read(): Long = record.cursor
 
                 override fun advance(to: Long) {
+                    // Section 6.4 — never past a group contact request that is
+                    // not stored yet; the next poll's gate retries the write.
+                    try {
+                        groupContactRequestsFlush?.invoke()
+                    } catch (cause: Throwable) {
+                        android.util.Log.w("ChatRepository", "sweep: cursor held, a group contact request is not stored", cause)
+                        return
+                    }
                     record.advanceCursor(to)
                 }
             },
@@ -16518,6 +16623,9 @@ private class GroupRecord(
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
         groupSettingSink: ((MemberIdentity?, GroupSettingKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((Long, MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
+        /** `docs/ux/who-can-find-me.md` section 6.4 — a contact request sent
+         *  inside the group: (sender key, envelope, DS message id, created at). */
+        groupContactRequestSink: ((MemberIdentity?, ByteArray, Long, String) -> Unit)? = null,
         /** ADR-0073 R.7 case 2 / UX 16.5 — the batch changed which devices the
          *  group holds and not which PEOPLE: its commit rows are not drawn
          *  ([deviceSwapAcrossCommits]). */
@@ -16681,6 +16789,11 @@ private class GroupRecord(
                     // timeline row; the sink keeps what this device acts on
                     // and drops the rest.
                     scopedSink?.invoke(event.senderKey, event.kind, event.bytes)
+                }
+                is IncomingChatEvent.GroupContactRequest -> {
+                    // Section 6.4 — never a timeline row; the sink opens it
+                    // with this account's key or drops it.
+                    groupContactRequestSink?.invoke(event.senderKey, event.envelope, event.messageId, event.createdAt)
                 }
                 is IncomingChatEvent.ProfileRequest -> {
                     // ADR-0048 trigger 4 — a member asking for everyone's

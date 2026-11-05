@@ -1699,4 +1699,52 @@ final class NseServiceEnvelopeTests: XCTestCase {
         XCTAssertNil(result, "no real message → generic banner")
         XCTAssertEqual(suppressed, 3)
     }
+    // MARK: - A contact request inside a group (`docs/ux/who-can-find-me.md` 6.4)
+
+    /// A request sealed to one member must never become a notification body,
+    /// on any member's device, the person's own included.
+    func testAGroupContactRequestIsAServiceEnvelope() throws {
+        let alice = try Identity.fromSeed(seed: Data(repeating: 0x71, count: 32))
+        let bob = try Identity.fromSeed(seed: Data(repeating: 0x72, count: 32))
+        let request = try composeContactRequest(
+            senderSigningSeed: bob.ed25519Seed(), senderAccountId: Data(repeating: 0xB0, count: 16),
+            recipientX25519Pub: alice.x25519PublicKey(), fromPseudonym: Data(repeating: 0xB1, count: 32),
+            validAfterMs: 1, privacyPassToken: Data(), profile: nil, replyGrant: nil, linkAnswer: nil,
+            introMessage: Data())
+        let envelope = try composeGroupContactRequestEnvelope(
+            recipientX25519Pub: alice.x25519PublicKey(), request: request)
+        let lens = Int(groupContactRequestEnvelopeMinLen())...Int(groupContactRequestEnvelopeMaxLen())
+        XCTAssertTrue(nseLooksLikeGroupContactRequest(envelope, envelopeLens: lens))
+        func filtered(_ bytes: Data, injected: Bool) -> Bool {
+            if injected {
+                return nseIsServiceEnvelope(
+                    bytes,
+                    decodesAsPushRoutingSecret: { _ in false }, decodesAsCommitterBeacon: { _ in false },
+                    committerBeaconEnvelopeLen: 0, decodesAsProfile: { _ in false },
+                    profileEnvelopeLens: 0...0, decodesAsGroupName: { _ in false },
+                    groupNameEnvelopeLens: 0...0, decodesAsProfileRequest: { _ in false },
+                    profileRequestEnvelopeLen: 0, decodesAsPin: { _ in false }, pinEnvelopeLen: 0,
+                    decodesAsRegistrarSeed: { _ in false }, registrarSeedEnvelopeLen: 0,
+                    decodesAsScopedDiscovery: { _ in false }, scopedDiscoveryEnvelopeLens: 0...0,
+                    decodesAsSharedChannels: { _ in false }, sharedChannelsEnvelopeLens: 0...0,
+                    isGroupContactRequest: { isGroupContactRequestEnvelope(bytes: $0) },
+                    groupContactRequestEnvelopeLens: lens)
+            }
+            return nseIsServiceEnvelope(
+                bytes,
+                decodesAsPushRoutingSecret: { _ in false }, decodesAsCommitterBeacon: { _ in false },
+                committerBeaconEnvelopeLen: 0, decodesAsProfile: { _ in false },
+                profileEnvelopeLens: 0...0, decodesAsGroupName: { _ in false },
+                groupNameEnvelopeLens: 0...0, decodesAsProfileRequest: { _ in false },
+                profileRequestEnvelopeLen: 0, decodesAsPin: { _ in false }, pinEnvelopeLen: 0,
+                decodesAsRegistrarSeed: { _ in false }, registrarSeedEnvelopeLen: 0,
+                decodesAsScopedDiscovery: { _ in false }, scopedDiscoveryEnvelopeLens: 0...0,
+                decodesAsSharedChannels: { _ in false }, sharedChannelsEnvelopeLens: 0...0)
+        }
+        XCTAssertTrue(filtered(envelope, injected: true), "a request inside a group must never be rendered")
+        XCTAssertFalse(
+            filtered(envelope, injected: false),
+            "without the injected check no other arm recognises it, which is why the production site injects it")
+        XCTAssertFalse(filtered(Data("hello".utf8), injected: true), "a chat body is not one")
+    }
 }

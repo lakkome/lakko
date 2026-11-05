@@ -635,9 +635,35 @@ export function formatTotalClock(ms: number): string {
   return formatClock(Math.ceil(ms / 1000) * 1000);
 }
 
-/** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */
+/** Whole seconds the TOTAL duration reads as: rounded up, as
+ *  {@link formatTotalClock} shows it (any non-zero duration is at least 1). */
+export function totalSeconds(ms: number): number {
+  return ms > 0 ? Math.ceil(ms / 1000) : 0;
+}
+
+/** Whole seconds an elapsed / playback position reads as: rounded down, as
+ *  {@link formatClock} shows it. */
+export function elapsedSeconds(ms: number): number {
+  return Math.max(0, Math.floor(ms / 1000));
+}
+
+/**
+ * The TOTAL duration spoken for labels ("4 seconds", "1 minute 5 seconds"),
+ * by the rule the bubble shows it with ({@link formatTotalClock}), so the
+ * visible `0:04` and the spoken label never disagree (base walk 2026-11-04:
+ * "0:04" read as "3 seconds"). For a position use {@link spokenElapsed}.
+ */
 export function spokenDuration(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000));
+  return spokenSeconds(totalSeconds(ms));
+}
+
+/** An elapsed / playback position spoken by the rule {@link formatClock}
+ *  shows it with (rounded down). */
+export function spokenElapsed(ms: number): string {
+  return spokenSeconds(elapsedSeconds(ms));
+}
+
+function spokenSeconds(total: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   const s = t("common.duration.seconds", { count: seconds });

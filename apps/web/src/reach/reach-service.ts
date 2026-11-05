@@ -58,14 +58,14 @@ import {
   dropReply,
   dropRepliesTo,
   encodeReachBook,
-  fofRotationDue,
+  advanceFofSchedule,
+  fofScheduleAfterAdoption,
   isAccountWideClass,
   isEmptyDiff,
   pruneExpired,
   reachClassName,
   reachStateEntries,
   reachDiff,
-  rotateFof,
   versionChecksDue,
   versionOf,
   type ReachBook,
@@ -363,6 +363,20 @@ export class ReachSession {
     return parts.join("|");
   }
 
+  /** Whether this person's "Who can find me" setting lets the members of
+   *  `groupId` find them (`docs/ux/who-can-find-me.md` section 6.4: a
+   *  contact request that arrived inside that group is shown only then, or
+   *  when its sender is already a contact). No setting reads as `false`. */
+  allowsGroupMembers(groupId: Uint8Array): boolean {
+    const setting = this.setting();
+    if (setting === null) return false;
+    try {
+      return this.allowsScope(setting, "group", groupId);
+    } catch {
+      return false;
+    }
+  }
+
   private allowsScope(setting: WasmVisibilitySetting, kind: "group" | "channel", id: Uint8Array): boolean {
     const scope = new this.wasm.ScopeId(
       kind === "group" ? this.wasm.ScopeKind.Group : this.wasm.ScopeKind.Channel,
@@ -629,10 +643,12 @@ export class ReachSession {
       throw err;
     }
     let rotated = false;
-    if (fofRotationDue(book, now)) {
-      book = this.restamp(rotateFof(book, now));
-      rotated = true;
-    }
+    // The first pass on this device starts the 7-day schedule instead of
+    // rotating: a rotation now would make every record contacts hold for
+    // this person refused until relayed again.
+    const fof = advanceFofSchedule(book, now);
+    book = fof.rotated ? this.restamp(fof.book) : fof.book;
+    if (fof.rotated) rotated = true;
     // ADR-0078 section 9: leaving a group (or being removed from it) or a
     // channel rotates that class's one key, since its former members hold it.
     const departures = departuresOf(book, scopes);
@@ -810,14 +826,11 @@ export class ReachSession {
       } finally {
         state.free();
       }
-      const fofBefore = versionOf(this.book, "fof", "");
-      let book = adoptReachState(this.book, entries, Number(stamp));
-      // The scheduled `fof` rotation happened on the other device: this one
-      // starts its own schedule from here instead of rotating a second time.
-      // Client-local bookkeeping, not part of the shared state.
-      if (versionOf(book, "fof", "") > fofBefore) {
-        book = { ...book, fofRotatedAtMs: Math.max(book.fofRotatedAtMs, this.now()) };
-      }
+      const book = fofScheduleAfterAdoption(
+        this.book,
+        adoptReachState(this.book, entries, Number(stamp)),
+        this.now(),
+      );
       this.book = book;
       await this.persistBook();
       this.versionsChanged(merge.send);

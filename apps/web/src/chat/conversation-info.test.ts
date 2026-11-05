@@ -441,10 +441,17 @@ describe("findPersonRecord", () => {
   const linked = { signaturePubkeyB64: "keyA", groupIdB64: "g1" };
   const byKey = { signaturePubkeyB64: "keyB" };
 
-  it("prefers the chat's own contact link", () => {
+  it("the peer's key decides; a record linked to this chat for another person does not count", () => {
     expect(
       findPersonRecord([byKey, linked], { groupIdB64: "g1", peerKeyB64: "keyB" }),
+    ).toBe(byKey);
+    expect(
+      findPersonRecord([byKey, linked], { groupIdB64: "g1", peerKeyB64: "keyA" }),
     ).toBe(linked);
+  });
+
+  it("uses the chat's link only while the roster cannot name the peer", () => {
+    expect(findPersonRecord([byKey, linked], { groupIdB64: "g1", peerKeyB64: null })).toBe(linked);
   });
 
   it("falls back to the peer's key when no link was ever written", () => {

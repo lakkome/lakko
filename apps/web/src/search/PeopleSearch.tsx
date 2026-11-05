@@ -67,7 +67,9 @@ import {
   type RowSendState,
 } from "./row-send";
 import { REQUEST_FAILED, REQUEST_SENT, searchStateMessage, showsNoMatchLine } from "./search-state";
-import { sendFoundRequest, type SendOutcome } from "./send-request";
+import { sendFoundRequest, withSharedGroupFallback, type SendOutcome } from "./send-request";
+import { sharedGroupsFor } from "../contacts/shared-groups";
+import { ownPersonKeyB64 } from "../chat/person-key";
 import {
   canonicalUsernameOf,
   localCandidates,
@@ -451,6 +453,33 @@ function PersonRow(props: {
     } catch {
       outcome = { kind: "failed", message: REQUEST_FAILED };
     }
+    // Who-can-find-me 6.4 - the inbox refused: the request goes inside a
+    // group both people are in, if there is one.
+    const accountIdHex = person.accountIdHex;
+    const fallback =
+      accountIdHex === null
+        ? { outcome, groupIdB64: null }
+        : await withSharedGroupFallback(outcome, {
+            sharedGroups: () =>
+              sharedGroupsFor({
+                groups: props.chats.groups(),
+                accountIdB64: reachSession()?.accountIdB64 ?? null,
+                ownKeyB64: ownPersonKeyB64(props.chats.identity()),
+                personKeysB64: [person.keyB64],
+              }),
+            sendInGroup: async (groupIdB64) => {
+              const entry = props.chats.get(groupIdB64);
+              if (entry === undefined) throw new Error("the shared group is gone");
+              await client.sendContactRequestInGroup(
+                auth.identitySecrets(),
+                hexToBytes(accountIdHex),
+                base64Decode(person.keyB64),
+                entry.group,
+              );
+            },
+            errorMessage: () => () => t("contacts.detail.request_failed"),
+          });
+    outcome = fallback.outcome;
     if (outcome.kind === "sent") {
       const account = reachSession()?.accountIdB64 ?? null;
       if (account !== null && person.accountIdHex !== null) {
@@ -460,6 +489,7 @@ function PersonRow(props: {
           recipientAccountIdHex: person.accountIdHex,
           sentAtMs: Date.now(),
           recipientKeyB64: person.keyB64,
+          ...(fallback.groupIdB64 === null ? {} : { throughGroupIdB64: fallback.groupIdB64 }),
         });
       }
     }
@@ -535,4 +565,11 @@ function PersonRow(props: {
       </Show>
     </div>
   );
+}
+
+/** Lower-case unseparated hex to bytes (the `accountIdHex` shape). */
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }

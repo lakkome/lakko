@@ -149,6 +149,12 @@ final class ContactAcceptTests: XCTestCase {
         XCTAssertEqual(steps.log, ["found"], "no accepted contact without a chat, and no ack")
     }
 
+    /// 2026-11-04 — after a failed accept the request row offers `Try again`.
+    func testAFailedAcceptOffersTryAgain() {
+        XCTAssertEqual(IncomingRequestRow.acceptTitleKey(failed: false), "contacts.request.accept")
+        XCTAssertEqual(IncomingRequestRow.acceptTitleKey(failed: true), "common.try_again")
+    }
+
     func testARequestWithNoAccountIdFails() async {
         let steps = Steps()
         let outcome = await ContactAccept.run(
@@ -315,6 +321,27 @@ final class OneToOneIsAContactTests: XCTestCase {
             [row(anna, groupIdHex: "abcd")],
             signatureKey: anna, accountId: nil, groupIdHex: "ffff", nowMs: 5,
             createdAt: "2026-09-26T12:00:00Z"))
+    }
+
+    // 2026-11-05 — a person's chat is a one-to-one with them. A stored link
+    // that names a group they are in (or another person's one-to-one) is no
+    // chat of theirs: adoption replaces it with the one-to-one it found.
+
+    func testAMisdirectedLinkGivesWayToTheirOneToOne() {
+        let next = ContactsRepository.adopting(
+            [row(anna, groupIdHex: "group", displayName: "Anna W.")],
+            signatureKey: anna, accountId: nil, groupIdHex: "abcd", nowMs: 5,
+            createdAt: "2026-09-26T12:00:00Z", keepsLink: { $0 != "group" })
+        XCTAssertEqual(next?.first?.groupIdHex, "abcd")
+        XCTAssertEqual(next?.first?.displayName, "Anna W.")
+    }
+
+    func testMisdirectedLinksAreCleared() {
+        let rows = [row(anna, groupIdHex: "group"), row(bob, groupIdHex: "abcd")]
+        let next = ContactsRepository.unlinking(rows, keepsLink: { _, held in held != "group" })
+        XCTAssertEqual(next?.map(\.groupIdHex), [nil, "abcd"])
+        XCTAssertNil(
+            ContactsRepository.unlinking(rows, keepsLink: { _, _ in true }), "nothing to clear")
     }
 
     // ADR-0074 section 3.7: a person met after a rotation asks with their

@@ -73,6 +73,11 @@
 //!   question for the ADR-0073 phase-2 group-closed envelope. Decode returns
 //!   the stamp and the successor id (to word a preview); nothing here
 //!   composes, orders or persists one (C-59).
+//! - [`group_contact_request::is_group_contact_request_envelope`] +
+//!   [`group_contact_request::group_contact_request_envelope_min_len`] /
+//!   [`group_contact_request::group_contact_request_envelope_max_len`] —
+//!   the same filter question for the ADR-0086 section 6 contact request
+//!   carried inside a group; yes or no, no field, no check (C-59).
 //! - [`scoped_discovery::decode_scoped_discovery_envelope`] +
 //!   [`scoped_discovery::scoped_discovery_envelope_min_len`] /
 //!   [`scoped_discovery::scoped_discovery_envelope_max_len`] — the same
@@ -109,6 +114,7 @@ pub mod conversation_envelopes;
 pub mod device_card;
 pub mod ds_proof;
 pub mod group_closed;
+pub mod group_contact_request;
 pub mod group_name;
 pub mod key_rotation;
 pub mod link_claim;

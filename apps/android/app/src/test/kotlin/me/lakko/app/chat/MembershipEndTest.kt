@@ -155,7 +155,7 @@ class MembershipEndTest {
         override suspend fun cameBack(row: OwedEnd) = step("cameBack")
     }
 
-    private fun applied(left: Boolean = false) = appliedEnd("aa", "Team", left, 7u)
+    private fun applied(left: Boolean = false) = appliedEnd("aa", "Team", left, 7u, nowMs = 0L)
 
     private fun run(row: OwedEnd, store: MemStore, ports: Ports): EndRun =
         runBlocking { runMembershipEnd("acct", row, store, ports) }
@@ -583,5 +583,23 @@ class MembershipEndTest {
         assertTrue(live.exitBlock)
         assertFalse(live.frozenRosterLine)
         assertTrue(live.membersCanFindMe)
+    }
+
+    @Test
+    fun `a new removal gets its own banner on top while an older one is still open`() {
+        // Base walk 2026-11-04: the banner kept the older group's sentence and
+        // the new removal said nothing.
+        val older = heardEnd("aa", "QA Phase A Walk", 3u, nowMs = 1_000L).copy(stage = EndStage.NOTICE_ONLY)
+        val newer = heardEnd("bb", "QA Base Alone", 5u, nowMs = 2_000L).copy(stage = EndStage.NOTICE_ONLY)
+        // The store hands rows back in no order.
+        val banner = bannerNotices(endNoticesOf(listOf(newer, older)))
+        assertEquals(listOf("QA Base Alone", "QA Phase A Walk"), banner.map { it.name })
+        assertEquals(banner, bannerNotices(endNoticesOf(listOf(older, newer))))
+        // Each banner closes on its own: closing the newer leaves the older.
+        assertEquals(listOf("QA Phase A Walk"), bannerNotices(endNoticesOf(listOf(older))).map { it.name })
+        // A closed notice is not in it; a person who chose to go gets none.
+        val closed = older.copy(noticeClosed = true)
+        assertEquals(listOf("bb"), bannerNotices(endNoticesOf(listOf(closed, newer))).map { it.idHex })
+        assertTrue(bannerNotices(endNoticesOf(listOf(chosenEnd("cc", 0u)))).isEmpty())
     }
 }

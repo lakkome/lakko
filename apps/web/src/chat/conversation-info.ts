@@ -349,11 +349,10 @@ export interface PersonRecordLike {
  * The contact record for the other person in a one-to-one chat, or `null`
  * when none can be found.
  *
- * Two ways in, and the order matters. The chat's own link (written at accept
- * time, when the contact and the 1x1 group are created together) is exact.
- * The peer's signature key is the fallback that covers the other side of the
- * handshake and a chat joined from a Welcome, where no link was ever
- * written.
+ * The peer's key decides: the record whose key (or a key the person rotated
+ * from) is the other member of this one-to-one. A record's stored chat id is
+ * consulted only while the roster cannot name the peer, since a stored id can
+ * be stale or wrong (seen live 2026-11-05: a contact linked to a group).
  *
  * `null` means a roster that cannot be read, not a person outside the
  * contact list - there is no such person, since every one-to-one peer is
@@ -369,9 +368,9 @@ export function findPersonRecord<T extends PersonRecordLike>(
   accepted: readonly T[],
   where: { readonly groupIdB64: string; readonly peerKeyB64: string | null },
 ): T | null {
-  const linked = accepted.find((c) => c.groupIdB64 === where.groupIdB64);
-  if (linked !== undefined) return linked;
-  if (where.peerKeyB64 === null) return null;
+  if (where.peerKeyB64 === null) {
+    return accepted.find((c) => c.groupIdB64 === where.groupIdB64) ?? null;
+  }
   const peerKeyB64 = where.peerKeyB64;
   return (
     accepted.find((c) => c.signaturePubkeyB64 === peerKeyB64) ??

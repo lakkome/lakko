@@ -7,6 +7,7 @@ import me.lakko.app.ui.chat.canCreateGroup
 import me.lakko.app.ui.contacts.contactChatLineKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,8 +23,13 @@ class PassDefectRulesTest {
     }
 
     @Test
-    fun `a contact with a known account is seconds from its chat`() {
-        assertEquals("contacts.detail.chat_starting", contactChatLineKey(ByteArray(16)))
+    fun `a contact with a known account and no chat here has no line, Message founds one`() {
+        assertNull(contactChatLineKey(ByteArray(16)))
+    }
+
+    @Test
+    fun `a contact with no known account cannot be messaged from here`() {
         assertEquals("contacts.detail.message_unavailable", contactChatLineKey(null))
+        assertEquals("contacts.detail.message_unavailable", contactChatLineKey(ByteArray(3)))
     }
 }

@@ -116,6 +116,8 @@ import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
 import { sniffSharedChannels, type SharedList } from "../discover/shared-channels";
 import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
+import { isGroupContactRequestEnvelope } from "./group-contact-request-envelope";
+import { deliverGroupContactRequest } from "../contacts/group-contact-request";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
 import { deliverKnockSeed, groupIsPublic, knockSeedsForRow, rememberKnockName } from "../ds/knock-seeds";
 import { rememberKnockOrigin, rowStampMs } from "./knock-origins";
@@ -572,6 +574,21 @@ export type IncomingChatEvent =
       kind: "registrarSeed";
       messageId: number;
       /** The whole envelope, for decode and open. */
+      plaintext: Uint8Array;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** `docs/ux/who-can-find-me.md` section 6.4 - a contact request sealed
+       *  to one member of this group. Never a timeline bubble, never a
+       *  notification body, never handed to a view: consumed at receipt
+       *  (`contacts/group-contact-request.ts`), where only the device it is
+       *  sealed to opens it. Listed in the union, like `registrarSeed`, only
+       *  so a caller that forgets to consume it cannot render it. */
+      kind: "groupContactRequest";
+      messageId: number;
+      /** The whole envelope. */
       plaintext: Uint8Array;
       /** The sender's ACCOUNT key resolved at receipt (C-68). */
       senderKey: MemberIdentity | undefined;
@@ -1497,6 +1514,9 @@ export class ChatClient {
     // and every subsequent poll would log a `CannotDecryptOwnMessage` for it.
     const matchedEchoes: number[] = [];
     const groupIdB64 = base64Encode(group.groupId);
+    // Who-can-find-me 6.4 - set when an opened contact request could not be
+    // written yet; the cursor is then held (see the commit below).
+    let groupRequestUnwritten = false;
     // ADR-0057 root handover - the role table's owner before each applied
     // row, so a commit that moves ownership away from this account is seen
     // at the apply that carried it.
@@ -1559,6 +1579,11 @@ export class ChatClient {
         await consumeRegistrarSeed(group, event);
         continue;
       }
+      // Section 6.4 - a contact request sealed to one member, the same way.
+      if (event.kind === "groupContactRequest") {
+        if (!(await consumeGroupContactRequest(group, event))) groupRequestUnwritten = true;
+        continue;
+      }
       // ADR-0087 section 5 — a knock seed, the same way.
       if (event.kind === "group-setting" && event.setting?.kind === "knockSeed") {
         await consumeKnockSeed(group, event.setting.plaintext, event.senderKey);
@@ -1576,7 +1601,13 @@ export class ChatClient {
     // behind a cursor that had already moved on, which since ADR-0045 strands
     // the device permanently. See `chat/durable-cursor.ts`.
     const verdict = await this.cursorGate.commit(
-      () => this.persistDurableOrThrow(),
+      async () => {
+        // Who-can-find-me 6.4: an opened contact request that could not be
+        // written yet holds the cursor (and the snapshot), so a reload reads
+        // its row again instead of losing it.
+        if (groupRequestUnwritten) throw new Error("a contact request from this group is not written yet");
+        await this.persistDurableOrThrow();
+      },
       () => {
         cursorRef?.advance(cursor);
         // Consume the echo registry entries only now: on the held path they
@@ -1664,6 +1695,43 @@ export async function consumeRegistrarSeed(
     plaintext: event.plaintext,
     senderAccountKey,
     ownerAccountKey,
+  });
+}
+
+/**
+ * `docs/ux/who-can-find-me.md` section 6.4 - hand one contact request sealed
+ * inside this group to the request list's handler, with the sender's account
+ * key as resolved at receipt (C-68). Never throws. `false` when the request
+ * is not written yet: the caller holds its journal cursor.
+ */
+export async function consumeGroupContactRequest(
+  group: WasmGroup,
+  event: {
+    readonly messageId: number;
+    readonly createdAt: string;
+    readonly plaintext: Uint8Array;
+    readonly senderKey: MemberIdentity | undefined;
+  },
+): Promise<boolean> {
+  let groupId: Uint8Array;
+  try {
+    groupId = group.groupId;
+  } catch {
+    return true;
+  }
+  let senderAccountKey: Uint8Array | undefined;
+  try {
+    senderAccountKey = event.senderKey === undefined ? undefined : base64Decode(event.senderKey);
+  } catch {
+    senderAccountKey = undefined;
+  }
+  return deliverGroupContactRequest({
+    groupId,
+    groupIdB64: base64Encode(groupId),
+    journalMessageId: event.messageId,
+    createdAt: event.createdAt,
+    plaintext: event.plaintext,
+    senderAccountKey,
   });
 }
 
@@ -1775,6 +1843,10 @@ export async function toEvent(
     // fixed length so a chat message never pays for the call.
     if (isRegistrarSeedEnvelope(await loadWasm(), bytes)) {
       return { kind: "registrarSeed", messageId, plaintext: bytes, senderKey, createdAt };
+    }
+    // Section 6.4 - a contact request sealed to one member, the same way.
+    if (isGroupContactRequestEnvelope(await loadWasm(), bytes)) {
+      return { kind: "groupContactRequest", messageId, plaintext: bytes, senderKey, createdAt };
     }
     // ADR-0042 — sniff for a push-routing-secret distribution envelope
     // before the chat parser. The wasm codec is fail-closed (domain +

@@ -4087,9 +4087,9 @@
       "text": "Send a message first to start a call.",
       "comment": "Tooltip of the disabled Call and Video buttons when there is no chat with this contact on this device yet."
     },
-    "contacts.detail.chat_starting": {
-      "text": "Your chat is being set up.",
-      "comment": "Under the disabled Message button in the seconds between accepting a contact and the chat arriving."
+    "contacts.detail.cannot_message": {
+      "text": "You can't message {name} yet. Ask them for an invite link.",
+      "comment": "Under the Message button on a contact's card when nothing can reach them: no inbox key is held and no group is shared. {name} is the contact's name."
     },
     "contacts.detail.gone_body": {
       "text": "This person is no longer in your contacts.",
@@ -4106,6 +4106,14 @@
     "contacts.detail.message_unavailable": {
       "text": "This contact was added before chats could be started from here. Ask them to message you.",
       "comment": "Tooltip of the disabled Message button for a contact whose account is not known."
+    },
+    "contacts.detail.request_failed": {
+      "text": "Couldn't send the request. Try again.",
+      "comment": "Under the Message button on a contact's card when sending the contact request failed (network); Message works again."
+    },
+    "contacts.detail.request_sent": {
+      "text": "Request sent. You can write once {name} accepts.",
+      "comment": "Under the Message button on a contact's card after a contact request went to them inside a group you share (no chat exists yet). {name} is the contact's name."
     },
     "contacts.detail.their_name": {
       "text": "Calls themselves {name}",
@@ -4264,8 +4272,8 @@
       "security_critical": true
     },
     "contacts.request.accept_failed": {
-      "text": "Couldn't accept. Try again.",
-      "comment": "Shown under an incoming contact request when accepting it failed and nothing happened; the request stays and Accept works again."
+      "text": "Couldn't accept.",
+      "comment": "Shown under an incoming contact request when accepting it failed and nothing happened, beside the Try again button that replaces Accept; the request stays."
     },
     "contacts.request.decline": {
       "text": "Decline",
@@ -4278,6 +4286,14 @@
     "contacts.request.someone": {
       "text": "Someone",
       "comment": "Name of the sender of a contact request when nothing is known about them yet: no profile name, no verified username."
+    },
+    "contacts.request.via_group": {
+      "text": "Via {group}",
+      "comment": "Extra line on an incoming contact request that arrived inside a group both people are in. {group} is the group's name."
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "Via a group you're both in",
+      "comment": "Extra line on an incoming contact request that arrived inside a group both people are in, when the group has no name."
     },
     "contacts.safety.body": {
       "text": "Compare it with {name} in person or on a call. Matching numbers mean nobody is between you.",
@@ -9459,6 +9475,30 @@
       "text": "Safety numbers",
       "comment": "Row title in Settings > Security explaining safety numbers.",
       "security_critical": true
+    },
+    "settings.text_size.large": {
+      "text": "Large",
+      "comment": "Text size step."
+    },
+    "settings.text_size.medium": {
+      "text": "Medium",
+      "comment": "Text size step (the default)."
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "Is this size easy to read?",
+      "comment": "Text of the incoming message in the text size preview."
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Change it here at any time.",
+      "comment": "Text of the outgoing message in the text size preview."
+    },
+    "settings.text_size.small": {
+      "text": "Small",
+      "comment": "Text size step."
+    },
+    "settings.text_size.title": {
+      "text": "Text size",
+      "comment": "Settings > Appearance row and screen title: the size of message text and reactions."
     },
     "settings.translation.delete_all": {
       "text": "Delete all translations and transcripts",

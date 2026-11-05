@@ -383,7 +383,12 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                 isGroupPhotoEnvelope(plaintext: bytes) || isGroupReactionsEnvelope(plaintext: bytes)
                     || isConversationHandleEnvelope(plaintext: bytes) || isKnockSeedEnvelope(plaintext: bytes)
                     || isAdmissionSeedEnvelope(plaintext: bytes)
-            }
+            },
+            // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
+            // group: a yes / no from the slim FFI, never opened here.
+            isGroupContactRequest: { isGroupContactRequestEnvelope(plaintext: $0) },
+            groupContactRequestEnvelopeLens:
+                Int(groupContactRequestEnvelopeMinLen())...Int(groupContactRequestEnvelopeMaxLen())
         ) {
             return nil
         }

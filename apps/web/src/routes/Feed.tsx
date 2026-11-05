@@ -44,7 +44,7 @@ import { createEffect, createMemo, createSignal, For, Index, onCleanup, onMount,
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -104,6 +104,7 @@ import { recordFeedSeen } from "../feed/feed-seen-writer";
 import { memberNameOf } from "../profile/member-label";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Avatar } from "../ui/Avatar";
+import { conversationAvatarKeys } from "../chat/conversation-avatar";
 import { MediaAttachment } from "../media/MediaBubbles";
 import { createMediaHub, mediaKey } from "../media/media-hub";
 import { ownAvatarLabel } from "../profile/member-label";
@@ -346,6 +347,21 @@ export default function Feed(): JSX.Element {
   const accountId = (): string | null => {
     const s = auth.state();
     return s.kind === "session" ? s.account.accountId : null;
+  };
+
+  /** The photo a source's avatar shows (`chat/conversation-avatar.ts`): a
+   *  group's own photo, filed under its current group id. Channels carry no
+   *  photo on web. */
+  const sourceAvatarKeyOf = (source: FeedSource): string | undefined => {
+    if (source.kind !== "group") return undefined;
+    try {
+      return conversationAvatarKeys({
+        kind: "group",
+        groupIdB64: base64Encode(base64UrlDecodeNoPad(source.slug)),
+      }).conversationKey;
+    } catch {
+      return undefined;
+    }
   };
 
   /** Groups only: a one-to-one is never in the feed (UX spec section 3). */
@@ -1316,6 +1332,7 @@ export default function Feed(): JSX.Element {
                         <Avatar
                           label={item.ref.source.title}
                           id={item.ref.source.conversationHex ?? item.ref.source.idHex}
+                          conversationKey={sourceAvatarKeyOf(item.ref.source)}
                         />
                       </div>
                       <div class="lk-feed-body">

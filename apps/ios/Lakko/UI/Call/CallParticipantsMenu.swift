@@ -129,6 +129,7 @@ struct CallInvitePicker: ViewModifier {
                     rows: offer.targets(),
                     notice: offer.pickerError,
                     invited: offer.invited,
+                    requestSent: offer.requestSent,
                     onPick: { row in
                         Task {
                             await offer.sendInvite(
@@ -152,6 +153,9 @@ struct CallInviteContactsScreen: View {
     var notice: String? = nil
     /// The rows already invited during this call (``InviteContactRow/id``).
     var invited: Set<String> = []
+    /// The rows a contact request went to instead of the link
+    /// (`docs/ux/who-can-find-me.md` 6.4).
+    var requestSent: Set<String> = []
     let onPick: (InviteContactRow) -> Void
     let onClose: () -> Void
 
@@ -190,7 +194,8 @@ struct CallInviteContactsScreen: View {
                 } else {
                     List {
                         ForEach(visible) { row in
-                            let done = invited.contains(row.id)
+                            let asked = requestSent.contains(row.id)
+                            let done = invited.contains(row.id) || asked
                             Button { onPick(row) } label: {
                                 HStack(spacing: 12) {
                                     InitialsAvatar(
@@ -210,7 +215,12 @@ struct CallInviteContactsScreen: View {
                                         }
                                     }
                                     Spacer(minLength: 8)
-                                    if done {
+                                    if asked {
+                                        Text(l10n.t("search.people.request_sent"))
+                                            .font(.footnote.weight(.medium))
+                                            .foregroundStyle(Color.lakkoTextMuted)
+                                            .fixedSize()
+                                    } else if done {
                                         Label(l10n.t("call.invite.row_invited"), systemImage: "checkmark")
                                             .font(.footnote.weight(.medium))
                                             .foregroundStyle(Color.lakkoTextMuted)

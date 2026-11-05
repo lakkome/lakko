@@ -24,7 +24,7 @@ import type { MediaHub } from "./media-hub";
 import { whenVisible } from "./near-viewport";
 import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } from "./playback-outcome";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
-import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
+import { elapsedSeconds, formatClock, formatTotalClock, spokenDuration, spokenElapsed, totalSeconds } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
 import { TranscriptBlock, TranscriptButton, type TranscriptHost } from "../translation/Transcript";
 import { voicePress } from "./voice-press";
@@ -391,9 +391,9 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
             tabindex={uploading() ? -1 : 0}
             aria-label={t("chat.voice.seek")}
             aria-valuemin={0}
-            aria-valuemax={Math.round(duration() / 1000)}
-            aria-valuenow={Math.round(position() / 1000)}
-            aria-valuetext={t("chat.voice.position", { position: spokenDuration(position()), duration: spokenDuration(duration()) })}
+            aria-valuemax={totalSeconds(duration())}
+            aria-valuenow={elapsedSeconds(position())}
+            aria-valuetext={t("chat.voice.position", { position: spokenElapsed(position()), duration: spokenDuration(duration()) })}
             onPointerDown={(e) => {
               // Primary button only. A right-click on the waveform is a request
               // for the message's action menu (`MessageMenu.tsx`), and seeking
@@ -940,13 +940,18 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
         onClick={() => setFullScreen(true)}
       >
         {media(false)}
-        <span class="lakko-gif-label">{t("chat.media.gif")}</span>
         <Show when={status() === "loading" || uploading()}>
           <span class="lakko-vn-glyph" style={{ "font-size": "1rem" }}>
             <span class="lakko-spinner" />
           </span>
         </Show>
       </button>
+      {/* Base walk 2026-11-04 — the label sits below the picture on its own
+          pill, never over it: drawn on the image it covered the GIF's own
+          caption. The image's alt text already says "GIF". */}
+      <span class="lakko-gif-label" aria-hidden="true">
+        {t("chat.media.gif")}
+      </span>
       <Show when={status() === "error"}>
         <AttachmentFailureNote failure={gifFailure()} onRetry={load}>
           <button

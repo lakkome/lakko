@@ -39,7 +39,7 @@
  * ended one-to-one had no way to be closed at all.
  */
 import { AutoTranslateSwitch } from "../translation/ConversationControls";
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
 import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
@@ -67,11 +67,14 @@ export interface ContactDetailViewProps {
   readonly localName: string;
   /** The route of the 1x1 chat with this person on this device, or `null`. */
   readonly chatHref: string | null;
-  /** Whether Message can create the chat when there is none yet. */
-  readonly canStartChat: boolean;
-  /** When the person became a contact, for the seconds a chat takes to
-   *  arrive after an accept. Absent where the screen has no such row. */
-  readonly acceptedAtMs?: number;
+  /** Whether the person's account id is known: with no chat on this device,
+   *  Message starts one when it is, and is unavailable when it is not
+   *  (`message-action.ts`). */
+  readonly accountKnown: boolean;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the line under Message for a
+   *  contact with no chat here: a request standing in Sent, or that nothing
+   *  can reach them. `null` for none. */
+  readonly messageLine?: () => string | null;
   readonly busy: () => boolean;
   readonly error: () => string | null;
   readonly myPubkey: () => Uint8Array | null;
@@ -235,17 +238,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     if (ok) props.onRemove();
   }
 
-  // Ticks only so the card moves on by itself when the seconds are over.
-  const [clock, setClock] = createSignal(Date.now());
-  const clockTimer = setInterval(() => setClock(Date.now()), 5_000);
-  onCleanup(() => clearInterval(clockTimer));
   const messageState = (): MessageAction =>
-    messageAction({
-      hasChat: props.chatHref !== null,
-      canStartChat: props.canStartChat,
-      acceptedAtMs: props.acceptedAtMs ?? null,
-      nowMs: clock(),
-    });
+    messageAction({ hasChat: props.chatHref !== null, accountKnown: props.accountKnown });
+  const unavailableLine = (): string | null =>
+    messageState() === "unavailable" ? t("contacts.detail.message_unavailable") : null;
 
   const actions = (): ReadonlyArray<{
     label: string;
@@ -263,11 +259,14 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         ? []
         : [
             {
-              label: t("contacts.detail.message"),
+              // Progress while Message founds the one-to-one.
+              label:
+                props.busy() && messageState() === "start"
+                  ? t("common.creating")
+                  : t("contacts.detail.message"),
               icon: "chat" as IconName,
-              disabled: props.busy() || messageState() !== "go",
-              title:
-                messageState() === "unavailable" ? t("contacts.detail.message_unavailable") : undefined,
+              disabled: props.busy() || messageState() === "unavailable",
+              title: unavailableLine() ?? undefined,
               run: () => props.onMessage(),
             },
           ];
@@ -363,10 +362,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             </For>
           </div>
         </Show>
-        <Show when={sections().includes("message") && messageState() === "starting"}>
-          <p class="lk-meta" role="status">
-            {t("contacts.detail.chat_starting")}
-          </p>
+        <Show when={sections().includes("message") ? (unavailableLine() ?? props.messageLine?.() ?? null) : null}>
+          {(line) => (
+            <p class="lk-meta" role="status">
+              {line()}
+            </p>
+          )}
         </Show>
         <Show when={props.error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
 

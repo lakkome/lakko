@@ -31,6 +31,7 @@ import {
   formatTotalClock,
   reduce,
   spokenDuration,
+  spokenElapsed,
   type RecEffect,
   type RecEvent,
   type RecState,
@@ -607,5 +608,31 @@ describe("formatting", () => {
     expect(spokenDuration(1_000)).toBe("1 second");
     expect(spokenDuration(65_000)).toBe("1 minute 5 seconds");
     expect(spokenDuration(120_000)).toBe("2 minutes");
+  });
+});
+
+describe("the spoken duration follows the visible one (base walk 2026-11-04)", () => {
+  /** The whole seconds a `m:ss` clock shows. */
+  const shown = (clock: string): number => {
+    const [m, sec] = clock.split(":");
+    return Number(m) * 60 + Number(sec);
+  };
+  /** The whole seconds an English spoken duration says. */
+  const said = (text: string): number => {
+    const min = /(\d+) minutes?/.exec(text);
+    const sec = /(\d+) seconds?/.exec(text);
+    return (min === null ? 0 : Number(min[1]) * 60) + (sec === null ? 0 : Number(sec[1]));
+  };
+
+  it("a 3.4 s voice message reads 0:04 and is spoken as 4 seconds", () => {
+    expect(formatTotalClock(3_400)).toBe("0:04");
+    expect(spokenDuration(3_400)).toBe("4 seconds");
+  });
+
+  it("for every duration, the label says the number the bubble shows", () => {
+    for (let ms = 1; ms <= 130_000; ms += 137) {
+      expect(said(spokenDuration(ms)), `total ${ms}`).toBe(shown(formatTotalClock(ms)));
+      expect(said(spokenElapsed(ms)), `elapsed ${ms}`).toBe(shown(formatClock(ms)));
+    }
   });
 });

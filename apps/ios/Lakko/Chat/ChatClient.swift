@@ -724,6 +724,21 @@ public final class ChatClient {
             // read. It is still the same synchronous region, hence still the
             // same epoch.
             let senderKey = senderLeaf.flatMap(resolveSender)
+            // `docs/ux/who-can-find-me.md` 6.4 — a contact request carried
+            // inside the group, sealed to one member whom it does not name.
+            // Never a timeline row and never a notification: the receive side
+            // tries to open it with this account's key and drops it unless it
+            // is for us. After the identity resolution because the core's
+            // check binds the request to the account key the sender leaf
+            // names in this epoch (C-68).
+            if isGroupContactRequestEnvelope(bytes: data) {
+                return .groupContactRequest(
+                    messageId: messageId,
+                    envelope: data,
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0048 — sniff for a profile envelope before the chat parser,
             // for the same reason as the beacon arm above: the lossy-UTF-8
             // fallback would otherwise render it as a bubble reading
@@ -1445,6 +1460,18 @@ public enum IncomingChatEvent: Equatable {
     /// account's own echo, and answers no request it cannot attribute.
     case profileRequest(
         messageId: Int64,
+        senderKey: MemberIdentity?,
+        createdAt: String
+    )
+    /// `docs/ux/who-can-find-me.md` 6.4 — a contact request one member sent
+    /// inside the group to one other member, sealed so the rest cannot tell
+    /// whom it is for. Never a timeline bubble and never a notification body:
+    /// the receive loop hands it to the contacts flow, which opens it with
+    /// this account's key or drops it. `senderKey` is the poster's account
+    /// key resolved from the MLS-authenticated leaf at receipt (C-68).
+    case groupContactRequest(
+        messageId: Int64,
+        envelope: Data,
         senderKey: MemberIdentity?,
         createdAt: String
     )

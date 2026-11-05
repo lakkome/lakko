@@ -110,8 +110,14 @@ class SentRequestsStoreTest {
             acceptedAtMs = 1uL,
             createdAt = "",
         )
+        // The ack alone keeps it (a contact needs the one-to-one); the
+        // Welcome answers it.
         val applied = applyContactAcks(emptyList(), store.load(accountA), listOf(ack))
         store.save(accountA, applied.sent)
+        assertEquals(listOf(1L, 2L), store.load(accountA).map { it.messageId })
+        val key = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 5 })
+        val answered = applyAnsweringWelcomes(emptyList(), store.load(accountA), mapOf(key to "ab".repeat(32)), 1uL, "")
+        store.save(accountA, answered.sent)
         assertEquals(listOf(2L), store.load(accountA).map { it.messageId })
     }
 

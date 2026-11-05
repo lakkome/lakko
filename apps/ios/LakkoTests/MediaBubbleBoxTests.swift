@@ -269,24 +269,25 @@ final class MediaBubbleBoxTests: XCTestCase {
         try assertTheMeasurementTechniqueMeasures()
 
         // 2:1 — the plain case: half the bubble width.
+        let label = GifBubble.lineSpacing + measure(GifLabel()).height
         let landscape = measure(gifBubble(width: 400, height: 200))
         XCTAssertEqual(
             landscape.width, GifBubble.maxWidth, accuracy: 0.5,
             "a GIF is no longer \(GifBubble.maxWidth) pt wide (measured \(landscape.width))")
         XCTAssertEqual(
-            landscape.height, GifBubble.maxWidth / 2, accuracy: 0.5,
+            landscape.height - label, GifBubble.maxWidth / 2, accuracy: 0.5,
             "a 2:1 GIF did not keep its aspect inside the bubble width (measured \(landscape.height))")
 
         // 1:4 — taller than the ceiling.
         let tall = measure(gifBubble(width: 400, height: 1600))
         XCTAssertEqual(
-            tall.height, 320, accuracy: 0.5,
+            tall.height - label, 320, accuracy: 0.5,
             "a very tall GIF was not clamped to the 320 pt ceiling (measured \(tall.height))")
 
         // 40:1 — a sliver, which must stay big enough to tap.
         let sliver = measure(gifBubble(width: 4000, height: 100))
         XCTAssertEqual(
-            sliver.height, 80, accuracy: 0.5,
+            sliver.height - label, 80, accuracy: 0.5,
             "a sliver GIF was not floored at 80 pt (measured \(sliver.height))")
     }
 
@@ -310,7 +311,8 @@ final class MediaBubbleBoxTests: XCTestCase {
 
         let gif = measure(gifBubble(width: 400, height: 200).environment(\.mediaColumnWidth, column))
         XCTAssertEqual(gif.width, column, accuracy: 1)
-        XCTAssertEqual(gif.height, column / 2, accuracy: 1, "the GIF lost its aspect")
+        let label = GifBubble.lineSpacing + measure(GifLabel()).height
+        XCTAssertEqual(gif.height - label, column / 2, accuracy: 1, "the GIF lost its aspect")
 
         let note = measure(videoNoteBubble(incoming: true).environment(\.mediaColumnWidth, column))
         XCTAssertEqual(note.width, column, accuracy: 1)

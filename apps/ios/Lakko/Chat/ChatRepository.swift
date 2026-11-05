@@ -153,6 +153,12 @@ public final class ChatRepository: ObservableObject {
     /// A held Welcome landed. Wired by ``ContactsRepository``, for what it
     /// does after any Welcome.
     var onHeldWelcomeJoined: (@MainActor (_ groupIdHex: String) -> Void)?
+
+    /// `docs/ux/who-can-find-me.md` 6.4 — a contact request one member sent
+    /// inside a group (the envelope as it came, and the poster's account key
+    /// resolved at receipt, base64). Set by the contacts repository, which
+    /// opens it or drops it.
+    var onGroupContactRequest: (@MainActor (_ groupIdHex: String, _ envelope: Data, _ senderKeyB64: String) -> Void)?
     /// Groups whose end is being carried out now.
     var endsRunning: Set<String> = []
     /// One pass over the held Welcomes at a time.
@@ -3260,7 +3266,8 @@ public final class ChatRepository: ObservableObject {
 
     /// THE one-to-one conversation with a contact on this device, or `nil`
     /// when it holds none (``ContactConversation`` is the rule): the one
-    /// linked on the contact record while this device still holds it, else
+    /// linked on the contact record while this device still holds it and it
+    /// is a one-to-one with that contact, else
     /// the conversation of one-to-one kind whose two PEOPLE are this account
     /// and the contact. Never a group that happens to hold the same two
     /// people. A read over the live rosters, no state change.
@@ -3274,7 +3281,14 @@ public final class ChatRepository: ObservableObject {
             idOf: { $0 },
             ownKey: conversationAccountIdentity?.signaturePublicKey(),
             peopleOf: { (members(groupIdHex: $0) ?? []).map(\.signaturePublicKey) },
-            isOneToOne: { isOneToOne(groupIdHex: $0) }
+            isOneToOne: { isOneToOne(groupIdHex: $0) },
+            // ADR-0074 section 3.7 — a proven rotation names one person by
+            // two keys; the contact row may hold either.
+            samePerson: { first, second in
+                first == second
+                    || ReachCenter.shared.currentAccountKey(of: first)
+                        == ReachCenter.shared.currentAccountKey(of: second)
+            }
         )
     }
 
@@ -5480,6 +5494,9 @@ public final class ChatRepository: ObservableObject {
             profileRequestSink: { [weak self] senderKey in
                 self?.answerProfileRequest(groupIdHex: groupIdHex, senderKey: senderKey)
             },
+            groupContactRequestSink: { [weak self] envelope, senderKey in
+                self?.onGroupContactRequest?(groupIdHex, envelope, senderKey)
+            },
             // ADR-0052 decision 3 — standing check against the live group, the
             // per-message order, store. Fire-and-forget (it only spawns a
             // `Task`), so the pin chain it takes is never awaited while the
@@ -7175,6 +7192,9 @@ public final class ChatRepository: ObservableObject {
                         },
                         profileRequestSink: { [weak self] senderKey in
                             self?.answerProfileRequest(groupIdHex: groupIdHex, senderKey: senderKey)
+                        },
+                        groupContactRequestSink: { [weak self] envelope, senderKey in
+                            self?.onGroupContactRequest?(groupIdHex, envelope, senderKey)
                         },
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
@@ -10762,6 +10782,7 @@ final class GroupRecord {
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
         profileRequestSink: ((MemberIdentity) -> Void)? = nil,
+        groupContactRequestSink: ((Data, MemberIdentity) -> Void)? = nil,
         pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
         registrarSeedSink: ((Data, UInt32?) -> Void)? = nil,
         scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil,
@@ -10955,6 +10976,13 @@ final class GroupRecord {
                 // never answered — the fail-closed side, as for the beacon.
                 guard let senderKey, senderKey != ownAuthorKey else { continue }
                 profileRequestSink?(senderKey)
+            case .groupContactRequest(_, let envelope, let senderKey, _):
+                // `docs/ux/who-can-find-me.md` 6.4 — never a timeline row.
+                // Our own (sent from another of our devices) is not for us;
+                // one with no resolvable sender is dropped, since the check
+                // binds the request to the poster.
+                guard let senderKey, senderKey != ownAuthorKey else { continue }
+                groupContactRequestSink?(envelope, senderKey)
             case .pin(_, let op, let senderLeaf, _):
                 // ADR-0052 decision 3 — a shared pin / unpin of one message.
                 // Not a timeline row: routed out to the repository, which owns

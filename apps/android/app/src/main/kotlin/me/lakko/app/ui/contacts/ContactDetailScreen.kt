@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -40,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,15 +74,34 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 
-/** The line under the disabled Message button: a contact with a known account
- *  is seconds from its chat after an accept; only one with no account cannot
- *  be started from here. */
-internal fun contactChatLineKey(accountId: ByteArray?): String =
+/** The line under the Message button of a contact with no chat on this
+ *  device. One whose account is not known cannot be messaged from here; for
+ *  any other, Message founds a new one-to-one (maintainer, 2026-11-05), so
+ *  there is no line (`null`). */
+internal fun contactChatLineKey(accountId: ByteArray?): String? =
     if (accountId != null && accountId.size == CONTACT_ACCOUNT_ID_LEN) {
-        "contacts.detail.chat_starting"
+        null
     } else {
         "contacts.detail.message_unavailable"
     }
+
+/** A line under Message on a known person with no chat on this device. */
+internal data class FoundLine(val key: String, val isError: Boolean, val namesPerson: Boolean = false)
+
+/**
+ * The line under Message for a person with no chat here
+ * (`docs/ux/who-can-find-me.md` section 6.4): nothing while it runs; then what
+ * the last run left ([MessageNotice]); else "Request sent" while a request to
+ * them waits in Sent.
+ */
+internal fun foundLine(starting: Boolean, notice: MessageNotice?, waiting: Boolean): FoundLine? = when {
+    starting -> null
+    notice == MessageNotice.START_FAILED -> FoundLine("contacts.error.start_chat", isError = true)
+    notice == MessageNotice.REQUEST_FAILED -> FoundLine("contacts.detail.request_failed", isError = true)
+    notice == MessageNotice.CANNOT_MESSAGE -> FoundLine("contacts.detail.cannot_message", isError = false, namesPerson = true)
+    waiting -> FoundLine("contacts.detail.request_sent", isError = false, namesPerson = true)
+    else -> null
+}
 
 /**
  * Contact detail — docs/ux/client-redesign.md section 5.3, and the person a
@@ -198,6 +219,28 @@ public fun ContactDetailScreen(
     // renames in place.
     val resolvedName = contact?.let { c -> nameVersion.let { directory.resolve(c.request.fromPubkey) } }
 
+    // `Message` on a contact with no chat here founds one (maintainer,
+    // 2026-11-05). The founded chat opens only while this card is still on
+    // screen; leaving it does not cancel the founding.
+    val startingChat by viewModel.startingChat.collectAsStateWithLifecycle()
+    val messageNotices by viewModel.messageNotices.collectAsStateWithLifecycle()
+    // `docs/ux/who-can-find-me.md` 6.4 — a request to them waits in Sent
+    // (read off the collected state so the line follows it).
+    val requestWaiting = isContact && contact?.request?.fromAccountId?.let { id ->
+        me.lakko.app.contacts.requestWaiting(contactsState.sent, java.util.Base64.getEncoder().encodeToString(id))
+    } == true
+    val onScreen = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    DisposableEffect(Unit) {
+        onScreen.set(true)
+        onDispose { onScreen.set(false) }
+    }
+    val messageAction = messageAction(
+        chatGroupIdHex = groupIdHex,
+        // Only a listed contact founds; a removed person's card is built
+        // from the conversation they still have.
+        accountId = if (isContact) contact?.request?.fromAccountId else null,
+    )
+
     val body: @Composable (Modifier) -> Unit = { bodyModifier ->
         val c = contact
         if (c != null && resolvedName != null) {
@@ -207,6 +250,18 @@ public fun ContactDetailScreen(
                 name = resolvedName,
                 groupIdHex = groupIdHex,
                 sections = sections,
+                messageAction = messageAction,
+                startingChat = contactKey in startingChat,
+                foundLine = foundLine(
+                    starting = contactKey in startingChat,
+                    notice = messageNotices[contactKey],
+                    waiting = requestWaiting,
+                ),
+                onStartChat = {
+                    viewModel.onStartChatClicked(contactKey, c) { founded ->
+                        if (onScreen.get()) onOpenChat(founded)
+                    }
+                },
                 onOpenChat = onOpenChat,
                 onStartCall = onStartCall,
                 onVerifySafetyNumber = onVerifySafetyNumber,
@@ -303,6 +358,10 @@ private fun ContactDetailBody(
     name: me.lakko.app.profile.ResolvedName,
     groupIdHex: String?,
     sections: List<InfoSection>,
+    messageAction: MessageAction,
+    startingChat: Boolean,
+    foundLine: FoundLine?,
+    onStartChat: () -> Unit,
     onOpenChat: (String) -> Unit,
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
@@ -361,8 +420,19 @@ private fun ContactDetailBody(
                     ActionButton(
                         label = t("contacts.detail.message"),
                         icon = Icons.AutoMirrored.Filled.Chat,
-                        enabled = groupIdHex != null,
-                        onClick = { if (groupIdHex != null) onOpenChat(groupIdHex) },
+                        enabled = when (messageAction) {
+                            is MessageAction.Open -> true
+                            MessageAction.Found -> !startingChat
+                            MessageAction.Unavailable -> false
+                        },
+                        busy = messageAction == MessageAction.Found && startingChat,
+                        onClick = {
+                            when (messageAction) {
+                                is MessageAction.Open -> onOpenChat(messageAction.groupIdHex)
+                                MessageAction.Found -> onStartChat()
+                                MessageAction.Unavailable -> Unit
+                            }
+                        },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -390,12 +460,28 @@ private fun ContactDetailBody(
             // is no tile to explain.
             val hasConversationActions =
                 InfoSection.CALL in sections || InfoSection.MESSAGE in sections
-            if (groupIdHex == null && hasConversationActions) {
+            val noChatLine = if (groupIdHex == null) contactChatLineKey(accountId) else null
+            if (noChatLine != null && hasConversationActions) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    t(contactChatLineKey(accountId)),
+                    t(noChatLine),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // What Message on a person with no chat here led to (section
+            // 6.4): a request waiting, nothing sendable, or a failure (Message
+            // stays usable).
+            if (messageAction == MessageAction.Found && foundLine != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (foundLine.namesPerson) t(foundLine.key, mapOf("name" to name.primary)) else t(foundLine.key),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (foundLine.isError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
             Spacer(Modifier.height(24.dp))
@@ -534,6 +620,8 @@ internal fun ActionButton(
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Work behind the tile is running: a spinner in place of the icon. */
+    busy: Boolean = false,
 ) {
     // Three tiles share one row on a 360 dp phone; the default button padding
     // left "Message" wrapping onto two lines, so the tile keeps a single line
@@ -544,7 +632,14 @@ internal fun ActionButton(
         modifier = modifier,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 10.dp),
     ) {
-        Icon(icon, contentDescription = null)
+        if (busy) {
+            androidx.compose.material3.CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+        } else {
+            Icon(icon, contentDescription = null)
+        }
         Spacer(Modifier.width(6.dp))
         Text(label, maxLines = 1, softWrap = false)
     }

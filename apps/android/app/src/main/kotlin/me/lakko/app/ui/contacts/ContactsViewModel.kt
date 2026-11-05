@@ -59,6 +59,33 @@ public class ContactsViewModel(
      */
     public val state: StateFlow<ContactsUiState> = combineState()
 
+    /** Contacts (route keys) whose `Message` founding is running
+     *  ([ContactsRepository.startChatWith], shared with New chat). */
+    public val startingChat: StateFlow<Set<String>> get() = repo.startingChat
+
+    /** The line each contact's last `Message` left. */
+    public val messageNotices: StateFlow<Map<String, MessageNotice>> get() = repo.messageNotices
+
+    /** The shared name of [groupIdHex] on this device, or `null`. */
+    public fun groupNameOf(groupIdHex: String): String? = chatRepo?.groupName(groupIdHex)?.name
+
+    /** `docs/ux/who-can-find-me.md` 6.4 — a request to [contact] is waiting. */
+    public fun requestWaitingFor(contact: me.lakko.app.contacts.AcceptedContact): Boolean =
+        repo.requestWaitingFor(contact)
+
+    /**
+     * `Message` on a contact with no chat on this device: found the
+     * one-to-one, then [onFounded] with its id (the host opens it). On
+     * failure [startChatFailed] holds the contact and the button stays
+     * usable. Leaving the card does not cancel it.
+     */
+    public fun onStartChatClicked(routeKey: String, contact: me.lakko.app.contacts.AcceptedContact, onFounded: (String) -> Unit) {
+        repo.startChatWith(routeKey, contact, onFounded)
+    }
+
+    /** The contact's chat on this device ([ContactsRepository.chatOf]). */
+    public fun chatOf(contact: me.lakko.app.contacts.AcceptedContact): String? = repo.chatOf(contact)
+
     /** ADR-0079 section 4 — the people added through their invite link whose
      *  app has not answered yet. */
     public val invited: StateFlow<List<me.lakko.app.contacts.PendingContact>> = repo.invited

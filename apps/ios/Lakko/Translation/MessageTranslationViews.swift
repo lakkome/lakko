@@ -28,9 +28,9 @@ struct TranslatableMessageText: View {
         let phase = conversation.flatMap { center.phase(conversation: $0, messageId: message.messageId) }
         VStack(alignment: .leading, spacing: 3) {
             if case .translated(let text, _) = phase {
-                MessageText(text: text, linkColor: linkColor, onOwnLink: onOwnLink).font(.body)
+                MessageText(text: text, linkColor: linkColor, onOwnLink: onOwnLink).chatFont(.body)
             } else {
-                MessageText(text: message.text, linkColor: linkColor, onOwnLink: onOwnLink).font(.body)
+                MessageText(text: message.text, linkColor: linkColor, onOwnLink: onOwnLink).chatFont(.body)
             }
             if let phase, let conversation {
                 TranslationQuietLine(phase: phase, outgoing: outgoing, actions: .init(

@@ -31,7 +31,7 @@
  *   account's sealed push subscriptions.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
- * - theme, language and media preferences, the GIF privacy note: device
+ * - theme, text size, language and media preferences, the GIF privacy note: device
  *   settings. (The emoji Recent row and tone choices are account data since
  *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.

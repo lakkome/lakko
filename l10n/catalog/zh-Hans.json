@@ -3914,8 +3914,8 @@
       "text": "请先发送一条消息，才能发起通话。",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "正在准备你的聊天。",
+    "contacts.detail.cannot_message": {
+      "text": "你还不能给 {name} 发消息。请向对方要一个邀请链接。",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -3932,6 +3932,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "此联系人是在可以从这里发起聊天之前添加的。请让对方给你发消息。",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "无法发送请求。请重试。",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "请求已发送。{name} 接受后你就可以发消息。",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4083,7 +4091,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "无法接受。请重试。",
+      "text": "无法接受。",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4096,6 +4104,14 @@
     },
     "contacts.request.someone": {
       "text": "某人",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "通过 {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "通过你们都在的一个群组",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -8752,6 +8768,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "安全码",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "大",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "中",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "这个大小读起来方便吗？",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "你可以随时在这里更改。",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "小",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "文字大小",
       "status": "machine"
     },
     "settings.translation.delete_all": {

@@ -1370,6 +1370,92 @@ public class ContactsClient(
                 IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),
             )
         }
+        val wireBytes = composeRequestWire(
+            senderSigningSeed = senderSigningSeed,
+            senderAccountId = senderAccountId,
+            recipientX25519Pubkey = recipientX25519Pubkey,
+            introMessage = introMessage,
+            senderProfile = senderProfile,
+            replyGrant = replyGrant,
+            linkAnswer = linkAnswer,
+        )
+
+        val write: suspend (MailboxDest) -> me.lakko.app.ds.PublishResult = { target ->
+            val sealed = try {
+                mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
+            } catch (e: FfiException) {
+                throw ContactsError.wrap(e)
+            }
+            try {
+                ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
+            } catch (e: DsReachRefusedError) {
+                throw ContactsError.reachRefused(e)
+            } catch (e: DsHttpError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsNetworkError) {
+                throw ContactsError.wrap(e)
+            } catch (e: DsClientArgError) {
+                throw ContactsError.wrap(e)
+            }
+        }
+        val publish = when (
+            val outcome = me.lakko.app.reach.firstAcceptedWrite(dests, write, ::isMailboxRefusal)
+        ) {
+            is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
+            // ADR-0078: no verified mailbox key, no write.
+            is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
+                throw outcome.lastRefusal ?: ContactsError.wrap(MailboxUnknown())
+        }
+        return PublishedRequest(messageId = publish.id, createdAt = publish.createdAt)
+    }
+
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.4 — a contact request to the
+     * account [recipientAccountId] sealed for sending INSIDE a group both are
+     * members of: the ordinary request wire (its keys through the same
+     * fail-closed gate as every request, [resolveVerifiedBundle]) wrapped by
+     * `composeGroupContactRequestEnvelope`, sealed to the recipient so the
+     * other members cannot tell whom it is for. Nothing is written here; the
+     * caller posts the envelope into the group.
+     */
+    public suspend fun composeGroupContactRequest(
+        senderSigningSeed: ByteArray,
+        senderAccountId: ByteArray,
+        recipientAccountId: ByteArray,
+        introMessage: ByteArray,
+        senderProfile: FfiProfile? = null,
+        mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
+    ): GroupRequestEnvelope {
+        val (signaturePub, x25519Pub) = resolveVerifiedBundle(recipientAccountId)
+        val wire = composeRequestWire(
+            senderSigningSeed = senderSigningSeed,
+            senderAccountId = senderAccountId,
+            recipientX25519Pubkey = x25519Pub,
+            introMessage = introMessage,
+            senderProfile = senderProfile,
+            replyGrant = mintReply?.invoke(signaturePub),
+            linkAnswer = null,
+        )
+        val envelope = try {
+            uniffi.lakko_ffi_uniffi.composeGroupContactRequestEnvelope(x25519Pub, wire)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+        return GroupRequestEnvelope(envelope = envelope, recipientSignaturePubkey = signaturePub)
+    }
+
+    /** The contact-request wire ([composeContactRequest]) sealed to
+     *  [recipientX25519Pubkey]; a profile the composer refuses throws and
+     *  nothing is sent (never a weakened form). */
+    private fun composeRequestWire(
+        senderSigningSeed: ByteArray,
+        senderAccountId: ByteArray,
+        recipientX25519Pubkey: ByteArray,
+        introMessage: ByteArray,
+        senderProfile: FfiProfile?,
+        replyGrant: FfiReachGrant?,
+        linkAnswer: FfiLinkAnswer?,
+    ): ByteArray {
         // Sender's from_pseudonym: 32 random bytes (routing metadata only).
         val senderPseudonym = ByteArray(FROM_PSEUDONYM_LEN).also { java.security.SecureRandom().nextBytes(it) }
 
@@ -1408,34 +1494,7 @@ public class ContactsClient(
         } catch (e: FfiException) {
             throw ContactsError.wrap(e)
         }
-
-        val write: suspend (MailboxDest) -> me.lakko.app.ds.PublishResult = { target ->
-            val sealed = try {
-                mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
-            } catch (e: FfiException) {
-                throw ContactsError.wrap(e)
-            }
-            try {
-                ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
-            } catch (e: DsReachRefusedError) {
-                throw ContactsError.reachRefused(e)
-            } catch (e: DsHttpError) {
-                throw ContactsError.wrap(e)
-            } catch (e: DsNetworkError) {
-                throw ContactsError.wrap(e)
-            } catch (e: DsClientArgError) {
-                throw ContactsError.wrap(e)
-            }
-        }
-        val publish = when (
-            val outcome = me.lakko.app.reach.firstAcceptedWrite(dests, write, ::isMailboxRefusal)
-        ) {
-            is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
-            // ADR-0078: no verified mailbox key, no write.
-            is me.lakko.app.reach.SignedWriteOutcome.Exhausted ->
-                throw outcome.lastRefusal ?: ContactsError.wrap(MailboxUnknown())
-        }
-        return PublishedRequest(messageId = publish.id, createdAt = publish.createdAt)
+        return wireBytes
     }
 
     /** Whether [dest]'s grant opens its mailbox. No token is spent; a network
@@ -1654,70 +1713,15 @@ public class ContactsClient(
                 }
 
                 MailboxRowKind.CONTACT_REQUEST -> {
-                    val parsed = try {
-                        ContactRequest.decodeAndVerify(env.body)
-                    } catch (_: FfiException) {
-                        // Bad signature, malformed wire bytes,
-                        // or some other verifier failure. Drop
-                        // and move on — the cursor advances so
-                        // we won't re-process the same row.
-                        // No logger plumbed yet; production
-                        // will wire `tracing`-equivalent in
-                        // 1.15d7 / 1.15f. Silence here matches
-                        // the web's console.warn that
-                        // production-builds-suppress.
-                        continue
-                    }
-                    // Read every field + try to open the
-                    // envelope BEFORE the handle closes. `.use`
-                    // wraps the whole block so the Rust-side
-                    // Arc releases on every exit (including the
-                    // unseal-throw path).
-                    val request = parsed.use { req ->
-                        // ADR-0048 §2 — the sealed plaintext carries the
-                        // sender's profile ahead of the intro. A profile that
-                        // failed its bounds opens as `null` with the intro
-                        // intact; the request is still authentic.
-                        var senderProfile: me.lakko.app.profile.PeerProfile? = null
-                        var replyGrant: FfiReachGrant? = null
-                        var linkAnswer: FfiLinkAnswer? = null
-                        val intro: String? = try {
-                            val opened = req.openEnvelope(myX25519Secret)
-                            // ADR-0079 section 2 — the answer to one of this
-                            // account's own invite links, when it carries one.
-                            linkAnswer = opened.linkAnswer
-                            // ADR-0060 §6 — the requester's reply key, bound
-                            // to the verified `from_pubkey`: kept by the
-                            // repository for the accept and the ack.
-                            replyGrant = opened.replyGrant
-                            senderProfile = opened.profile?.let { me.lakko.app.profile.peerProfileOf(it) }
-                            // UTF-8 decode with replacement-on-
-                            // error so malformed bytes still
-                            // surface as the best-effort string
-                            // we can show.
-                            String(opened.introMessage, Charsets.UTF_8)
-                        } catch (_: FfiException) {
-                            // Envelope didn't decrypt for our
-                            // X25519 secret. Could be a malicious
-                            // request, could be a bug; either way
-                            // we still surface the request (the
-                            // outer signature is verified) but
-                            // with no intro body.
-                            null
-                        }
-                        IncomingContactRequest(
-                            messageId = message.id,
-                            fromPubkey = req.fromPubkey(),
-                            fromAccountId = req.fromAccountId(),
-                            fromPseudonym = req.fromPseudonym(),
-                            validAfterMs = req.validAfterMs(),
-                            intro = intro,
-                            createdAt = message.createdAt,
-                            profile = senderProfile,
-                            replyGrant = replyGrant,
-                            linkAnswer = linkAnswer,
-                        )
-                    }
+                    // Bad signature, malformed wire bytes, or some other
+                    // verifier failure: dropped, and the cursor advances so
+                    // the same row is not processed again.
+                    val request = incomingContactRequestFromWire(
+                        wire = env.body,
+                        messageId = message.id,
+                        createdAt = message.createdAt,
+                        myX25519Secret = myX25519Secret,
+                    ) ?: continue
                     events.add(IncomingMailboxEvent.ContactRequest(request))
                 }
             }
@@ -1742,6 +1746,13 @@ public class ContactsClient(
 // =============================================================================
 // Result types
 // =============================================================================
+
+/** Section 6.4 — a contact request sealed for a group, and the verified key
+ *  it was sealed to. */
+public class GroupRequestEnvelope(
+    public val envelope: ByteArray,
+    public val recipientSignaturePubkey: ByteArray,
+)
 
 /** Internal carrier for [ContactsClient.composeAndPublishContactRequest]. */
 private data class PublishedRequest(
@@ -1784,6 +1795,65 @@ public data class SendResult(
     }
 }
 
+/**
+ * One verified incoming request from its wire bytes: the signature checked
+ * against the request's `from_pubkey`, the sealed part opened with
+ * [myX25519Secret]. `null` when the wire does not verify. The same for a
+ * mailbox row and for a request that arrived inside a group
+ * (`docs/ux/who-can-find-me.md` section 6.4), so both are one request.
+ */
+internal fun incomingContactRequestFromWire(
+    wire: ByteArray,
+    messageId: Long,
+    createdAt: String,
+    myX25519Secret: ByteArray,
+    viaGroupIdHex: String? = null,
+): IncomingContactRequest? {
+    val parsed = try {
+        ContactRequest.decodeAndVerify(wire)
+    } catch (_: FfiException) {
+        return null
+    }
+    // Every field is read and the envelope opened BEFORE the handle closes;
+    // `.use` releases the Rust-side Arc on every exit.
+    return parsed.use { req ->
+        // ADR-0048 §2 — the sealed plaintext carries the sender's profile ahead
+        // of the intro. A profile that failed its bounds opens as `null` with
+        // the intro intact; the request is still authentic.
+        var senderProfile: me.lakko.app.profile.PeerProfile? = null
+        var replyGrant: FfiReachGrant? = null
+        var linkAnswer: FfiLinkAnswer? = null
+        val intro: String? = try {
+            val opened = req.openEnvelope(myX25519Secret)
+            // ADR-0079 section 2 — the answer to one of this account's own
+            // invite links, when it carries one.
+            linkAnswer = opened.linkAnswer
+            // ADR-0060 §6 — the requester's reply key, bound to the verified
+            // `from_pubkey`: kept by the repository for the accept and the ack.
+            replyGrant = opened.replyGrant
+            senderProfile = opened.profile?.let { me.lakko.app.profile.peerProfileOf(it) }
+            String(opened.introMessage, Charsets.UTF_8)
+        } catch (_: FfiException) {
+            // The envelope did not open for this key: the outer signature is
+            // verified, so the request still shows, with no intro.
+            null
+        }
+        IncomingContactRequest(
+            messageId = messageId,
+            fromPubkey = req.fromPubkey(),
+            fromAccountId = req.fromAccountId(),
+            fromPseudonym = req.fromPseudonym(),
+            validAfterMs = req.validAfterMs(),
+            intro = intro,
+            createdAt = createdAt,
+            profile = senderProfile,
+            replyGrant = replyGrant,
+            linkAnswer = linkAnswer,
+            viaGroupIdHex = viaGroupIdHex,
+        )
+    }
+}
+
 /** One verified incoming ContactRequest. */
 public data class IncomingContactRequest(
     val messageId: Long,
@@ -1817,6 +1887,9 @@ public data class IncomingContactRequest(
      *  links the request was sent through. SECRET: decided on when the
      *  request arrives and never persisted with the pending row. */
     val linkAnswer: FfiLinkAnswer? = null,
+    /** `docs/ux/who-can-find-me.md` section 6.4 — the group the request was
+     *  sent inside (hex), shown as "Via {group}"; `null` for a mailbox row. */
+    val viaGroupIdHex: String? = null,
 ) {
     /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
      *  does not parse. For a request through an invite link it decides the

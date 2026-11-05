@@ -81,7 +81,7 @@ const ATTACKER = 7;
 const IDENTITY = { signaturePublicKey: key(99) } as unknown as WasmIdentity;
 
 function client(devices: readonly Uint8Array[]): ContactsClient {
-  return new ContactsClient(
+  const made = new ContactsClient(
     {
       // Nothing published: the gate passes without touching the pin, so each
       // test states the trust it starts from.
@@ -92,6 +92,10 @@ function client(devices: readonly Uint8Array[]): ContactsClient {
     withCommitRoute({ registerGroupEpoch: async () => {} }) as unknown as DsClient,
     { identityProvider: () => IDENTITY },
   );
+  // The device filter is under test, not the reach of the Welcome
+  // (`start-chat-failure.test.ts` covers that check).
+  Object.defineProperty(made, "welcomeCanReach", { value: async () => true });
+  return made;
 }
 
 /** A role-table group whose Add proposal records what it was handed. */

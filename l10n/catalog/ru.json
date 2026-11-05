@@ -4030,8 +4030,8 @@
       "text": "Чтобы позвонить, сначала отправьте сообщение.",
       "status": "machine"
     },
-    "contacts.detail.chat_starting": {
-      "text": "Чат создаётся.",
+    "contacts.detail.cannot_message": {
+      "text": "Вы пока не можете написать {name}. Попросите у него ссылку-приглашение.",
       "status": "machine"
     },
     "contacts.detail.gone_body": {
@@ -4048,6 +4048,14 @@
     },
     "contacts.detail.message_unavailable": {
       "text": "Этот контакт добавлен ещё до того, как отсюда можно было начинать чаты. Попросите его написать вам.",
+      "status": "machine"
+    },
+    "contacts.detail.request_failed": {
+      "text": "Не удалось отправить запрос. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "contacts.detail.request_sent": {
+      "text": "Запрос отправлен. Вы сможете написать, когда {name} примет его.",
       "status": "machine"
     },
     "contacts.detail.their_name": {
@@ -4199,7 +4207,7 @@
       "status": "machine"
     },
     "contacts.request.accept_failed": {
-      "text": "Не удалось принять. Попробуйте ещё раз.",
+      "text": "Не удалось принять.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -4212,6 +4220,14 @@
     },
     "contacts.request.someone": {
       "text": "Кто-то",
+      "status": "machine"
+    },
+    "contacts.request.via_group": {
+      "text": "Через {group}",
+      "status": "machine"
+    },
+    "contacts.request.via_unnamed_group": {
+      "text": "Через группу, в которой вы оба состоите",
       "status": "machine"
     },
     "contacts.safety.body": {
@@ -9020,6 +9036,30 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Коды безопасности",
+      "status": "machine"
+    },
+    "settings.text_size.large": {
+      "text": "Крупный",
+      "status": "machine"
+    },
+    "settings.text_size.medium": {
+      "text": "Средний",
+      "status": "machine"
+    },
+    "settings.text_size.preview_incoming": {
+      "text": "Удобно читать такой размер?",
+      "status": "machine"
+    },
+    "settings.text_size.preview_outgoing": {
+      "text": "Его можно изменить здесь в любой момент.",
+      "status": "machine"
+    },
+    "settings.text_size.small": {
+      "text": "Мелкий",
+      "status": "machine"
+    },
+    "settings.text_size.title": {
+      "text": "Размер текста",
       "status": "machine"
     },
     "settings.translation.delete_all": {

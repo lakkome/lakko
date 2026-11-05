@@ -703,7 +703,10 @@ public struct ChatScreen: View {
                 set: { open in if !open { viewModel.cancelEdit() } }
             )
         ) {
-            EditMessageSheet(viewModel: viewModel)
+            EditMessageSheet(
+                text: $viewModel.editText,
+                onCancel: { viewModel.cancelEdit() },
+                onSave: { viewModel.commitEdit() })
         }
     }
 
@@ -1573,6 +1576,10 @@ public struct ChatScreen: View {
                     .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $viewModel.draft, caret: caret, disabled: viewModel.sending,
+                        onReturn: {
+                            guard !viewModel.uploading, !media.recState.isCapturing else { return }
+                            viewModel.onSendClicked()
+                        },
                         focus: $composerFocused)
                     // ADR-0047 §4 — the smiley opens the picker on Emoji.
                     Button {
@@ -2087,6 +2094,8 @@ struct MessageRow: View {
     /// ADR-0082 — the conversation this row belongs to, for translation and
     /// transcripts; `nil` outside a conversation screen.
     @Environment(\.translationConversation) private var translationConversation
+    /// `docs/ux/text-size.md` — the chat text size factor.
+    @Environment(\.chatTextScale) private var chatTextScale
 
     /// Where this row's bubble is on screen.
     ///
@@ -2243,8 +2252,7 @@ struct MessageRow: View {
                 bubbleColumn(alignment: .leading) {
                     if startsRun, let authorName {
                         Text(authorName)
-                            .font(.caption)
-                            .fontWeight(.medium)
+                            .chatFont(.caption1, weight: .medium)
                             .foregroundStyle(Color.lakkoAccent)
                             .lineLimit(1)
                             .padding(.leading, 4)
@@ -2569,13 +2577,13 @@ struct MessageRow: View {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
                     Label(l10n.t("chat.message.deleted"), systemImage: "trash")
-                        .font(.body.italic())
+                        .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else if message.unsupportedVersion != nil {
                     // ADR-0061 section 6 — a message from a newer version of
                     // Lakko. The core hands no text; the sentence is ours.
                     Label(l10n.t("chat.message.unsupported"), systemImage: "arrow.down.app")
-                        .font(.body.italic())
+                        .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else {
                     // ADR-0052 decision 2 / section 5.1 — one line above the
@@ -2668,23 +2676,22 @@ struct MessageRow: View {
             // ADR-0065 / UX section 2 — the saved mark, seen by this person only.
             if saveState == .unsave {
                 Image(systemName: "bookmark.fill")
-                    .font(.caption2)
+                    .chatFont(.caption2)
                     .accessibilityLabel(l10n.t("chat.message.saved_mark"))
             }
             if message.edited, !message.deleted {
                 Text(l10n.t("chat.message.edited"))
-                    .font(.caption2)
+                    .chatFont(.caption2)
             }
             if let timeLabel {
                 Text(timeLabel)
-                    .font(.caption2)
-                    .monospacedDigit()
+                    .chatFont(.caption2, monospacedDigit: true)
             }
             // The action sits next to the message it belongs to, which is the
             // only place that can say WHICH message failed.
             if message.ack == .failed {
                 Button(l10n.t("common.retry")) { onRetrySend(message.localId) }
-                    .font(.caption2)
+                    .chatFont(.caption2)
                     .buttonStyle(.plain)
                     .underline()
             }
@@ -2757,7 +2764,7 @@ struct MessageRow: View {
     /// replaced rather than disabled.
     @ViewBuilder
     private var reactionChips: some View {
-        ReactionChipFlow(spacing: 4) {
+        ReactionChipFlow(spacing: ReactionChipMetrics.chipSpacing * chatTextScale) {
             ForEach(chipRow.chips, id: \.emoji) { chip in
                 if actionsAvailable {
                     // A tap reacts; a long press lists who reacted (Lakko's
@@ -2787,13 +2794,9 @@ struct MessageRow: View {
                 }
             }
             if chipRow.overflowKinds > 0 {
-                Text("+\(Int(chipRow.overflowKinds).formatted(.number.locale(l10n.locale)))")
-                    .font(.caption)
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.lakkoSurfaceSunken)
-                    .clipShape(Capsule())
+                ReactionChipLabel(
+                    emoji: nil,
+                    content: .count("+\(Int(chipRow.overflowKinds).formatted(.number.locale(l10n.locale)))"))
                     .contentShape(Rectangle())
                     .onTapGesture { onShowReactors(nil) }
                     .accessibilityAddTraits(.isButton)
@@ -2823,36 +2826,22 @@ struct MessageRow: View {
     /// two cannot come to look different (section 7: the face is the shared
     /// rule's — the emoji alone, a number, or up to three faces).
     private func chipLabel(_ chip: FfiReactionChip) -> some View {
-        HStack(spacing: 3) {
-            Text(chip.emoji).font(.caption)
-            switch chip.face {
-            case .emojiOnly:
-                EmptyView()
-            case .count(let count):
-                Text(Int(count).formatted(.number.locale(l10n.locale)))
-                    .font(.caption2)
-                    .foregroundStyle(Color.lakkoTextMuted)
-            case .avatars(let reactors):
-                HStack(spacing: -5) {
-                    ForEach(Array(reactors.prefix(3).enumerated()), id: \.offset) { _, key in
-                        let mine = key.base64EncodedString() == ownIdentity
-                        InitialsAvatar(
-                            name: reactorName(key), identity: key.base64EncodedString(), size: 16,
-                            photo: mine ? .own : .person(key))
-                            .overlay(Circle().stroke(Color.lakkoSurface, lineWidth: 1))
-                    }
-                }
-            }
+        let content: ReactionChipContent
+        switch chip.face {
+        case .emojiOnly:
+            content = .emojiOnly
+        case .count(let count):
+            content = .count(Int(count).formatted(.number.locale(l10n.locale)))
+        case .avatars(let reactors):
+            content = .avatars(reactors.prefix(ReactionChipMetrics.maxAvatars).map { key in
+                let mine = key.base64EncodedString() == ownIdentity
+                return (
+                    name: reactorName(key), identity: key.base64EncodedString(),
+                    photo: mine ? AvatarPhoto.own : AvatarPhoto.person(key))
+            })
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(chip.mine ? Color.lakkoAccentSoft : Color.lakkoSurfaceSunken)
-        .overlay(
-            Capsule()
-                .stroke(chip.mine ? Color.lakkoAccent : Color.clear, lineWidth: 1)
-        )
-        .clipShape(Capsule())
-        .animation(.easeOut(duration: 0.15), value: chip.count)
+        return ReactionChipLabel(emoji: chip.emoji, content: content, mine: chip.mine)
+            .animation(.easeOut(duration: 0.15), value: chip.count)
     }
 
     /// A reactor's name for an avatar's initials. This person's own key
@@ -2879,7 +2868,7 @@ struct MessageRow: View {
             EmptyView()
         case .sent:
             Image(systemName: "checkmark")
-                .font(.system(size: 10, weight: .semibold))
+                .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
                 .accessibilityLabel(l10n.t("chat.message.sent"))
         case .read:
             ZStack(alignment: .leading) {
@@ -2887,7 +2876,7 @@ struct MessageRow: View {
                 Image(systemName: "checkmark")
                     .offset(x: 4)
             }
-            .font(.system(size: 10, weight: .semibold))
+            .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
             .padding(.trailing, 4)
             .accessibilityLabel(l10n.t("chat.message.read"))
         }
@@ -2939,9 +2928,17 @@ private struct PendingMediaRow: View {
 /// ADR-0023 — the edit sheet. A small form pre-filled with the
 /// message's current text; Save publishes the edit op + applies
 /// it locally, Cancel discards.
-private struct EditMessageSheet: View {
-    @ObservedObject var viewModel: ChatViewModel
+/// The edit sheet: the message's text in a field that takes the keyboard as
+/// soon as the sheet appears, with the caret at the end (base walk 2026-11-04:
+/// typing must go into the field without tapping it first).
+struct EditMessageSheet: View {
+    @Binding var text: String
+    let onCancel: () -> Void
+    let onSave: () -> Void
     @ObservedObject private var l10n = Localization.shared
+    @FocusState private var focused: Bool
+
+    private var canSave: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -2949,28 +2946,31 @@ private struct EditMessageSheet: View {
                 Section(l10n.t("chat.composer.placeholder")) {
                     TextField(
                         l10n.t("chat.composer.placeholder"),
-                        text: $viewModel.editText,
+                        text: $text,
                         axis: .vertical
                     )
                     .lineLimit(1...6)
+                    .focused($focused)
+                    // Base scenario 10 — Return saves, Shift+Return breaks the line.
+                    .submitOnHardwareReturn { if canSave { onSave() } }
+                    .accessibilityIdentifier("edit-message-field")
                 }
             }
             .navigationTitle(l10n.t("chat.edit.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(l10n.t("common.cancel")) { viewModel.cancelEdit() }
+                    Button(l10n.t("common.cancel"), action: onCancel)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(l10n.t("common.save")) { viewModel.commitEdit() }
-                        .disabled(
-                            viewModel.editText.trimmingCharacters(
-                                in: .whitespacesAndNewlines
-                            ).isEmpty
-                        )
+                    Button(l10n.t("common.save"), action: onSave)
+                        .disabled(!canSave)
                 }
             }
         }
+        // Focused on appear. A field focused programmatically puts its caret at
+        // the end of the text it holds.
+        .onAppear { focused = true }
     }
 }
 

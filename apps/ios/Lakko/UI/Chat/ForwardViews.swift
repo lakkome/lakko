@@ -29,9 +29,9 @@ struct ForwardedLine: View {
         Button(action: onTap) {
             HStack(spacing: 5) {
                 Image(systemName: "arrowshape.turn.up.right")
-                    .font(.caption2)
+                    .chatFont(.caption2)
                 Text(line)
-                    .font(.caption)
+                    .chatFont(.caption1)
                     .lineLimit(1)
             }
             .foregroundStyle(outgoing ? Color.lakkoAccentForeground : Color.lakkoTextMuted)

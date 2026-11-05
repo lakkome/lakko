@@ -2524,6 +2524,15 @@ pub enum FfiIncomingEnvelopeKind {
     /// from an owner or admin resolved at receipt and keep it only when
     /// `groupReactionsIsNewer`. Never render it. Appended last.
     GroupReactions,
+    /// A contact request sealed to one member of the group (ADR-0086 section
+    /// 6); the envelope names nobody. `payload` is the whole envelope. Never
+    /// render it. Every member passes `payload` to
+    /// [`crate::group_contact_request::check_group_contact_request`] with its
+    /// own X25519 secret and the sender's account key resolved at receipt
+    /// (C-68); `None` means not for this member (drop silently). The member
+    /// it opens for applies its "Who can find me" setting and hands the
+    /// returned request to the ordinary incoming-request flow. Appended last.
+    GroupContactRequest,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2741,6 +2750,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::GroupReactions(value) => FfiIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..FfiIncomingEnvelope::of(K::GroupReactions)
+        },
+        IncomingEnvelope::GroupContactRequest(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::GroupContactRequest)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

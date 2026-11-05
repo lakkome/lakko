@@ -61,6 +61,20 @@ function keptGrantWiresOf(keyHex: string): readonly string[] {
   }
 }
 
+/**
+ * Whether a grant this device holds for the person still reaches them: the
+ * DS reach check, grant by grant, in the order a write would try them
+ * (`docs/ux/who-can-find-me.md` section 6.4, step 1). `false` when none is
+ * held or every one is refused. Throws what the check throws: a check that
+ * could not be made is no refusal.
+ */
+export async function heldGrantReaches(identityPk: Uint8Array): Promise<boolean> {
+  for (const wire of keptGrantWiresOf(toHex(identityPk))) {
+    if (await reachCheckWith(identityPk, wire)) return true;
+  }
+  return false;
+}
+
 /** What this device knows about one person (by account key, base64). */
 export function knownPerson(
   profiles: ProfileApi,

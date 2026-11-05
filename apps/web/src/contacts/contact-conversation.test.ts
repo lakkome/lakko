@@ -62,3 +62,34 @@ describe("conversationWithContact", () => {
     expect(find({ signaturePubkeyB64: ANNA, groupIdB64: "g1" }, [conv], null)).toBe(conv);
   });
 });
+
+describe("a stored chat id that is not the person's one-to-one does not count", () => {
+  it("a link to a group (it held two people once) falls back to the real one-to-one, or to none", () => {
+    const group: Conv = { groupIdB64: "walk", people: [ME, ANNA, "boris"], oneToOne: false };
+    const real: Conv = { groupIdB64: "g2", people: [ME, ANNA], oneToOne: true };
+    expect(find({ signaturePubkeyB64: ANNA, groupIdB64: "walk" }, [group])).toBeUndefined();
+    expect(find({ signaturePubkeyB64: ANNA, groupIdB64: "walk" }, [group, real])).toBe(real);
+    // Two people but a group: still not their chat.
+    const pair: Conv = { groupIdB64: "pair", people: [ME, ANNA], oneToOne: false };
+    expect(find({ signaturePubkeyB64: ANNA, groupIdB64: "pair" }, [pair])).toBeUndefined();
+  });
+
+  it("a link to a one-to-one with someone else does not count", () => {
+    const boris: Conv = { groupIdB64: "gb", people: [ME, "boris"], oneToOne: true };
+    expect(find({ signaturePubkeyB64: ANNA, groupIdB64: "gb" }, [boris])).toBeUndefined();
+  });
+
+  it("an older one-to-one under a key the contact rotated from is still theirs", () => {
+    const old: Conv = { groupIdB64: "old", people: [ME, "anna-old"], oneToOne: true };
+    expect(
+      conversationWithContact({
+        contact: { signaturePubkeyB64: ANNA, groupIdB64: "old", previousSignaturePubkeysB64: ["anna-old"] },
+        conversations: [old],
+        ownKeyB64: ME,
+        peopleOf: (c) => c.people,
+        isOneToOne: (c) => c.oneToOne,
+      }),
+    ).toBe(old);
+  });
+});
+

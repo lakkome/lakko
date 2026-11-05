@@ -138,3 +138,30 @@ export async function sendFoundRequest(person: PersonResult, deps: SendDeps): Pr
     return { kind: "failed", message: deps.errorMessage(err) };
   }
 }
+
+/**
+ * `docs/ux/who-can-find-me.md` section 6.4 - the same order as Message on a
+ * contact card: a request the inbox refused (no grant reaches the person)
+ * goes inside a group both people are in, the one with the newest message.
+ * `groupIdB64` names the group it went into, `null` when it did not. Never
+ * throws: a failed send inside the group is a failed send.
+ */
+export async function withSharedGroupFallback(
+  outcome: SendOutcome,
+  deps: {
+    readonly sharedGroups: () => Promise<readonly { readonly groupIdB64: string; readonly newestMs: number }[]>;
+    readonly sendInGroup: (groupIdB64: string) => Promise<void>;
+    readonly errorMessage: (err: unknown) => () => string;
+  },
+): Promise<{ readonly outcome: SendOutcome; readonly groupIdB64: string | null }> {
+  if (outcome.kind !== "refused") return { outcome, groupIdB64: null };
+  try {
+    let best: { readonly groupIdB64: string; readonly newestMs: number } | null = null;
+    for (const g of await deps.sharedGroups()) if (best === null || g.newestMs > best.newestMs) best = g;
+    if (best === null) return { outcome, groupIdB64: null };
+    await deps.sendInGroup(best.groupIdB64);
+    return { outcome: { kind: "sent" }, groupIdB64: best.groupIdB64 };
+  } catch (err) {
+    return { outcome: { kind: "failed", message: deps.errorMessage(err) }, groupIdB64: null };
+  }
+}

@@ -47,6 +47,11 @@ public data class FeedSource(
  */
 public fun feedSourceKey(source: FeedSource): String = source.conversationHex ?: source.idHex
 
+/** The id a feed card's source circle looks the photo up by: the group (or
+ *  channel) id the Chats row passes for the same conversation, so a group
+ *  with a photo shows it here too (base walk 2026-11-04: initials instead). */
+public fun feedSourceAvatarId(source: FeedSource): String = source.idHex.lowercase()
+
 /** One group conversation as the feed's source list reads it. */
 public data class GroupConversationForFeed(
     /** Hex of the conversation id (the lineage root). */

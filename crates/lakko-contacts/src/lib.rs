@@ -42,6 +42,12 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
+//! - [`group_contact_request`] — the ADR-0086 §6 envelope carrying an
+//!   ordinary contact request inside a group, sealed whole to one member's
+//!   X25519 key so the other members cannot tell whom it is for, for a
+//!   person no held reach grant reaches;
+//!   [`group_contact_request::check_group_contact_request`] is the
+//!   receiver's rule.
 //! - [`group_closed`] — the ADR-0073 phase-2 group-closed envelope (an admin
 //!   closes a group whose owner reset their keys and names the recreated
 //!   group, `closed_at_ms`): the group-name template reused, bounded,
@@ -119,6 +125,7 @@ pub mod device_card;
 pub mod envelope;
 pub mod error;
 pub mod group_closed;
+pub mod group_contact_request;
 pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
@@ -220,6 +227,14 @@ pub use group_closed::{
     compose_group_closed, decode_group_closed, group_closed_is_newer, try_unwrap_group_closed,
     GroupClosed, GroupClosedError, GROUP_CLOSED_ENVELOPE_DOMAIN_V1, GROUP_CLOSED_ENVELOPE_MAX_LEN,
     GROUP_CLOSED_ENVELOPE_MIN_LEN, GROUP_CLOSED_VERSION_V1, SUCCESSOR_GROUP_ID_LEN,
+};
+pub use group_contact_request::{
+    check_group_contact_request, compose_group_contact_request, decode_group_contact_request,
+    seal_group_contact_request, try_unwrap_group_contact_request, GroupContactRequest,
+    GroupContactRequestError, GROUP_CONTACT_REQUEST_ENVELOPE_DOMAIN_V1,
+    GROUP_CONTACT_REQUEST_ENVELOPE_MAX_LEN, GROUP_CONTACT_REQUEST_ENVELOPE_MIN_LEN,
+    GROUP_CONTACT_REQUEST_MAX_REQUEST_LEN, GROUP_CONTACT_REQUEST_MAX_SEALED_LEN,
+    GROUP_CONTACT_REQUEST_MIN_SEALED_LEN, GROUP_CONTACT_REQUEST_VERSION_V1,
 };
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
@@ -504,6 +519,36 @@ pub mod fuzz_api {
             Ok(crate::incoming_envelope::IncomingEnvelope::LinkClaim(c)) if c == claim
         );
         Some(recomposed && dispatched)
+    }
+
+    /// `None` when `bytes` is not a well-formed group contact request
+    /// (ADR-0086 §6); else `Some(true)` when it re-composes to exactly
+    /// `bytes`, lies within the advertised lengths, and the dispatcher
+    /// classifies it as the same envelope, and the receiver's rule under a
+    /// fixed key refuses a box the fuzzer could not have sealed to it,
+    /// `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn group_contact_request_decode(bytes: &[u8]) -> Option<bool> {
+        let envelope = crate::group_contact_request::decode_group_contact_request(bytes).ok()?;
+        let recomposed = crate::group_contact_request::compose_group_contact_request(&envelope)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::group_contact_request::GROUP_CONTACT_REQUEST_ENVELOPE_MIN_LEN
+            ..=crate::group_contact_request::GROUP_CONTACT_REQUEST_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::GroupContactRequest(e)) if e == envelope
+        );
+        // The receiver's rule never panics on a box it cannot open.
+        let opened = crate::group_contact_request::check_group_contact_request(
+            &envelope,
+            &lakko_crypto::agreement::SecretKey::from_bytes([0x5A; 32]),
+            &[0u8; 32],
+        );
+        let refused = opened.is_err();
+        Some(recomposed && within && dispatched && refused)
     }
 
     /// `None` when `bytes` is not a well-formed link-founded note (ADR-0079);

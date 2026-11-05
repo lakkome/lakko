@@ -258,6 +258,7 @@ final class CallInviteOfferTests: XCTestCase {
             send: { conversation, text in
                 if let failure = world.sendFailure { throw failure }
                 world.sent.append((conversation, text))
+                return .sent
             },
             // The line's time on screen is not waited out in a test.
             hold: { ms in world.holds.append(ms) })

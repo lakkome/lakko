@@ -88,6 +88,7 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
 pub mod feed;
+pub mod group_contact_request;
 pub mod handles;
 pub mod journal_epoch;
 pub mod key_reset;

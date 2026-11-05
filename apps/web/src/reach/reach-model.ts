@@ -97,8 +97,9 @@ export interface ReachBook {
   readonly registered: Readonly<Record<string, number | null>>;
   /** The Everyone flag last set on the mailbox, `null` = never set. */
   readonly open: boolean | null;
-  /** When the `fof` key last rotated on its schedule. */
-  readonly fofRotatedAtMs: number;
+  /** When the `fof` schedule last started or rotated; `null` before this
+   *  device's first registration pass, which starts it without rotating. */
+  readonly fofRotatedAtMs: number | null;
   /** The stamp of the version counters (the ReachState envelope's
    *  `updatedAtMs`, ADR-0060 section 7): moved forward by every local change
    *  of a version, adopted from a newer state another device of the account
@@ -186,7 +187,7 @@ export const EMPTY_REACH_BOOK: ReachBook = {
   links: [],
   registered: {},
   open: null,
-  fofRotatedAtMs: 0,
+  fofRotatedAtMs: null,
   stateUpdatedAtMs: 0,
   recovery: null,
   memberOf: null,
@@ -408,9 +409,44 @@ export function applyAcceptedDiff(book: ReachBook, diff: ReachDiff): ReachBook {
   return { ...book, registered, open: diff.open === undefined ? book.open : diff.open };
 }
 
-/** Whether the `fof` key is due for its scheduled rotation. */
+/** Whether the `fof` key is due for its scheduled rotation: only once
+ *  {@link FOF_ROTATION_MS} has passed since the schedule started or last
+ *  rotated. A schedule that has not started (a fresh install, a restore, a
+ *  pairing) is not due, and neither is one whose start lies ahead of a clock
+ *  that went backwards. The same rule as iOS `ReachRules.fofRotationDue`. */
 export function fofRotationDue(book: ReachBook, nowMs: number): boolean {
-  return nowMs - book.fofRotatedAtMs >= FOF_ROTATION_MS;
+  const last = book.fofRotatedAtMs;
+  if (last === null || nowMs < last) return false;
+  return nowMs - last >= FOF_ROTATION_MS;
+}
+
+/**
+ * The `fof` schedule as one registration pass advances it. A schedule that
+ * has not started starts at `nowMs` and rotates nothing (a rotation on the
+ * first pass after an install, a restore or a pairing would make every record
+ * contacts hold for this person refused until relayed again); a due schedule
+ * rotates the key; otherwise the book is returned as it is. The caller
+ * persists a changed book and restamps the shared counters when `rotated`.
+ */
+export function advanceFofSchedule(
+  book: ReachBook,
+  nowMs: number,
+): { readonly book: ReachBook; readonly rotated: boolean } {
+  if (book.fofRotatedAtMs === null) return { book: { ...book, fofRotatedAtMs: nowMs }, rotated: false };
+  if (fofRotationDue(book, nowMs)) return { book: rotateFof(book, nowMs), rotated: true };
+  return { book, rotated: false };
+}
+
+/**
+ * The `fof` schedule after adopting a reach state another device of the
+ * account sent (`adopted` from `before`). When it carries a higher `fof`
+ * version the scheduled rotation happened there: this device restarts its
+ * schedule from `nowMs` instead of rotating a second time. Client-local
+ * bookkeeping, not part of the shared state.
+ */
+export function fofScheduleAfterAdoption(before: ReachBook, adopted: ReachBook, nowMs: number): ReachBook {
+  if (versionOf(adopted, "fof", "") <= versionOf(before, "fof", "")) return adopted;
+  return { ...adopted, fofRotatedAtMs: Math.max(adopted.fofRotatedAtMs ?? 0, nowMs) };
 }
 
 /** The book with the `fof` key rotated now. */
@@ -634,7 +670,9 @@ export function decodeReachBook(json: string | null | undefined): ReachBook {
       links: Array.isArray(raw.links) ? raw.links : [],
       registered: typeof raw.registered === "object" && raw.registered !== null ? raw.registered : {},
       open: typeof raw.open === "boolean" ? raw.open : null,
-      fofRotatedAtMs: typeof raw.fofRotatedAtMs === "number" ? raw.fofRotatedAtMs : 0,
+      // A stored 0 is the "never" of the earlier book format.
+      fofRotatedAtMs:
+        typeof raw.fofRotatedAtMs === "number" && raw.fofRotatedAtMs > 0 ? raw.fofRotatedAtMs : null,
       stateUpdatedAtMs: typeof raw.stateUpdatedAtMs === "number" ? raw.stateUpdatedAtMs : 0,
       recovery: decodeRecovery(raw.recovery),
       ...(typeof raw.registeredForKeyHex === "string"

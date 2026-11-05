@@ -33,8 +33,15 @@ import uniffi.lakko_ffi_uniffi.OprfResult
  */
 
 /** The inputs an introduction record is built from, as one key. */
-internal fun introductionOfferKey(fofVersion: Int, name: String?, username: String?): String =
-    listOf(fofVersion.toString(), name ?: "", username ?: "").joinToString("\u0001")
+internal fun introductionOfferKey(
+    fofVersion: Int,
+    name: String?,
+    username: String?,
+    /** ADR-0078 — the mailbox binding the record carries, hex; a record built
+     *  before it (or with another binding) is rebuilt, as on iOS. */
+    mailboxBindingHex: String = "",
+): String =
+    listOf(fofVersion.toString(), name ?: "", username ?: "", mailboxBindingHex).joinToString("\u0001")
 
 /** Whether the held record must be rebuilt. `false` when 2.1 is off. */
 internal fun offerNeedsRebuild(heldKey: String?, contactsOfContacts: Boolean, key: String): Boolean =
@@ -187,8 +194,17 @@ internal suspend fun publishIntroductions(
     val username = inputs.username?.takeIf { it.isNotEmpty() }
 
     // 2. The introduction record, rebuilt when an input moved.
-    val key = introductionOfferKey(inputs.fofVersion, name, username)
-    if (offerNeedsRebuild(state.ownOffer?.key, inputs.contactsOfContacts, key)) {
+    val key = introductionOfferKey(
+        inputs.fofVersion,
+        name,
+        username,
+        inputs.fofGrant?.binding?.let(::reachHex).orEmpty(),
+    )
+    // A failure building the own record (an OPRF token refused, a network
+    // error) must not cost the relay of the contacts' records (step 4), as on
+    // iOS: it is kept and rethrown at the end.
+    var buildFailure: Exception? = null
+    if (offerNeedsRebuild(state.ownOffer?.key, inputs.contactsOfContacts, key)) try {
         val terms = mutableListOf<Term>()
         name?.let { n ->
             for (t in ops.nameSearchTerms(n)) {
@@ -236,11 +252,16 @@ internal suspend fun publishIntroductions(
             val record = ops.composeIntroduction(payload, outputs, inputs.nowMs.coerceAtLeast(0L).toULong())
             save(state.copy(ownOffer = StoredOwnOffer(key, reachHex(record)), offerSentTo = emptyMap()))
         }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        buildFailure = e
     }
 
     // 3. Offer the record to every allowed contact not sent this version yet.
-    //    An ask reopens a conversation, and goes through this same list.
-    val offer = state.ownOffer
+    //    An ask reopens a conversation, and goes through this same list. A
+    //    record that failed to rebuild is not offered stale.
+    val offer = state.ownOffer.takeIf { buildFailure == null }
     if (offer != null) {
         val targets = offerTargets(offer.key, state.offerSentTo, inputs.contactsOfContacts, inputs.offerGroups)
         if (targets.isNotEmpty()) {
@@ -271,6 +292,7 @@ internal suspend fun publishIntroductions(
             }
         }
     }
+    buildFailure?.let { throw it }
     return state
 }
 
@@ -289,15 +311,17 @@ internal const val INTRODUCTIONS_ASK_WITH_GRANT_MIN_MS: Long = 7L * 24 * 60 * 60
 internal data class IntroductionsHeld(val offer: Boolean, val bundle: Boolean, val contactGrant: Boolean)
 
 /**
- * Whether a conversation lacks introductions: no offer and no bundle from the
- * other person. A contact grant does not count, or a device that once got a
+ * Whether a conversation lacks introductions: no offer from the other person.
+ * A bundle from them does not stand in for it (it usually carries this
+ * device's own record back, so a device that missed the offer but held a
+ * bundle never asked again). A contact grant does not count, or a device that once got a
  * profile would never ask; it only makes the ask rarer
  * ([introductionsAskStamp]). [held] is `null` for a conversation that is not a
  * one-to-one, or whose other person cannot be named: a torn roster read decides
  * nothing.
  */
 internal fun lacksIntroductions(held: IntroductionsHeld?): Boolean =
-    held != null && !held.offer && !held.bundle
+    held != null && !held.offer
 
 /**
  * The stamp to record for an ask now, or `null` not to ask. [lastMs] is when

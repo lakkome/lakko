@@ -10,6 +10,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -46,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -725,8 +727,13 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
     }
 }
 
+/** Test tags of the GIF picture and of its label. */
+internal const val GIF_IMAGE_TAG: String = "gif-image"
+internal const val GIF_LABEL_TAG: String = "gif-label"
+
 /** §5 timeline — the animation itself, looping and muted, sized to its aspect
- *  ratio, with a small `GIF` label; a tap opens it full-screen. */
+ *  ratio, with a small `GIF` label under it (never on the picture); a tap
+ *  opens it full-screen. */
 @Composable
 internal fun GifBubble(
     ref: AttachmentRef,
@@ -750,9 +757,13 @@ internal fun GifBubble(
     val w = ref.width?.toInt()?.takeIf { it > 0 }
     val h = ref.height?.toInt()?.takeIf { it > 0 }
     val ratio = if (w != null && h != null) (w.toFloat() / h).coerceIn(0.4f, 2.5f) else 1f
+    // Base walk 2026-11-04 — the `GIF` label sits UNDER the picture, never on
+    // it: drawn on the image it covered the GIF's own caption text.
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
+            .testTag(GIF_IMAGE_TAG)
             .widthIn(max = 240.dp)
             .aspectRatio(ratio)
             .clip(RoundedCornerShape(10.dp))
@@ -777,17 +788,22 @@ internal fun GifBubble(
             f == null -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
             else -> GifContent(f, inline, Modifier.fillMaxSize()) { failed = true }
         }
-        Text(
-            t("chat.media.gif"),
-            style = MaterialTheme.typography.labelSmall,
-            color = Color.White,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(6.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color.Black.copy(alpha = 0.5f))
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-        )
+    }
+    // media-messages.md §5 — a capsule at the leading edge, sunken surface,
+    // muted 11/600 text.
+    Text(
+        t("chat.media.gif"),
+        style = MaterialTheme.typography.labelSmall.copy(
+            fontSize = 11.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        ),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .testTag(GIF_LABEL_TAG)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    )
     }
     val f = file
     if (fullScreen && f != null) {

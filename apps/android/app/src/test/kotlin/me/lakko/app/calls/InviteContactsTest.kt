@@ -9,7 +9,9 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.IncomingContactRequest
+import me.lakko.app.contacts.MessageOutcome
 import me.lakko.app.contacts.foundOneToOneWith
+import me.lakko.app.contacts.runMessageOrder
 import me.lakko.app.ui.contacts.ContactRowModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -117,21 +119,38 @@ class InviteContactsTest {
         val sent = mutableListOf<Pair<String, String>>()
         var failSend: Throwable? = null
 
+        /** `docs/ux/who-can-find-me.md` 6.4 — whether a grant reaches them,
+         *  the group both are in, and the requests sent inside groups. */
+        var grantReaches = true
+        var sharedGroup: String? = null
+        val requestsInGroups = mutableListOf<String>()
+
         override fun contactFor(rowKey: String): AcceptedContact? = contacts[rowKey]
 
         override fun conversationWith(contact: AcceptedContact): String? =
             conversations[contact.request.messageId]
 
-        override suspend fun foundOneToOne(contact: AcceptedContact): String =
-            foundOneToOneWith(
-                contact = contact,
-                startOneToOne = { _, key ->
-                    val id = "new-${key[0]}"
-                    created += id
-                    conversations[contact.request.messageId] = id
-                    id
+        override suspend fun messageKnownPerson(contact: AcceptedContact): MessageOutcome =
+            runMessageOrder(
+                waiting = requestsInGroups.isNotEmpty(),
+                grantReaches = { grantReaches },
+                sharedGroup = { sharedGroup },
+                found = {
+                    foundOneToOneWith(
+                        contact = contact,
+                        startOneToOne = { _, key ->
+                            val id = "new-${key[0]}"
+                            created += id
+                            conversations[contact.request.messageId] = id
+                            id
+                        },
+                        link = { key, groupIdHex -> linked += "${key[0]}:$groupIdHex" },
+                    )
                 },
-                link = { key, groupIdHex -> linked += "${key[0]}:$groupIdHex" },
+                sendInGroup = { group ->
+                    requestsInGroups += group
+                    true
+                },
             )
 
         override suspend fun sendText(groupIdHex: String, text: String) {
@@ -175,8 +194,11 @@ class InviteContactsTest {
         sessionToken = "token",
     )
 
-    private suspend fun Harness.invite(world: World, rowKey: String, name: String): Boolean =
+    private suspend fun Harness.inviteOutcome(world: World, rowKey: String, name: String): ContactInviteOutcome =
         inviteContactToCall(world, rowKey) { send -> host.sendInvite(identity, name, send) }
+
+    private suspend fun Harness.invite(world: World, rowKey: String, name: String): Boolean =
+        inviteOutcome(world, rowKey, name) == ContactInviteOutcome.SENT
 
     @Test
     fun `the invitation goes into the one-to-one this device already holds`() = runTest {
@@ -211,17 +233,57 @@ class InviteContactsTest {
     }
 
     @Test
-    fun `a contact record without an account id fails as not sent, and nothing is created`() = runTest {
+    fun `a contact record without an account id fails as not sent, and nothing is created or minted`() = runTest {
         val h = liveCall()
         val world = World(mapOf("k-old" to contact(2, accountId = null)))
 
-        assertFalse(h.invite(world, "k-old", "Old"))
+        assertEquals(ContactInviteOutcome.FAILED, h.inviteOutcome(world, "k-old", "Old"))
 
         assertTrue(world.created.isEmpty())
         assertTrue(world.linked.isEmpty())
         assertTrue(world.sent.isEmpty())
-        val url = mintedInviteUrl(h.host.invite.value)!!
-        assertEquals(InCallInvite.Failed(CallInviteFailure.NOT_SENT, url), h.host.invite.value)
+        assertTrue(h.port.minted.isEmpty())
+    }
+
+    @Test
+    fun `with no grant a request goes inside the shared group and no invitation is sent`() = runTest {
+        val h = liveCall()
+        val world = World(mapOf("k-anna" to contact(1)))
+        world.grantReaches = false
+        world.sharedGroup = "group-trip"
+
+        assertEquals(ContactInviteOutcome.REQUEST_SENT, h.inviteOutcome(world, "k-anna", "Anna"))
+
+        assertEquals(listOf("group-trip"), world.requestsInGroups)
+        assertTrue(world.created.isEmpty())
+        assertTrue(world.sent.isEmpty())
+        // No invitation until they accept: nothing minted.
+        assertTrue(h.port.minted.isEmpty())
+        // Pressed again while it waits: nothing new is sent.
+        assertEquals(ContactInviteOutcome.REQUEST_SENT, h.inviteOutcome(world, "k-anna", "Anna"))
+        assertEquals(listOf("group-trip"), world.requestsInGroups)
+    }
+
+    @Test
+    fun `with no grant and no shared group nothing is sent`() = runTest {
+        val h = liveCall()
+        val world = World(mapOf("k-anna" to contact(1)))
+        world.grantReaches = false
+
+        assertEquals(ContactInviteOutcome.CANNOT_MESSAGE, h.inviteOutcome(world, "k-anna", "Anna"))
+
+        assertTrue(world.requestsInGroups.isEmpty())
+        assertTrue(world.created.isEmpty())
+        assertTrue(h.port.minted.isEmpty())
+    }
+
+    @Test
+    fun `the row line says what happened`() {
+        assertEquals("common.sending", me.lakko.app.ui.call.inviteRowLineKey(true, false, false, false))
+        assertEquals("call.invite.row_invited", me.lakko.app.ui.call.inviteRowLineKey(false, true, false, false))
+        assertEquals("contacts.detail.request_sent", me.lakko.app.ui.call.inviteRowLineKey(false, false, true, false))
+        assertEquals("contacts.detail.cannot_message", me.lakko.app.ui.call.inviteRowLineKey(false, false, false, true))
+        assertNull(me.lakko.app.ui.call.inviteRowLineKey(false, false, false, false))
     }
 
     @Test

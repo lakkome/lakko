@@ -520,7 +520,13 @@ export function upsertAccepted(contact: AcceptedContact, owner?: string): Accept
  *  (`adopt-one-to-one.ts`): apply the rule for one peer against the
  *  persisted list, write only when it changes something, and tell the
  *  listeners. Returns whether a write happened. */
-export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
+export function adoptOneToOne(
+  peer: OneToOnePeer,
+  owner?: string,
+  /** Whether a row's recorded chat id is still that person's one-to-one on
+   *  this device; a link that is not is replaced (`adopt-one-to-one.ts`). */
+  linkHolds?: (groupIdB64: string, row: AcceptedContact) => boolean,
+): boolean {
   const account = ownerOf(owner);
   if (account === null) return false;
   const current = load(account);
@@ -529,7 +535,7 @@ export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
   // on the next page load).
   const onePerson = provenSamePerson(current);
   if ((current.removed ?? []).some((k) => onePerson(k, peer.signatureKey))) return false;
-  const next = adoptOneToOnePeer(current.accepted, peer, onePerson);
+  const next = adoptOneToOnePeer(current.accepted, peer, onePerson, linkHolds);
   if (next === null) return false;
   save(account, { ...current, accepted: next });
   notifyAcceptedChanged("edited");

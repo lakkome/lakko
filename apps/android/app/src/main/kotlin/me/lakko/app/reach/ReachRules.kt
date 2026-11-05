@@ -63,6 +63,37 @@ public enum class ReachKind {
 /** How long a `reply` key lives (ADR-0060 §1): seven days, chosen, not measured. */
 public const val REPLY_TTL_MS: Long = 7L * 24 * 60 * 60 * 1000
 
+/** How often the `fof` key rotates on a schedule (ADR-0060 §4, "Narrowing"):
+ *  seven days, chosen, not measured. Same constant as the web client's
+ *  `FOF_ROTATION_MS`. */
+public const val FOF_ROTATION_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+/**
+ * Whether the `fof` key is due for its scheduled rotation (ADR-0060 §4): its
+ * last scheduled rotation, kept on the device, is at least [FOF_ROTATION_MS]
+ * ago. A device that holds no "rotated at" yet (install, restore, pairing) is
+ * never due: its first pass only starts the schedule ([fofScheduleStart]). A
+ * clock that went backwards (now before the stored time) reads as not due.
+ * Checked when the app is active, never by a background job. Mirrors iOS
+ * `ReachRules.fofRotationDue`.
+ */
+public fun fofRotationDue(fofRotatedAtMs: Long?, nowMs: Long): Boolean =
+    fofRotatedAtMs != null && nowMs >= fofRotatedAtMs && nowMs - fofRotatedAtMs >= FOF_ROTATION_MS
+
+/** The "rotated at" a device's first registration pass records: the schedule
+ *  starts at [nowMs] and nothing rotates. `null` when one is already held. */
+public fun fofScheduleStart(fofRotatedAtMs: Long?, nowMs: Long): Long? =
+    if (fofRotatedAtMs == null) nowMs else null
+
+/**
+ * When the schedule restarts after another device's ReachState was adopted:
+ * when that state raised the `fof` version, the other device rotated `fof`
+ * (its schedule or a removal), so this device restarts its own schedule from
+ * now instead of rotating a second time. Client-local bookkeeping.
+ */
+public fun fofRotatedAtAfterAdopt(fofBefore: Int, fofAfter: Int, fofRotatedAtMs: Long?, nowMs: Long): Long? =
+    if (fofAfter > fofBefore) maxOf(fofRotatedAtMs ?: nowMs, nowMs) else fofRotatedAtMs
+
 /** Byte length of a random `reply` scope (ADR-0060 §1). */
 public const val REPLY_SCOPE_LEN: Int = 16
 

@@ -81,6 +81,29 @@ public final class ContactsViewModel: ObservableObject {
     ) {
         self.repository = repository
         self.chatRepository = chatRepository
+        self.founder = { [weak repository] contact in
+            guard let repository else { throw ContactAccept.Unavailable() }
+            return try await repository.foundOneToOne(with: contact)
+        }
+        self.route = { [weak repository] contact in
+            repository?.requestRoute(toAccountKey: contact.request.fromPubkey) ?? .none
+        }
+        self.groupRequester = { [weak repository] contact, groupIdHex in
+            guard let repository, let accountId = contact.request.fromAccountId else {
+                throw ContactAccept.Unavailable()
+            }
+            try await repository.sendContactRequestInGroup(
+                groupIdHex: groupIdHex, recipientAccountId: accountId,
+                recipientAccountKey: contact.request.fromPubkey,
+                recipientName: {
+                    let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+                    return resolved.isPlaceholder ? nil : resolved.name
+                }())
+        }
+        self.conversation = { [weak chatRepository] contact in
+            chatRepository?.oneToOneConversation(
+                contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
+        }
         self.repositoryState = repository.state
         repository.$state
             .receive(on: RunLoop.main)
@@ -114,6 +137,10 @@ public final class ContactsViewModel: ObservableObject {
         for entry in ProfileDirectory.shared.profilesWithAccountId() {
             accountIds[entry.signatureKeyB64] = entry.accountId
         }
+        // A stored link that names a group (or someone else's one-to-one)
+        // is no chat of theirs (2026-11-05); cleared first so the pass below
+        // can link the one-to-one they do have.
+        repository.dropMisdirectedLinks()
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let createdAt = ISO8601DateFormatter().string(from: Date())
         for groupIdHex in chatRepository.conversationHeadIdHexes {
@@ -271,10 +298,103 @@ public final class ContactsViewModel: ObservableObject {
     /// accepted and the Welcome created the chat here). The rule is
     /// ``ContactConversation``, shared with the call screen's
     /// `Invite contacts`. A read over the live rosters, no state change.
+    // MARK: - Message on the contact card (maintainer, 2026-11-05)
+
+    /// The contacts whose one-to-one is being founded from Message (the
+    /// button shows progress), keyed by the contact row id.
+    @Published public private(set) var startingChat: Set<Int64> = []
+    /// The contacts whose last founding from Message failed: the card shows
+    /// `contacts.error.start_chat` and Message works again.
+    @Published public private(set) var startChatFailed: Set<Int64> = []
+
+    /// `docs/ux/who-can-find-me.md` 6.4 — what the card says after Message
+    /// found no way to the person, or a request inside a group failed to
+    /// send, keyed by the contact row id. A request that went out is read
+    /// from Sent instead (``hasWaitingRequest(for:)``), so it survives a
+    /// relaunch.
+    @Published public private(set) var messageNotice: [Int64: ContactMessageNotice] = [:]
+
+    /// Founds the one-to-one with an accepted contact and links it on the
+    /// SAME contact row (``ContactsRepository/foundOneToOne(with:)``, the
+    /// call the accept path's founding goes through). A seam for tests.
+    var founder: (AcceptedContact) async throws -> String
+
+    /// Which way a request to the contact goes
+    /// (``ContactsRepository/requestRoute(toAccountKey:)``). A seam for tests.
+    var route: (AcceptedContact) -> ContactRequestRoute
+
+    /// Sends the request inside the shared group
+    /// (``ContactsRepository/sendContactRequestInGroup(groupIdHex:recipientAccountId:recipientAccountKey:recipientName:)``).
+    /// A seam for tests.
+    var groupRequester: (AcceptedContact, String) async throws -> Void
+
+    /// The shared name of a group this device holds, for the "Via {group}"
+    /// line of a request that came inside it.
+    public func groupName(groupIdHex: String) -> String? {
+        chatRepository?.groupName(groupIdHex: groupIdHex)
+    }
+
+    /// Whether a request to the contact stands unanswered under Sent: the
+    /// card says "Request sent", and Message sends nothing new.
+    public func hasWaitingRequest(for contact: AcceptedContact) -> Bool {
+        // Read from the repository, not from the mirrored copy, which lags
+        // it by a run-loop turn: a second press right after a send must see
+        // the row the first one wrote.
+        SentRequests.holds(
+            repository.state.sent, accountKey: contact.request.fromPubkey,
+            accountId: contact.request.fromAccountId)
+    }
+
+    /// Message on the contact card, in the order of section 6.4: the chat
+    /// this device holds with the contact; else, when a request to them is
+    /// waiting, nothing new; else a new one-to-one through their inbox when
+    /// a grant reaches it, or a contact request inside a group both are in,
+    /// or nothing (the card says they cannot be messaged yet). Returns the
+    /// chat to open, or `nil` when there is none to open now.
+    public func openOrStartChat(for contact: AcceptedContact) async -> String? {
+        if let chat = chatGroupIdHex(for: contact) { return chat }
+        let rowId = contact.request.messageId
+        guard contact.request.fromAccountId != nil, !hasWaitingRequest(for: contact),
+              startingChat.insert(rowId).inserted
+        else { return nil }
+        startChatFailed.remove(rowId)
+        messageNotice[rowId] = nil
+        defer { startingChat.remove(rowId) }
+        switch route(contact) {
+        case .inbox:
+            do {
+                return try await founder(contact)
+            } catch {
+                NSLog("contact card: the one-to-one was not started: \(type(of: error))")
+                startChatFailed.insert(rowId)
+                return nil
+            }
+        case .group(let groupIdHex):
+            do {
+                try await groupRequester(contact, groupIdHex)
+            } catch {
+                NSLog("contact card: the request inside a group was not sent: \(type(of: error))")
+                messageNotice[rowId] = .requestFailed
+            }
+            return nil
+        case .none:
+            messageNotice[rowId] = .cannotMessage
+            return nil
+        }
+    }
+
+    /// The one-to-one this device holds with a contact, by
+    /// ``ChatRepository/oneToOneConversation(contactKey:linkedGroupIdHex:)``.
+    /// A seam for tests; with no chat repository there is none.
+    var conversation: (AcceptedContact) -> String?
+
+    /// A person's chat is a one-to-one whose other person is that contact
+    /// (``ContactConversation``). The id stored on the contact row is only a
+    /// hint: one that is not held here, names a group, or names a one-to-one
+    /// with someone else is not their chat (seen on web 2026-11-05: Message
+    /// opened a group the person is in).
     public func chatGroupIdHex(for contact: AcceptedContact) -> String? {
-        guard let chatRepository else { return contact.groupIdHex }
-        return chatRepository.oneToOneConversation(
-            contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
+        conversation(contact)
     }
 
     /// The accepted contact on the other side of a conversation between two
@@ -296,13 +416,19 @@ public final class ContactsViewModel: ObservableObject {
     }
 
     public func contact(forOneToOneChat groupIdHex: String) -> AcceptedContact? {
-        if let recorded = repositoryState.accepted.first(where: { $0.groupIdHex == groupIdHex }) {
-            return recorded
-        }
+        // Only a one-to-one names a person, and the person is its other
+        // member: a row whose stored link is this id but who is not that
+        // member (a link that once named a group) is not its contact.
         guard let chatRepository,
               let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
         else { return nil }
-        return repositoryState.accepted.first { $0.request.fromPubkey == peer }
+        let resolver = ReachCenter.shared
+        let current = resolver.currentAccountKey(of: peer)
+        func isPeer(_ row: AcceptedContact) -> Bool {
+            row.request.fromPubkey == peer || resolver.currentAccountKey(of: row.request.fromPubkey) == current
+        }
+        let accepted = repositoryState.accepted
+        return accepted.first { $0.groupIdHex == groupIdHex && isPeer($0) } ?? accepted.first(where: isPeer)
     }
 
     /// Whether the call buttons on a contact detail can act: a chat exists and
@@ -649,4 +775,13 @@ public final class ContactsViewModel: ObservableObject {
         }
         return Localization.text("contacts.identity_changed.\(verdict)_unnamed")
     }
+}
+
+/// What the contact card says under Message after it could not open a chat
+/// (`docs/ux/who-can-find-me.md` 6.4).
+public enum ContactMessageNotice: Equatable {
+    /// No grant reaches them and no group is shared: nothing was sent.
+    case cannotMessage
+    /// The request inside a shared group did not go out; Message works again.
+    case requestFailed
 }

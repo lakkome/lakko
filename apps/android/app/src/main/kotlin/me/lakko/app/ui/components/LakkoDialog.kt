@@ -121,6 +121,10 @@ public fun LakkoDialog(
         onClick = onDismissRequest,
     ),
     extraActions: List<LakkoDialogAction> = emptyList(),
+    /** Put the keyboard focus on Cancel when the dialog opens with a hardware
+     *  keyboard. `false` for a dialog whose field takes the focus itself (an
+     *  edit), or the field would lose it to Cancel the moment it opens. */
+    focusCancelOnOpen: Boolean = true,
     content: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     Dialog(
@@ -203,7 +207,7 @@ public fun LakkoDialog(
         // in a text field turns keyboard mode on, and keyed on that it took the
         // focus out of the field, so the rest of the typing went nowhere.
         LaunchedEffect(Unit) {
-            if (cancel != null && keyboardMode) runCatching { cancelFocus.requestFocus() }
+            if (focusCancelOnOpen && cancel != null && keyboardMode) runCatching { cancelFocus.requestFocus() }
         }
     }
 }

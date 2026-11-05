@@ -2549,6 +2549,15 @@ pub enum WasmIncomingEnvelopeKind {
     /// `groupReactions`; `payload` is empty. Admit it only from an owner or
     /// admin and keep it only when `groupReactionsIsNewer`. Never render it.
     GroupReactions = 26,
+    /// A contact request sealed to one member of the group (ADR-0086 section
+    /// 6); the envelope names nobody. `payload` is the whole envelope. Never
+    /// render it. Every member passes `payload` to `checkGroupContactRequest`
+    /// with its own X25519 secret and the sender's account key resolved at
+    /// receipt (C-68); `undefined` means not for this member (drop
+    /// silently). The member it opens for applies its "Who can find me"
+    /// setting and hands the returned request to the ordinary
+    /// incoming-request flow.
+    GroupContactRequest = 27,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2909,6 +2918,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..WasmIncomingEnvelope::of(K::GroupReactions)
+        },
+        IncomingEnvelope::GroupContactRequest(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::GroupContactRequest)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),

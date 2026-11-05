@@ -101,6 +101,34 @@ export interface SentRequestRecord {
   /** ADR-0084 - the recipient's signature key (standard base64), for their
    *  photo once this device holds their profile. Absent in older records. */
   readonly recipientKeyB64?: string;
+  /** The accepter's signature key (standard base64) from a verified
+   *  ContactAck: the key the one-to-one's Welcome is matched by. The ack
+   *  makes no contact; joining that one-to-one does (base walk 2026-11-04).
+   *  Absent until an ack lands. */
+  readonly accepterKeyB64?: string;
+  /** The accepter's X25519 key from the same ack, carried onto the contact
+   *  when the one-to-one is joined. */
+  readonly accepterX25519B64?: string;
+  /** `docs/ux/who-can-find-me.md` section 6.4 - the request went inside this
+   *  group (standard base64 of its id) to someone already a contact on this
+   *  device with no chat here. Such a record stands in Sent although its
+   *  recipient is a contact, until their one-to-one is joined. */
+  readonly throughGroupIdB64?: string;
+}
+
+/** The sent records a one-to-one with `peerKeyB64` answers: matched on the
+ *  key the ack named, the key the request went to, or the account id. */
+export function sentRequestsAnsweredBy(
+  sent: readonly SentRequestRecord[],
+  peerKeyB64: string,
+  peerAccountIdHex: string | null,
+): SentRequestRecord[] {
+  return sent.filter(
+    (r) =>
+      r.accepterKeyB64 === peerKeyB64 ||
+      r.recipientKeyB64 === peerKeyB64 ||
+      (peerAccountIdHex !== null && peerAccountIdHex.length > 0 && r.recipientAccountIdHex === peerAccountIdHex),
+  );
 }
 
 /** Add or refresh a sent record; one row per recipient, the newest send
@@ -127,8 +155,10 @@ export function waitingSentRequests(
   return sent
     .filter(
       (r) =>
-        !acceptedAccountIdHexes.has(r.recipientAccountIdHex) &&
-        !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)),
+        r.throughGroupIdB64 !== undefined ||
+        (!acceptedAccountIdHexes.has(r.recipientAccountIdHex) &&
+        !(r.recipientKeyB64 !== undefined && acceptedKeysB64.has(r.recipientKeyB64)) &&
+        !(r.accepterKeyB64 !== undefined && acceptedKeysB64.has(r.accepterKeyB64))),
     )
     .sort((a, b) => b.sentAtMs - a.sentAtMs);
 }

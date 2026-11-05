@@ -42,6 +42,8 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import me.lakko.app.ui.components.submitOnHardwareEnter
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.style.TextOverflow
@@ -1771,13 +1773,15 @@ private fun MessageRow(
             }
             Column(horizontalAlignment = Alignment.Start) {
                 if (authorName != null && firstInRun) {
-                    Text(
-                        text = authorName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
-                    )
+                    me.lakko.app.ui.theme.ChatTextScale {
+                        Text(
+                            text = authorName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                        )
+                    }
                 }
                 Bubble(
                     msg = msg,
@@ -2093,6 +2097,10 @@ internal fun Bubble(
     // or video message, on this device. A row of an older segment takes none.
     val tr = rememberBubbleTranslation(msg, isOwn)
 
+    // docs/ux/text-size.md — the message's text, its meta line, the quote,
+    // the forwarded line, link previews and the reaction chips follow the
+    // device's text size; media frames are dp and do not.
+    me.lakko.app.ui.theme.ChatTextScale {
     Column(
         horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -2538,7 +2546,11 @@ internal fun Bubble(
             )
         }
     }
+    }
 }
+
+/** The edit dialog's text field, for the UI tests. */
+internal const val EDIT_FIELD_TAG: String = "edit-message-field"
 
 /** UX 3.1 — how long a jumped-to row stays lit: "about a second and a half". */
 internal const val REPLY_HIGHLIGHT_MS: Long = 1_500L
@@ -2899,9 +2911,19 @@ private fun ReactionChips(
     val row = remember(reactions, ownIdentity, ctx?.allowed, ctx?.chipConversation) {
         chipRowOf(reactions, ownIdentity, ctx)
     }
+    // docs/ux/text-size.md — every chip value scales together; the `sp`
+    // values already do through the scaled font size.
+    val f = me.lakko.app.ui.theme.LocalChatTextFactor.current
+    val chipHeight = REACTION_CHIP_HEIGHT * f
+    val chipPadding = REACTION_CHIP_PADDING * f
+    val innerGap = REACTION_CHIP_INNER_GAP * f
+    val spacing = REACTION_CHIP_SPACING * f
+    val avatarSize = REACTION_AVATAR_SIZE * f
+    val overlap = REACTION_AVATAR_OVERLAP * f
+    // design-system.md "Reaction chip": 6 between chips and between lines.
     FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(spacing),
+        verticalArrangement = Arrangement.spacedBy(spacing),
     ) {
         for (chip in row.chips) {
             val label = if (chip.mine) {
@@ -2910,7 +2932,7 @@ private fun ReactionChips(
                 strings.format("chat.reaction.chip_a11y", mapOf("emoji" to chip.emoji), mapOf("count" to chip.count.toULong()))
             }
             Surface(
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(percent = 50),
                 color = if (chip.mine) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
@@ -2923,6 +2945,7 @@ private fun ReactionChips(
                 },
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
+                    .height(chipHeight)
                     .semantics { contentDescription = label }
                     .then(
                         if (interactive) {
@@ -2938,28 +2961,36 @@ private fun ReactionChips(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(innerGap),
+                    modifier = Modifier.fillMaxHeight().padding(horizontal = chipPadding),
                 ) {
-                    Text(text = chip.emoji, style = MaterialTheme.typography.labelMedium)
+                    Text(text = chip.emoji, style = reactionChipEmojiStyle())
                     when (val face = chip.face) {
                         is uniffi.lakko_ffi_uniffi.FfiChipFace.Count ->
-                            Text(text = face.count.toString(), style = MaterialTheme.typography.labelMedium)
-                        is uniffi.lakko_ffi_uniffi.FfiChipFace.Avatars -> Row {
-                            face.reactors.forEachIndexed { i, key ->
+                            Text(
+                                text = face.count.toString(),
+                                style = reactionChipCountStyle(),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        // Overlapping by 4: a negative spacing, so the row's
+                        // width is what is drawn (an offset would leave the
+                        // overlap as empty space at the end of the chip).
+                        is uniffi.lakko_ffi_uniffi.FfiChipFace.Avatars -> Row(
+                            horizontalArrangement = Arrangement.spacedBy(-overlap),
+                        ) {
+                            face.reactors.take(REACTION_CHIP_MAX_AVATARS).forEach { key ->
                                 val b64 = java.util.Base64.getEncoder().encodeToString(key)
                                 val mine = b64 == ownIdentity
                                 LakkoAvatar(
                                     name = if (mine) ownAvatarName else ctx?.nameOf?.invoke(b64) ?: "?",
                                     seed = b64,
-                                    size = 16.dp,
+                                    size = avatarSize,
                                     personKey = key,
                                     avatar = if (mine) ownAvatar else null,
                                     // A 1 dp ring in the surface colour, as on
                                     // iOS: the circle stays visible on the own
                                     // chip's accent fill and where avatars overlap.
                                     modifier = Modifier
-                                        .offset(x = (-4 * i).dp)
                                         .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape),
                                 )
                             }
@@ -2971,20 +3002,52 @@ private fun ReactionChips(
         }
         if (row.overflowKinds > 0u) {
             Surface(
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(percent = 50),
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.combinedClickable(onClick = { onShowReactors(null) }),
+                modifier = Modifier
+                    .height(chipHeight)
+                    .combinedClickable(onClick = { onShowReactors(null) }),
             ) {
-                Text(
-                    text = "+${row.overflowKinds}",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                )
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.fillMaxHeight().padding(horizontal = chipPadding),
+                ) {
+                    Text(
+                        text = "+${row.overflowKinds}",
+                        style = reactionChipCountStyle(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
 }
+
+/*
+ * design-system.md "Reaction chip" (maintainer, 2026-11-04): a capsule 32 tall,
+ * 10 of horizontal padding; emoji 18; reactor avatars 22 with a 1 ring in the
+ * surface colour, overlapping by 4 (at 7 the second initial of a covered
+ * avatar was hidden), at most 3; 4 between the emoji and the
+ * avatars or the count; count 14, muted; 6 between chips and wrapped lines.
+ */
+internal val REACTION_CHIP_HEIGHT: Dp = 32.dp
+internal val REACTION_CHIP_PADDING: Dp = 10.dp
+internal val REACTION_CHIP_INNER_GAP: Dp = 4.dp
+internal val REACTION_CHIP_SPACING: Dp = 6.dp
+internal val REACTION_AVATAR_SIZE: Dp = 22.dp
+internal val REACTION_AVATAR_OVERLAP: Dp = 4.dp
+internal const val REACTION_CHIP_MAX_AVATARS: Int = 3
+internal val REACTION_CHIP_EMOJI_SP = 18.sp
+internal val REACTION_CHIP_COUNT_SP = 14.sp
+
+@Composable
+private fun reactionChipEmojiStyle(): androidx.compose.ui.text.TextStyle =
+    MaterialTheme.typography.bodyLarge.copy(fontSize = REACTION_CHIP_EMOJI_SP, lineHeight = 22.sp)
+
+@Composable
+private fun reactionChipCountStyle(): androidx.compose.ui.text.TextStyle =
+    MaterialTheme.typography.bodyMedium.copy(fontSize = REACTION_CHIP_COUNT_SP, lineHeight = 18.sp)
 
 /** The core's chip row, or a plain tally when the core is unavailable. */
 private fun chipRowOf(
@@ -3114,15 +3177,30 @@ internal fun ReactorsSheet(
 
 /** ADR-0023 — the pre-filled edit dialog (Save / Cancel). */
 @Composable
-private fun EditMessageDialog(
+internal fun EditMessageDialog(
     initialText: String,
     onCancel: () -> Unit,
     onSave: (String) -> Unit,
 ) {
-    var draft by remember { mutableStateOf(initialText) }
+    // Base walk 2026-11-04 — the field takes focus with the caret at the end
+    // and raises the keyboard as soon as Edit is chosen, so typing goes in
+    // without a tap on the field first.
+    var field by remember {
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(initialText, androidx.compose.ui.text.TextRange(initialText.length)))
+    }
+    val draft = field.text
+    val editFocus = remember { FocusRequester() }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        runCatching { editFocus.requestFocus() }
+        keyboard?.show()
+    }
+    val canSave = draft.trim().isNotEmpty() && draft.trim() != initialText.trim()
     LakkoDialog(
         onDismissRequest = onCancel,
         title = t("chat.edit.title"),
+        // The field has the focus, keyboard or not: typing is why it opened.
+        focusCancelOnOpen = false,
         confirm = LakkoDialogAction(
             t("common.save"),
             enabled = draft.trim().isNotEmpty() && draft.trim() != initialText.trim(),
@@ -3130,13 +3208,18 @@ private fun EditMessageDialog(
         cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onCancel),
     ) {
         OutlinedTextField(
-            value = draft,
-            onValueChange = { draft = it },
+            value = field,
+            onValueChange = { field = it },
             singleLine = false,
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Sentences,
             ),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(EDIT_FIELD_TAG)
+                .focusRequester(editFocus)
+                // Base scenario 10 — Enter saves, Shift+Enter is a new line.
+                .submitOnHardwareEnter { if (canSave) onSave(draft) },
         )
     }
 }
@@ -3345,7 +3428,9 @@ internal fun Composer(
         }
         // ADR-0052 / UX 3.1 — the reply strip, above the tray and the field.
         if (replyStrip != null && !recording) {
-            ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply, quotesOwnAccount = replyStripIsOwn)
+            me.lakko.app.ui.theme.ChatTextScale {
+                ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply, quotesOwnAccount = replyStripIsOwn)
+            }
         }
         // reactions-and-emoji section 13 — the `:` suggestions strip.
         val colonQuery = me.lakko.app.chat.colonQueryAt(
@@ -3462,13 +3547,26 @@ internal fun Composer(
                         unfocusedBorderColor = Color.Transparent,
                         disabledBorderColor = Color.Transparent,
                     ),
-                    textStyle = MaterialTheme.typography.bodyLarge,
+                    // docs/ux/text-size.md — the composer's text follows the
+                    // device's text size; the field's frame does not.
+                    textStyle = MaterialTheme.typography.bodyLarge.let { base ->
+                        val f = me.lakko.app.ui.theme.chatTextFactor()
+                        base.copy(fontSize = base.fontSize * f, lineHeight = base.lineHeight * f)
+                    },
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                     ),
                     modifier = Modifier
                         .weight(1f)
                         .focusRequester(fieldFocus)
+                        // Base scenario 10 — a hardware keyboard's Enter sends
+                        // (Shift+Enter is a new line); the on-screen keyboard's
+                        // Enter stays a new line.
+                        .submitOnHardwareEnter {
+                            if (!sending && !uploading && (draft.isNotBlank() || pendingAttachments.isNotEmpty())) {
+                                onSendClicked()
+                            }
+                        }
                         // ADR-0024 — surface focus to the ViewModel so a
                         // blur clears any outstanding typing signal.
                         .onFocusChanged { onFocusChanged(it.isFocused) },

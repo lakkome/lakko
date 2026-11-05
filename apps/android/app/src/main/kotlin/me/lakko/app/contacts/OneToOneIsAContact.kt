@@ -42,11 +42,16 @@ public fun adoptingOneToOnePeer(
     nowMs: ULong,
     createdAt: String,
     samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
+    /** Whether a recorded chat id is this person's one-to-one held here
+     *  ([conversationWithContact]); one that is not (a group, a one-to-one
+     *  with someone else, gone) is replaced by [groupIdHex]. */
+    linkCounts: (row: AcceptedContact, groupIdHex: String) -> Boolean = { _, _ -> true },
 ): List<AcceptedContact>? {
     val index = accepted.indexOfFirst { samePerson(it.request.fromPubkey, signatureKey) }
     if (index >= 0) {
         val old = accepted[index]
-        if (old.groupIdHex != null) return null
+        val recorded = old.groupIdHex
+        if (recorded != null && (recorded.equals(groupIdHex, ignoreCase = true) || linkCounts(old, recorded))) return null
         return accepted.toMutableList().also { rows ->
             rows[index] = old.copy(groupIdHex = groupIdHex)
         }
@@ -74,6 +79,9 @@ public fun acceptingRequests(
     requests: List<IncomingContactRequest>,
     groupIdHex: String?,
     samePerson: (ByteArray, ByteArray) -> Boolean = { a, b -> a.contentEquals(b) },
+    /** As in [adoptingOneToOnePeer]: a recorded chat id that is not this
+     *  person's one-to-one gives way to [groupIdHex]. */
+    linkCounts: (row: AcceptedContact, groupIdHex: String) -> Boolean = { _, _ -> true },
 ): List<AcceptedContact> {
     val rows = accepted.toMutableList()
     for (request in requests) {
@@ -85,7 +93,7 @@ public fun acceptingRequests(
         val held = rows[index]
         rows[index] = held.copy(
             request = if (held.request.messageId < 0) request else held.request,
-            groupIdHex = held.groupIdHex ?: groupIdHex,
+            groupIdHex = held.groupIdHex?.takeIf { linkCounts(held, it) } ?: groupIdHex ?: held.groupIdHex,
         )
     }
     return rows

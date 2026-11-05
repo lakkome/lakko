@@ -187,7 +187,27 @@ internal data class ReachDoc(
     /** The slots ([reachSlotId]) whose version was already recovered from
      *  [recoveryPkHex], so a slot is scanned once. */
     val recoveredSlots: List<String> = emptyList(),
+    /** ADR-0060 §4 — when the `fof` key last rotated on its 7-day schedule
+     *  (or the schedule started, [fofScheduleStart]); `null` before this
+     *  device's first registration pass. Device-local, not part of the
+     *  shared ReachState. */
+    val fofRotatedAtMs: Long? = null,
 )
+
+/**
+ * ADR-0060 §4 — [doc] with the `fof` key rotated on its schedule at [nowMs]:
+ * the next `fof` version, and the schedule restarted. The caller stamps the
+ * ReachState, saves, reconciles the mailbox (the old key comes off at once) and
+ * republishes the introduction record to the contacts.
+ */
+internal fun withScheduledFofRotation(doc: ReachDoc, nowMs: Long): ReachDoc {
+    val current = doc.versions.firstOrNull { it.kind == ReachKind.FOF.name && it.scopeHex == "" }?.version ?: 0
+    return doc.copy(
+        versions = doc.versions.filterNot { it.kind == ReachKind.FOF.name && it.scopeHex == "" } +
+            StoredVersion(ReachKind.FOF.name, "", current + 1),
+        fofRotatedAtMs = nowMs,
+    )
+}
 
 /** Where the documents live. An interface so the manager is testable. */
 internal interface ReachDocStore {

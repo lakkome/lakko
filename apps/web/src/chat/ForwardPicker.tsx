@@ -35,6 +35,7 @@ import { useLineage } from "./use-lineage";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
+import { conversationAvatarKeys } from "./conversation-avatar";
 import { Icon } from "../ui/icons";
 import { ModalLayer } from "../ui/ModalLayer";
 import { summarizeGroupSlot } from "./background-log";
@@ -228,7 +229,11 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                     disabled={busyId() !== null}
                     onClick={() => void pick(row)}
                   >
-                    <Avatar label={row.title} id={row.id} personKey={row.personKey} />
+                    <Avatar
+                      label={row.title}
+                      id={row.id}
+                      {...conversationAvatarKeys({ kind: row.kind, groupIdB64: row.id, peerKeyB64: row.personKey })}
+                    />
                     <div class="lk-row-body">
                       <div class="lk-row-line">
                         <span class="lk-row-title">

@@ -56,12 +56,20 @@ describe("the Everyone publication", () => {
 
 describe("the introduction record", () => {
   it("is rebuilt when the fof version, the name or the username moved, and only while 2.1 is on", () => {
-    const k = offerKey(0, "Anna", "anna");
+    const k = offerKey(0, "Anna", "anna", "B1");
     expect(offerNeedsRebuild(null, true, k)).toBe(true);
     expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, k)).toBe(false);
-    expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, offerKey(1, "Anna", "anna"))).toBe(true);
-    expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, offerKey(0, "Ann", "anna"))).toBe(true);
+    expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, offerKey(1, "Anna", "anna", "B1"))).toBe(true);
+    expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, offerKey(0, "Ann", "anna", "B1"))).toBe(true);
     expect(offerNeedsRebuild(null, false, k)).toBe(false);
+  });
+
+  it("is rebuilt when the mailbox binding moved, and a record kept before the binding was part of the key is rebuilt", () => {
+    const k = offerKey(0, "Anna", "anna", "B1");
+    expect(offerNeedsRebuild({ key: k, recordB64: "r" }, true, offerKey(0, "Anna", "anna", "B2"))).toBe(true);
+    // The key a record built before 2026-10-15 was kept under (no binding).
+    const old = JSON.stringify([0, "Anna", "anna"]);
+    expect(offerNeedsRebuild({ key: old, recordB64: "r" }, true, k)).toBe(true);
   });
 
   it("goes to every one-to-one not yet sent this version", () => {

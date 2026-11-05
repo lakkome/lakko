@@ -82,7 +82,9 @@ export async function acceptContactRequest(
       console.warn("contact accept: the ack did not land");
       return { accepted: loadAccepted(), groupIdB64: null, status: "failed" };
     }
-    return { accepted: upsertAccepted(contact), groupIdB64: null, status: "legacy" };
+    // A contact is made only with its one-to-one (base walk 2026-11-04), and
+    // a request with no account id cannot found one: no contact.
+    return { accepted: loadAccepted(), groupIdB64: null, status: "legacy" };
   }
 
   // ADR-0062 — a contact's conversation is a one-to-one for good.

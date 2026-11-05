@@ -84,7 +84,12 @@ open from its header; it is not a state with a screen.
   conversation, Message simply returns to it. (Until 2026-09-26 Message was
   withheld when the card was reached from the chat's own header, which needed
   an "origin" to be threaded through the shared rule and gave the same person
-  two cards; the origin is gone.)
+  two cards; the origin is gone.) When this device holds no chat with the
+  contact, Message starts a new one-to-one and opens it (maintainer,
+  2026-11-05); while it is being made the button shows progress and takes no
+  second tap, and a failure shows "Could not start the chat. Try again." under it with the
+  button usable again. A contact with no account id cannot be reached and
+  reads "message unavailable".
 - **Safety number** - the out-of-band check, which is the one security thing
   a person acts on and so is the one that belongs in front of them
   ([`design-system.md`](design-system.md)).

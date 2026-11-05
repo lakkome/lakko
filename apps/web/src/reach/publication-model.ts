@@ -97,9 +97,18 @@ export function everyoneAction(
   return { kind: "none" };
 }
 
-/** The inputs an introduction record is built from, as one key. */
-export function offerKey(fofVersion: number, name: string | null, username: string | null): string {
-  return JSON.stringify([fofVersion, name ?? "", username ?? ""]);
+/** The inputs an introduction record is built from, as one key. The mailbox
+ *  binding (ADR-0078 phase 1, standard base64) is one of them, as on iOS: a
+ *  record composed before the binding existed (payload v3, 2026-10-15) has a
+ *  key without it and is rebuilt, where it used to be offered forever while
+ *  no client could open it (`coc-discovery-findings.md` item 5). */
+export function offerKey(
+  fofVersion: number,
+  name: string | null,
+  username: string | null,
+  mailboxBindingB64: string,
+): string {
+  return JSON.stringify([fofVersion, name ?? "", username ?? "", mailboxBindingB64]);
 }
 
 /** Whether the held record must be rebuilt. `false` when 2.1 is off. */
