@@ -516,6 +516,9 @@ public class WebRtcPeerConnection(
      *  PeerConnection itself, fires no further delegate
      *  callbacks. */
     public fun close() {
+        // ADR-0088: this call's noise suppressor goes with it (a no-op when
+        // another call has taken the stage since).
+        runCatching { CaptureNoiseSuppression.processor.disarm(this) }
         try {
             // G3-sframe-native N-5 — release SFrame native
             // pointers BEFORE the senders/receivers / peer
@@ -592,6 +595,14 @@ public class WebRtcPeerConnection(
         this.localAudioSource = source
         this.localAudioTrack = track
         this.localAudioSender = sender
+        // ADR-0088: this call's microphone gets a fresh noise suppressor
+        // when the switch is on; the line it logs says which processing
+        // applies.
+        CaptureNoiseSuppression.processor.arm(
+            owner = this,
+            on = NoiseSuppressionSetting.on.value,
+            platform = CaptureNoiseSuppression.platformEffects(),
+        )
     }
 
     /** Toggle the mic. Mute → unmute flips at the encoder
@@ -2071,8 +2082,15 @@ public class WebRtcPeerConnection(
                 val audioModule = org.webrtc.audio.JavaAudioDeviceModule.builder(app)
                     .createAudioDeviceModule()
                 sharedAudioModule = audioModule
+                // ADR-0088: Lakko's noise suppressor runs in libwebrtc's
+                // capture post-processing stage. `null` (no native
+                // suppressor, or the hook refused) builds the factory as
+                // before, with libwebrtc's own audio processing.
+                NoiseSuppressionSetting.attach(app)
+                val audioProcessing = CaptureNoiseSuppression.audioProcessingFactory()
                 sharedFactory = PeerConnectionFactory.builder()
                     .setAudioDeviceModule(audioModule)
+                    .apply { if (audioProcessing != null) setAudioProcessingFactory(audioProcessing) }
                     .setVideoEncoderFactory(
                         DefaultVideoEncoderFactory(egl.eglBaseContext, true, true)
                     )

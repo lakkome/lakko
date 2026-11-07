@@ -165,7 +165,9 @@ data class JoinCallUiState(
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     /** Why the last attempt failed (ADR-0061: a catalog message). */
     val error: UiText? = null,
-    /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
+    /** A guest's name in the call (`docs/ux/call-links.md` section 9.1),
+     *  prefilled with a new random two-word name every time the page opens
+     *  ([JoinCallViewModel.onLinkOpened]). */
     val guestName: String = GUEST_NAME_DEFAULT,
     /** The reason the typed guest name fails the rule, or `null`. */
     val guestNameError: UiText? = null,
@@ -182,10 +184,10 @@ data class JoinCallUiState(
     val guestDeleted: Boolean = false,
 )
 
-/** ADR-0048 UX §4 — the guest name field's prefill: "<adjective> <animal>"
- *  from the shared rule (`lakko_ui_rules::guest_name`), drawn when the screen
- *  opens. Where the native library is not loaded (host tests) the catalog's
- *  plain word stands in. */
+/** The guest name field's prefill: "<adjective> <animal>" from the shared rule
+ *  (`lakko_ui_rules::guest_name`), drawn anew every time it is read, which is
+ *  every time the page opens. Where the native library is not loaded (host
+ *  tests) the catalog's plain word stands in. */
 internal val GUEST_NAME_DEFAULT: String
     get() = try {
         uniffi.lakko_ffi_uniffi.guestName(kotlin.random.Random.nextLong().toULong())
@@ -236,6 +238,11 @@ class JoinCallViewModel internal constructor(
     /** ADR-0074 Stage A - the seed of the account identity MLS groups know
      *  this account by (the predecessor after a key rotation). */
     private val conversationSeed: (IdentitySecrets) -> ByteArray = { it.accountIdentitySeed },
+    /** The core's display-name rule (`normalizeDisplayName`); injected for
+     *  host tests, where the native library is not loaded. */
+    private val normalizeDisplayName: (String) -> String? = { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
+    /** Draws the guest name prefill ([GUEST_NAME_DEFAULT]). */
+    private val drawGuestName: () -> String = { GUEST_NAME_DEFAULT },
 ) : ViewModel() {
 
     constructor(
@@ -270,7 +277,11 @@ class JoinCallViewModel internal constructor(
     )
 
     /** This screen's own state before (or instead of) the host's call. */
-    private val local = MutableStateFlow(JoinCallUiState())
+    private val local = MutableStateFlow(JoinCallUiState(guestName = drawGuestName()))
+
+    /** The link open this model last drew a guest name for
+     *  ([onLinkOpened]); `null` before the screen reported one. */
+    private var linkOpen: Long? = null
 
     /** Landing UI snapshot: the local state, with the phase of the host's call
      *  for this link when it holds one. */
@@ -382,13 +393,47 @@ class JoinCallViewModel internal constructor(
         return copy(phase = phase, error = shownError)
     }
 
-    /** `true` while there is no signed-in session, i.e. Join would mint a guest
-     *  account — the screen then asks for the guest's name. */
-    fun needsGuestName(): Boolean = auth.identitySecrets.value == null
+    /**
+     * Whether the page asks for a name (`docs/ux/call-links.md` section 9.1):
+     * a visitor who will join as a new guest, and a guest whose guest account
+     * from an earlier link is still on this device (amended 2026-11-07:
+     * before, that guest saw no field and kept the first random name for
+     * every later call). Never the link's owner, never a real account.
+     */
+    fun needsGuestName(): Boolean {
+        if (uiState.value.decoded?.isOwner == true) return false
+        return auth.identitySecrets.value == null || local.value.guest
+    }
 
-    /** ADR-0048 UX §4 — the guest name field, checked against the core's rule. */
+    /**
+     * The page was opened for this link, [open] numbering the opens
+     * ([me.lakko.app.contacts.InviteIntake.callJoinOpens]). Every open after
+     * the first this model saw draws a new guest name: the model outlives the
+     * page (it is kept per link), and the name of an earlier visit is never
+     * offered again. The same open seen twice (the page moving between the
+     * signed-out and signed-in roots when a guest account lands, a rotation)
+     * draws nothing, so a name being used for a join is never replaced.
+     */
+    fun onLinkOpened(open: Long) {
+        val before = linkOpen
+        if (before == open) return
+        linkOpen = open
+        if (before == null) return
+        if (mintingGuest || pendingJoin != null) return
+        local.update { it.copy(guestName = drawGuestName(), guestNameError = null) }
+    }
+
+    /** The name typed on the page as the guest's name for the call: the
+     *  trimmed name, or `null` when the field is empty or fails the rule. */
+    private fun typedCallName(): String? =
+        (checkGuestName(local.value.guestName) as? me.lakko.app.profile.DisplayNameCheck.Valid)?.normalized
+
+    private fun checkGuestName(value: String): me.lakko.app.profile.DisplayNameCheck =
+        me.lakko.app.profile.checkDisplayName(value, normalizeDisplayName)
+
+    /** The guest name field, checked against the core's rule. */
     fun onGuestNameChange(value: String) {
-        val check = me.lakko.app.profile.checkDisplayName(value)
+        val check = checkGuestName(value)
         local.update {
             it.copy(
                 guestName = value,
@@ -433,7 +478,16 @@ class JoinCallViewModel internal constructor(
         }
         val secrets = auth.identitySecrets.value
         if (secrets != null) {
-            viewModelScope.launch { beginJoin(d, secrets) }
+            // A returning guest's typed name is their name for this call; it
+            // must pass the rule like a new guest's. The profile is not
+            // written. A real account starts under its profile name.
+            val callName = if (local.value.guest && !d.isOwner) {
+                if (checkGuestName(local.value.guestName) is me.lakko.app.profile.DisplayNameCheck.Invalid) return
+                typedCallName()
+            } else {
+                null
+            }
+            viewModelScope.launch { beginJoin(d, secrets, callName) }
             return
         }
         // No session — mint a guest account. Its session lands at once (no
@@ -505,11 +559,13 @@ class JoinCallViewModel internal constructor(
         } catch (err: Throwable) {
             Log.w("JoinCall", "guest profile not saved", err)
         }
-        viewModelScope.launch { beginJoin(d, secrets) }
+        // The same name is the guest's name for this call.
+        val callName = typedCallName()
+        viewModelScope.launch { beginJoin(d, secrets, callName) }
     }
 
     /** Hand the ADR-0032 host / join to the app-level call host. */
-    private suspend fun beginJoin(d: DecodedCall, secrets: IdentitySecrets) {
+    private suspend fun beginJoin(d: DecodedCall, secrets: IdentitySecrets, callName: String? = null) {
         local.update { it.copy(phase = JoinCallPhase.Starting, error = null, busyMessage = null) }
         val outcome = host.start(
             LinkCallRequest(
@@ -522,6 +578,7 @@ class JoinCallViewModel internal constructor(
                 accountIdentitySeed = conversationSeed(secrets),
                 sessionToken = secrets.sessionToken,
                 accountId = secrets.accountId,
+                initialCallName = callName,
             ),
         )
         when (outcome) {
@@ -696,6 +753,9 @@ fun JoinCallRoot(
     endCurrentCall: () -> Unit,
     guestOffer: me.lakko.app.ui.auth.GuestAccountOfferViewModel? = null,
     guestClaimedUsername: String? = null,
+    /** Numbers the opens of a call link (`InviteIntake.callJoinOpens`): a
+     *  new one draws a new guest name ([JoinCallViewModel.onLinkOpened]). */
+    linkOpen: Long = 0L,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val vm: JoinCallViewModel = viewModel(
@@ -706,6 +766,9 @@ fun JoinCallRoot(
                 JoinCallViewModel(authRepository, applicationContext, slug, host, endCurrentCall) as T
         },
     )
+
+    // A new open of the link draws a new guest name (section 9.1).
+    androidx.compose.runtime.LaunchedEffect(vm, linkOpen) { vm.onLinkOpened(linkOpen) }
 
     // Guest-join resume: once signupGuest has landed a full session, continue
     // the parked join automatically.
@@ -890,14 +953,15 @@ private fun JoinCallPanel(
             }
             when (ui.phase) {
                 JoinCallPhase.Idle -> {
-                    // ADR-0048 UX §4 — a guest (no session) is asked for a
-                    // name before Join mints the guest account.
+                    // Section 9.1 — a guest (no session yet, or a guest
+                    // account from an earlier link) is asked for their name
+                    // in the call before Join.
                     val asksName = viewModel.needsGuestName()
                     if (asksName) {
                         OutlinedTextField(
                             value = ui.guestName,
                             onValueChange = viewModel::onGuestNameChange,
-                            label = { Text(t("settings.profile.name.label")) },
+                            label = { Text(t("call.link.guest_name.label")) },
                             singleLine = true,
                             isError = ui.guestNameError != null,
                             supportingText = ui.guestNameError?.let { reason -> { Text(reason.text()) } },
@@ -915,7 +979,7 @@ private fun JoinCallPanel(
                     }
                     // No login required: a visitor with no session joins as
                     // a guest, and is told so before pressing.
-                    if (asksName && !decoded.isOwner) {
+                    if (asksName && !ui.guest) {
                         CenteredText(t("call.guest.note"), muted = true, small = true)
                     }
                     // A guest who is here and not in the call (the app was

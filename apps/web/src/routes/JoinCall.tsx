@@ -51,6 +51,7 @@ import {
   createMemo,
   createResource,
   createSignal,
+  on,
   onCleanup,
   type JSX,
 } from "solid-js";
@@ -132,25 +133,44 @@ export default function JoinCall() {
   };
   const callHost: CallHostApi = useCallHost();
 
-  // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
-  // prefilled with "<adjective> <animal>" from the shared rule
-  // (`lakko_ui_rules::guest_name`), and it becomes the new account's profile
-  // name. The prefill lands once the core has loaded, and never over a name
-  // the visitor has started typing.
+  // docs/ux/call-links.md section 9.1 — a guest is asked their name here,
+  // prefilled with a NEW "<adjective> <animal>" from the shared rule
+  // (`lakko_ui_rules::guest_name`) every time a link page opens (a new link
+  // in the same tab included), never the name of an earlier visit. It is the
+  // guest's name for the call (`docs/ux/calls.md` section 4.1); a brand-new
+  // guest account also takes it as its profile name. The prefill lands once
+  // the core has loaded, and never over a name the visitor has started
+  // typing on this link.
   const [guestName, setGuestName] = createSignal("");
   let guestNameEdited = false;
-  void loadWasm().then((wasm) => {
-    if (guestNameEdited) return;
-    const random = new Uint32Array(1);
-    crypto.getRandomValues(random);
-    setGuestName(wasm.guestName(random[0] ?? 0));
-  });
+  createEffect(
+    on(
+      () => params.slug,
+      () => {
+        guestNameEdited = false;
+        setGuestName("");
+        void loadWasm().then((wasm) => {
+          if (guestNameEdited) return;
+          const random = new Uint32Array(1);
+          crypto.getRandomValues(random);
+          setGuestName(wasm.guestName(random[0] ?? 0));
+        });
+      },
+    ),
+  );
   const guestNameCheck = createDisplayNameCheck(guestName);
   /** The name to save once the guest session lands; `undefined` = nothing to
    *  save (the visitor already had a session). */
   let pendingGuestName: string | null | undefined;
   const isAnonymousVisitor = (): boolean =>
     chats.identity() === null || auth.identitySecrets() === null;
+  /** Whether the page asks for a name: a visitor who will join as a new
+   *  guest, and a guest whose guest account from an earlier link is still on
+   *  this device (section 9.1, amended 2026-11-07: before, that guest saw no
+   *  field and kept the first random name for every later call). Never the
+   *  link's owner. */
+  const asksGuestName = (): boolean =>
+    (isAnonymousVisitor() || auth.isGuest()) && decoded()?.isOwner !== true;
 
   const discovery = new DiscoveryClient();
 
@@ -322,6 +342,8 @@ export default function JoinCall() {
       return;
     }
     if (chats.identity() !== null && auth.identitySecrets() !== null) {
+      // A returning guest's name must pass the rule like a new guest's.
+      if (auth.isGuest() && !maySaveDisplayName(guestNameCheck())) return;
       await beginJoin(d);
       return;
     }
@@ -370,7 +392,12 @@ export default function JoinCall() {
   async function beginJoin(d: DecodedCall): Promise<void> {
     setError(null);
     setLocalPhase("starting");
+    // A guest's typed name is their name for this call; a person with a
+    // real account starts under their profile name and can change it in the
+    // call (docs/ux/calls.md section 4.1).
+    const callName = auth.isGuest() ? savedDisplayName(guestNameCheck()) : null;
     const outcome = await callHost.startLinkCall({
+      ...(callName !== null ? { callName } : {}),
       callId: d.callId,
       ownerAccountId: d.ownerAccountId,
       ownerSignatureKey: d.ownerSignatureKey,
@@ -521,9 +548,9 @@ export default function JoinCall() {
               )}
             </Show>
             <Show when={phase() === "idle"}>
-              <Show when={isAnonymousVisitor() && !decoded()?.isOwner}>
+              <Show when={asksGuestName()}>
                 <label>
-                  {t("settings.profile.name.label")}
+                  {t("call.link.guest_name.label")}
                   <input
                     type="text"
                     autocomplete="name"
@@ -551,7 +578,7 @@ export default function JoinCall() {
               <button
                 type="button"
                 class="primary"
-                disabled={isAnonymousVisitor() && !maySaveDisplayName(guestNameCheck())}
+                disabled={asksGuestName() && !maySaveDisplayName(guestNameCheck())}
                 onClick={() => void onStart(decoded()!)}
               >
                 {decoded()?.isOwner ? t("call.link.start") : t("call.link.join")}

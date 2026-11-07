@@ -25,6 +25,7 @@ import {
 import { SILENT_MIC_NOTICE } from "./microphone-silence";
 import { deniedCopy, noticeCopy, type Recorder } from "./recording-controller";
 import { barIsPlayed, waveformBars } from "./waveform";
+import { paintVideoBehind } from "./video-overlay";
 
 function holding(s: RecState): boolean {
   return s.phase === "recording" || s.phase === "requesting";
@@ -401,7 +402,10 @@ function LiveCircle(props: { recorder: Recorder }): JSX.Element {
     <>
       <div class="lakko-vn-circle">
         <video
-          ref={video}
+          ref={(el): void => {
+            video = el;
+            paintVideoBehind(el);
+          }}
           muted
           playsinline
           autoplay
@@ -467,7 +471,10 @@ function PreviewCircle(props: { recorder: Recorder }): JSX.Element {
         }}
       >
         <video
-          ref={video}
+          ref={(el): void => {
+            video = el;
+            paintVideoBehind(el);
+          }}
           src={r.preview()?.url ?? ""}
           muted
           loop

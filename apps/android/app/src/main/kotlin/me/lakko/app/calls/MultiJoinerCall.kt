@@ -136,6 +136,11 @@ class MultiJoinerCall private constructor(
         /** The name on the local tile (`docs/ux/calls.md` section 4.4). */
         /** Empty when this device has no own name: the tile draws `call.participant.you`. */
         val localDisplayName: String = "",
+        /** The name this person typed for this call (`docs/ux/calls.md`
+         *  section 4.1, `CallName.kt`): a guest's name from the link page.
+         *  `null`: the name typed for this call earlier in this app run,
+         *  else none. Already normalised by the display-name rule. */
+        val initialCallName: String? = null,
         /** The user's own ADR-0048 profile envelope, or `null` when none is
          *  stored. Composed for a display name or a username alone: an
          *  account with no profile name is announced by its username. Sealed
@@ -219,6 +224,12 @@ class MultiJoinerCall private constructor(
      *  scope, so no extra synchronisation is needed. */
     private val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+    /** The call id, lower-case hex: the key of [RememberedCallNames]. */
+    private val callIdHex: String = hexKey(opts.callId)
+
+    /** The name this device typed for this call (`""` = none). */
+    private var ownCallName: String = opts.initialCallName ?: RememberedCallNames.get(callIdHex)
+
     /** Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on this
      *  device from the session's own connection while the call is connected. */
     private val speaking: SpeakingMonitor =
@@ -280,6 +291,13 @@ class MultiJoinerCall private constructor(
                 },
                 onLocalVideoTrack = { track -> ui.setLocalVideoTrack(track) },
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
+                // The name a peer typed for this call (`CallName.kt`): it
+                // outranks every other source of the tile's name.
+                onRemoteCallName = { peerId, name ->
+                    if (opts.names.callNamed(peerId, name)) {
+                        ui.setParticipantName("$PEER_PREFIX$peerId", opts.names.name(peerId))
+                    }
+                },
             ),
         )
         // A joiner behind a symmetric NAT has no server-reflexive candidate
@@ -287,6 +305,23 @@ class MultiJoinerCall private constructor(
         // with the call token (ADR-0078 section 2). Fail-soft: none leaves the
         // call on STUN.
         session.setTurnClient(TurnCredentialClient.preMinted(turn))
+
+        // `Your name in this call` (section 4.1): sent with every
+        // announcement once this client holds the call group, shown on the
+        // own tile, and changed from the call's Settings sheet.
+        RememberedCallNames.put(callIdHex, ownCallName)
+        session.setOwnCallName(ownCallName)
+        ui.setCallNameControl(
+            control = { name ->
+                ownCallName = name
+                RememberedCallNames.put(callIdHex, name)
+                session.setOwnCallName(name)
+                ui.setOwnCallName(name)
+                ui.setParticipantName("local", localName())
+            },
+            own = ownCallName,
+            default = opts.localDisplayName,
+        )
     }
 
     companion object {
@@ -411,6 +446,7 @@ class MultiJoinerCall private constructor(
         clearRebroadcast()
         clearOwnerProbe()
         lastKnownCameraOn.clear()
+        ui.setCallNameControl(null, own = "", default = "")
         session.hangUp()
     }
 
@@ -1096,10 +1132,14 @@ class MultiJoinerCall private constructor(
     // UI-participant helpers (ported from SfuCallUi)
     // -----------------------------------------------------------------
 
+    /** The own tile's name: the name typed for the call, else the profile
+     *  name (empty: the tile draws `call.participant.you`). */
+    private fun localName(): String = ownCallTileName(ownCallName, opts.localDisplayName)
+
     private fun localParticipant(): CallUiState.Participant =
         CallUiState.Participant(
             id = "local",
-            displayName = opts.localDisplayName,
+            displayName = localName(),
             isLocal = true,
             micOn = opts.audio,
             camOn = opts.video,

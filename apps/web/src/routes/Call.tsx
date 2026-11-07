@@ -120,6 +120,8 @@ import {
   PREVIEW_DIAG_AFTER_MS,
 } from "../calls/local-preview";
 import { callBarPhase } from "../calls/call-bar-model";
+import { ANIMATION_FRAMES, mirrorVideoToCanvas } from "../calls/video-canvas";
+import { paintVideoBehind, PICTURES_THROUGH_CANVAS } from "../media/video-overlay";
 import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
 import {
   noiseSuppressionOn,
@@ -172,6 +174,9 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
   </Show>
 );
 import { t } from "../l10n";
+import { callNameState } from "../calls/call-name";
+import { createDisplayNameCheck } from "../profile/username-field";
+import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { displayLocale } from "../l10n/display-locale";
 
 // ============================================================================
@@ -470,6 +475,83 @@ function canSelectAudioOutput(): boolean {
 }
 
 /**
+ * `Your name in this call` (docs/ux/calls.md section 4.1): the name every
+ * participant sees on this person's tile, for this call only. The profile
+ * name does not change. Absent on a call that cannot carry it.
+ */
+const CallNameField: Component = () => {
+  const [typed, setTyped] = createSignal(callNameState.ownName());
+  const check = createDisplayNameCheck(typed);
+  const [said, setSaid] = createSignal("");
+  const normalised = (): string | null => {
+    const c = check();
+    return maySaveDisplayName(c) ? (savedDisplayName(c) ?? "") : null;
+  };
+  const canSave = (): boolean => {
+    const name = normalised();
+    return name !== null && name !== callNameState.ownName();
+  };
+  const save = (): void => {
+    const control = callNameState.control();
+    const name = normalised();
+    if (control === null || name === null || !canSave()) return;
+    control.save(name);
+    setTyped(name);
+    setSaid(
+      name === ""
+        ? t("call.settings.call_name.a11y_cleared")
+        : t("call.settings.call_name.a11y_saved", { name }),
+    );
+  };
+  return (
+    <section>
+      <h3 id="lk-call-settings-call-name">{t("call.settings.call_name.label")}</h3>
+      <form
+        class="lk-call-settings-name"
+        onSubmit={(e): void => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <input
+          type="text"
+          autocomplete="off"
+          aria-labelledby="lk-call-settings-call-name"
+          aria-describedby="lk-call-settings-call-name-hint"
+          placeholder={callNameState.defaultName()}
+          value={typed()}
+          onInput={(e): void => {
+            setTyped(e.currentTarget.value);
+          }}
+          aria-invalid={check().kind === "invalid"}
+        />
+        <button type="submit" class="lk-card-row-action" disabled={!canSave()}>
+          {t("call.settings.call_name.save")}
+        </button>
+      </form>
+      <Show
+        when={(() => {
+          const c = check();
+          return c.kind === "invalid" ? c.reason : null;
+        })()}
+      >
+        {(reason) => (
+          <div class="form-error" role="status">
+            {reason()}
+          </div>
+        )}
+      </Show>
+      <span id="lk-call-settings-call-name-hint" class="lk-call-settings-hint">
+        {t("call.settings.call_name.hint")}
+      </span>
+      <span class="lk-visually-hidden" role="status" aria-live="polite">
+        {said()}
+      </span>
+    </section>
+  );
+};
+
+/**
  * The settings sheet. The app's own radio lists, never a `<select>`: on a
  * phone that opens the system's picker. A choice applies at once; the call
  * host already follows the store's selected devices for every kind of call.
@@ -526,6 +608,9 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
       <div class="lk-call-modal lk-call-settings">
         <h2 id="lk-call-settings-title">{t("call.settings.title")}</h2>
         <div class="lk-call-settings-body">
+          <Show when={callNameState.control() !== null}>
+            <CallNameField />
+          </Show>
           <section>
             <h3 id="lk-call-settings-sound">{t("call.settings.sound")}</h3>
             <div class="lk-call-settings-switch">
@@ -1227,6 +1312,30 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
 };
 
 /**
+ * Keeps a canvas drawing the frames of a video element
+ * (`calls/video-canvas.ts`), started again whenever the element is given
+ * another stream (a pending per-frame callback may not survive the swap).
+ */
+class CanvasPicture {
+  private stop: (() => void) | null = null;
+  constructor(
+    private readonly video: () => HTMLVideoElement | undefined,
+    private readonly canvas: () => HTMLCanvasElement | undefined,
+  ) {}
+  restart(): void {
+    this.end();
+    const v = this.video();
+    const c = this.canvas();
+    if (v === undefined || c === undefined) return;
+    this.stop = mirrorVideoToCanvas<HTMLVideoElement>(v, c, ANIMATION_FRAMES);
+  }
+  end(): void {
+    this.stop?.();
+    this.stop = null;
+  }
+}
+
+/**
  * The person's own camera on their own screen (`calls/local-preview.ts`).
  *
  * Bound once the element is in the document, to a stream of its own made
@@ -1245,6 +1354,11 @@ const LocalVideo: Component<{
   ariaLabel?: string | undefined;
 }> = (props) => {
   let el: HTMLVideoElement | undefined;
+  let canvasEl: HTMLCanvasElement | undefined;
+  const picture = new CanvasPicture(
+    () => el,
+    () => canvasEl,
+  );
   const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
     (track) => new MediaStream([track]),
   );
@@ -1254,6 +1368,7 @@ const LocalVideo: Component<{
     // The attribute alone is not relied on for the muted state either.
     if (!el.muted) el.muted = true;
     if (!binder.sync(el, props.stream)) return;
+    if (PICTURES_THROUGH_CANVAS) picture.restart();
     if (diagTimer !== undefined) clearTimeout(diagTimer);
     if (binder.track() === null) return;
     diagTimer = setTimeout(() => {
@@ -1274,12 +1389,18 @@ const LocalVideo: Component<{
     onCleanup(() => {
       clearInterval(timer);
       if (diagTimer !== undefined) clearTimeout(diagTimer);
+      picture.end();
       if (el !== undefined) el.srcObject = null;
       binder.reset();
     });
   });
   return (
-    <video class={props.class} aria-label={props.ariaLabel} autoplay playsinline muted ref={el} />
+    <>
+      <video class={props.class} aria-label={props.ariaLabel} autoplay playsinline muted ref={el} />
+      {PICTURES_THROUGH_CANVAS ? (
+        <canvas class={`${props.class} lk-video-canvas`} aria-hidden="true" ref={canvasEl} />
+      ) : null}
+    </>
   );
 };
 
@@ -1314,6 +1435,11 @@ const LayerVideo: Component<{
   where: string;
 }> = (props) => {
   let el: HTMLVideoElement | undefined;
+  let canvasEl: HTMLCanvasElement | undefined;
+  const picture = new CanvasPicture(
+    () => el,
+    () => canvasEl,
+  );
   const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
     (track) => new MediaStream([track]),
   );
@@ -1322,6 +1448,7 @@ const LayerVideo: Component<{
     if (el === undefined) return;
     if (!el.muted) el.muted = true;
     if (!binder.sync(el, props.stream)) return;
+    if (PICTURES_THROUGH_CANVAS) picture.restart();
     if (diagTimer !== undefined) clearTimeout(diagTimer);
     if (binder.track() === null) return;
     diagTimer = setTimeout(() => {
@@ -1363,12 +1490,13 @@ const LayerVideo: Component<{
       clearInterval(timer);
       if (diagTimer !== undefined) clearTimeout(diagTimer);
       stopFrames();
+      picture.end();
       if (el !== undefined) el.srcObject = null;
       binder.reset();
       props.elRef(undefined);
     });
   });
-  return (
+  const video = (
     <video
       class={props.class}
       data-shown={props.shown === undefined ? undefined : String(props.shown)}
@@ -1379,6 +1507,18 @@ const LayerVideo: Component<{
       muted
       ref={el}
     />
+  );
+  if (!PICTURES_THROUGH_CANVAS) return video;
+  return (
+    <>
+      {video}
+      <canvas
+        class={`${props.class} lk-video-canvas`}
+        data-shown={props.shown === undefined ? undefined : String(props.shown)}
+        aria-hidden="true"
+        ref={canvasEl}
+      />
+    </>
   );
 };
 
@@ -1750,7 +1890,10 @@ const ScreenShareView: Component<{
         }}
       >
         <video
-          ref={videoEl}
+          ref={(el): void => {
+            videoEl = el;
+            paintVideoBehind(el);
+          }}
           class="lk-call-share-video"
           muted
           autoplay

@@ -31,6 +31,7 @@ import type { MediaBubbleProps } from "./MediaBubbles";
 import { mediaKey } from "./media-hub";
 import { whenVisible } from "./near-viewport";
 import { bubbleBox, saveNameFor } from "./visual-media";
+import { paintVideoBehind } from "./video-overlay";
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
 
@@ -99,7 +100,10 @@ function MediaViewer(props: {
           fallback={<img src={props.url} alt={t("chat.media.photo")} draggable={false} />}
         >
           <video
-            ref={(el) => props.onVideo?.(el)}
+            ref={(el) => {
+              props.onVideo?.(el);
+              paintVideoBehind(el);
+            }}
             src={props.url}
             controls
             autoplay

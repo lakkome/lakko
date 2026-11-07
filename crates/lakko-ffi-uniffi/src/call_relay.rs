@@ -19,11 +19,15 @@
 //! - [`compose_call_screen_share`], [`verify_call_screen_share`] and
 //!   [`CallScreenShareState`] - the signed screen-share state and the
 //!   one-share-per-call fold of ADR-0083 (`lakko_calls::screen_share`).
+//! - [`compose_call_name`], [`verify_call_name`], [`call_name_is_newer`] -
+//!   the name a participant gives themself for one call
+//!   (`lakko_calls::call_name`, `docs/ux/calls.md` section 4.1).
 //!
 //! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use lakko_calls::call_name as names;
 use lakko_calls::relay::{self as core, RelayError, RelayPayload, CALL_ID_LEN};
 use lakko_calls::screen_share::{self as share, ShareId, ShareStatus};
 
@@ -122,6 +126,13 @@ pub enum CallRelayPayload {
         /// The whole share state.
         state: Vec<u8>,
     },
+    /// A participant's name for this call; verify it with
+    /// [`verify_call_name`]. Appended last: uniffi lowers a variant by its
+    /// ordinal.
+    CallName {
+        /// The whole call name.
+        name: Vec<u8>,
+    },
 }
 
 /// Classify an opened relay plaintext.
@@ -134,6 +145,7 @@ pub fn classify_call_relay_plaintext(plaintext: Vec<u8>) -> CallRelayPayload {
         },
         RelayPayload::MediaState { camera_on } => CallRelayPayload::MediaState { camera_on },
         RelayPayload::ScreenShare(state) => CallRelayPayload::ScreenShare { state },
+        RelayPayload::CallName(name) => CallRelayPayload::CallName { name },
         RelayPayload::Unknown => CallRelayPayload::Unknown,
     }
 }
@@ -319,6 +331,78 @@ pub fn verify_call_screen_share(
     })
 }
 
+/// Compose this device's name for the call: `name` (empty to go back to
+/// the default naming) numbered `seq` (1, 2, 3, ... for the life of
+/// `peer_id`) for call `call_id` under SFU `peer_id`, signed with
+/// `identity`'s leaf key. `name` must already be normalised
+/// (`normalizeDisplayName`): an untrimmed or otherwise inadmissible name is
+/// refused. Seal it with [`CallRelayKey::seal`].
+///
+/// # Errors
+///
+/// [`FfiError::CallRelay`] `callIdLength`, `malformed` (a bad peer id, a
+/// seq of 0, or a bad name) or `identityKeyMismatch`.
+#[uniffi::export]
+pub fn compose_call_name(
+    identity: Arc<Identity>,
+    call_id: Vec<u8>,
+    peer_id: String,
+    seq: u64,
+    name: String,
+) -> Result<Vec<u8>, FfiError> {
+    names::compose_call_name(&identity.inner, &call_id16(&call_id)?, &peer_id, seq, &name)
+        .map_err(relay_err)
+}
+
+/// A call name that verified against the call's roster.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCallName {
+    /// The sender's peer id.
+    pub peer_id: String,
+    /// The name's sequence number; keep the greatest per peer
+    /// ([`call_name_is_newer`]).
+    pub seq: u64,
+    /// The name, `None` when the sender went back to its default naming.
+    pub name: Option<String>,
+    /// The account key the signer's leaf resolves to: the person.
+    pub account_key: Vec<u8>,
+}
+
+/// Verify a call name. `peer_id` is the relay `from`, `peer_signer_key` the
+/// signature key of that peer's verified announcement.
+///
+/// # Errors
+///
+/// [`FfiError::CallRelay`] with `callIdLength`, a decode code, `wrongCall`,
+/// `wrongPeer`, `notAMember`, `noAccount` or `badSignature`: drop it.
+#[uniffi::export]
+pub fn verify_call_name(
+    group: Arc<Group>,
+    call_id: Vec<u8>,
+    peer_id: String,
+    peer_signer_key: Vec<u8>,
+    name: Vec<u8>,
+) -> Result<VerifiedCallName, FfiError> {
+    let call_id = call_id16(&call_id)?;
+    let g = group.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+    let v = names::verify_call_name(&g, &call_id, &peer_id, &peer_signer_key, &name)
+        .map_err(relay_err)?;
+    Ok(VerifiedCallName {
+        peer_id: v.peer_id,
+        seq: v.seq,
+        name: v.name,
+        account_key: v.account_key,
+    })
+}
+
+/// Whether a call name numbered `incoming_seq` replaces the one held for the
+/// same peer (`stored_seq`, `None` when none is held): strictly greater.
+#[uniffi::export]
+#[must_use]
+pub const fn call_name_is_newer(incoming_seq: u64, stored_seq: Option<u64>) -> bool {
+    names::call_name_is_newer(incoming_seq, stored_seq)
+}
+
 /// The share a call is showing now.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct CallCurrentScreenShare {
@@ -454,6 +538,48 @@ mod tests {
             CallRelayPayload::MediaState { camera_on: false }
         );
         assert!(CallRelayKey::from_call_seed(vec![7; 31]).is_err());
+    }
+
+    #[test]
+    fn a_call_name_seals_classifies_and_verifies() {
+        use lakko_mls::GroupKind;
+        let alice = lakko_mls::Identity::from_seed(&[1; 32]).expect("alice");
+        let bob = lakko_mls::Identity::from_seed(&[2; 32]).expect("bob");
+        let mut g = lakko_mls::Group::create(&alice, GroupKind::Group).expect("group");
+        g.add_member(&alice, bob.create_key_package().expect("kp"))
+            .expect("add");
+        let group = Arc::new(Group {
+            inner: Mutex::new(g),
+        });
+        let bob_key = bob.signature_public_key().to_vec();
+        let bob = Arc::new(Identity { inner: bob });
+        let wire = compose_call_name(bob.clone(), vec![9; 16], "bob".into(), 1, "Bobby".into())
+            .expect("compose");
+        let key = CallRelayKey::from_call_seed(vec![7; 32]).expect("key");
+        let opened = key
+            .open(key.seal(wire.clone()).expect("seal"))
+            .expect("open");
+        assert_eq!(
+            classify_call_relay_plaintext(opened),
+            CallRelayPayload::CallName { name: wire.clone() }
+        );
+        let v = verify_call_name(
+            group.clone(),
+            vec![9; 16],
+            "bob".into(),
+            bob_key.clone(),
+            wire,
+        )
+        .expect("verify");
+        assert_eq!(v.name.as_deref(), Some("Bobby"));
+        assert_eq!(v.seq, 1);
+        let cleared = compose_call_name(bob.clone(), vec![9; 16], "bob".into(), 2, String::new())
+            .expect("compose empty");
+        let v2 = verify_call_name(group, vec![9; 16], "bob".into(), bob_key, cleared)
+            .expect("verify empty");
+        assert_eq!(v2.name, None);
+        assert!(call_name_is_newer(2, Some(1)) && !call_name_is_newer(1, Some(1)));
+        assert!(compose_call_name(bob, vec![9; 16], "bob".into(), 1, " x".into()).is_err());
     }
 
     #[test]

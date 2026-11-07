@@ -55,6 +55,7 @@
 
 pub mod bandwidth;
 pub mod call_key_ring;
+pub mod call_name;
 pub mod codec_audio;
 pub mod codec_video;
 pub mod error;

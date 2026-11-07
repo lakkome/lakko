@@ -52,11 +52,18 @@ import { GroupScreenShare } from "./group-screen-share";
 import { screenShareActions } from "./screen-share-store";
 import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
+import { callNameActions, rememberCallName, rememberedCallName } from "./call-name";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
   /** Display name for the local participant tile. Defaults to "You". */
   readonly localDisplayName?: string;
+  /** The call id, lower-case hex: the key a name typed for this call is
+   *  remembered under for a rejoin in this app run (`call-name.ts`). */
+  readonly callIdHex?: string;
+  /** The user's own profile name (`""` when none): what others see when no
+   *  name is typed for the call, the placeholder of the call-name field. */
+  readonly profileName?: string;
   /** The name of the person behind a peer (base64 account key, from the
    *  peer's verified announcement, ADR-0078 section 2), or `null` while it
    *  cannot be named (`calls/tile-name.ts`). */
@@ -204,8 +211,13 @@ export function createSfuCallUi(
   // `refreshNames` replays them through the resolver; the store's
   // `Participant` deliberately carries neither.
   const peerPersons = new Map<string, string | null>();
+  // The name each remote peer typed for this call (`call-name.ts`), keyed by
+  // the roster tile id. It outranks every other source (`tile-name.ts`).
+  const peerCallNames = new Map<string, string>();
 
   const localName = options.localDisplayName ?? t("call.participant.you");
+  // A name this device typed for this call earlier in this app run.
+  let ownCallName = options.callIdHex !== undefined ? rememberedCallName(options.callIdHex) : "";
   /** What this device joined without (section 4.4), once capture ran. */
   let captureFallback: CaptureFallback | null = null;
   const nameOf = (personKeyB64: string | null | undefined): string =>
@@ -215,10 +227,12 @@ export function createSfuCallUi(
     (personKeyB64 === null || personKeyB64 === undefined
       ? null
       : options.resolveDisplayName?.(personKeyB64)) ?? "";
+  /** A remote tile's name: the name typed for the call, else the person's. */
+  const tileName = (id: string): string => peerCallNames.get(id) ?? nameOf(peerPersons.get(id));
 
   const localParticipant = (): Participant => ({
     id: "local",
-    displayName: localName,
+    displayName: ownCallName !== "" ? ownCallName : localName,
     isLocal: true,
     // The camera check can be left muted (docs/ux/calls.md section 3.2), and
     // `media.audio` is always true on web (a call with no audio transceiver
@@ -309,7 +323,12 @@ export function createSfuCallUi(
       detachScreenShare: () => session.detachScreenShare(),
       getSelfPeerId: () => session.getSelfPeerId(),
     },
-    nameOf: (personKeyB64) => nameOf(personKeyB64),
+    nameOf: (personKeyB64) => {
+      for (const [id, person] of peerPersons) {
+        if (person === personKeyB64) return tileName(id);
+      }
+      return nameOf(personKeyB64);
+    },
     notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
     store: screenShareActions,
   });
@@ -374,7 +393,7 @@ export function createSfuCallUi(
       if (!peerPersons.has(id)) return;
       if (peerPersons.get(id) === identity.personKeyB64) return;
       peerPersons.set(id, identity.personKeyB64);
-      callActions.setParticipantName(id, nameOf(identity.personKeyB64));
+      callActions.setParticipantName(id, tileName(id));
       callActions.setParticipantPerson(id, identity.personKeyB64);
     },
     onPeerLeft: (peerId): void => {
@@ -383,6 +402,7 @@ export function createSfuCallUi(
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
       peerPersons.delete(id);
+      peerCallNames.delete(id);
       share.onPeerLeft(peerId);
       // The companion and the middle track go with their peer.
       setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
@@ -393,6 +413,12 @@ export function createSfuCallUi(
       // A shared screen is not a participant (ADR-0083).
       if (share.onRemoteTrack(rt.streamId, rt.track)) return;
       addStream(rt);
+    },
+    onRemoteCallName: (peerId, name): void => {
+      const id = peerParticipantId(peerId);
+      if (name === null) peerCallNames.delete(id);
+      else peerCallNames.set(id, name);
+      callActions.setParticipantName(id, tileName(id));
     },
     onRemoteScreenShareState: (peerId, state): void => {
       share.onState(peerId, state);
@@ -429,6 +455,22 @@ export function createSfuCallUi(
     },
   });
 
+  // The name this device typed for the call (`docs/ux/calls.md` section 4.1):
+  // sent with every announcement once the session can sign it, shown on the
+  // own tile, and changed from the call's Settings sheet.
+  session.setOwnCallName(ownCallName);
+  callNameActions.setOwnName(ownCallName);
+  callNameActions.setDefaultName(options.profileName ?? "");
+  callNameActions.setControl({
+    save: (name: string): void => {
+      ownCallName = name;
+      if (options.callIdHex !== undefined) rememberCallName(options.callIdHex, name);
+      session.setOwnCallName(name);
+      callNameActions.setOwnName(name);
+      callActions.setParticipantName("local", name !== "" ? name : localName);
+    },
+  });
+
   return {
     session,
     remoteStreams,
@@ -445,8 +487,10 @@ export function createSfuCallUi(
     hangUp: (): void => {
       share.dispose();
       screenShareActions.reset();
+      callNameActions.reset();
       session.hangUp();
       peerPersons.clear();
+      peerCallNames.clear();
       setRemoteStreams(new Map());
       setRemoteLightStreams(new Map());
       setRemoteMiddleStreams(new Map());
@@ -468,8 +512,8 @@ export function createSfuCallUi(
       session.switchVideoInput(deviceId),
     rekey: (newSeed): void => session.rekey(newSeed),
     refreshNames: (): void => {
-      for (const [id, person] of peerPersons) {
-        callActions.setParticipantName(id, nameOf(person));
+      for (const id of peerPersons.keys()) {
+        callActions.setParticipantName(id, tileName(id));
       }
       share.refreshNames();
     },

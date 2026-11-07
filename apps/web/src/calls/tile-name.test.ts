@@ -16,25 +16,67 @@ const KEY = new Uint8Array(32).fill(0xa1);
 const NONE = { resolved: null, announcedName: null, claimedUsername: null };
 
 describe("callTileName", () => {
+  it("puts the name typed for the call ahead of everything (calls.md 4.1)", () => {
+    expect(
+      callTileName({
+        callName: "Captain",
+        resolved: "Anna (my contact)",
+        announcedName: "Anna",
+        claimedUsername: "anna",
+      }),
+    ).toBe("Captain");
+  });
+
+  it("falls back to the contact name when no call name is typed", () => {
+    expect(
+      callTileName({
+        callName: null,
+        resolved: "Anna (my contact)",
+        announcedName: null,
+        claimedUsername: null,
+      }),
+    ).toBe("Anna (my contact)");
+    expect(
+      callTileName({
+        callName: "  ",
+        resolved: "Anna",
+        announcedName: null,
+        claimedUsername: null,
+      }),
+    ).toBe("Anna");
+  });
+
   it("prefers what the one resolver calls the person", () => {
     expect(
-      callTileName({ resolved: "Anna (work)", announcedName: "Anna", claimedUsername: "anna" }),
+      callTileName({
+        resolved: "Anna (work)",
+        announcedName: "Anna",
+        claimedUsername: "anna",
+      }),
     ).toBe("Anna (work)");
   });
 
   it("uses the name announced in the call when the resolver has none", () => {
-    expect(callTileName({ ...NONE, announcedName: "Guest", claimedUsername: "guest_1" })).toBe(
-      "Guest",
-    );
+    expect(
+      callTileName({
+        ...NONE,
+        announcedName: "Guest",
+        claimedUsername: "guest_1",
+      }),
+    ).toBe("Guest");
   });
 
   it("names a person with no profile name by the username they claim, without @", () => {
-    expect(callTileName({ ...NONE, claimedUsername: "valentin" })).toBe("valentin");
+    expect(callTileName({ ...NONE, claimedUsername: "valentin" })).toBe(
+      "valentin",
+    );
   });
 
   it("is unnamed only when nothing has arrived, and never a piece of an id", () => {
     expect(callTileName(NONE)).toBeNull();
-    expect(callTileName({ resolved: "  ", announcedName: "", claimedUsername: " " })).toBeNull();
+    expect(
+      callTileName({ resolved: "  ", announcedName: "", claimedUsername: " " }),
+    ).toBeNull();
   });
 });
 

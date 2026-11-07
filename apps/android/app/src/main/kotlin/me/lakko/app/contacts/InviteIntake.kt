@@ -92,9 +92,17 @@ public class InviteIntake {
      *  (an anonymous visitor gets the ADR-0032 guest-join path). */
     public val pendingCallJoinSlug: StateFlow<String?> = mutableCallJoinSlug.asStateFlow()
 
+    private val mutableCallJoinOpens: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** Numbers every open of a call link ([publishCallJoin]), the same link
+     *  opened again included: the landing draws a new guest name for each
+     *  (`docs/ux/call-links.md` section 9.1). */
+    public val callJoinOpens: StateFlow<Long> = mutableCallJoinOpens.asStateFlow()
+
     /** ADR-0032 — publish a call-invite slug, called from
      *  `MainActivity` (via [publishLink]). */
     public fun publishCallJoin(slug: String) {
+        mutableCallJoinOpens.value += 1
         mutableCallJoinSlug.value = slug
     }
 

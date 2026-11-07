@@ -76,6 +76,9 @@ final class LinkCallTileNames {
     private var claimedUsernames: [String: String] = [:]
     /// SFU peer id -> the person whose sealed profile that peer relayed.
     private var persons: [String: MemberIdentity] = [:]
+    /// SFU peer id -> the name that peer typed for this call
+    /// (``CallNameChannel``); it outranks every other source.
+    private var callNames: [String: String] = [:]
     private var subscription: AnyCancellable?
 
     init(ports: Ports) {
@@ -124,9 +127,19 @@ final class LinkCallTileNames {
         }
     }
 
+    /// `peerId` typed `name` for this call (`nil`: back to its default).
+    func setCallName(_ peerId: String, _ name: String?) {
+        if let name, !name.isEmpty {
+            callNames[peerId] = name
+        } else {
+            callNames.removeValue(forKey: peerId)
+        }
+    }
+
     /// The peer left: a return under the same id starts unnamed again.
     func peerLeft(_ peerId: String) {
         peers.remove(peerId)
+        callNames.removeValue(forKey: peerId)
         memberKeys.removeValue(forKey: peerId)
         announcedNames.removeValue(forKey: peerId)
         claimedUsernames.removeValue(forKey: peerId)
@@ -160,6 +173,7 @@ final class LinkCallTileNames {
     private func currentName(_ peerId: String) -> String {
         let person = persons[peerId]
         return CallTileName.name(
+            callName: callNames[peerId],
             resolved: person.flatMap { ports.personName($0) },
             announcedName: announcedNames[peerId],
             claimedUsername: claimedUsernames[peerId] ?? person.flatMap { ports.storedUsername($0) }

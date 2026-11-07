@@ -9,6 +9,9 @@ import Foundation
 /// A tile always carries the person's name. One rule for both call kinds, in
 /// this order:
 ///
+///   0. the name the person typed for this call (``CallNameChannel``,
+///      `docs/ux/calls.md` section 4.1, 2026-11-07): once typed, every device
+///      shows it, ahead of the viewer's own name for a contact;
 ///   1. what the one resolver (``resolveDisplayName(signatureKey:localRename:profile:verification:)``)
 ///      calls the person behind the tile: the viewer's rename, the person's
 ///      profile name, their verified `@username`. The resolver's neutral
@@ -36,12 +39,18 @@ enum CallTileName {
     /// The name the sources give, or `nil` while the person is still unnamed.
     ///
     /// - Parameters:
+    ///   - callName: the name the person typed for this call.
     ///   - resolved: the one resolver's name for the person (``personName(_:)``).
     ///   - announcedName: the display name announced inside the call.
     ///   - claimedUsername: the username the person claims, verified or not,
     ///     without `@`.
-    static func name(resolved: String?, announcedName: String?, claimedUsername: String?) -> String? {
-        for candidate in [resolved, announcedName, claimedUsername] {
+    static func name(
+        callName: String? = nil,
+        resolved: String?,
+        announcedName: String?,
+        claimedUsername: String?
+    ) -> String? {
+        for candidate in [callName, resolved, announcedName, claimedUsername] {
             guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty
             else { continue }

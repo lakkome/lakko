@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "me.lakko.desktop.dev",
   "build": {
-    "frontendDist": "../../web/dist"
+    "frontendDist": "../../web/dist-desktop"
   },
   "app": {
     "windows": [],

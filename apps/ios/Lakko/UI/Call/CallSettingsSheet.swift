@@ -3,6 +3,7 @@
 
 import AVFoundation
 import SwiftUI
+import UIKit
 
 /// The call's settings (`docs/ux/calls.md` section 4.1): which microphone,
 /// camera and speaker the call uses.
@@ -13,6 +14,9 @@ import SwiftUI
 ///
 /// Which sections and rows exist is ``CallSettingsModel``; what the platform
 /// offers and how a choice is applied is ``CallDevices``. This file draws.
+///
+/// A group or link call also carries, at the top, the name this person shows
+/// in the call (``CallNameEditor``); a one-to-one call has none.
 struct CallSettingsSheet: View {
     @ObservedObject var state: CallUiState
     @ObservedObject var l10n = Localization.shared
@@ -35,6 +39,10 @@ struct CallSettingsSheet: View {
                 .fontWeight(.semibold)
                 .foregroundColor(Color.lakkoText)
                 .accessibilityAddTraits(.isHeader)
+
+            if state.callNameAvailable {
+                CallNameEditor(state: state)
+            }
 
             if sections.isEmpty {
                 Text(l10n.t("call.settings.no_devices"))
@@ -140,5 +148,66 @@ struct CallSettingsSheet: View {
                 refresh()
             }
         }
+    }
+}
+
+/// The name this person shows in this call (`docs/ux/calls.md` section 4.1):
+/// one field, its placeholder the profile name, and a Save that applies at
+/// once. Empty goes back to the profile name. The profile never changes.
+struct CallNameEditor: View {
+    @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
+    @State private var text = ""
+
+    private var verdict: CallNameField.Verdict {
+        CallNameField.verdict(text: text, current: state.ownCallName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(l10n.t("call.settings.call_name.label"))
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(Color.lakkoTextMuted)
+                .accessibilityAddTraits(.isHeader)
+            HStack(spacing: 8) {
+                TextField(state.callNameDefault, text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.words)
+                    .submitLabel(.done)
+                    .onSubmit(save)
+                    .accessibilityLabel(l10n.t("call.settings.call_name.label"))
+                Button(action: save) {
+                    Text(l10n.t("call.settings.call_name.save"))
+                        .font(.body.weight(.semibold))
+                        .frame(minHeight: CallScreenPresentation.minimumTouchTarget)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canSave)
+            }
+            if case .invalid(let reason) = verdict {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundColor(Color.lakkoDanger)
+            }
+            Text(l10n.t("call.settings.call_name.hint"))
+                .font(.footnote)
+                .foregroundColor(Color.lakkoTextMuted)
+        }
+        .onAppear { text = state.ownCallName }
+    }
+
+    private var canSave: Bool {
+        if case .save = verdict { return true }
+        return false
+    }
+
+    private func save() {
+        guard case .save(let name) = verdict else { return }
+        state.saveCallName(name)
+        text = name
+        let spoken = name.isEmpty
+            ? l10n.t("call.settings.call_name.a11y_cleared")
+            : l10n.t("call.settings.call_name.a11y_saved", texts: ["name": name])
+        UIAccessibility.post(notification: .announcement, argument: spoken)
     }
 }

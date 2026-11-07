@@ -305,6 +305,41 @@ public final class CallUiState: ObservableObject {
     /// that lives as long as the tile, the second an SFU peer id.
     var tileVideoQualitySink: ((ObjectIdentifier, String, TileVideoQuality?) -> Void)?
 
+    // MARK: - The name for this call (`docs/ux/calls.md` section 4.1)
+
+    /// Whether this call can carry a name typed for it: a group or link call
+    /// (SFU) whose adapter registered a save action. A one-to-one call has no
+    /// relay, and its Settings sheet has no name field.
+    @Published private(set) var callNameAvailable = false
+    /// The name this device typed for this call, `""` when none.
+    @Published private(set) var ownCallName = ""
+    /// What the others see when no name is typed (the profile name): the
+    /// field's placeholder, `""` when none.
+    @Published private(set) var callNameDefault = ""
+    /// Applies a saved name to the live call; set by the call's adapter.
+    private var callNameSave: ((String) -> Void)?
+
+    /// The call's adapter: this call carries a name, starting at `ownName`,
+    /// with `defaultName` shown when none is typed; `save` applies a new one.
+    func setCallNameControl(
+        ownName: String,
+        defaultName: String,
+        save: @escaping (String) -> Void
+    ) {
+        ownCallName = ownName
+        callNameDefault = defaultName
+        callNameSave = save
+        callNameAvailable = true
+    }
+
+    /// Save `name` (already normalised; `""` = back to the default) as this
+    /// device's name for the call. Nothing on a call that carries none.
+    func saveCallName(_ name: String) {
+        guard callNameAvailable, let callNameSave else { return }
+        ownCallName = name
+        callNameSave(name)
+    }
+
     /// B2a — mid-call camera-on lifecycle, driven by the bound session
     /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
     /// `SfuCallUi`). `CallScreen` reads this for the camera-button
@@ -865,6 +900,11 @@ public final class CallUiState: ObservableObject {
         self.screenShareLayout = ScreenShareLayoutMemory()
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
+        // The name typed for a call is that call's.
+        self.callNameAvailable = false
+        self.ownCallName = ""
+        self.callNameDefault = ""
+        self.callNameSave = nil
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.

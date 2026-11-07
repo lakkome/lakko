@@ -8,6 +8,9 @@
  * A tile always carries the person's name. One rule for both call kinds, in
  * this order:
  *
+ *   0. the name the person typed for this call (`call-name.ts`, section 4.1,
+ *      2026-11-07): once typed, every device shows it, ahead of the viewer's
+ *      own name for a contact;
  *   1. what the one resolver (`profile/resolver.ts`) calls the person behind
  *      the tile: the viewer's rename, the person's profile name, their
  *      verified `@username`. A key fingerprint is not a name and is skipped;
@@ -33,6 +36,8 @@ import type { ResolvedName } from "../profile/resolver";
 
 /** The inputs of one tile's name. Each is `null` when that source has nothing. */
 export interface TileNameInputs {
+  /** The name the person typed for this call (`call-name.ts`). */
+  readonly callName?: string | null;
   /** The one resolver's name for the person behind the tile
    *  ({@link personNameOrNull}). */
   readonly resolved: string | null;
@@ -44,7 +49,12 @@ export interface TileNameInputs {
 
 /** The name the sources give, or `null` while the person is still unnamed. */
 export function callTileName(inputs: TileNameInputs): string | null {
-  for (const candidate of [inputs.resolved, inputs.announcedName, inputs.claimedUsername]) {
+  for (const candidate of [
+    inputs.callName ?? null,
+    inputs.resolved,
+    inputs.announcedName,
+    inputs.claimedUsername,
+  ]) {
     const name = candidate?.trim() ?? "";
     if (name.length > 0) return name;
   }

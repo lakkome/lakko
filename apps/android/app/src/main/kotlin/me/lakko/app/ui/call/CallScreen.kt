@@ -1066,7 +1066,18 @@ private fun InCallView(
             val chosenCamera by state.devices.camera.collectAsState()
             val chosenOutput by state.devices.audioOutput.collectAsState()
             val chosenInput by state.devices.audioInput.collectAsState()
+            remember(context) { me.lakko.app.calls.NoiseSuppressionSetting.attach(context) }
+            val noiseOn by me.lakko.app.calls.NoiseSuppressionSetting.on.collectAsState()
+            // Section 4.1 — `Your name in this call`, on a group or link call.
+            val callNameControl by state.callNameControl.collectAsState()
+            val ownCallName by state.ownCallName.collectAsState()
+            val callNameDefault by state.callNameDefault.collectAsState()
             CallSettingsSheet(
+                noiseSuppressionOn = noiseOn,
+                onNoiseSuppressionChange = { me.lakko.app.calls.NoiseSuppressionSetting.set(it) },
+                callNameControl = callNameControl,
+                ownCallName = ownCallName,
+                callNameDefault = callNameDefault,
                 sections = callSettingsSections(
                     devices = callSettingsSheetDevices(inputs, cameras, outputs, strings),
                     selection = SettingsSelection(

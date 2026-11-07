@@ -509,6 +509,10 @@ dev-web:
 # test stack. A release build must not set either.
 build-desktop-web:
     cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_SFU_URL="${VITE_LAKKO_SFU_URL:-wss://test.lakko.me/sfu}" VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
+    # The desktop app embeds its own copy: a browser build for the test
+    # deploy writes the same `dist/` and must not end up inside the app
+    # (seen 2026-11-07).
+    rsync -a --delete apps/web/dist/ apps/web/dist-desktop/
 
 # Build, sign and run the desktop app (macOS debug build).
 #
@@ -523,7 +527,7 @@ build-desktop-web:
 # microphone but not the camera, the camera was refused with no prompt
 # (tccd: "requires entitlement com.apple.security.device.camera but it is
 # missing for responsible=com.anthropic.claude-code"), 2026-11-07. The log
-# goes to target/debug/lakko-desktop.log and is followed here; Ctrl-C stops
+# goes to ~/Library/Logs/Lakko/lakko-desktop-dev.log and is followed here; Ctrl-C stops
 # the app.
 #
 # The linker only ad-hoc signs a debug binary, with an identifier derived
@@ -594,7 +598,12 @@ dev-desktop:
         echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
     fi
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
-    log=target/debug/lakko-desktop.log
+    # The log lives under ~/Library/Logs: `open` hands the launch to Launch
+    # Services, which refused (-10810) to redirect output to a file on the
+    # external volume this checkout sits on (seen 2026-11-07); a file in the
+    # home folder works.
+    mkdir -p "$HOME/Library/Logs/Lakko"
+    log="$HOME/Library/Logs/Lakko/lakko-desktop-dev.log"
     : > "$log"
     # `open` starts the app without this shell's environment; pass on what
     # the host reads at run time.
@@ -603,7 +612,7 @@ dev-desktop:
         case "$name" in LAKKO_DESKTOP_*) env_args+=(--env "$name=${!name}") ;; esac
     done
     exe="$PWD/$app/Contents/MacOS/lakko-desktop"
-    open -n -W --stdout "$log" --stderr "$log" "${env_args[@]}" "$app" &
+    open -n -W --stdout "$log" --stderr "$log" "${env_args[@]}" "$PWD/$app" &
     open_pid=$!
     tail -n +1 -f "$log" &
     tail_pid=$!

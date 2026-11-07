@@ -13,7 +13,8 @@
 #   1. Pick the right NDK toolchain (clang++ + sysroot + target
 #      triple).
 #   2. Compile apps/shared/sframe-bridge/sframe-bridge.cc +
-#      apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc.
+#      apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc +
+#      apps/android/lakko-sframe/src/main/cpp/noise_jni.cc.
 #   3. Link against the cross-compiled
 #      target/<triple>/release/liblakko_sframe_native.a.
 #   4. Emit a single libsframe_jni.so under
@@ -109,9 +110,13 @@ COMMON_INCLUDES=(
 #   - sframe-bridge.cc — webrtc::FrameEncryptor / Decryptor
 #                       subclass (N-3)
 #   - sframe_jni.cc    — JNI trampoline (this sub-sprint)
+#   - noise_jni.cc     — JNI for the capture noise suppressor
+#                        (ADR-0088), over the lakko_noise_* C ABI of the
+#                        same archive. Plain C++, no vtables.
 SRC=(
     "$ROOT/apps/shared/sframe-bridge/sframe-bridge.cc"
     "$ROOT/apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc"
+    "$ROOT/apps/android/lakko-sframe/src/main/cpp/noise_jni.cc"
 )
 
 OUT_BASE="$ROOT/apps/android/lakko-sframe/src/main/jniLibs"

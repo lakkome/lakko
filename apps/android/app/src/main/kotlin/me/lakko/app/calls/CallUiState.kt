@@ -224,6 +224,37 @@ public class CallUiState(
     }
 
     /**
+     * `Your name in this call` (`docs/ux/calls.md` section 4.1, `CallName.kt`):
+     * what the Settings sheet's name field saves through, or `null` on a call
+     * that cannot carry a call name (a one-to-one call). Written by the SFU
+     * call adapters.
+     */
+    private val _callNameControl = MutableStateFlow<CallNameControl?>(null)
+    public val callNameControl: StateFlow<CallNameControl?> = _callNameControl.asStateFlow()
+
+    /** The name this device typed for the call (`""` = none). */
+    private val _ownCallName = MutableStateFlow("")
+    public val ownCallName: StateFlow<String> = _ownCallName.asStateFlow()
+
+    /** What others see when no call name is set (the profile name), the
+     *  placeholder of the name field; `""` when none. */
+    private val _callNameDefault = MutableStateFlow("")
+    public val callNameDefault: StateFlow<String> = _callNameDefault.asStateFlow()
+
+    /** The call can carry a call name: the sheet's field saves through
+     *  [control]; [own] is the name already set, [default] the profile name. */
+    public fun setCallNameControl(control: CallNameControl?, own: String, default: String) {
+        _ownCallName.value = own
+        _callNameDefault.value = default
+        _callNameControl.value = control
+    }
+
+    /** This device's name for the call changed. */
+    public fun setOwnCallName(name: String) {
+        _ownCallName.value = name
+    }
+
+    /**
      * Who holds the floor and who held it last, as the stage of the Focus
      * layout reads it. Written by [setSpeech]; [StageSpeech.None] until a level
      * has been heard, in which case the stage falls back to the roster.
@@ -886,6 +917,11 @@ public class CallUiState(
         _remoteVideoGiven.value = emptyMap()
         tileVideoQualityReporter = null
         tileVideoQualityReports.clear()
+        // A name typed for the call is per call (remembered by call id
+        // elsewhere, `RememberedCallNames`).
+        _callNameControl.value = null
+        _ownCallName.value = ""
+        _callNameDefault.value = ""
         // A share is per call.
         _screenShare.value = null
         choiceBeforeShare = null

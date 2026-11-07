@@ -408,9 +408,9 @@ pub fn reaction_chips(
                 {
                     ChipFace::Avatars(s.reactors.clone())
                 },
-                ChipConversation::OneToOne | ChipConversation::Group | ChipConversation::Channel => {
-                    ChipFace::Count(s.count)
-                },
+                ChipConversation::OneToOne
+                | ChipConversation::Group
+                | ChipConversation::Channel => ChipFace::Count(s.count),
             },
         })
         .collect();

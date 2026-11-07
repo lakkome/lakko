@@ -90,10 +90,13 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The ledger could not be asked for the link (the network, a server
     /// error): the link may be fine, the screen offers it again.
     @Published public private(set) var openFailed = false
-    /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
-    /// prefilled with "<adjective> <animal>" from the shared rule
-    /// (`lakko_ui_rules::guest_name`). It becomes the new account's own profile.
-    @Published public var guestName: String = LakkoCore.guestName(random: UInt64.random(in: .min ... .max))
+    /// `docs/ux/call-links.md` section 9.1 — a guest (no session, or a guest
+    /// account still on this device) is asked for a name here, prefilled with
+    /// a NEW "<adjective> <animal>" every time the landing opens (the shared
+    /// rule `lakko_ui_rules::guest_name`). It is the name in the call; a new
+    /// guest's account also takes it as its profile name, a returning
+    /// guest's profile is not touched.
+    @Published public var guestName: String
     /// ADR-0054 S4 — the guest account is being created (the one heavy proof
     /// of work): `Getting you into the call...` with the signup line below.
     @Published public private(set) var creatingGuest = false
@@ -111,6 +114,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     private let slug: String
     private let authRepository: AuthRepository
+    /// Whether this device has a session, and whether that session is a guest
+    /// account. The auth repository in the app; a test replaces them.
+    private let hasSession: @MainActor () -> Bool
+    private let isGuestSession: @MainActor () -> Bool
     private let guestSignup: GuestSignup
     private let intake: InviteIntake
     /// The call itself lives here, app-wide, so it survives this screen.
@@ -118,6 +125,11 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var didDecode = false
     private let landingToken = UUID()
     private var hostSubscription: AnyCancellable?
+    private var opensSubscription: AnyCancellable?
+    /// The open of the link this model last saw (``InviteIntake/callJoinOpens``).
+    private var linkOpen: UInt64?
+    /// Draws a guest name: the shared rule in the app, a test replaces it.
+    private let drawGuestName: () -> String
     // Synchronous double-tap latches (set BEFORE any await), so a rapid second
     // tap can't mint a SECOND guest account or start a second call (Hardening 3).
     private var mintingGuest = false
@@ -128,10 +140,19 @@ public final class JoinCallLandingViewModel: ObservableObject {
         authRepository: AuthRepository,
         intake: InviteIntake,
         linkCallHost: LinkCallHost,
-        guestSignup: GuestSignup? = nil
+        guestSignup: GuestSignup? = nil,
+        hasSession: (@MainActor () -> Bool)? = nil,
+        isGuestSession: (@MainActor () -> Bool)? = nil,
+        drawGuestName: @escaping () -> String = {
+            LakkoCore.guestName(random: UInt64.random(in: .min ... .max))
+        }
     ) {
         self.slug = slug
         self.authRepository = authRepository
+        self.hasSession = hasSession ?? { [authRepository] in authRepository.identitySecrets != nil }
+        self.isGuestSession = isGuestSession ?? { [authRepository] in authRepository.isGuest }
+        self.guestName = drawGuestName()
+        self.drawGuestName = drawGuestName
         self.guestSignup = guestSignup ?? { [authRepository] onCommitting, onAccountReady in
             try await authRepository.signupGuest(
                 onCommitting: onCommitting, onAccountReady: onAccountReady)
@@ -141,6 +162,27 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // The host's slot is what this screen shows once the call is started.
         hostSubscription = linkCallHost.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
+        // The same link opened again while this landing shows: a new name.
+        // The current number arrives at once and is this model's first open.
+        opensSubscription = intake.$callJoinOpens
+            .sink { [weak self] open in
+                MainActor.assumeIsolated { self?.onLinkOpened(open) }
+            }
+    }
+
+    /// The link was opened, `open` numbering the opens
+    /// (``InviteIntake/callJoinOpens``). Every open after the first this
+    /// model saw draws a new guest name, so the name of an earlier visit is
+    /// never offered again. The same open seen twice draws nothing, and
+    /// nothing is drawn while a guest sign-up or its parked join is under
+    /// way, so a name being used for a join is never replaced.
+    func onLinkOpened(_ open: UInt64) {
+        let before = linkOpen
+        if before == open { return }
+        linkOpen = open
+        guard before != nil else { return }
+        if mintingGuest || guestTask != nil || intake.callJoinAutoResume { return }
+        guestName = drawGuestName()
     }
 
     /// The phase shown: the host's, once the host holds this link's call (or
@@ -184,9 +226,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // flag is only consumed when we actually have a valid, live-session
         // decode.
         if let decoded, decoded.valid,
-            authRepository.identitySecrets != nil,
+            hasSession(),
             intake.consumeCallJoinAutoResume() {
-            await beginJoin(decoded)
+            // The name the guest typed before its account existed.
+            await beginJoin(decoded, callName: intake.takeCallJoinGuestName())
         }
     }
 
@@ -211,8 +254,18 @@ public final class JoinCallLandingViewModel: ObservableObject {
             localPhase = .busy(busy)
             return
         }
-        if authRepository.identitySecrets != nil {
-            await beginJoin(decoded)
+        if hasSession() {
+            // A guest account still on this device joins under the name typed
+            // here, as the call's name; its profile is not touched.
+            var callName: String?
+            if showsGuestNameField(decoded) {
+                if guestNameError != nil {
+                    localPhase = .error(UiText { [weak self] in self?.guestNameError ?? "" })
+                    return
+                }
+                callName = Self.callName(fromTyped: guestName)
+            }
+            await beginJoin(decoded, callName: callName)
             return
         }
         // No session — mint a guest account. Its session lands at once and the
@@ -227,8 +280,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
         let nameSnapshot = guestName
         mintingGuest = true
         localPhase = .starting
-        // Arm auto-resume BEFORE the await so the re-mounted landing continues.
-        intake.armCallJoinAutoResume()
+        // Arm auto-resume BEFORE the await so the re-mounted landing continues,
+        // and with it the name, which the call carries as its name.
+        intake.armCallJoinAutoResume(guestName: Self.callName(fromTyped: nameSnapshot))
         creatingGuest = true
         guestCommitting = false
         let task = Task { @MainActor [guestSignup] in
@@ -269,6 +323,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
             // Nothing landed, so nothing is resumed. The slug stays parked:
             // the landing stays up for the retry.
             _ = intake.consumeCallJoinAutoResume()
+            _ = intake.takeCallJoinGuestName()
             if task.isCancelled || error is CancellationError {
                 // Back / Cancel while the account was being created.
                 localPhase = .idle
@@ -293,7 +348,33 @@ public final class JoinCallLandingViewModel: ObservableObject {
     }
 
     /// `true` when this device has no session, so joining creates a guest.
-    public var joinsAsGuest: Bool { authRepository.identitySecrets == nil }
+    public var joinsAsGuest: Bool { !hasSession() }
+
+    /// Whether the landing asks for a name (`docs/ux/call-links.md` section
+    /// 9.1): to a visitor with no session and to a guest account, never to
+    /// the link's owner and never to a real account.
+    func showsGuestNameField(_ decoded: Decoded) -> Bool {
+        Self.showsGuestNameField(
+            hasSession: hasSession(), isGuest: isGuestSession(), isOwner: decoded.isOwner)
+    }
+
+    /// The rule of ``showsGuestNameField(_:)``.
+    static func showsGuestNameField(hasSession: Bool, isGuest: Bool, isOwner: Bool) -> Bool {
+        !isOwner && (!hasSession || isGuest)
+    }
+
+    /// The call name a typed guest name gives: normalised by the display-name
+    /// rule, `""` for a blank field (no call name), `nil` when the rule
+    /// refuses it.
+    static func callName(fromTyped text: String) -> String? {
+        // Not `try?`: it would flatten a blank field (`nil`) and a refusal
+        // into one answer.
+        do {
+            return try checkDisplayName(text) ?? ""
+        } catch {
+            return nil
+        }
+    }
 
     /// A guest account was just deleted on this device (`No, thanks`); the
     /// landing says so above the Join button.
@@ -448,7 +529,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     /// Hand the ADR-0032 host / join to the app-level ``LinkCallHost`` now that
     /// a live session exists.
-    private func beginJoin(_ decoded: Decoded) async {
+    private func beginJoin(_ decoded: Decoded, callName: String? = nil) async {
         // Synchronous latch (Hardening 3): a rapid double-tap must not reach the
         // host twice before its slot is written. The host is idempotent for the
         // same call too (`alreadyInThisCall`).
@@ -468,7 +549,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
             ownerAccountId: decoded.ownerAccountId,
             ownerSignatureKey: decoded.ownerSignatureKey,
             mediaVideo: decoded.mediaVideo,
-            isOwner: decoded.isOwner
+            isOwner: decoded.isOwner,
+            initialCallName: callName
         )
         let outcome = await Cancellation.shielded { await host.start(request) }
         beginning = false
@@ -602,10 +684,14 @@ public struct JoinCallLandingScreen: View {
     private func content(_ decoded: JoinCallLandingViewModel.Decoded) -> some View {
         switch viewModel.phase {
         case .idle:
-            if viewModel.joinsAsGuest {
-                // ADR-0048 — the name the people in this call's chats see.
+            if viewModel.showsGuestNameField(decoded) {
+                // `docs/ux/call-links.md` section 9.1 — the name everyone in
+                // this call sees.
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField(l10n.t("settings.profile.name.label"), text: $viewModel.guestName)
+                    Text(l10n.t("call.link.guest_name.label"))
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TextField(l10n.t("call.link.guest_name.label"), text: $viewModel.guestName)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.words)
                     if let error = viewModel.guestNameError {
@@ -619,7 +705,7 @@ public struct JoinCallLandingScreen: View {
                 Task { await viewModel.onStart(decoded) }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(viewModel.joinsAsGuest && viewModel.guestNameError != nil)
+            .disabled(viewModel.showsGuestNameField(decoded) && viewModel.guestNameError != nil)
             // No login required: a visitor with no session joins as a guest,
             // and is told so before pressing.
             if viewModel.joinsAsGuest && !decoded.isOwner {

@@ -23,6 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
  * and username name a peer only when that peer announced the very leaf that
  * sealed the profile: a relayed copy of someone else's profile names nobody.
  *
+ * A name the peer typed for this call ([callNamed], `CallName.kt`) outranks
+ * all of that, on every device.
+ *
  * The name is read when asked, so a profile that arrives mid-call, or a
  * contact renamed, reaches a tile already on screen through [reapply], which
  * the host runs whenever the profile directory moves.
@@ -51,6 +54,9 @@ public class CallPeerNames(
 
     /** SFU peer id -> the username that peer's own sealed profile claims. */
     private val claimedUsernames = ConcurrentHashMap<String, String>()
+
+    /** SFU peer id -> the name that peer typed for this call (`CallName.kt`). */
+    private val callNames = ConcurrentHashMap<String, String>()
 
     /** The tile name of [peerId], which is now on the roster; empty while it
      *  is unnamed. */
@@ -94,6 +100,17 @@ public class CallPeerNames(
         putOrRemove(claimedUsernames, peerId, username)
     }
 
+    /**
+     * [peerId] typed [name] for this call (verified by the session against the
+     * leaf key its announcement named), or went back to its default naming
+     * (`null`). Returns whether that changed anything.
+     */
+    public fun callNamed(peerId: String, name: String?): Boolean {
+        val trimmed = name?.trim()
+        val before = if (trimmed.isNullOrEmpty()) callNames.remove(peerId) else callNames.put(peerId, trimmed)
+        return before != trimmed?.takeIf { it.isNotEmpty() }
+    }
+
     /** [peerId] left: a later peer under the same id starts unnamed. */
     public fun forget(peerId: String) {
         peers.remove(peerId)
@@ -101,6 +118,7 @@ public class CallPeerNames(
         memberKeys.remove(peerId)
         announcedNames.remove(peerId)
         claimedUsernames.remove(peerId)
+        callNames.remove(peerId)
     }
 
     /** Re-run the naming rule for every remote tile on [ui]. [participantIdOf]
@@ -118,6 +136,7 @@ public class CallPeerNames(
             resolved = person?.let { safely { personName(it) } },
             announcedName = announcedNames[peerId],
             claimedUsername = claimedUsernames[peerId] ?: person?.let { safely { storedUsername(it) } },
+            callName = callNames[peerId],
         ).orEmpty()
     }
 

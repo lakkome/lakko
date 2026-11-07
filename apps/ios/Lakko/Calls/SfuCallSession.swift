@@ -128,6 +128,10 @@ final class SfuCallSession {
         /// ``SfuCallSession/peerAnnounceIntervalMs``); a verified one fires
         /// ``Callbacks/onPeerIdentified``. `nil`: nobody is named (tests).
         var peerAnnouncer: CallPeerAnnouncer? = nil
+        /// The call id, lower-case hex: the key a name typed for this call is
+        /// remembered under for a rejoin in this app run (``CallNameMemory``).
+        /// `nil`: nothing is remembered (tests).
+        var callIdHex: String? = nil
     }
 
     /// How often a device re-announces who it is to the call (ADR-0078
@@ -218,6 +222,11 @@ final class SfuCallSession {
         /// video track under `<peer>~screen`. Its own tile, never a picture
         /// of the person's camera, and never in `video-wants`.
         var onRemoteScreenVideoTrack: ((RTCVideoTrack?, _ peerId: String) -> Void)? = nil
+        /// A peer's name for this call changed (`docs/ux/calls.md` section
+        /// 4.1, ``CallNameChannel``): signed with the leaf key that peer's
+        /// announcement verified with, newest per peer. `nil` when the peer
+        /// went back to its default naming.
+        var onRemoteCallName: ((_ peerId: String, _ name: String?) -> Void)? = nil
     }
 
     private let config: Config
@@ -309,6 +318,25 @@ final class SfuCallSession {
     private let relay = CallRelay()
     /// The periodic peer re-announcement.
     private var announceTask: Task<Void, Never>?
+    /// This device's name for the call and the newest one per peer
+    /// (``CallNameChannel``). Re-sent after every announcement.
+    private lazy var callNames = CallNameChannel(deps: CallNameChannel.Deps(
+        compose: { [weak self] selfPeerId, seq, name in
+            self?.config.peerAnnouncer?.composeCallName(selfPeerId, seq, name)
+        },
+        verify: { [weak self] from, signerKey, bytes in
+            self?.config.peerAnnouncer?.verifyCallName(from, signerKey, bytes)
+        },
+        sendSealed: { [weak self] plaintext in
+            guard let self, self.signaling != nil, let sealed = self.relay.seal(plaintext) else {
+                return false
+            }
+            self.sendSignalRelayToCall(payload: sealed)
+            return true
+        },
+        selfPeerId: { [weak self] in self?.selfPeerId },
+        onName: { [weak self] peerId, name in self?.callbacks.onRemoteCallName?(peerId, name) }
+    ))
 
     // ---- What this device shows of each person (ADR-0070 steps 5 and 6) ----
     /// The SFU's id for this device, from the Welcome.
@@ -433,6 +461,17 @@ final class SfuCallSession {
               let sealed = relay.seal(announcement)
         else { return }
         sendSignalRelayToCall(payload: sealed)
+        // The name for this call follows the announcement it is checked
+        // against (a newcomer, a rekey, the periodic re-announcement).
+        callNames.resend()
+    }
+
+    /// Set this device's name for the call (`docs/ux/calls.md` section 4.1):
+    /// `name` has passed the display-name rule; `""` goes back to the
+    /// default. Sent at once when the call can carry it, and again after
+    /// every announcement, so someone who joins later sees it too.
+    func setOwnCallName(_ name: String) {
+        callNames.setOwnName(name)
     }
 
     private func startAnnouncing() {
@@ -1221,6 +1260,7 @@ final class SfuCallSession {
                     self.screenShares.participantLeft(signerKey: signer) {
                     self.callbacks.onScreenShareChanged?(self.screenShares.current)
                 }
+                self.callNames.peerLeft(peerId)
                 self.callbacks.onPeerLeft?(peerId)
             }
         }
@@ -1282,9 +1322,12 @@ final class SfuCallSession {
                 if let identity = config.peerAnnouncer?.verify(from, announcement) {
                     if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }
                     callbacks.onPeerIdentified?(from, identity)
+                    callNames.peerIdentified(from, signerKey: identity.signatureKey)
                 }
             case .screenShare(let state):
                 receiveScreenShare(from: from, state: state)
+            case .callName(let name):
+                callNames.received(from: from, bytes: name)
             case .unknown:
                 break
             }

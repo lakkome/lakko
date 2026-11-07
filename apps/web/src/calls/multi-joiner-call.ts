@@ -75,6 +75,7 @@ import {
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import { groupPeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
+import { callNameActions, rememberCallName, rememberedCallName } from "./call-name";
 import {
   CallPresence,
   electActingCommitterLeaf,
@@ -152,6 +153,13 @@ export interface MultiJoinerCallOptions {
   /** The name on the local tile (§4.4: the user's own profile name). Defaults
    *  to "You". */
   readonly localDisplayName?: string;
+  /** The name this person typed for this call (`docs/ux/calls.md` section
+   *  4.1): a guest's name from the link page. Absent: the name typed for
+   *  this call earlier in this app run, else none. */
+  readonly initialCallName?: string;
+  /** The user's own profile name (`""` when none): the placeholder of the
+   *  call-name field. */
+  readonly profileName?: string;
   /** The user's own ADR-0048 profile envelope, or `null` when none is set.
    *  Sealed into the call's MLS group and relayed, so every other member — a
    *  guest with no contact list included — names this tile (§4.4). The SFU
@@ -262,6 +270,11 @@ export class MultiJoinerCall {
    *  name learnt this way outranks the contact-list resolver: it is what the
    *  person calls themself, sealed under a key only members hold. */
   private readonly peerNames = new Map<string, string>();
+  /** The name each peer typed for this call (`call-name.ts`); it outranks
+   *  every other source (`tile-name.ts`). */
+  private readonly peerCallNames = new Map<string, string>();
+  /** The name this device typed for this call (`""` = none). */
+  private ownCallName = "";
   /** SFU peer id -> the person (base64 account key) whose sealed profile
    *  that peer relayed. */
   private readonly peerPersons = new Map<string, string>();
@@ -438,6 +451,11 @@ export class MultiJoinerCall {
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
         onRemoteScreenShareState: (peerId, state): void => this.share.onState(peerId, state),
+        onRemoteCallName: (peerId, name): void => {
+          if (name === null) this.peerCallNames.delete(peerId);
+          else this.peerCallNames.set(peerId, name);
+          this.renameTile(peerId);
+        },
         onLocalStream: (stream): void => this.setLocalStream(stream),
         onVideoPublishState: (state): void => this.setVideoPublishState(state),
         onCaptureFallback: (fallback): void => this.onCaptureFallback(fallback),
@@ -448,6 +466,26 @@ export class MultiJoinerCall {
     // call token (ADR-0078 section 2). Fail-soft: none leaves the call on
     // STUN.
     this.session.setTurnProvider(async () => turn);
+
+    // The name this device typed for the call (`docs/ux/calls.md` 4.1).
+    const callIdHex = groupIdHex(opts.callId);
+    this.ownCallName = opts.initialCallName ?? rememberedCallName(callIdHex);
+    rememberCallName(callIdHex, this.ownCallName);
+    this.session.setOwnCallName(this.ownCallName);
+    if (this.current()) {
+      callNameActions.setOwnName(this.ownCallName);
+      callNameActions.setDefaultName(opts.profileName ?? "");
+      callNameActions.setControl({
+        save: (name: string): void => {
+          this.ownCallName = name;
+          rememberCallName(callIdHex, name);
+          this.session.setOwnCallName(name);
+          if (!this.current()) return;
+          callNameActions.setOwnName(name);
+          callActions.setParticipantName("local", this.localName());
+        },
+      });
+    }
   }
 
   /** Section 4.4: the device lacked what the call asked for. Turn the missing
@@ -688,6 +726,7 @@ export class MultiJoinerCall {
     this.lastKnownCameraOn.clear();
     this.share.dispose();
     if (this.current()) screenShareActions.reset();
+    if (this.current()) callNameActions.reset();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
     this.setRemoteLightStreams(() => new Map());
@@ -844,6 +883,7 @@ export class MultiJoinerCall {
     // the same id starts from a clean slate (join-race guard).
     this.lastKnownCameraOn.delete(id);
     this.peerNames.delete(peerId);
+    this.peerCallNames.delete(peerId);
     this.peerUsernames.delete(peerId);
     this.peerPersons.delete(peerId);
     this.namingInputs.delete(peerId);
@@ -1364,6 +1404,7 @@ export class MultiJoinerCall {
     // (`tile-name.ts`).
     return (
       callTileName({
+        callName: this.peerCallNames.get(peerId) ?? null,
         resolved:
           person === undefined ? null : (this.opts.resolvePersonName?.(person) ?? null),
         announcedName: this.peerNames.get(peerId) ?? null,
@@ -1372,10 +1413,17 @@ export class MultiJoinerCall {
     );
   }
 
+  /** The own tile's name: the name typed for the call, else the profile
+   *  name, else "You". */
+  private localName(): string {
+    if (this.ownCallName !== "") return this.ownCallName;
+    return this.opts.localDisplayName ?? t("call.participant.you");
+  }
+
   private localParticipant(): Participant {
     return {
       id: "local",
-      displayName: this.opts.localDisplayName ?? t("call.participant.you"),
+      displayName: this.localName(),
       isLocal: true,
       // See `sfu-call-ui.ts`: `media.audio` is always true on web, so a muted
       // start is carried in the store instead (docs/ux/calls.md section 3.2).

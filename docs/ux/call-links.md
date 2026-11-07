@@ -228,13 +228,30 @@ want an account is a question for after the call.
 
 ### 9.1 The flow
 
-1. **The link page.** A name field prefilled `Guest`, `Join call`, and one
-   line under the button: `You join as a guest. No account is needed.`
+1. **The link page.** A name field, `Join call`, and one line under the
+   button: `You join as a guest. No account is needed.` The field is
+   prefilled with a new random two-word name (`<adjective> <animal>`, the
+   shared rule `lakko_ui_rules::guest_name`) **every time the page opens**,
+   never the name of an earlier visit; the person may replace it, and a text
+   that fails the display-name rule disables `Join call`. `Guest` only when
+   the core cannot be loaded. The field is there for a visitor with no
+   account AND for a guest whose guest account from an earlier link is still
+   on the device (amended 2026-11-07: until then such a guest saw no field
+   and was shown under the first random name for every later call, because
+   that name had become the guest account's profile name). It is absent for
+   a signed-in person with a real account, who is shown under their profile
+   name and can change the name for the call in the call's Settings
+   (`calls.md` section 4.1).
 2. **`Join call`.** A guest account is made silently (the busy row of
    [`anti-abuse.md`](anti-abuse.md) section 1 while it is) and the call starts.
    No recovery phrase, no username, no password, no notification prompt.
 3. **In the call** a guest is a participant like any other, under the name
-   they typed. `Invite contacts` is absent (section 3): a guest has no
+   they typed: it is sent as their name for this call (`calls.md` 4.1), so
+   every participant's tile shows it, and they can change it in the call's
+   Settings like anyone else. When the guest account is made, the same name
+   also becomes its profile name (so `Create account` keeps it); a later
+   link visit with the same guest account sends the newly typed name for
+   that call and does not touch the profile name. `Invite contacts` is absent (section 3): a guest has no
    contacts.
 4. **A guest never lands in the app.** Its chat list, contacts and settings
    are an empty shell for someone with no account of their own. Wherever the

@@ -41,6 +41,8 @@ sys_includes = ["stddef.h", "stdint.h"]
 "ParticipantKey" = "lakko_sframe_participant_key_t"
 "CallKeyRing" = "lakko_sframe_call_key_ring_t"
 "LakkoSframeStatus" = "lakko_sframe_status_t"
+"LakkoNoiseSuppressor" = "lakko_noise_suppressor_t"
+"LakkoNoiseStatus" = "lakko_noise_status_t"
 
 [enum]
 # `rename_variants = "ScreamingSnakeCase"` plus `prefix_with_name`

@@ -17,6 +17,8 @@
 //! - `composeCallScreenShare`, `verifyCallScreenShare` and
 //!   `CallScreenShareState` - the signed screen-share state and the
 //!   one-share-per-call fold of ADR-0083 (`lakko_calls::screen_share`).
+//! - `composeCallName`, `verifyCallName`, `callNameIsNewer` - the name a
+//!   participant gives themself for one call (`lakko_calls::call_name`).
 //!
 //! A refusal throws an `Error` whose `callRelayError` own property is the
 //! frozen code (`badLength`, `unknownVersion`, `notOpened`, `wrongDomain`,
@@ -26,6 +28,7 @@
 //!
 //! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
+use lakko_calls::call_name as names;
 use lakko_calls::relay::{self as core, RelayError, RelayPayload, CALL_ID_LEN};
 use lakko_calls::screen_share::{self as share, ShareId, ShareStatus};
 use wasm_bindgen::prelude::*;
@@ -114,12 +117,13 @@ pub struct CallRelayPayload {
     camera_on: bool,
     announcement: Vec<u8>,
     state: Vec<u8>,
+    call_name: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl CallRelayPayload {
-    /// `"peer-announcement"`, `"media-state"`, `"screen-share"` or
-    /// `"unknown"`.
+    /// `"peer-announcement"`, `"media-state"`, `"screen-share"`,
+    /// `"call-name"` or `"unknown"`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn kind(&self) -> String {
@@ -146,6 +150,14 @@ impl CallRelayPayload {
     pub fn state(&self) -> Vec<u8> {
         self.state.clone()
     }
+
+    /// For `"call-name"`: the whole call name; verify it with
+    /// `verifyCallName`.
+    #[wasm_bindgen(getter, js_name = callName)]
+    #[must_use]
+    pub fn call_name(&self) -> Vec<u8> {
+        self.call_name.clone()
+    }
 }
 
 /// Classify an opened relay plaintext.
@@ -158,24 +170,35 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
             camera_on: false,
             announcement,
             state: Vec::new(),
+            call_name: Vec::new(),
         },
         RelayPayload::MediaState { camera_on } => CallRelayPayload {
             kind: "media-state",
             camera_on,
             announcement: Vec::new(),
             state: Vec::new(),
+            call_name: Vec::new(),
         },
         RelayPayload::ScreenShare(state) => CallRelayPayload {
             kind: "screen-share",
             camera_on: false,
             announcement: Vec::new(),
             state,
+            call_name: Vec::new(),
+        },
+        RelayPayload::CallName(call_name) => CallRelayPayload {
+            kind: "call-name",
+            camera_on: false,
+            announcement: Vec::new(),
+            state: Vec::new(),
+            call_name,
         },
         RelayPayload::Unknown => CallRelayPayload {
             kind: "unknown",
             camera_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
+            call_name: Vec::new(),
         },
     }
 }
@@ -432,6 +455,114 @@ pub fn verify_call_screen_share(
     })
 }
 
+/// Compose this device's name for the call: `name` (empty to go back to the
+/// default naming) numbered `seq` (1, 2, 3, ... for the life of `peerId`)
+/// for call `callId` under SFU `peerId`, signed with `identity`'s leaf key.
+/// `name` must already be normalised (`normalizeDisplayName`). Seal it with
+/// `CallRelayKey.seal`.
+///
+/// # Errors
+///
+/// `callIdLength`, `malformed` (a bad peer id, a seq of 0 or a bad name) or
+/// `identityKeyMismatch`.
+#[wasm_bindgen(js_name = composeCallName)]
+pub fn compose_call_name(
+    identity: &Identity,
+    call_id: &[u8],
+    peer_id: &str,
+    seq: u64,
+    name: &str,
+) -> Result<Vec<u8>, JsValue> {
+    names::compose_call_name(
+        identity.mls_identity(),
+        &call_id16(call_id)?,
+        peer_id,
+        seq,
+        name,
+    )
+    .map_err(relay_err)
+}
+
+/// A call name that verified against the call's roster.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct VerifiedCallName {
+    peer_id: String,
+    seq: u64,
+    name: Option<String>,
+    account_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl VerifiedCallName {
+    /// The sender's peer id.
+    #[wasm_bindgen(getter, js_name = peerId)]
+    #[must_use]
+    pub fn peer_id(&self) -> String {
+        self.peer_id.clone()
+    }
+
+    /// The name's sequence number; keep the greatest per peer.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The name, `undefined` when the sender went back to its default
+    /// naming.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    /// The account key the signer's leaf resolves to: the person.
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+}
+
+/// Verify a call name. `peerId` is the relay `from`, `peerSignerKey` the
+/// signature key of that peer's verified announcement.
+///
+/// # Errors
+///
+/// Any refusal (`wrongCall`, `wrongPeer`, `notAMember`, `noAccount`,
+/// `badSignature`, a decode code, `callIdLength`): drop it.
+#[wasm_bindgen(js_name = verifyCallName)]
+pub fn verify_call_name(
+    group: &Group,
+    call_id: &[u8],
+    peer_id: &str,
+    peer_signer_key: &[u8],
+    name: &[u8],
+) -> Result<VerifiedCallName, JsValue> {
+    let call_id = call_id16(call_id)?;
+    let g = group
+        .mls_group()
+        .lock()
+        .map_err(|_| coded_error("group lock poisoned", PROPERTY, "lockPoisoned"))?;
+    let v =
+        names::verify_call_name(&g, &call_id, peer_id, peer_signer_key, name).map_err(relay_err)?;
+    Ok(VerifiedCallName {
+        peer_id: v.peer_id,
+        seq: v.seq,
+        name: v.name,
+        account_key: v.account_key,
+    })
+}
+
+/// Whether a call name numbered `incomingSeq` replaces the one held for the
+/// same peer (`storedSeq`, `undefined` when none is held): strictly greater.
+#[wasm_bindgen(js_name = callNameIsNewer)]
+#[must_use]
+pub fn call_name_is_newer(incoming_seq: u64, stored_seq: Option<u64>) -> bool {
+    names::call_name_is_newer(incoming_seq, stored_seq)
+}
+
 /// The share a call is showing now.
 #[wasm_bindgen]
 pub struct CallCurrentScreenShare {
@@ -595,5 +726,15 @@ mod tests {
         assert_eq!(payload.kind, "media-state");
         assert!(payload.camera_on);
         assert_eq!(classify_call_relay_plaintext(b"x").kind, "unknown");
+    }
+
+    #[test]
+    fn a_call_name_classifies_as_call_name() {
+        let alice = lakko_mls::Identity::from_seed(&[1; 32]).expect("alice");
+        let wire = names::compose_call_name(&alice, &[9; 16], "a", 1, "Anna").expect("compose");
+        let payload = classify_call_relay_plaintext(&wire);
+        assert_eq!(payload.kind, "call-name");
+        assert_eq!(payload.call_name, wire);
+        assert!(call_name_is_newer(1, None) && !call_name_is_newer(1, Some(1)));
     }
 }

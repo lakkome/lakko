@@ -46,6 +46,10 @@ final class LinkCallHost: ObservableObject {
         let ownerSignatureKey: Data
         let mediaVideo: Bool
         let isOwner: Bool
+        /// The name typed on the link page for this call (a guest's,
+        /// `docs/ux/call-links.md` section 9.1), shown and announced as the
+        /// call name; the profile is not written. `nil`: none typed.
+        var initialCallName: String? = nil
     }
 
     /// Everything the host needs from outside, injectable for tests.
@@ -616,6 +620,7 @@ extension LinkCallHost {
                     // the first second, and the same profile is announced to
                     // every other member inside the call group.
                     localDisplayName: GroupCallHost.ownTileName(),
+                    initialCallName: request.initialCallName,
                     ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelopeForCall() }
                 )
                 if request.isOwner {

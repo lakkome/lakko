@@ -281,6 +281,18 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
   the owner hands only to intended people). This throttle is a separate backend
   arc; the client flow functions without it.
 
+**Amended 2026-11-07 (maintainer), the guest's name.** The name a guest types
+on the link page is their name for that call, carried by the signed call-name
+relay payload of ADR-0078 section 2 (amended the same day), and every
+participant's tile shows it. A brand-new guest account still takes it as its
+profile name; a later link visit with a guest account still on the device asks
+again, with a new random two-word name (`lakko_ui_rules::guest_name`) every time
+the page opens, and sends the new name for that call without touching the
+profile. Before this, such a guest saw no name field and was shown under the
+first random name in every later call, because that name had become the guest
+account's profile name. `docs/ux/call-links.md` section 9.1. Built on web;
+iOS and Android not yet.
+
 ## References
 
 - [ADR-0009](0009-link-based-call-invitations.md) — the link-based call-invite

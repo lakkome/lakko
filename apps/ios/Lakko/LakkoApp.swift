@@ -986,6 +986,10 @@ struct AppRoot: View, Equatable {
                         ),
                         onDone: {}
                     )
+                    // A second link opened while this landing shows gets its
+                    // own model: its slug, and a new guest name
+                    // (`docs/ux/call-links.md` section 9.1).
+                    .id(callSlug)
                 } else if let inviteSlug = inviteIntake.pendingSlug, signedOutInviteChoice == nil {
                     // ADR-0079 amendment of 2026-10-26 — a tapped `/i/` link
                     // from a person who is not signed in: who invites, with
@@ -2591,6 +2595,8 @@ private struct SessionRoot: View, Equatable {
                 ),
                 onDone: { pop(route, from: tab) }
             )
+            // Another link in the same place gets its own model.
+            .id(slug)
         }
     }
 

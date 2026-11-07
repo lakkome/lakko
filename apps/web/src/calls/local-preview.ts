@@ -84,6 +84,7 @@ export class LocalPreviewBinder<T extends PreviewTrack, S> {
   private binds = 0;
   private playCalls = 0;
   private playRefusals = 0;
+  private lastRefusal: string | null = null;
 
   /**
    * @param streamOf makes the stream the element plays from one camera track
@@ -124,8 +125,13 @@ export class LocalPreviewBinder<T extends PreviewTrack, S> {
 
   /** How often the element was bound, `play()` called, and `play()`
    *  refused, for the diagnostic line. */
-  counts(): { readonly binds: number; readonly playCalls: number; readonly playRefusals: number } {
-    return { binds: this.binds, playCalls: this.playCalls, playRefusals: this.playRefusals };
+  counts(): PreviewCounts {
+    return {
+      binds: this.binds,
+      playCalls: this.playCalls,
+      playRefusals: this.playRefusals,
+      lastRefusal: this.lastRefusal,
+    };
   }
 
   private play(el: PreviewElement<S>): void {
@@ -134,15 +140,46 @@ export class LocalPreviewBinder<T extends PreviewTrack, S> {
     try {
       const result = el.play();
       if (result !== undefined && typeof result.then === "function") {
-        result.then(undefined, () => {
+        result.then(undefined, (err: unknown) => {
           // Refused or interrupted (a newer bind): the next look tries again.
           this.playRefusals += 1;
+          this.lastRefusal = refusalOf(err);
         });
       }
-    } catch {
+    } catch (err) {
       this.playRefusals += 1;
+      this.lastRefusal = refusalOf(err);
     }
   }
+}
+
+/** What the binder counted, for the diagnostic lines. `lastRefusal` is the
+ *  name and message of the last `play()` rejection, `null` when there was
+ *  none (an `AbortError` there is a newer bind interrupting the previous
+ *  play, not a refusal by the engine). */
+export interface PreviewCounts {
+  readonly binds: number;
+  readonly playCalls: number;
+  readonly playRefusals: number;
+  readonly lastRefusal?: string | null;
+}
+
+/** A `play()` rejection as `<name>: <message>`, one line, bounded. */
+export function refusalOf(err: unknown): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  const message = err instanceof Error ? err.message : String(err);
+  return `${name}: ${message}`.replace(/\s+/g, " ").slice(0, 160);
+}
+
+/** The counts as the diagnostic lines print them. */
+function describeCounts(counts: PreviewCounts): string {
+  const why =
+    counts.lastRefusal === undefined || counts.lastRefusal === null
+      ? ""
+      : ` play_error="${counts.lastRefusal}"`;
+  return (
+    ` binds=${counts.binds} play_calls=${counts.playCalls} play_refused=${counts.playRefusals}` + why
+  );
 }
 
 /** One track's state as `ready=<live|ended|-> muted=<..> enabled=<..>`. */
@@ -173,12 +210,12 @@ export function describeLocalPreview(
   where: string,
   el: PreviewElement<unknown>,
   track: PreviewTrack | null,
-  counts: { readonly binds: number; readonly playCalls: number; readonly playRefusals: number },
+  counts: PreviewCounts,
 ): string {
   return (
     `call local preview ${where}: el_ready=${el.readyState ?? "-"}` +
     ` paused=${el.paused === undefined ? "-" : String(el.paused)} width=${el.videoWidth ?? "-"}` +
-    ` binds=${counts.binds} play_calls=${counts.playCalls} play_refused=${counts.playRefusals}` +
+    describeCounts(counts) +
     ` track ${describeTrackState(track)}`
   );
 }
@@ -225,13 +262,13 @@ export function describeRemotePicture(
   where: string,
   el: PreviewElement<unknown>,
   track: PreviewTrack | null,
-  counts: { readonly binds: number; readonly playCalls: number; readonly playRefusals: number },
+  counts: PreviewCounts,
   layout: PictureLayout,
 ): string {
   return (
     `call remote picture ${where}: el_ready=${el.readyState ?? "-"}` +
     ` paused=${el.paused === undefined ? "-" : String(el.paused)} width=${el.videoWidth ?? "-"}` +
-    ` binds=${counts.binds} play_calls=${counts.playCalls} play_refused=${counts.playRefusals}` +
+    describeCounts(counts) +
     ` track ${describeTrackState(track)}` +
     ` box=${Math.round(layout.width)}x${Math.round(layout.height)} opacity=${layout.opacity}` +
     ` z=${layout.zIndex} visibility=${layout.visibility} display=${layout.display} shown=${layout.shown}`

@@ -47,6 +47,10 @@ class SfuCallUi(
      *  (ADR-0078 section 2, `CallPeerNames.kt`). `null`: every remote tile
      *  stays unnamed (the tile's unnamed state, `CallTileName.kt`). */
     peerNames: CallPeerNames? = null,
+    /** The call id, lower-case hex: the key a name typed for this call is
+     *  remembered under for a rejoin in this app run (`CallName.kt`).
+     *  `null`: nothing is remembered. */
+    callIdHex: String? = null,
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
@@ -89,6 +93,11 @@ class SfuCallUi(
         // both callbacks are delivered on the same session scope, so no extra
         // synchronisation is needed and per-call lifetime handles teardown.
         val lastKnownCameraOn = mutableMapOf<String, Boolean>()
+
+        // The name this device typed for this call (`docs/ux/calls.md`
+        // section 4.1): one typed earlier in this app run for the same call,
+        // else none. It names the own tile ahead of the profile name.
+        var ownCallName = callIdHex?.let(RememberedCallNames::get).orEmpty()
 
         // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
         // this device from the session's own connection. The session is
@@ -137,7 +146,7 @@ class SfuCallUi(
                 }
             },
             onWelcome = { selfPeerId, roster ->
-                val local = localParticipant(localDisplayName, config.audio, config.video)
+                val local = localParticipant(ownCallTileName(ownCallName, localDisplayName), config.audio, config.video)
                 val remotes = roster
                     .filter { it.peerId != selfPeerId }
                     .map { remoteParticipant(peerNames?.name(it.peerId).orEmpty(), it.peerId) }
@@ -233,6 +242,13 @@ class SfuCallUi(
             // The call's current screen share (ADR-0083): its tile, the
             // layout across it and the announcements follow it.
             onScreenShare = { share -> ui.setScreenShare(share) },
+            // The name a peer typed for this call (`CallName.kt`): it
+            // outranks every other source of the tile's name.
+            onRemoteCallName = { peerId, name ->
+                if (peerNames?.callNamed(peerId, name) == true) {
+                    ui.setParticipantName(participantId(peerId), peerNames.name(peerId))
+                }
+            },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -242,6 +258,22 @@ class SfuCallUi(
             callbacks = callbacks,
         )
         sessionRef = session
+
+        // `Your name in this call` (section 4.1): sent with every
+        // announcement once the session can sign it, shown on the own tile,
+        // and changed from the call's Settings sheet.
+        session.setOwnCallName(ownCallName)
+        ui.setCallNameControl(
+            control = { name ->
+                ownCallName = name
+                callIdHex?.let { RememberedCallNames.put(it, name) }
+                session.setOwnCallName(name)
+                ui.setOwnCallName(name)
+                ui.setParticipantName("local", ownCallTileName(name, localDisplayName))
+            },
+            own = ownCallName,
+            default = localDisplayName,
+        )
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -253,6 +285,8 @@ class SfuCallUi(
      *  callback). Idempotent. */
     fun hangUp() {
         speaking.stop()
+        // The name field belongs to a call that can carry a call name.
+        ui.setCallNameControl(null, own = "", default = "")
         session.hangUp()
     }
 

@@ -25,7 +25,8 @@ import uniffi.lakko_ffi_uniffi.verifyCallScreenShare
  * seed (`CallRelayKey`), and every receiver checks the signature against the
  * leaf in the call's MLS roster (`verifyCallPeerAnnouncement`). The leaf is
  * account-bound (ADR-0050), so a verified announcement names the person. The
- * camera on/off media state rides the same sealed channel.
+ * camera on/off media state, the screen-share state and the name a person
+ * typed for the call (`CallName.kt`) ride the same sealed channel.
  *
  * The relay key changes with the call seed (every MLS epoch, ADR-0029); the
  * previous epoch's key is kept for opening. Not thread-safe: the session uses
@@ -39,6 +40,10 @@ public class CallRelay {
 
         /** A signed screen-share state (ADR-0083); verify it before use. */
         public class ScreenShare(public val state: ByteArray) : Opened
+
+        /** A signed name for this call (`CallName.kt`); verify it against
+         *  the sender's verified announcement before use. */
+        public class CallName(public val bytes: ByteArray) : Opened
         public data object Unknown : Opened
     }
 
@@ -84,6 +89,7 @@ public class CallRelay {
                 is CallRelayPayload.PeerAnnouncement -> Opened.Announcement(payload.announcement)
                 is CallRelayPayload.MediaState -> Opened.MediaState(payload.cameraOn)
                 is CallRelayPayload.ScreenShare -> Opened.ScreenShare(payload.state)
+                is CallRelayPayload.CallName -> Opened.CallName(payload.name)
                 CallRelayPayload.Unknown -> Opened.Unknown
             }
         }
@@ -126,6 +132,16 @@ public class CallPeerAnnouncer(
     /** This device's own leaf signature key, the fold's own key; `null`
      *  when it cannot be read (no share is then folded). */
     public val ownSignatureKey: () -> ByteArray? = { null },
+    /** This device's signed call name (`CallName.kt`) as `selfPeerId`,
+     *  numbered `seq`; `null` when it cannot be composed (no group yet, or a
+     *  name the core refuses). Absent: no call name is ever sent. */
+    public val composeCallName: (selfPeerId: String, seq: ULong, name: String) -> ByteArray? =
+        { _, _, _ -> null },
+    /** A peer's call name verified against the roster, for the peer `from`
+     *  whose verified announcement named [signerKey]; `null` on any refusal.
+     *  Absent: no call name is ever accepted. */
+    public val verifyCallName: (from: String, signerKey: ByteArray, bytes: ByteArray) -> VerifiedCallNameView? =
+        { _, _, _ -> null },
 ) {
     public companion object {
         /** The announcer for a call whose roster is `group()`. */
@@ -159,6 +175,27 @@ public class CallPeerAnnouncer(
                         identity.signaturePublicKey()
                     } catch (_: Throwable) {
                         null
+                    }
+                },
+                composeCallName = { selfPeerId, seq, name ->
+                    if (group() == null) {
+                        null
+                    } else {
+                        try {
+                            uniffi.lakko_ffi_uniffi.composeCallName(identity, callId, selfPeerId, seq, name)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                },
+                verifyCallName = { from, signerKey, bytes ->
+                    group()?.let { g ->
+                        try {
+                            uniffi.lakko_ffi_uniffi.verifyCallName(g, callId, from, signerKey, bytes)
+                                .let { VerifiedCallNameView(seq = it.seq, name = it.name) }
+                        } catch (_: Throwable) {
+                            null
+                        }
                     }
                 },
             )

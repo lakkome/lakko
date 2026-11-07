@@ -21,12 +21,16 @@ import LakkoCore
 /// Owned by the call handle; dropping the handle drops the subscription.
 @MainActor
 final class GroupCallPeerNames {
-    private let name: (_ personKeyB64: String) -> String?
+    private let resolve: (_ personKeyB64: String) -> String?
     private let changes: AnyPublisher<UInt64, Never>?
     /// Roster participant id -> the person its announcement verified as
     /// (`nil` while not yet verified). Every remote tile on the roster has an
     /// entry.
     private var persons: [String: String?] = [:]
+    /// Roster participant id -> the name that peer typed for this call
+    /// (``CallNameChannel``); it outranks every other source
+    /// (``CallTileName``).
+    private var callNames: [String: String] = [:]
     private weak var ui: CallUiState?
     private var subscription: AnyCancellable?
 
@@ -34,7 +38,7 @@ final class GroupCallPeerNames {
         name: @escaping (_ personKeyB64: String) -> String?,
         changes: AnyPublisher<UInt64, Never>? = nil
     ) {
-        self.name = name
+        self.resolve = name
         self.changes = changes
     }
 
@@ -57,6 +61,7 @@ final class GroupCallPeerNames {
     /// The roster as the Welcome reported it: every entry starts unnamed.
     func setRoster(_ peerIds: [String]) {
         persons = [:]
+        callNames = [:]
         for peerId in peerIds {
             persons[SfuCallUi.participantId(forPeer: peerId)] = .some(nil)
         }
@@ -69,7 +74,22 @@ final class GroupCallPeerNames {
 
     /// A peer left: a return under the same id starts unnamed again.
     func peerLeft(_ peerId: String) {
-        persons.removeValue(forKey: SfuCallUi.participantId(forPeer: peerId))
+        let id = SfuCallUi.participantId(forPeer: peerId)
+        persons.removeValue(forKey: id)
+        callNames.removeValue(forKey: id)
+    }
+
+    /// `peerId` typed `name` for this call (`nil`: back to its default).
+    /// Returns the tile's new name, or `nil` for a peer not on the roster.
+    func setCallName(_ peerId: String, _ name: String?) -> String? {
+        let id = SfuCallUi.participantId(forPeer: peerId)
+        guard persons[id] != nil else { return nil }
+        if let name, !name.isEmpty {
+            callNames[id] = name
+        } else {
+            callNames.removeValue(forKey: id)
+        }
+        return self.name(participantId: id)
     }
 
     /// `peerId`'s announcement verified as `personKeyB64`. Returns the tile's
@@ -80,19 +100,23 @@ final class GroupCallPeerNames {
         guard let current = persons[id] else { return nil }
         if current == personKeyB64 { return nil }
         persons[id] = .some(personKeyB64)
-        return tileName(personKeyB64)
+        return self.name(participantId: id)
     }
 
     /// The current name of a participant (empty: unnamed).
     func name(participantId: String) -> String {
-        guard let person = persons[participantId] ?? nil else { return "" }
-        return tileName(person)
+        let person = persons[participantId] ?? nil
+        return CallTileName.name(
+            callName: callNames[participantId],
+            resolved: person.flatMap { resolve($0) },
+            announcedName: nil,
+            claimedUsername: nil) ?? ""
     }
 
     /// Apply the current names to every remote tile on `ui`.
     func relabel(_ ui: CallUiState) {
-        for (id, person) in persons {
-            ui.setParticipantName(id, person.map(tileName) ?? "")
+        for id in persons.keys {
+            ui.setParticipantName(id, name(participantId: id))
         }
     }
 
@@ -107,9 +131,5 @@ final class GroupCallPeerNames {
                     self.relabel(ui)
                 }
             }
-    }
-
-    private func tileName(_ personKeyB64: String) -> String {
-        name(personKeyB64) ?? ""
     }
 }

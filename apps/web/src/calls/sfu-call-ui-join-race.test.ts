@@ -60,6 +60,7 @@ vi.mock("./sfu-call-session", () => ({
     rekey(): void {}
     setMicrophoneEnabled(): void {}
     setCameraEnabled(): void {}
+    setOwnCallName(): void {}
     async publishVideo(): Promise<void> {}
     async switchAudioInput(): Promise<void> {}
     async switchVideoInput(): Promise<void> {}

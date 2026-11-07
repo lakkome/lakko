@@ -97,6 +97,10 @@ final class MultiJoinerCall {
         var authBaseUrl: String?
         /// The name on the local tile (`docs/ux/calls.md` section 4.4).
         var localDisplayName: String = ""
+        /// The name this person typed for this call (`docs/ux/calls.md`
+        /// section 4.1): a guest's name from the link page. `nil`: the name
+        /// typed for this call earlier in this app run, else none.
+        var initialCallName: String?
         /// The user's own ADR-0048 profile envelope, or `nil` without an
         /// account. Sealed into the call's MLS group and relayed, so every
         /// other member — a guest with no contact list included — names this
@@ -152,6 +156,8 @@ final class MultiJoinerCall {
     /// (``CallTileName``): what each member announced over the call group, and
     /// the person the profile store knows them as.
     private let names: LinkCallTileNames
+    /// The name this device typed for this call (`""` = none).
+    private var ownCallName = ""
     /// Broadcasts that arrived before this client had a group to read them.
     private var earlyRelays = EarlyRelays<(from: String, bytes: Data)>()
 
@@ -330,9 +336,35 @@ final class MultiJoinerCall {
             onRemoteScreenVideoTrack: { [weak self] track, peerId in
                 guard let self else { return }
                 self.screenTracks.attach(track, sharer: peerPrefix + peerId, ui: self.ui)
+            },
+            onRemoteCallName: { [weak self] peerId, name in
+                // The name that peer typed for this call outranks every other
+                // source (``CallTileName``).
+                guard let self else { return }
+                self.names.setCallName(peerId, name)
+                self.names.relabel(self.ui)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
+        // The name this device typed for the call (`docs/ux/calls.md` section
+        // 4.1): the guest's name from the link page, else one typed for this
+        // call earlier in this app run. Sent with every announcement, shown on
+        // the own tile, changed from the call's Settings sheet.
+        let callIdHex = hexEncode(opts.callId)
+        let initialName = opts.initialCallName ?? CallNameMemory.remembered(callIdHex: callIdHex)
+        self.ownCallName = initialName
+        CallNameMemory.remember(callIdHex: callIdHex, name: initialName)
+        self.session.setOwnCallName(initialName)
+        ui.setCallNameControl(
+            ownName: initialName,
+            defaultName: opts.localDisplayName,
+            save: { [weak self] name in
+                guard let self else { return }
+                self.ownCallName = name
+                CallNameMemory.remember(callIdHex: callIdHex, name: name)
+                self.session.setOwnCallName(name)
+                self.ui.setParticipantName("local", self.localTileName())
+            })
         self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in
@@ -1088,10 +1120,16 @@ final class MultiJoinerCall {
 
     // MARK: - Store-participant helpers
 
+    /// The own tile's name: the name typed for the call, else the profile
+    /// name (`""` renders as the localized `You`).
+    private func localTileName() -> String {
+        SfuCallUi.ownTileName(callName: ownCallName, profileName: opts.localDisplayName)
+    }
+
     private func localParticipant() -> CallUiState.Participant {
         CallUiState.Participant(
             id: "local",
-            displayName: opts.localDisplayName,
+            displayName: localTileName(),
             isLocal: true,
             micOn: opts.audio,
             camOn: opts.video,

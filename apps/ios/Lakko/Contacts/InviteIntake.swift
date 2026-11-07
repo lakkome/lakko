@@ -76,6 +76,16 @@ public final class InviteIntake: ObservableObject {
     /// resumes automatically (mirror of the web `pendingJoin` + resume effect).
     /// Consumed one-shot by ``consumeCallJoinAutoResume()``.
     public private(set) var callJoinAutoResume = false
+    /// The name a new guest typed on the `/c/` landing before its account was
+    /// created (`docs/ux/call-links.md` section 9.1): the call the re-mounted
+    /// landing starts carries it as the call name. Taken one-shot by
+    /// ``takeCallJoinGuestName()``.
+    private(set) var callJoinGuestName: String?
+    /// Numbers every open of a call link, the same link opened again
+    /// included: the landing draws a new guest name for each
+    /// (`docs/ux/call-links.md` section 9.1). Set BEFORE the slug, so a
+    /// landing that wakes on the slug already finds its open.
+    @Published private(set) var callJoinOpens: UInt64 = 0
 
     public init() {}
 
@@ -122,6 +132,7 @@ public final class InviteIntake: ObservableObject {
             pendingGroupJoinFragment = Self.fragment(of: url)
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
+            callJoinOpens &+= 1
             pendingCallJoinSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if path == "/feed/import" || path == "/feed/import/" {
             // ADR-0063 — a shared feed rides in the fragment, never the path.
@@ -233,18 +244,28 @@ public final class InviteIntake: ObservableObject {
     public func clearCallJoin() {
         pendingCallJoinSlug = nil
         callJoinAutoResume = false
+        callJoinGuestName = nil
     }
 
     /// ADR-0032 — park a call link again (the "Open" of a running link call's
     /// status line), exactly as if its URL had just been tapped.
     public func parkCallJoin(slug: String) {
+        callJoinOpens &+= 1
         pendingCallJoinSlug = slug
     }
 
     /// ADR-0032 — arm the auto-resume flag before a guest signup, so the
     /// re-mounted landing continues the join once the session lands.
-    public func armCallJoinAutoResume() {
+    public func armCallJoinAutoResume(guestName: String? = nil) {
         callJoinAutoResume = true
+        callJoinGuestName = guestName
+    }
+
+    /// The name parked by ``armCallJoinAutoResume(guestName:)``, once.
+    func takeCallJoinGuestName() -> String? {
+        let name = callJoinGuestName
+        callJoinGuestName = nil
+        return name
     }
 
     /// ADR-0032 — read + clear the auto-resume flag (one-shot).

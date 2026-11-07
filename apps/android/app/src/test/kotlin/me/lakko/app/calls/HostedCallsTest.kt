@@ -583,6 +583,9 @@ class HostedCallsTest {
         var events: LinkCallEvents? = null
         val handles = mutableListOf<FakeLinkHandle>()
 
+        /** Every request a call was started with, in order. */
+        val requests = mutableListOf<LinkCallRequest>()
+
         /** Every call id an invite link was minted for, in order. */
         val minted = mutableListOf<String>()
         var mintError: Throwable? = null
@@ -596,6 +599,7 @@ class HostedCallsTest {
             events: LinkCallEvents,
         ): LinkCallHandle {
             this.events = events
+            requests += request
             startError?.let { throw it }
             // The owner founds the group inside `host()`.
             if (request.isOwner) events.onJoined()

@@ -66,6 +66,11 @@ public class LinkCallRequest(
     public val sessionToken: String,
     /** The raw account id, to read the own profile the call announces. */
     public val accountId: ByteArray,
+    /** The name a guest typed on the link page, their name for this call
+     *  (`docs/ux/calls.md` section 4.1, `docs/ux/call-links.md` section 9.1),
+     *  already normalised; `null` for a real account, which starts under its
+     *  profile name. */
+    public val initialCallName: String? = null,
 )
 
 /**

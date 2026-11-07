@@ -12,7 +12,13 @@
   Chromium of the Claude desktop browser pane with a synthetic noise source
   (no microphone, no call): the worklet reported ready and the noise RMS fell
   from about 0.035 to about 0.0003. Never run with a microphone, on a call,
-  in Firefox, Safari or the desktop app. iOS and Android are not built.
+  in Firefox, Safari or the desktop app. **Android built the same day**
+  (section 4 as built): the capture post-processing hook of the pinned
+  libwebrtc, `lakko_noise_*` C ABI in `crates/lakko-sframe-native`
+  (`src/noise.rs`), JNI `noise_jni.cc` in `libsframe_jni.so`, the switch
+  in the call Settings sheet; Rust tests and Android host unit tests only
+  (a fake native suppressor); never run on a device, an emulator or a
+  call, and nothing was heard. iOS is not built.
 - **Date:** 2026-11-07
 - **Context:** the call test of 2026-11-07 (typing and room noise reached
   every participant), the investigation behind it (call-audio report of the
@@ -188,7 +194,7 @@ getUserMedia track (raw, AEC/NS/AGC on)
 - **The mid-call microphone switch** now asks for the same three
   processing flags as the first capture, in both call sessions.
 
-### 4. Android (not built)
+### 4. Android (built, see 4a)
 
 The pinned AAR (`io.github.webrtc-sdk:android:125.6422.07`) has two hooks
 on the captured signal (read with `javap` in the call-audio report):
@@ -209,6 +215,90 @@ hook at 48 kHz (to be confirmed; a hook at another rate falls back to no
 suppression rather than resampling, until measured). The switch toggles a
 flag the hook reads per buffer, so it applies at once. Fallback: the hook
 passes the buffer through unchanged.
+
+### 4a. Android as built (2026-11-07)
+
+Read before building, from the webrtc-sdk `m125_release` sources the
+pinned AAR is built from (`sdk/android/src/jni/pc/external_audio_processor.cc`,
+`external_audio_processing_factory.cc`) and libwebrtc M125
+`modules/audio_processing/audio_processing_impl.cc`:
+
+- **Position.** The hook is the audio processing module's
+  `capture_post_processor`, run in `ProcessCaptureStreamLocked` after echo
+  cancellation (AEC3 or the mobile AECM), libwebrtc's noise suppressor and
+  gain control, and after the bands are merged back to full band. On phones
+  whose platform AEC / NS effects run (the Pixel 7a of the test call), those
+  ran earlier still, on the `AudioRecord`. So the order of section 1 holds:
+  platform processing, then RNNoise, then the encoder and SFrame.
+- **What `process(numBands, numFrames, buffer)` hands over.** A direct
+  `ByteBuffer` (new each call, made by the SDK glue) over channel 0 of
+  libwebrtc's capture buffer: `numFrames` floats (10 ms at the stage's rate),
+  full band, in the range of 16-bit PCM ("FloatS16"), native byte order. It
+  is called under the adapter's own mutex, on libwebrtc's audio thread;
+  `initialize(rate, channels)` and `reset(rate)` are called under the same
+  mutex when the stage's format changes.
+- **Rate.** The stage runs at the capture rate rounded up to 16, 32 or
+  48 kHz (`SuitableProcessRate`, maximum 48 kHz unless the pipeline caps it
+  at 32 kHz, which the voice engine does not). A phone recording at 48 kHz
+  therefore gets 48 kHz. **At any other rate, or with more than one channel,
+  the buffer is passed through untouched; there is no resampling.** The
+  format line in the log says which (`capture post-processing format ... Hz,
+  ... ch: RNNoise applies when the switch is on` or `... bypassed`).
+
+What was built:
+
+- `lakko_noise::NoiseSuppressor::process_s16_in_place` cleans FloatS16
+  samples in place, with the same constant one-frame delay and block-size
+  independence as `process` (tested against it), allocating nothing.
+- **Why a hand-written JNI path and not UniFFI.** Cleaning the buffer in
+  place needs its address (`GetDirectBufferAddress`), which only a JNI
+  function can take; UniFFI would copy the 480 samples into a fresh buffer
+  every 10 ms. The C ABI (`lakko_noise_new`, `lakko_noise_free`,
+  `lakko_noise_process_s16_in_place`, `lakko_noise_voice_probability`) lives
+  in `crates/lakko-sframe-native` because `libsframe_jni.so` already links
+  that crate's static archive and already carries JNI entry points for the
+  real-time media threads; a second Rust static archive cannot be linked
+  into the same shared library (both carry the Rust standard library). iOS
+  links the same archive, so the functions are there for an iOS hook.
+  `apps/android/lakko-sframe/src/main/cpp/noise_jni.cc` (built by
+  `tools/build-sframe-jni.sh`) and `me.lakko.sframe.NativeNoiseSuppressor`
+  are the JNI pair; the process call checks the buffer is direct, long
+  enough and aligned, else touches nothing.
+- `me.lakko.app.calls.CaptureNoiseSuppression` builds the process-wide
+  `PeerConnectionFactory` with an `ExternalAudioProcessingFactory` whose
+  capture post-processing is `CaptureNoiseProcessor`, once per process. When
+  `libsframe_jni.so` has no noise functions the hook is not installed and
+  the factory is built exactly as before. The SDK's `destroy()` is never
+  called (it deletes the process-wide adapter without clearing the pointer)
+  and `setBypassFlagForCapturePost` is not used (it takes the mutex the audio
+  thread holds).
+- `CaptureNoiseProcessor.process` allocates nothing, takes no lock and never
+  throws (a throw would abort inside libwebrtc's JNI glue). A fresh native
+  suppressor is made on a control thread for every call (when its
+  microphone track is added) and every switch-on, so none of the
+  suppressor's delay line or overlap memory from an earlier call or
+  stretch reaches a new one; an old one is freed only after the audio thread
+  has been seen outside `process` (a counter it raises around its use),
+  else left allocated with one log line. The switch is a volatile the audio
+  thread reads per buffer, so it applies at once mid-call.
+- **Failure:** a refused buffer (or a throw) leaves that buffer untouched,
+  stops the suppressor for the rest of the call and logs one line. With the
+  switch off the stage still runs but returns at once; libwebrtc's audio
+  processing module is the one the SDK builds with the default builder plus
+  this stage.
+- **Logs** (tag `CaptureNoise`): whether the hook was installed; per call,
+  which processing applies with the platform AEC / NS kind
+  (`JavaAudioDeviceModule.isBuiltIn*Supported`); the stage's format; every
+  switch change; at the call's end how many buffers were cleaned and how
+  many passed through.
+- The switch: `NoiseSuppressionSetting`, its own `SharedPreferences` file
+  (`lakko_call_audio`, key `noise_suppression`), on by default, this device
+  only; the `Sound` section heads the call Settings sheet, shown even with
+  no device list.
+- **Not verified:** that the pinned AAR's binary behaves as the m125_release
+  source read (the symbols match; the code was not disassembled), that the
+  stage runs at 48 kHz on a real phone, CPU, and how it sounds. The SDK glue
+  makes a `ByteBuffer` object per 10 ms whatever Lakko does.
 
 ### 5. iOS (not built), and its cost
 
@@ -290,7 +380,9 @@ when the model question (open question 1) is answered.
    whether `AudioContext({ sampleRate: 48000 })` with a microphone source is
    accepted in each engine (Firefox refuses a source at another rate; the
    fallback covers it).
-6. **Android hook rate and position** (section 4).
+6. **Android hook rate and position**: read in source (section 4a), not
+   observed on a phone; the call log's format line answers it on the first
+   call.
 
 ## References
 

@@ -126,6 +126,9 @@ class JoinCallViewModelTest {
         isOwner = false,
     )
 
+    /** How many guest names were drawn (each prefill is `Guest <n>`). */
+    private var draws = 0
+
     private fun TestScope.harness(
         decodeLink: suspend (String, me.lakko.app.auth.IdentitySecrets?) -> CallLinkDecode =
             { _, _ -> CallLinkDecode.Opened(call) },
@@ -147,6 +150,13 @@ class JoinCallViewModelTest {
             endCurrentCallAction = {},
             decodeLink = decodeLink,
             saveGuestName = { _, name -> savedNames += name },
+            // The core's rule, as far as these tests need it: trimmed, blank
+            // is "no name", a line break is refused.
+            normalizeDisplayName = { typed ->
+                if ('\n' in typed) throw IllegalArgumentException("line break")
+                typed.trim().ifEmpty { null }
+            },
+            drawGuestName = { "Guest ${++draws}" },
         )
         advanceUntilIdle()
         return Harness(model, auth, host, port, savedNames)
@@ -279,5 +289,101 @@ class JoinCallViewModelTest {
         assertEquals(2, h.auth.signups)
         second.complete(Unit)
         advanceUntilIdle()
+    }
+
+    /** A guest account from an earlier link, still on the device. */
+    private fun returningGuest(h: Harness) {
+        h.auth.guestAccount.value = GuestSession(accountIdB64 = "acct-0", markedAtMs = 1L, claimedUsername = null)
+        h.auth.identitySecrets.value = IdentitySecrets(
+            accountId = ByteArray(16),
+            exportKey = ByteArray(32),
+            accountIdentitySeed = ByteArray(64),
+            session = me.lakko.app.auth.SessionPair("token-0", Long.MAX_VALUE, "refresh-0", Long.MAX_VALUE, 1L),
+        )
+        h.auth.state.value = AuthState.Session(SessionAccount(accountIdB64 = "acct-0", username = ""))
+    }
+
+    @Test
+    fun `a new guest's typed name is also their name in the call`() = runTest(dispatcher) {
+        val h = harness()
+        h.model.onGuestNameChange("  Captain  ")
+        h.model.onStart()
+        advanceUntilIdle()
+        landSession(h)
+        assertEquals("Captain", h.port.requests.single().initialCallName)
+    }
+
+    @Test
+    fun `a guest from an earlier link is asked again and the name goes to the call, not the profile`() =
+        runTest(dispatcher) {
+            val h = harness()
+            returningGuest(h)
+            advanceUntilIdle()
+            assertTrue(h.model.uiState.value.guest)
+            assertTrue(h.model.needsGuestName())
+
+            h.model.onGuestNameChange("Captain")
+            h.model.onStart()
+            advanceUntilIdle()
+            assertEquals(0, h.auth.signups)
+            assertTrue(h.savedNames.isEmpty())
+            assertEquals("Captain", h.port.requests.single().initialCallName)
+        }
+
+    @Test
+    fun `a returning guest cannot join under a name the rule refuses`() = runTest(dispatcher) {
+        val h = harness()
+        returningGuest(h)
+        advanceUntilIdle()
+        h.model.onGuestNameChange("two\nlines")
+        h.model.onStart()
+        advanceUntilIdle()
+        assertTrue(h.port.requests.isEmpty())
+    }
+
+    @Test
+    fun `a real account is not asked and starts under its profile name`() = runTest(dispatcher) {
+        val h = harness()
+        h.auth.identitySecrets.value = IdentitySecrets(
+            accountId = ByteArray(16),
+            exportKey = ByteArray(32),
+            accountIdentitySeed = ByteArray(64),
+            session = me.lakko.app.auth.SessionPair("token-r", Long.MAX_VALUE, "refresh-r", Long.MAX_VALUE, 1L),
+        )
+        h.auth.state.value = AuthState.Session(SessionAccount(accountIdB64 = "acct-r", username = "anna"))
+        advanceUntilIdle()
+        assertFalse(h.model.needsGuestName())
+        h.model.onStart()
+        advanceUntilIdle()
+        assertEquals(null, h.port.requests.single().initialCallName)
+    }
+
+    @Test
+    fun `the link's owner is never asked for a guest name`() = runTest(dispatcher) {
+        val h = harness(decodeLink = { _, _ -> CallLinkDecode.Opened(call.copy(isOwner = true)) })
+        assertFalse(h.model.needsGuestName())
+    }
+
+    @Test
+    fun `every open of the link draws a new guest name, and the same open draws none`() = runTest(dispatcher) {
+        val h = harness()
+        val first = h.model.uiState.value.guestName
+        h.model.onLinkOpened(1L)
+        advanceUntilIdle()
+        // The model's first open keeps the name it was made with.
+        assertEquals(first, h.model.uiState.value.guestName)
+        h.model.onGuestNameChange("Typed")
+        // The page moving between roots, or a rotation: the same open.
+        h.model.onLinkOpened(1L)
+        advanceUntilIdle()
+        assertEquals("Typed", h.model.uiState.value.guestName)
+        // The link opened again: a new name, never the earlier one.
+        h.model.onLinkOpened(2L)
+        advanceUntilIdle()
+        val second = h.model.uiState.value.guestName
+        assertTrue(second != first && second != "Typed")
+        h.model.onLinkOpened(3L)
+        advanceUntilIdle()
+        assertTrue(h.model.uiState.value.guestName != second)
     }
 }

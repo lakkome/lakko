@@ -69,6 +69,7 @@
  * and every sender and receiver has its streams taken (`coverSFrame`).
  */
 
+import { isOwnLinePhantom } from "./own-line-track";
 import {
   armGenericFrameDescriptor,
   type HeaderExtensionTransceiver,
@@ -86,7 +87,8 @@ import {
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
 import { iceServersFor, iceServersLine } from "./ice-servers";
-import { CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
+import { bytesOfHex, CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
+import { CallNameChannel } from "./call-name";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -373,6 +375,13 @@ export interface SfuCallCallbacks {
    */
   onRemoteScreenShareState?(peerId: string, state: Uint8Array): void;
   /**
+   * A peer's name for this call changed (`docs/ux/calls.md` section 4.1,
+   * `call-name.ts`): signed with the leaf key that peer's announcement
+   * verified with, newest per peer. `null` when the peer went back to its
+   * default naming.
+   */
+  onRemoteCallName?(peerId: string, name: string | null): void;
+  /**
    * The device did not have everything the call asked for, so the person
    * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
    * only the microphone is live, or neither could be captured and they
@@ -448,6 +457,9 @@ export class SfuCallSession {
   private relay: CallRelay | null = null;
   /** The periodic peer re-announcement. */
   private announceTimer: ReturnType<typeof setInterval> | null = null;
+  /** This device's name for the call and the newest one per peer
+   *  (`call-name.ts`). Re-sent after every announcement. */
+  private readonly callNames: CallNameChannel;
 
   /** Serializes SFU-initiated offers so two `setRemoteDescription`
    *  calls never overlap. Each entry is the offer SDP. */
@@ -617,6 +629,12 @@ export class SfuCallSession {
     this.publishLeaf = config.localLeaf ?? 0;
     this.localCameraOn = config.media.video;
     this.nowMs = config.nowMs ?? Date.now;
+    this.callNames = new CallNameChannel({
+      signer: config.peerAnnouncer,
+      sendSealed: (plaintext) => this.sendSealedRelay(plaintext),
+      selfPeerId: () => this.selfPeerId,
+      onName: (peerId, name) => this.callbacks.onRemoteCallName?.(peerId, name),
+    });
     this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
       now: () => this.nowMs(),
       setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -1304,6 +1322,16 @@ export class SfuCallSession {
     })();
   }
 
+  /**
+   * Set this device's name for the call (`docs/ux/calls.md` section 4.1):
+   * `name` has passed the display-name rule; `""` goes back to the default.
+   * Sent at once when the call can carry it, and again with every
+   * re-announcement, so someone who joins later sees it too.
+   */
+  setOwnCallName(name: string): void {
+    this.callNames.setOwnName(name);
+  }
+
   /** The relay keys, built on first use and seeded from the current seed. */
   private relayFor(wasm: Awaited<ReturnType<typeof loadWasm>>): CallRelay {
     if (this.relay === null) {
@@ -1338,6 +1366,9 @@ export class SfuCallSession {
       } catch {
         // best-effort
       }
+      // The name for this call follows the announcement it is checked
+      // against (a newcomer, a rekey, the periodic re-announcement).
+      this.callNames.resend();
     })();
   }
 
@@ -2310,6 +2341,17 @@ export class SfuCallSession {
 
     pc.ontrack = (ev): void => {
       const stream0 = ev.streams[0];
+      // The receiver of one of this device's own send lines carries nothing
+      // and belongs to nobody (`own-line-track.ts`): not a peer.
+      if (
+        isOwnLinePhantom(ev.transceiver?.direction, splitStreamId(stream0?.id ?? "").peerId)
+      ) {
+        // eslint-disable-next-line no-console
+        console.info(
+          `SfuCallSession: ignored the receiver of an own send line kind=${ev.track.kind} mid=${ev.transceiver?.mid ?? "-"}`,
+        );
+        return;
+      }
       const remoteStream = stream0 ?? new MediaStream([ev.track]);
       // Decrypt incoming media; the worker reads the per-frame KID to
       // pick the right per-sender key, so one seed serves every sender.
@@ -2526,6 +2568,7 @@ export class SfuCallSession {
       this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
     }
     this.onRosterChanged(false);
+    this.callNames.onPeerLeft(frame.peer_id);
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
@@ -2567,9 +2610,15 @@ export class SfuCallSession {
           mediaCb?.(frame.from, opened.cameraOn);
         } else if (opened.kind === "announcement") {
           const identity = this.config.peerAnnouncer?.verify(frame.from, opened.bytes) ?? null;
-          if (identity !== null) identifiedCb?.(frame.from, identity);
+          if (identity !== null) {
+            identifiedCb?.(frame.from, identity);
+            const key = bytesOfHex(identity.memberKeyHex);
+            if (key !== null) this.callNames.onPeerIdentified(frame.from, key);
+          }
         } else if (opened.kind === "screen-share") {
           this.callbacks.onRemoteScreenShareState?.(frame.from, opened.state);
+        } else if (opened.kind === "call-name") {
+          this.callNames.onReceived(frame.from, opened.bytes);
         }
         return;
       }

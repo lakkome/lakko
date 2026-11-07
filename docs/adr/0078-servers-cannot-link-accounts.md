@@ -524,6 +524,29 @@ not deployed, no call placed against it.
   arrives its tile is unnamed. The SFU still learns the set of peer ids in
   a room and their timing (class (c)). Nothing was run against a deployed
   SFU, auth or TURN.
+- **Amended 2026-11-07 (maintainer): a name for the call.** Any participant
+  may change the name the others see on their tile, for this call only; the
+  profile name does not change (`docs/ux/calls.md` section 4.1). The name is
+  a fourth relay payload, `lakko_calls::call_name`:
+  `"lakko/call/name/v1\0" || 0x01 || call_id(16) || peer_id_len ||
+  peer_id || seq(8 BE, >= 1) || name_len || name(0..=255, empty =
+  withdrawn; otherwise the ADR-0048 display-name rule as it stands) ||
+  signer_key(32) || signature(64)`, signed by the sender's MLS leaf key over
+  its own domain (`lakko/call/name/sig/v1\0`), sealed under the relay key
+  like the announcement. `verify_call_name` takes the relay `from` AND the
+  leaf key that peer's verified announcement named (the screen-share
+  shape), so an SFU colluding with one member cannot put that member's name
+  on another member's tile. A sender numbers its names per peer id and
+  re-sends the current one after every announcement, so a late joiner
+  learns it; a receiver keeps the greatest `seq` per peer
+  (`call_name_is_newer`, strictly greater). No server sees the name, and
+  nothing is stored: invariants #2 and #5 are unchanged. Fuzz:
+  `lakko-calls/relay_open` now also drives `decode_call_name`. FFI:
+  `composeCallName`, `verifyCallName`, `callNameIsNewer` and the
+  `CallName` relay kind (appended to the UniFFI `CallRelayPayload`) on
+  UniFFI and wasm. Built in the core, both FFI surfaces and web; iOS and
+  Android not yet. A one-to-one call (peer to peer, no relay) carries no
+  call name: its carrier would be a call-signalling body and is not built.
 
 ### 3. Push without a bipartite graph (finding 8)
 

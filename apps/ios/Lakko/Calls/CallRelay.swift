@@ -28,6 +28,9 @@ final class CallRelay {
         /// A signed screen-share state (ADR-0083), still to be verified with
         /// ``CallPeerAnnouncer/verifyScreenShare``.
         case screenShare(Data)
+        /// A signed call name (`docs/ux/calls.md` section 4.1), still to be
+        /// verified with ``CallPeerAnnouncer/verifyCallName``.
+        case callName(Data)
         case unknown
     }
 
@@ -61,6 +64,7 @@ final class CallRelay {
             case .peerAnnouncement(let announcement): return .announcement(announcement)
             case .mediaState(let cameraOn): return .mediaState(cameraOn: cameraOn)
             case .screenShare(let state): return .screenShare(state)
+            case .callName(let name): return .callName(name)
             case .unknown: return .unknown
             }
         }
@@ -105,6 +109,18 @@ struct CallPeerAnnouncer {
     ) -> VerifiedCallScreenShare? = { _, _, _ in nil }
     /// This device's own leaf signature key: the fold's own key.
     var ownSignatureKey: Data = Data()
+    /// This device's signed name for the call (`docs/ux/calls.md` section
+    /// 4.1) as `selfPeerId`, numbered `seq`; `nil` when it cannot make one
+    /// (no group yet, a name the display-name rule refuses).
+    var composeCallName: @MainActor (
+        _ selfPeerId: String, _ seq: UInt64, _ name: String
+    ) -> Data? = { _, _, _ in nil }
+    /// A call name from `from`, verified against the call's group with
+    /// `signerKey` (the leaf key `from`'s verified announcement named). `nil`
+    /// on any refusal, and when there is no group.
+    var verifyCallName: @MainActor (
+        _ from: String, _ signerKey: Data, _ name: Data
+    ) -> CallNameChannel.Verified? = { _, _, _ in nil }
 
     /// The announcer for a call whose roster is `group()`.
     static func forGroup(
@@ -127,7 +143,19 @@ struct CallPeerAnnouncer {
                 return try? verifyCallScreenShare(
                     group: g, callId: callId, peerId: from, peerSignerKey: signerKey, state: state)
             },
-            ownSignatureKey: identity.signaturePublicKey()
+            ownSignatureKey: identity.signaturePublicKey(),
+            composeCallName: { selfPeerId, seq, name in
+                guard group() != nil else { return nil }
+                return try? LakkoCore.composeCallName(
+                    identity: identity, callId: callId, peerId: selfPeerId, seq: seq, name: name)
+            },
+            verifyCallName: { from, signerKey, name in
+                guard let g = group(),
+                      let verified = try? LakkoCore.verifyCallName(
+                          group: g, callId: callId, peerId: from, peerSignerKey: signerKey, name: name)
+                else { return nil }
+                return CallNameChannel.Verified(seq: verified.seq, name: verified.name)
+            }
         )
     }
 

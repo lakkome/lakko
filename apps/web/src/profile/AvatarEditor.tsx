@@ -35,6 +35,7 @@ import {
   videoStripFrames,
   type LocalAvatar,
 } from "./avatar-media";
+import { paintVideoBehind } from "../media/video-overlay";
 
 /** What goes into the crop screen. */
 export type CropSource = { readonly kind: "image"; readonly blob: Blob } | { readonly kind: "video"; readonly blob: Blob };
@@ -271,7 +272,10 @@ export function AvatarCrop(props: {
                 <img class="lk-avatar-crop-media" src={u()} alt="" draggable={false} style={mediaStyle()} />
               ) : (
                 <video
-                  ref={previewVideo}
+                  ref={(el): void => {
+                    previewVideo = el;
+                    paintVideoBehind(el);
+                  }}
                   class="lk-avatar-crop-media"
                   src={u()}
                   muted
@@ -465,7 +469,10 @@ export function AvatarCamera(props: {
         <div class="lk-avatar-camera lk-stack">
           <div class="lk-avatar-camera-view">
             <video
-              ref={preview}
+              ref={(el): void => {
+                preview = el;
+                paintVideoBehind(el);
+              }}
               muted
               autoplay
               playsinline

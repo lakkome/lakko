@@ -423,7 +423,8 @@ final class GroupCallHost: ObservableObject {
             video: video,
             // ADR-0078 section 2: the SFU names nobody; each peer announces
             // itself, verified against this group's roster.
-            peerAnnouncer: ports.peerAnnouncer(groupIdHex, callId)
+            peerAnnouncer: ports.peerAnnouncer(groupIdHex, callId),
+            callIdHex: callIdHex
         )
         let handle = ports.makeHandle(config, ui, minted.turn)
         self.handle = handle

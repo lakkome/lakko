@@ -430,6 +430,10 @@ export interface StartLinkCallOptions {
   /** The local identity IS the capability owner: found + host. */
   readonly isOwner: boolean;
   readonly routePath: string;
+  /** The name typed on the link page (a guest): this person's name for the
+   *  call (`docs/ux/calls.md` section 4.1), never written to the profile
+   *  here. Absent: none typed. */
+  readonly callName?: string;
 }
 
 export type LinkCallStartOutcome =
@@ -508,6 +512,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    *  none is set. Read at call start; a rename mid-call lands next call. */
   const ownTileName = (): string =>
     profiles.ownProfile().displayName?.trim() || t("call.participant.you");
+  /** The own profile name, `""` when none: the placeholder of the field
+   *  where a name for the call is typed (section 4.1). */
+  const ownProfileName = (): string => profiles.ownProfile().displayName?.trim() ?? "";
   const callLog = useCallLog();
   const membershipEnd = useMembershipEnd();
   const groupNames = useGroupNames();
@@ -1901,6 +1908,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             },
             {
               localDisplayName: ownTileName(),
+              callIdHex: hex,
+              profileName: ownProfileName(),
               safetyNumber: m.safetyNumber,
               resolveDisplayName: callNameOfPerson,
               onSessionStateChange: (state) => onGroupSessionState(hex, state),
@@ -2553,6 +2562,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       sfuBaseUrl: base,
       media: { audio: true, video: opts.mediaVideo },
       localDisplayName: ownTileName(),
+      profileName: ownProfileName(),
+      ...(opts.callName !== undefined ? { initialCallName: opts.callName } : {}),
       ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
       // Tiles are named by the one resolver: a member's verified peer
       // announcement names the person (ADR-0078 section 2), and a member's

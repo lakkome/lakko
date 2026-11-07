@@ -267,8 +267,9 @@ move the same person at the same moment.
 
 - **Grid**: always on page 1, **always the last cell** (bottom right; on a
   centred last row, the right end of it). A fixed place is how a person finds
-  themselves without looking. It is labelled with your profile name, `You` only
-  when no name is set (`calls.md` 4.4).
+  themselves without looking. It is labelled with the name you typed for this
+  call, else your profile name, `You` only when neither is set (`calls.md`
+  4.1 and 4.4).
 - **Focus**: the last tile of the strip.
 - **Alone in the call**: your tile fills the call area, as `calls.md` 4.4 says.
 - It is never on the stage while anyone else is present, and it cannot be pinned.
@@ -623,6 +624,10 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
   glyph instead of initials (a `P` would look like someone called Pat). Two
   unresolved people are told apart by tone colour. They are **not numbered**:
   `Participant 3` becomes wrong the moment someone before them leaves.
+- **A name typed for the call** (`calls.md` 4.1, 2026-11-07) labels the tile
+  on every device, ahead of the viewer's own name for a contact; when it
+  changes mid-call the strip and the spoken label change with it, without an
+  announcement.
 - **Long names**: truncated in the strip; the full name is in the spoken label and
   the pin button's name.
 - **Text size**: at the largest accessibility text sizes the strip grows to two

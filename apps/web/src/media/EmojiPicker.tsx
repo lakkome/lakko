@@ -47,6 +47,7 @@ import {
 import { gifProviderMissing, setGifProviderMissing } from "./media-prefs";
 import { ObjectUrlRegistry } from "./object-url-registry";
 import { t } from "../l10n";
+import { paintVideoBehind } from "./video-overlay";
 
 /** Whether this page session has asked the proxy if a GIF provider is
  *  configured. Asked once, when the composer picker first opens, so an
@@ -583,7 +584,7 @@ function GifTab(props: {
                   <Show when={previews().get(item.id)}>
                     {(p) =>
                       p().video ? (
-                        <video src={p().url} autoplay muted loop playsinline />
+                        <video ref={paintVideoBehind} src={p().url} autoplay muted loop playsinline />
                       ) : (
                         <img src={p().url} alt="" draggable={false} />
                       )

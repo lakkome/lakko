@@ -103,6 +103,7 @@ import {
 } from "../devices/device-cards";
 import type { IconName } from "../ui/icons";
 import { displayLocale } from "../l10n/display-locale";
+import { paintVideoBehind } from "../media/video-overlay";
 
 /**
  * The text a failure shows (ADR-0061 section 6): a sentence written for a
@@ -1574,7 +1575,10 @@ function ScanView(props: {
         </Match>
         <Match when={state().kind === "scanning"}>
           <div class="lk-center">
-            <video class="lk-camera" ref={(el) => setVideoRef(el)} playsinline muted />
+            <video class="lk-camera" ref={(el) => {
+              setVideoRef(el);
+              paintVideoBehind(el);
+            }} playsinline muted />
             <button type="button" onClick={reset}>
               {t("common.cancel")}
             </button>

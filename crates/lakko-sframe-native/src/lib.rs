@@ -38,6 +38,13 @@
 //! unchanged, have no caller on a media path, and do not open a frame of
 //! the other layout.
 //!
+//! ## Noise suppression (ADR-0088)
+//!
+//! [`noise`] carries the C ABI of the capture noise suppressor
+//! (`lakko_noise_*`), here for the reason given in that module: the
+//! Android capture hook needs a hand-written JNI function, and this crate's
+//! archive is what `libsframe_jni.so` links.
+//!
 //! ## Memory ownership
 //!
 //! Every function that returns a pointer (`*mut CallKey`,
@@ -95,6 +102,8 @@
 // `from_raw_parts` with `len == cap` is exactly the
 // contract we want, not the lint's suggested alternative.
 #![allow(clippy::same_length_and_capacity)]
+
+pub mod noise;
 
 use std::sync::Mutex;
 

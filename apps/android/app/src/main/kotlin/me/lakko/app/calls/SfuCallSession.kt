@@ -197,6 +197,11 @@ class SfuCallSession(
          *  shared fold names now, or `null` when nobody shares. Only states
          *  verified against the call's roster reach the fold. */
         val onScreenShare: (share: ScreenShareView?) -> Unit = {},
+        /** A peer's name for this call changed (`CallName.kt`,
+         *  `docs/ux/calls.md` section 4.1): the name, or `null` when the peer
+         *  went back to its default naming. Only names verified against the
+         *  leaf key the peer's announcement named reach here. */
+        val onRemoteCallName: (peerId: String, name: String?) -> Unit = { _, _ -> },
     )
 
     class SfuCallException(message: String) : Exception(message)
@@ -263,6 +268,37 @@ class SfuCallSession(
     /** The newest screen-share state of a peer not yet identified, verified
      *  once its announcement is. One per peer; gone when the peer leaves. */
     private val pendingShareStates = HashMap<String, ByteArray>()
+
+    /** The name this device and every peer typed for the call
+     *  (`CallName.kt`). Used on [scope] only. */
+    private val callNames = CallNameChannel(
+        CallNameChannelDeps(
+            compose = { self, seq, name -> config.peerAnnouncer?.composeCallName?.invoke(self, seq, name) },
+            verify = { from, key, bytes -> config.peerAnnouncer?.verifyCallName?.invoke(from, key, bytes) },
+            sendSealed = { plaintext ->
+                val sealed = relay.seal(plaintext)
+                val sig = signaling
+                if (sealed != null && sig != null) {
+                    sig.sendSignalRelayToCall(sealed)
+                    true
+                } else {
+                    false
+                }
+            },
+            selfPeerId = { selfPeerId },
+            onName = { peerId, name -> callbacks.onRemoteCallName(peerId, name) },
+        ),
+    )
+
+    /**
+     * This device's name for the call (`docs/ux/calls.md` section 4.1),
+     * already normalised by the display-name rule; `""` goes back to the
+     * default (the profile name). Sent at once when the call can carry it,
+     * and again after every announcement this device sends.
+     */
+    fun setOwnCallName(name: String) {
+        scope.launch { callNames.setOwnName(name) }
+    }
 
     /** The call's one screen-share fold (ADR-0083), made on the first state
      *  that verifies. `null` without an announcer or an own key. Used on
@@ -881,6 +917,7 @@ class SfuCallSession(
         screenShare = null
         peerSignerKeys.clear()
         pendingShareStates.clear()
+        callNames.clear()
         stopMediaCounters()
         // What was asked of the SFU and what it said go with the call.
         wantsSender.reset()
@@ -1138,6 +1175,9 @@ class SfuCallSession(
         val announcement = announcer.compose(self) ?: return
         val sealed = relay.seal(announcement) ?: return
         sig.sendSignalRelayToCall(sealed)
+        // The name typed for the call follows every announcement, so a late
+        // joiner (or one that just identified this device) learns it.
+        callNames.resend()
     }
 
     /**
@@ -1590,6 +1630,8 @@ class SfuCallSession(
                     // A peer that leaves ends its share (ADR-0083 section 2).
                     pendingShareStates.remove(peerId)
                     peerSignerKeys.remove(peerId)?.let { key -> screenShare?.participantLeft(key) }
+                    // What it called itself goes with it too.
+                    callNames.onPeerLeft(peerId)
                     onRosterChanged(joined = false)
                 }
                 callbacks.onPeerLeft(peerId)
@@ -1620,12 +1662,16 @@ class SfuCallSession(
                         is CallRelay.Opened.MediaState -> callbacks.onRemoteMediaState(from, opened.cameraOn)
                         is CallRelay.Opened.Announcement -> {
                             config.peerAnnouncer?.verify?.invoke(from, opened.bytes)?.let { identity ->
-                                bytesOfHex(identity.memberKeyHex)?.let { peerSignerKeys[from] = it }
+                                val signerKey = bytesOfHex(identity.memberKeyHex)
+                                signerKey?.let { peerSignerKeys[from] = it }
                                 callbacks.onPeerIdentified(from, identity)
                                 pendingShareStates.remove(from)?.let { onScreenShareState(from, it) }
+                                // A name it sent before is read now.
+                                signerKey?.let { callNames.onPeerIdentified(from, it) }
                             }
                         }
                         is CallRelay.Opened.ScreenShare -> onScreenShareState(from, opened.state)
+                        is CallRelay.Opened.CallName -> callNames.onReceived(from, opened.bytes)
                         CallRelay.Opened.Unknown -> Unit
                         null -> callbacks.onSignalRelay(from, bytes)
                     }

@@ -29,6 +29,7 @@ import { PhotoBubble, VideoBubble } from "./VisualBubbles";
 import { TranscriptBlock, TranscriptButton, type TranscriptHost } from "../translation/Transcript";
 import { voicePress } from "./voice-press";
 import { barIsPlayed, waveformBars } from "./waveform";
+import { paintVideoBehind } from "./video-overlay";
 
 /** Upload state of an outgoing media message: a completed fraction while
  *  uploading, `"failed"` when nothing reached the other side, `undefined`
@@ -735,7 +736,10 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
       <button ref={root} type="button" class="lakko-vn-bubble" aria-label={label()} onClick={onTap}>
         <Show when={mounted() && videoUrl() !== null}>
           <video
-            ref={video}
+            ref={(el): void => {
+              video = el;
+              paintVideoBehind(el);
+            }}
             src={videoUrl() ?? undefined}
             playsinline
             preload="auto"
@@ -777,6 +781,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
               >
                 {(url) => (
                   <video
+                    ref={paintVideoBehind}
                     src={url()}
                     muted
                     playsinline
@@ -921,7 +926,7 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
     <Show when={url()}>
       {(u) =>
         inline() === "video" ? (
-          <video src={u()} autoplay muted loop playsinline aria-label={t("chat.media.gif")} style={big ? {} : undefined} />
+          <video ref={paintVideoBehind} src={u()} autoplay muted loop playsinline aria-label={t("chat.media.gif")} style={big ? {} : undefined} />
         ) : (
           <img src={u()} alt={t("chat.media.gif")} draggable={false} />
         )

@@ -14,6 +14,7 @@ import {
   describeTrackState,
   LocalPreviewBinder,
   type PreviewElement,
+  refusalOf,
 } from "./local-preview";
 
 interface Track {
@@ -71,7 +72,7 @@ describe("LocalPreviewBinder", () => {
     // Nothing changed: nothing is done again.
     expect(b.sync(el, callStream(cam))).toBe(false);
     expect(el.plays).toBe(1);
-    expect(b.counts()).toEqual({ binds: 1, playCalls: 1, playRefusals: 0 });
+    expect(b.counts()).toEqual({ binds: 1, playCalls: 1, playRefusals: 0, lastRefusal: null });
   });
 
   it("does not bind an element that is not in the document yet, and binds it on the next look", () => {
@@ -133,7 +134,12 @@ describe("LocalPreviewBinder", () => {
     expect(el.plays).toBe(3);
     await Promise.resolve();
     await Promise.resolve();
-    expect(b.counts()).toEqual({ binds: 1, playCalls: 3, playRefusals: 3 });
+    expect(b.counts()).toEqual({
+      binds: 1,
+      playCalls: 3,
+      playRefusals: 3,
+      lastRefusal: "Error: not allowed",
+    });
   });
 
   it("survives an element whose play throws or does not exist", () => {
@@ -147,6 +153,7 @@ describe("LocalPreviewBinder", () => {
     };
     expect(b.sync(throwing, callStream(track("cam")))).toBe(true);
     expect(b.counts().playRefusals).toBe(1);
+    expect(b.counts().lastRefusal).toBe("Error: no");
     const bare: PreviewElement<Stream> = { srcObject: null };
     expect(binder().sync(bare, callStream(track("cam")))).toBe(true);
   });
@@ -208,6 +215,30 @@ describe("describeRemotePicture", () => {
     expect(line).toBe(
       "call remote picture peer-ab heavy: el_ready=4 paused=false width=640 binds=1 play_calls=1 play_refused=0" +
         " track ready=live muted=false enabled=true box=320x180 opacity=1 z=1 visibility=visible display=block shown=true",
+    );
+  });
+});
+
+describe("refusalOf and the play_error field", () => {
+  it("names the rejection by its name and message on one bounded line", () => {
+    const err = new Error("The play() request was interrupted\nby a new load request.");
+    err.name = "AbortError";
+    expect(refusalOf(err)).toBe("AbortError: The play() request was interrupted by a new load request.");
+    expect(refusalOf("x".repeat(400)).length).toBe(160);
+  });
+
+  it("prints the last refusal on the preview line", () => {
+    const el = { srcObject: null, paused: true, readyState: 0, videoWidth: 0 };
+    expect(
+      describeLocalPreview("tile", el, track("t"), {
+        binds: 2,
+        playCalls: 2,
+        playRefusals: 1,
+        lastRefusal: "NotAllowedError: denied",
+      }),
+    ).toBe(
+      "call local preview tile: el_ready=0 paused=true width=0 binds=2 play_calls=2 play_refused=1" +
+        ' play_error="NotAllowedError: denied" track ready=live muted=false enabled=true',
     );
   });
 });

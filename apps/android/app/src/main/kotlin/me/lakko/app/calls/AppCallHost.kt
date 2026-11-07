@@ -506,6 +506,9 @@ internal class ChatRepositoryGroupCallPort(
             scope = scope,
             ui = ui,
             peerNames = names,
+            // A name typed for this call earlier in this app run comes back
+            // on a rejoin (`docs/ux/calls.md` section 4.1).
+            callIdHex = request.callIdHex,
         )
         // The SFU has a public address, so most clients reach it on a
         // server-reflexive candidate - but one behind a symmetric NAT has
@@ -618,6 +621,9 @@ internal class MultiJoinerLinkCallPort(
             // first second, and the same profile is announced to every other
             // member inside the call group (never through the SFU in clear).
             localDisplayName = ownProfile?.displayName?.trim()?.takeIf { it.isNotEmpty() }.orEmpty(),
+            // A guest's name from the link page is their name for this call
+            // (`docs/ux/calls.md` section 4.1); the profile is not written.
+            initialCallName = request.initialCallName,
             // Composed whenever a profile is stored, a display name or a
             // username alone included; with the username goes its certificate
             // (ADR-0060 section 5), which is what lets a receiver verify it.

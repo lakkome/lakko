@@ -49,6 +49,9 @@ pub const MAX_BLOCK: usize = 8192;
 /// RNNoise works on samples in the range of 16-bit PCM.
 const PCM_SCALE: f32 = 32_768.0;
 
+/// The largest 16-bit PCM value, as `f32`.
+const PCM_MAX_S16: f32 = 32_767.0;
+
 /// Why a block was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseError {
@@ -121,28 +124,63 @@ impl NoiseSuppressor {
             } else {
                 0.0
             };
-            self.pending.push(clean * PCM_SCALE);
-            if self.pending.len() == FRAME_SIZE {
-                self.voice_probability =
-                    self.state.process_frame(&mut self.frame_out, &self.pending);
-                self.pending.clear();
-                for &out in &self.frame_out {
-                    let scaled = out / PCM_SCALE;
-                    let bounded = if scaled.is_finite() {
-                        scaled.clamp(-1.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    self.ready.push_back(bounded);
-                }
-            }
+            self.push(clean * PCM_SCALE);
         }
         for slot in output.iter_mut() {
-            // Never `None` by the invariant on `ready` (see the field doc);
-            // silence rather than a panic if it ever were.
-            *slot = self.ready.pop_front().unwrap_or(0.0);
+            *slot = self.pop();
         }
         Ok(())
+    }
+
+    /// Cleans `samples` in place, for a host whose audio is `f32` in the
+    /// range of 16-bit PCM (`[-32768, 32767]`, libwebrtc's "FloatS16", the
+    /// format of the Android capture post-processing hook). At most
+    /// [`MAX_BLOCK`] samples. The same stream as [`Self::process`]: one
+    /// suppressor must be fed through one of the two only. A non-finite
+    /// sample is silence; every output sample is finite and within the
+    /// 16-bit range. Allocates nothing.
+    pub fn process_s16_in_place(&mut self, samples: &mut [f32]) -> Result<(), NoiseError> {
+        if samples.len() > MAX_BLOCK {
+            return Err(NoiseError::BlockTooLong);
+        }
+        for &sample in samples.iter() {
+            let clean = if sample.is_finite() {
+                sample.clamp(-PCM_SCALE, PCM_MAX_S16)
+            } else {
+                0.0
+            };
+            self.push(clean);
+        }
+        for slot in samples.iter_mut() {
+            *slot = (self.pop() * PCM_SCALE).clamp(-PCM_SCALE, PCM_MAX_S16);
+        }
+        Ok(())
+    }
+
+    /// Feeds one sample already in the 16-bit range; runs RNNoise on every
+    /// whole frame.
+    fn push(&mut self, pcm: f32) {
+        self.pending.push(pcm);
+        if self.pending.len() == FRAME_SIZE {
+            self.voice_probability = self.state.process_frame(&mut self.frame_out, &self.pending);
+            self.pending.clear();
+            for &out in &self.frame_out {
+                let scaled = out / PCM_SCALE;
+                let bounded = if scaled.is_finite() {
+                    scaled.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                self.ready.push_back(bounded);
+            }
+        }
+    }
+
+    /// The next cleaned sample, in `[-1, 1]`.
+    fn pop(&mut self) -> f32 {
+        // Never `None` by the invariant on `ready` (see the field doc);
+        // silence rather than a panic if it ever were.
+        self.ready.pop_front().unwrap_or(0.0)
     }
 
     /// RNNoise's estimate, in `[0, 1]`, that the last whole frame held a
@@ -253,6 +291,52 @@ mod tests {
             ns.process(&big, &mut big_out),
             Err(NoiseError::BlockTooLong)
         );
+    }
+
+    #[test]
+    fn s16_in_place_matches_the_unit_range_stream() {
+        // Inputs that are exact in both scalings, so the two entry points
+        // see the same PCM: the in-place 16-bit path must give the unit
+        // path's output scaled by 32768, whatever the block size.
+        let input: Vec<f32> = noise(FRAME_SIZE * 6 + 7, 0.25, 11)
+            .iter()
+            .map(|s| (s * 32_768.0).round() / 32_768.0)
+            .collect();
+        let reference = run(&input, 128);
+        for block in [1, 160, 480, 481, 4096] {
+            let mut ns = NoiseSuppressor::new();
+            let mut samples: Vec<f32> = input.iter().map(|s| s * 32_768.0).collect();
+            for chunk in samples.chunks_mut(block) {
+                ns.process_s16_in_place(chunk).unwrap();
+            }
+            for (i, (got, want)) in samples.iter().zip(&reference).enumerate() {
+                let want = (want * 32_768.0).clamp(-32_768.0, 32_767.0);
+                assert!(
+                    (got - want).abs() < 1e-3,
+                    "block {block} sample {i}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn s16_in_place_stays_in_range_and_refuses_long_blocks() {
+        let mut samples = noise(FRAME_SIZE * 4, 200_000.0, 5);
+        samples[3] = f32::NAN;
+        samples[900] = f32::NEG_INFINITY;
+        let mut ns = NoiseSuppressor::new();
+        for chunk in samples.chunks_mut(480) {
+            ns.process_s16_in_place(chunk).unwrap();
+        }
+        assert!(samples
+            .iter()
+            .all(|s| s.is_finite() && (-32_768.0..=32_767.0).contains(s)));
+        let mut big = vec![0.0; MAX_BLOCK + 1];
+        assert_eq!(
+            ns.process_s16_in_place(&mut big),
+            Err(NoiseError::BlockTooLong)
+        );
+        assert!(big.iter().all(|&s| s == 0.0));
     }
 
     #[test]

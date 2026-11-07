@@ -887,6 +887,10 @@
       "text": "Failed: {reason}",
       "comment": "Joining failed; {reason} is a sentence explaining why."
     },
+    "call.link.guest_name.label": {
+      "text": "Your name in the call",
+      "comment": "Label of the name field on a call-link page for a visitor joining as a guest. Prefilled with a random two-word name each time the page opens; everyone in the call sees it."
+    },
     "call.link.host": {
       "text": "Host: {name}",
       "comment": "Who invited you; {name} is a contact or profile name."
@@ -1242,6 +1246,26 @@
     "call.self.starting_camera": {
       "text": "Starting camera...",
       "comment": "Shown over your own picture in a call while the camera starts."
+    },
+    "call.settings.call_name.a11y_cleared": {
+      "text": "Your name in this call is your profile name again.",
+      "comment": "Spoken (screen reader) confirmation after saving an empty name for the call, which goes back to the profile name."
+    },
+    "call.settings.call_name.a11y_saved": {
+      "text": "Your name in this call is now {name}.",
+      "comment": "Spoken (screen reader) confirmation after saving a name for the call; {name} is the new name."
+    },
+    "call.settings.call_name.hint": {
+      "text": "Everyone in the call sees this name. Your profile does not change.",
+      "comment": "Line under the 'Your name in this call' field in the in-call Settings sheet."
+    },
+    "call.settings.call_name.label": {
+      "text": "Your name in this call",
+      "comment": "Label of the text field at the top of the in-call Settings sheet (group and link calls) where a participant changes the name everyone in this call sees on their tile. The profile name does not change."
+    },
+    "call.settings.call_name.save": {
+      "text": "Save",
+      "comment": "Button beside the 'Your name in this call' field; applies the typed name for this call at once. An empty field takes the person back to their profile name."
     },
     "call.settings.devices": {
       "text": "Devices",

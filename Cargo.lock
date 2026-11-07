@@ -3024,6 +3024,7 @@ version = "0.0.0"
 dependencies = [
  "cbindgen",
  "lakko-calls",
+ "lakko-noise",
 ]
 
 [[package]]

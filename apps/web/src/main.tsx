@@ -20,6 +20,7 @@ import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
 import { bootstrapTextSize } from "./ui/text-size";
+import { bootstrapVideoSurfaces } from "./calls/video-surface";
 import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
 import { publishNotificationStrings } from "./l10n/notification-strings";
 import { installOriginHistory } from "./routes/origin-history";
@@ -58,6 +59,9 @@ if (root === null) {
 bootstrapTheme();
 // docs/ux/text-size.md — the message text size, before the first paint.
 bootstrapTextSize();
+// Call pictures kept off Firefox's compositor video surfaces
+// (calls/video-surface.ts).
+bootstrapVideoSurfaces(document.documentElement, navigator);
 
 // The address bar shows the origin only: read the entry path (an invite
 // link, a notification's `/?wake=`) and clear the URL before any screen

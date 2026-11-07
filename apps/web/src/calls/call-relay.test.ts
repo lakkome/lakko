@@ -76,3 +76,37 @@ describe("groupPeerAnnouncer", () => {
     expect(none.verify("bobpeer", ann!)).toBeNull();
   });
 });
+
+describe("call names through the real core (docs/ux/calls.md 4.1)", () => {
+  it("seals, classifies and verifies a name only against the announced leaf", () => {
+    const alice = Identity.fromSeed(new Uint8Array(32).fill(0xa1));
+    const bob = Identity.fromSeed(new Uint8Array(32).fill(0xb2));
+    const group = new Group(alice, GroupKind.Group);
+    group.addMember(alice, bob.createKeyPackage());
+    const asBob = groupPeerAnnouncer(wasmNs, bob, CALL, () => group);
+    const verifier = groupPeerAnnouncer(wasmNs, alice, CALL, () => group);
+
+    const wire = asBob.composeCallName?.("bobpeer", 1n, "Captain Bob") ?? null;
+    expect(wire).not.toBeNull();
+    const relay = new CallRelay(wasmNs);
+    relay.setSeed(new Uint8Array(32).fill(4));
+    expect(relay.open(relay.seal(wire!)!)).toEqual({ kind: "call-name", bytes: wire });
+
+    expect(verifier.verifyCallName?.("bobpeer", bob.signaturePublicKey, wire!)).toEqual({
+      seq: 1n,
+      name: "Captain Bob",
+    });
+    // Another peer id, or another leaf's key: dropped.
+    expect(verifier.verifyCallName?.("alicepeer", bob.signaturePublicKey, wire!)).toBeNull();
+    expect(verifier.verifyCallName?.("bobpeer", alice.signaturePublicKey, wire!)).toBeNull();
+    // An empty name goes back to the default; an untrimmed one is refused.
+    const cleared = asBob.composeCallName?.("bobpeer", 2n, "") ?? null;
+    expect(verifier.verifyCallName?.("bobpeer", bob.signaturePublicKey, cleared!)).toEqual({
+      seq: 2n,
+      name: null,
+    });
+    expect(asBob.composeCallName?.("bobpeer", 3n, " Bob")).toBeNull();
+    expect(wasmNs.callNameIsNewer(2n, 1n)).toBe(true);
+    expect(wasmNs.callNameIsNewer(1n, 1n)).toBe(false);
+  });
+});

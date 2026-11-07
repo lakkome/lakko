@@ -70,6 +70,7 @@ fn main() {
                 }
             }
             println!("cargo:rerun-if-changed=src/lib.rs");
+            println!("cargo:rerun-if-changed=src/noise.rs");
             println!("cargo:rerun-if-changed=cbindgen.toml");
             println!(
                 "cargo:warning=lakko-sframe-native: emitted {}",

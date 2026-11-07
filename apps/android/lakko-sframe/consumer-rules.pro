@@ -34,3 +34,6 @@
 -keepclassmembers class org.webrtc.RtpReceiver {
     long getNativeRtpReceiver();
 }
+
+# NativeNoiseSuppressor (ADR-0088): native methods found by name.
+-keep class me.lakko.sframe.NativeNoiseSuppressor { *; }

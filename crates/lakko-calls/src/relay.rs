@@ -15,7 +15,8 @@
 //! The roster leaf is account-bound (ADR-0050), so the binding
 //! `peer id -> person` stays spoof-proof, and the SFU never sees it: the
 //! announcement, and every other relay payload the clients agree on (today
-//! the camera on/off media state and the ADR-0083 screen-share state), is
+//! the camera on/off media state, the ADR-0083 screen-share state and the
+//! name a participant gives themself for the call, [`crate::call_name`]), is
 //! sealed under a key only members hold.
 //!
 //! # The relay key
@@ -65,7 +66,7 @@ pub const RELAY_VERSION: u8 = 0x01;
 const RELAY_AAD_DOMAIN: &[u8] = b"lakko/call/relay/v1\x00";
 
 /// Largest plaintext a relay payload may carry. An announcement is at most
-/// 206 bytes and a media state 28; the bound keeps a hostile payload from
+/// 206 bytes, a media state 28 and a call name 461; the bound keeps a hostile payload from
 /// costing more than a small allocation.
 pub const MAX_RELAY_PLAINTEXT: usize = 1024;
 
@@ -267,6 +268,9 @@ pub enum RelayPayload {
     /// A screen-share state (the whole plaintext; verify it with
     /// [`crate::screen_share::verify_screen_share`], ADR-0083).
     ScreenShare(Vec<u8>),
+    /// A participant's name for this call (the whole plaintext; verify it
+    /// with [`crate::call_name::verify_call_name`]).
+    CallName(Vec<u8>),
     /// Anything else: dropped by the caller.
     Unknown,
 }
@@ -281,6 +285,9 @@ pub fn classify_relay_plaintext(plaintext: &[u8]) -> RelayPayload {
     }
     if plaintext.starts_with(crate::screen_share::SCREEN_SHARE_DOMAIN) {
         return RelayPayload::ScreenShare(plaintext.to_vec());
+    }
+    if plaintext.starts_with(crate::call_name::CALL_NAME_DOMAIN) {
+        return RelayPayload::CallName(plaintext.to_vec());
     }
     match lakko_contacts::media_state::try_unwrap_media_state(plaintext) {
         Ok(Some(state)) => RelayPayload::MediaState {

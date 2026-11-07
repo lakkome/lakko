@@ -52,6 +52,7 @@ vi.mock("./sfu-call-session", () => ({
     rekey(): void {}
     setMicrophoneEnabled(): void {}
     setCameraEnabled(): void {}
+    setOwnCallName(): void {}
     sendSignalRelayToCall(): void {}
     sendSignalRelayToPeer(): void {}
     setTurnProvider(): void {}

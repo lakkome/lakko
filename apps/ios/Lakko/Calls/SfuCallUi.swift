@@ -90,6 +90,13 @@ private final class RemotePictureTracker {
     var flowing: Set<String> = []
 }
 
+/// The name this device typed for the call (`docs/ux/calls.md` section 4.1),
+/// held by reference so the init-time callbacks can read the current one.
+private final class OwnCallNameBox {
+    var name: String
+    init(name: String) { self.name = name }
+}
+
 @MainActor
 final class SfuCallUi {
     /// The underlying session (for direct control if needed).
@@ -130,6 +137,10 @@ final class SfuCallUi {
         // able to reach the video layout at all (see `RemotePictureTracker`).
         let pictureTracker = RemotePictureTracker()
         let screenTracker = ScreenShareTracks()
+        // The name typed for this call earlier in this app run, if any.
+        let callIdHex = config.callIdHex
+        let ownCallName = OwnCallNameBox(
+            name: callIdHex.map { CallNameMemory.remembered(callIdHex: $0) } ?? "")
         let audio = config.audio
         let video = config.video
         // Canonical call safety number derived from the shared seed — the
@@ -164,7 +175,9 @@ final class SfuCallUi {
                 }
             },
             onWelcome: { selfPeerId, roster in
-                let local = Self.localParticipant(localDisplayName, audio: audio, video: video)
+                let local = Self.localParticipant(
+                    Self.ownTileName(callName: ownCallName.name, profileName: localDisplayName),
+                    audio: audio, video: video)
                 let remotePeers = roster.map(\.peerId).filter { $0 != selfPeerId }
                 peerNames?.setRoster(remotePeers)
                 let remotes = remotePeers.map { Self.remoteParticipant("", peerId: $0) }
@@ -347,10 +360,35 @@ final class SfuCallUi {
             },
             onRemoteScreenVideoTrack: { track, peerId in
                 screenTracker.attach(track, sharer: Self.participantId(forPeer: peerId), ui: ui)
+            },
+            onRemoteCallName: { peerId, name in
+                // The name that peer typed for this call outranks every other
+                // source (``CallTileName``); `nil` takes it back to them.
+                let tile: String?
+                if let peerNames {
+                    tile = peerNames.setCallName(peerId, name)
+                } else {
+                    tile = name ?? ""
+                }
+                if let tile { ui.setParticipantName(Self.participantId(forPeer: peerId), tile) }
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)
         self.session = session
+        // The name this device typed for the call: sent with every
+        // announcement, shown on the own tile, changed from the call's
+        // Settings sheet (`docs/ux/calls.md` section 4.1).
+        session.setOwnCallName(ownCallName.name)
+        ui.setCallNameControl(
+            ownName: ownCallName.name,
+            defaultName: localDisplayName,
+            save: { [weak session] name in
+                ownCallName.name = name
+                if let callIdHex { CallNameMemory.remember(callIdHex: callIdHex, name: name) }
+                session?.setOwnCallName(name)
+                ui.setParticipantName(
+                    "local", Self.ownTileName(callName: name, profileName: localDisplayName))
+            })
         speaking.source = { [weak session] in await session?.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak session] tile, peerId, quality in
@@ -474,6 +512,12 @@ final class SfuCallUi {
     /// unit-testable without a live `SfuCallSession`.
     static func joinRaceCameraOn(trackPresent: Bool, lastKnown: Bool?) -> Bool {
         trackPresent ? (lastKnown ?? true) : false
+    }
+
+    /// The own tile's name: the name typed for the call, else the profile
+    /// name (`""` renders as the localized `You`).
+    static func ownTileName(callName: String, profileName: String) -> String {
+        callName.isEmpty ? profileName : callName
     }
 
     private static func localParticipant(

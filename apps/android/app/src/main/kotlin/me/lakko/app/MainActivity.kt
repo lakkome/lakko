@@ -715,6 +715,7 @@ private fun AppRoot(
     // moves from the first place to the second and the call starts.
     val pendingCallJoinSlug by inviteIntake.pendingCallJoinSlug.collectAsStateWithLifecycle()
     val callSlug = pendingCallJoinSlug
+    val callLinkOpen by inviteIntake.callJoinOpens.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext
     if (callSlug != null && state !is AuthState.Session) {
         me.lakko.app.ui.call.JoinCallRoot(
@@ -724,6 +725,7 @@ private fun AppRoot(
             onExit = { inviteIntake.consumeCallJoin() },
             host = me.lakko.app.calls.AppCallHost.link,
             endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
+            linkOpen = callLinkOpen,
         )
         return
     }
@@ -998,6 +1000,7 @@ private fun AppRoot(
                     // asked whether to keep the account.
                     guestOffer = guestOffer,
                     guestClaimedUsername = guest?.claimedUsername,
+                    linkOpen = callLinkOpen,
                 )
             }
             // The 1x1 call's ringing banner and in-call screen.

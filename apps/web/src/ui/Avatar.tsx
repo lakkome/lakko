@@ -13,6 +13,7 @@ import { createSignal, Match, Switch, type JSX } from "solid-js";
 
 import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
 import { wasmSync } from "../wasm";
+import { paintVideoBehind } from "../media/video-overlay";
 
 /**
  * The initials of a display label: the shared rule in the core
@@ -84,6 +85,7 @@ export function Avatar(props: {
         <Match when={video()}>
           {(url) => (
             <video
+              ref={paintVideoBehind}
               class="lk-avatar-media"
               src={url()}
               poster={still() ?? undefined}

@@ -14,6 +14,9 @@ import uniffi.lakko_ffi_uniffi.FfiProfile
  * A tile always carries the person's name. One rule for both call kinds, in
  * this order:
  *
+ *  0. the name the person typed for this call (`CallName.kt`,
+ *     `docs/ux/calls.md` section 4.1, 2026-11-07): once typed, every device
+ *     shows it, ahead of the viewer's own name for a contact;
  *  1. what the one resolver (`ProfileDirectory.resolve`) calls the person
  *     behind the tile: the viewer's rename, the person's profile name, their
  *     verified `@username`. The placeholder it returns for a person it knows
@@ -39,9 +42,15 @@ import uniffi.lakko_ffi_uniffi.FfiProfile
  */
 
 /** The name the sources give, or `null` while the person is still unnamed.
- *  Each argument is `null` (or blank) when that source has nothing. */
-public fun callTileName(resolved: String?, announcedName: String?, claimedUsername: String?): String? {
-    for (candidate in arrayOf(resolved, announcedName, claimedUsername)) {
+ *  Each argument is `null` (or blank) when that source has nothing.
+ *  [callName], the name typed for the call, outranks every other source. */
+public fun callTileName(
+    resolved: String?,
+    announcedName: String?,
+    claimedUsername: String?,
+    callName: String? = null,
+): String? {
+    for (candidate in arrayOf(callName, resolved, announcedName, claimedUsername)) {
         val name = candidate?.trim().orEmpty()
         if (name.isNotEmpty()) return name
     }

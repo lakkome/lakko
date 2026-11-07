@@ -30,6 +30,7 @@ import type {
   VerifiedCallScreenShare,
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
+import type { CallNameSigner } from "./call-name";
 
 /** The wasm surface this module uses. */
 export type CallRelayWasm = Pick<
@@ -40,6 +41,8 @@ export type CallRelayWasm = Pick<
   | "verifyCallPeerAnnouncement"
   | "composeCallScreenShare"
   | "verifyCallScreenShare"
+  | "composeCallName"
+  | "verifyCallName"
 >;
 
 /** What an opened relay payload carries. */
@@ -49,6 +52,9 @@ export type OpenedRelay =
   /** A signed screen-share state (ADR-0083), to verify against the sender's
    *  verified announcement. */
   | { readonly kind: "screen-share"; readonly state: Uint8Array }
+  /** A signed name for this call (`call-name.ts`), to verify against the
+   *  sender's verified announcement. */
+  | { readonly kind: "call-name"; readonly bytes: Uint8Array }
   | { readonly kind: "unknown" };
 
 /** The relay keys of the current and the previous call epoch. */
@@ -110,6 +116,8 @@ export class CallRelay {
             return { kind: "media-state", cameraOn: classified.cameraOn };
           case "screen-share":
             return { kind: "screen-share", state: classified.state };
+          case "call-name":
+            return { kind: "call-name", bytes: classified.callName };
           default:
             return { kind: "unknown" };
         }
@@ -143,7 +151,7 @@ export interface VerifiedPeerIdentity {
  * group is read at each call, since the call's MLS group changes epoch (and
  * a link joiner has none before its Welcome).
  */
-export interface PeerAnnouncer {
+export interface PeerAnnouncer extends CallNameSigner {
   /** This device's announcement of `selfPeerId`, or `null` when it cannot
    *  make one yet. */
   compose(selfPeerId: string): Uint8Array | null;
@@ -219,6 +227,28 @@ export function groupPeerAnnouncer(
       if (g === null) return null;
       try {
         return wasm.verifyCallScreenShare(g, callId, from, signerKey, state);
+      } catch {
+        return null;
+      }
+    },
+    composeCallName: (selfPeerId, seq, name) => {
+      if (group() === null) return null;
+      try {
+        return wasm.composeCallName(identity, callId, selfPeerId, seq, name);
+      } catch {
+        return null;
+      }
+    },
+    verifyCallName: (from, signerKey, bytes) => {
+      const g = group();
+      if (g === null) return null;
+      try {
+        const verified = wasm.verifyCallName(g, callId, from, signerKey, bytes);
+        try {
+          return { seq: verified.seq, name: verified.name ?? null };
+        } finally {
+          verified.free();
+        }
       } catch {
         return null;
       }

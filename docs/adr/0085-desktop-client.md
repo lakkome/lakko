@@ -600,6 +600,35 @@ because a tunnel that dies mid-response ends the read like a close does.
 `reality_tunnel_carries_a_large_request_and_response` failed before the fix
 with that same error. Shadowsocks has no such path.
 
+### 15. Call pictures through a canvas on macOS (2026-11-07)
+
+On the first desktop call with a working camera (macOS 27.2) the own preview
+never appeared, although the element played (`readyState=4`, width 1280,
+`paused=false`). Reproduced without Lakko or Tauri in a plain WKWebView test
+app: every `<video>` played and could be drawn into a canvas, but its
+`RenderVideo` layer in the window's layer tree had no hosted content, for a
+file video as much as for a WebRTC track, and the same with the GPU process
+for media turned off. Screen captures show no WebKit video on that Mac, in
+Safari either, while QuickTime's video is captured; whether Safari shows
+video there to the eye was not established. A canvas fed from the element
+with `drawImage` on each frame shows the picture in the same window.
+
+So the desktop build on a WebKit engine (`calls/video-canvas.ts`
+`videoNeedsCanvas`: the desktop platform and an AppleWebKit user agent that
+is not Chromium) draws each call picture (own camera, remote main and light
+pictures) into a canvas laid over the `<video>`, which keeps the element's
+class and keeps playing. Every other `<video>` a person sees (the shared
+screen, profile videos and the profile editor, video notes and their
+recording preview, GIFs in chats and the picker, video attachments and their
+viewer, the pairing camera) gets a canvas BEHIND it in the same box
+(`media/video-overlay.ts` `paintVideoBehind`): a video the engine does not put
+on screen paints nothing, so its frames show through while its native
+controls, its poster and the player's own buttons stay above and work. The
+browser and the Windows build are unchanged. Unverified: anything on screen
+in the Lakko window itself; the test app with Lakko's stylesheet showed the
+call tile, the self view, a video note, a GIF, an avatar and a video with
+native controls through their canvases.
+
 ## Alternatives
 
 - **B. A proxy for every wasm call.** The host holds the MLS objects and every

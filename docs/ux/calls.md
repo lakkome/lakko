@@ -242,6 +242,34 @@ microphone, the camera, and the speaker where the platform lets the app move a
 call's sound. A list with nothing to choose is absent. A choice applies at once
 and holds for the call. Never a system picker or a system route sheet.
 
+**Settings is also where a person changes the name others see in this call**
+(2026-11-07, maintainer). At the top of the sheet, above the device lists:
+
+- A text field labelled `Your name in this call`, holding the name this
+  person typed for this call, or empty when they typed none. Its placeholder
+  is the name others see by default: the profile name, or nothing when there
+  is none. Under it one line: `Everyone in the call sees this name. Your
+  profile does not change.`
+- A `Save` button beside the field, enabled only when the field differs from
+  the saved call name and passes the display-name rule of
+  [`profile-names.md`](profile-names.md) (trimmed, 1-64 characters, no line
+  break, no control or invisible formatting character). A text that fails the
+  rule shows the profile screen's sentence for that failure under the field
+  and keeps `Save` disabled.
+- `Save` applies at once: the person's own tile and, within moments, every
+  other participant's tile for them show the new name. Saving an empty field
+  takes the person back to the default (the profile name, or the viewer's own
+  name for them when they are a contact).
+- The name holds for this call only. It is not written to the profile, to the
+  conversation or to any server: it travels sealed to the call's participants
+  and is forgotten when the call ends (a rejoin of the same call from the same
+  app run keeps it). The profile name never changes because of it.
+- Any participant can do it: an account holder, a guest, the person who
+  started the call.
+- Not yet on a one-to-one call: the field is absent there until the
+  one-to-one carrier exists (the sealed relay of ADR-0078 section 2 exists
+  only on a call through the SFU, i.e. a group call or a link call).
+
 **The camera button is on a voice call too, and it turns the call into a video one.**
 People start a call with their voice and decide to show something a minute later; every
 messenger allows that, and taking it away to keep the row short would be a feature lost
@@ -498,7 +526,8 @@ were each picking someone else and one of them was picking wrong:
   starts a group call is its first participant, so there is no waiting screen
   and no message about others joining: the screen is the group screen from the
   first second, with the user's own tile, their own camera when it is on, and
-  their own name on it (the profile name; `You` only when no name is set). The
+  their own name on it (the name they typed for this call, else the profile
+  name; `You` only when neither is set). The
   status line already carries the count.
 - **The user's own tile is never the large one** unless they are alone in the
   call, when their own preview is the only thing there is to show. With others
@@ -526,7 +555,12 @@ were each picking someone else and one of them was picking wrong:
 
 - **Every tile carries the person's name, in a link call too.** A tile
   always shows a name. One rule on every client and for both kinds of call, in
-  this order:
+  this order (step 0 added 2026-11-07, maintainer):
+  0. the name the person typed for this call (section 4.1, Settings; a guest's
+     name from the link page), as every device received it. Once a person has
+     typed one, every device shows it, whatever that device calls them
+     otherwise. Saving an empty name withdraws it and the steps below apply
+     again;
   1. what the one resolver of [`profile-names.md`](profile-names.md) calls the
      person behind the tile: the viewer's own name for a contact, then the
      person's profile name, then their verified `@username`;
@@ -565,6 +599,15 @@ were each picking someone else and one of them was picking wrong:
   server admitted that participant to the call as; otherwise the profile is
   not kept and the tile shows the announced name as plain text. The tiles are
   named again whenever the stored profiles change.
+
+  The name typed for the call (step 0) travels the same way and only that
+  way: signed with the person's MLS leaf key, sealed under the call's relay
+  key, never to a server in clear and never into the profile store. Each
+  participant re-sends it whenever it re-announces itself (someone joins, a
+  rekey, the periodic announcement), so a person who joins later sees it too.
+  A device takes it only from the peer whose verified announcement named that
+  leaf key, and keeps the newest one per peer (a number that grows with each
+  change), so an old name re-sent late cannot replace a newer one.
 - **The person joins with what the device has.** A video call asks for a
   camera and a microphone; a device without a camera, or a browser that
   blocks capture, used to fail the whole request and print the browser's own

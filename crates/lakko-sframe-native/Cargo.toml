@@ -45,6 +45,9 @@ workspace = true
 
 [dependencies]
 lakko-calls.workspace = true
+# ADR-0088: the capture noise suppressor's C ABI (`src/noise.rs`) for the
+# Android capture hook in libsframe_jni.so.
+lakko-noise.workspace = true
 
 [build-dependencies]
 cbindgen = "0.28"

@@ -17,10 +17,17 @@
 //!   2. sealing the input (when within bounds) opens back to it;
 //!   3. `classify_relay_plaintext` and `decode_peer_announcement` never
 //!      panic, and an announcement that decodes has a peer id within its
-//!      bounds and re-encodes to the exact input length.
+//!      bounds and re-encodes to the exact input length;
+//!   4. `decode_call_name` (the name a participant gives themself for the
+//!      call) never panics, on the raw input and behind the call-name
+//!      domain, and a name that decodes has a peer id and a name within
+//!      their bounds, a non-zero seq, and accounts for every input byte.
 
 #![no_main]
 
+use lakko_calls::call_name::{
+    call_name_len, decode_call_name, CALL_NAME_DOMAIN, MAX_CALL_NAME_BYTES,
+};
 use lakko_calls::relay::{
     classify_relay_plaintext, decode_peer_announcement, peer_announcement_len, RelayKey,
     MAX_PEER_ID_LEN, MAX_RELAY_PLAINTEXT,
@@ -44,5 +51,18 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(ann) = decode_peer_announcement(data) {
         assert!(!ann.peer_id.is_empty() && ann.peer_id.len() <= MAX_PEER_ID_LEN);
         assert_eq!(peer_announcement_len(ann.peer_id.len()), data.len());
+    }
+
+    // (4) The call name, raw and behind its domain so the fuzzer reaches the
+    // field parsers without having to find the prefix.
+    let mut prefixed = CALL_NAME_DOMAIN.to_vec();
+    prefixed.extend_from_slice(data);
+    for input in [data, prefixed.as_slice()] {
+        if let Ok(n) = decode_call_name(input) {
+            assert!(!n.peer_id.is_empty() && n.peer_id.len() <= MAX_PEER_ID_LEN);
+            assert!(n.name.len() <= MAX_CALL_NAME_BYTES);
+            assert!(n.seq >= 1);
+            assert_eq!(call_name_len(n.peer_id.len(), n.name.len()), input.len());
+        }
     }
 });
