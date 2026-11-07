@@ -305,6 +305,7 @@ public class ChannelPublisherLoop private constructor(
             } ?: channelRotationStateAfterRotation(now.toULong()).also { seeded ->
                 state.saveRotationState(channelId, StoredRotationState(seeded.lastRotationMs, seeded.postsSinceRotation))
             }
+            knowEpochBeforeCommit(channelId)
             val result = rotate(pub, groupFor(pub, channelId), channelId, stored)
             if (result.rotated) afterRotation(channelId)
         }
@@ -347,6 +348,20 @@ public class ChannelPublisherLoop private constructor(
                 state = rotationState,
                 nowMs = System.currentTimeMillis().toULong(),
             )
+        }
+    }
+
+    /** The epoch the current keys serve, read before a commit replaces them,
+     *  so [ChannelsUiState.refreshPublisherKey] can keep the outgoing seed
+     *  under it (section 13: the publisher still reads its older posts). */
+    private suspend fun knowEpochBeforeCommit(channelId: String) {
+        if (state.epochByChannel.value[channelId] != null) return
+        try {
+            state.setEpoch(channelId, client.fetchEpoch(channelId))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // Unknown: the outgoing seed is then not kept.
         }
     }
 
@@ -406,6 +421,7 @@ public class ChannelPublisherLoop private constructor(
             val account = state.boundAccount ?: throw IllegalStateException("no account bound")
             val store = state.commitStore ?: throw IllegalStateException("no commit store")
             val pg = groupFor(pub, channelId)
+            knowEpochBeforeCommit(channelId)
             try {
                 pub.withIdentityPersistingFirst { id, persistNow ->
                     CoPublisher.approve(ds, client, id, pg, joinerKey, channelId, account, store, persistNow)
@@ -475,6 +491,7 @@ public class ChannelPublisherLoop private constructor(
         val account = state.boundAccount ?: throw IllegalStateException("no account bound")
         val store = state.commitStore ?: throw IllegalStateException("no commit store")
         val pg = groupFor(pub, channelId)
+        knowEpochBeforeCommit(channelId)
         try {
             pub.withIdentityPersistingFirst { id, persistNow ->
                 CoPublisher.removePublisher(ds, client, id, pg, accountKey, channelId, account, store, persistNow)

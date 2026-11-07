@@ -365,6 +365,7 @@ public fun ChannelInfoScreen(
                 }
             },
             onClose = { inviting = null },
+            publisher = picking,
         )
     }
     if (confirmDelete) {

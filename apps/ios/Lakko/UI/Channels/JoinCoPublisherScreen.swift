@@ -23,6 +23,9 @@ struct JoinCoPublisherScreen: View {
     /// ADR-0053 — the join failure (same copy and Try-again rule as the
     /// group join screen). The raw error is logged, never shown.
     @State private var failure: CoPublisherJoin.Failure?
+    /// The request was sent and the owner has not approved yet; it lands by
+    /// itself when they do.
+    @State private var waiting = false
 
     private let ds = DsClient()
 
@@ -36,6 +39,12 @@ struct JoinCoPublisherScreen: View {
                 TextField(l10n.t("channels.join.name_label"), text: $localName)
             } footer: {
                 Text(l10n.t("channels.join.subtitle"))
+            }
+            if waiting && status == nil {
+                Section {
+                    Text(l10n.t("channels.join.waiting"))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
             }
             if let status {
                 Section {
@@ -79,17 +88,26 @@ struct JoinCoPublisherScreen: View {
         if trimmed.isEmpty { return }
         busy = true
         failure = nil
+        waiting = false
         defer {
             busy = false
             status = nil
         }
         do {
-            _ = try await CoPublisherJoin.run(
+            let outcome = try await CoPublisherJoin.run(
                 link: trimmed, localName: localName, state: state, accountIdentitySeed: accountIdentitySeed,
                 ds: ds, onStage: { stage in
                     status = stage == .sending ? "group.join.sending" : "channels.join.waiting"
                 })
-            dismiss()
+            switch outcome {
+            case .joined:
+                dismiss()
+            case .waiting:
+                // ADR-0045 decision 2 — the request has no deadline: it stays
+                // recorded and lands when the owner approves, on this screen
+                // or not.
+                waiting = true
+            }
         } catch let failed as CoPublisherJoin.Failure {
             failure = failed
         } catch {

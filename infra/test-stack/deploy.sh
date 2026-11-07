@@ -131,7 +131,7 @@ if [[ $SKIP_WEB != 1 ]]; then
   team_id="$(sed -n 's/^LAKKO_APPLE_TEAM_ID=//p' /etc/lakko-test/lakko.env | tr -d '"'"'"' \r' | head -n1)"
   if [[ -n $team_id ]]; then
     install -d -m 755 /var/www/lakko-test-web/.well-known
-    printf '{"applinks":{"details":[{"appIDs":["%s.me.lakko.dev"],"components":[{"/":"/i/*"},{"/":"/g/*"},{"/":"/c/*"}]}]}}\n' "$team_id" \
+    printf '{"applinks":{"details":[{"appIDs":["%s.me.lakko.dev"],"components":[{"/":"/i/*"},{"/":"/g/*"},{"/":"/c/*"},{"/":"/feed/import"}]}]}}\n' "$team_id" \
       > /var/www/lakko-test-web/.well-known/apple-app-site-association
   else
     echo "[deploy-test] WARN LAKKO_APPLE_TEAM_ID is not set in /etc/lakko-test/lakko.env; no apple-app-site-association written (iOS links open in Safari)"

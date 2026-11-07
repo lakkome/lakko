@@ -299,6 +299,9 @@ public object AccountLocalWipe {
         Step("channel-own-feedback") { ctx, acct -> me.lakko.app.channels.OwnChannelFeedbackStore.forgetAccount(ctx, acct) },
         Step("channel-feedback-outbox") { ctx, acct -> me.lakko.app.channels.ChannelFeedbackOutbox.forgetAccount(ctx, acct) },
         Step("channel-copublishers") { ctx, acct -> me.lakko.app.channels.ChannelAdmissionSeedShare.forgetAccount(ctx, acct) },
+        Step("channel-pending-publisher-requests") { ctx, acct ->
+            me.lakko.app.channels.PendingPublisherRequests.forgetAccount(ctx, acct)
+        },
         Step("channel-copublisher-bindings") { ctx, acct -> me.lakko.app.channels.CoPublisherBindingStore.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------

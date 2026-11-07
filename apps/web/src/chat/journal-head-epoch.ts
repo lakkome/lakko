@@ -37,8 +37,10 @@ export const JOURNAL_HEAD_MAX_PAGES = 1000;
 export async function scanJournal<T>(
   fetchPage: (after: number, limit: number) => Promise<JournalHeadPage>,
   visit: (row: JournalHeadRow) => T | undefined,
+  /** Read only rows after this id (a caller that keeps its own cursor). */
+  startAfter = 0,
 ): Promise<T | undefined> {
-  let after = 0;
+  let after = startAfter;
   for (let page = 0; page < JOURNAL_HEAD_MAX_PAGES; page++) {
     const raw = await fetchPage(after, JOURNAL_HEAD_PAGE_SIZE);
     for (const m of raw.messages) {

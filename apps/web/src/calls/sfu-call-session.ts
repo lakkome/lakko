@@ -115,6 +115,7 @@ import {
   type VideoPublishState,
 } from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
+import { NoiseSuppressionController } from "./noise-suppression";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 import {
   addCameraSenderMidCall,
@@ -437,6 +438,9 @@ export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
+  /** Which microphone track the sender carries, raw or noise-suppressed
+   *  (ADR-0088). Created with the first publish, disposed at teardown. */
+  private noise: NoiseSuppressionController | null = null;
   private signaling: SfuSignalingClient | null = null;
   private selfPeerId: string | null = null;
   /** The relay keys of the current and previous call epoch (ADR-0078
@@ -1226,6 +1230,7 @@ export class SfuCallSession {
     for (const track of this.localStream.getAudioTracks()) {
       track.enabled = on;
     }
+    this.noise?.setMuted(!on);
   }
 
   /** Enable / disable the local camera (local-only gate). Also broadcasts the
@@ -1495,9 +1500,11 @@ export class SfuCallSession {
     const sender = this.mainSenderOf(pc, kind);
     if (sender === undefined) return;
 
+    // The microphone asks for the same echo cancellation, noise suppression
+    // and gain control as the first capture (`audioTrackConstraint`).
     const constraints: MediaStreamConstraints =
       kind === "audio"
-        ? { audio: { deviceId: { exact: deviceId } } }
+        ? { audio: audioTrackConstraint(true, deviceId) }
         : { video: { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } } };
 
     let captured: MediaStream;
@@ -1530,6 +1537,9 @@ export class SfuCallSession {
     // Preserve the current mute (enabled) state so a switch never unmutes.
     newTrack.enabled = oldTracks[0]?.enabled ?? true;
 
+    // A noise-suppression build in flight for the old microphone must not
+    // land on the sender after the new one (ADR-0088).
+    if (kind === "audio") this.noise?.detach();
     try {
       // replaceTrack keeps the sender's RTCRtpScriptTransform (the SFrame
       // encryptor) bound — no re-attach needed.
@@ -1538,6 +1548,8 @@ export class SfuCallSession {
       // eslint-disable-next-line no-console
       console.warn(`replaceTrack (SFU ${kind} device switch) failed`, err);
       newTrack.stop();
+      const previous = oldTracks[0];
+      if (kind === "audio" && previous !== undefined) void this.noise?.attach(previous);
       return;
     }
     if (this.pc !== pc || this.localStream !== localStream) {
@@ -1552,6 +1564,8 @@ export class SfuCallSession {
       t.stop();
     }
     localStream.addTrack(newTrack);
+    // The suppressor follows the microphone to the new device.
+    if (kind === "audio") void this.noise?.attach(newTrack);
     // The copies follow the camera to the new device. Their old clones are
     // stopped there; the old camera track was stopped just above. A copy the
     // browser would not take is not tried again here.
@@ -2057,6 +2071,8 @@ export class SfuCallSession {
       }
       this.pc = null;
     }
+    this.noise?.dispose();
+    this.noise = null;
     if (this.localStream !== null) {
       for (const track of this.localStream.getTracks()) {
         track.stop();
@@ -2256,6 +2272,22 @@ export class SfuCallSession {
     }
     // The camera's copies (ADR-0070 steps 1 and 5), sealed like every sender
     // before the offer is built.
+    // The microphone goes out raw first; the noise suppressor swaps its
+    // processed track onto the same sender once its graph runs (ADR-0088),
+    // so building it never delays the publish.
+    const microphone = stream.getAudioTracks()[0];
+    if (microphone !== undefined && this.noise === null) {
+      const noise = new NoiseSuppressionController({
+        label: "group",
+        replaceSenderTrack: async (track): Promise<void> => {
+          const sender = this.pc === pc ? this.mainSenderOf(pc, "audio") : undefined;
+          if (sender === undefined) throw new Error("no microphone sender");
+          await sender.replaceTrack(track);
+        },
+      });
+      this.noise = noise;
+      void noise.attach(microphone);
+    }
     const camera = stream.getVideoTracks()[0];
     if (camera !== undefined) await this.followCamera(pc, camera, seed);
     if (this.pc !== pc) return;

@@ -590,6 +590,12 @@ struct LakkoApp: App {
         chat.lineageWriter = { [weak sync] successor, root in
             await sync?.setLineage(successorGroupId: successor, rootConversationId: root) ?? false
         }
+        // One person, one one-to-one row (``DuplicateOneToOne``): folded once
+        // the synced state is loaded, and again on every lineage change.
+        chat.lineageReady = { [weak sync] in sync?.ready ?? false }
+        chat.lineageReadyWatch = sync.$ready
+            .receive(on: RunLoop.main)
+            .sink { [weak chat] ready in if ready { chat?.foldDuplicateOneToOnes() } }
         chat.ownDeviceGroupRosterProvider = { [weak sync, weak auth] in
             if let live = sync?.rosterDeviceKeys() { return live }
             guard let secrets = auth?.identitySecrets else { return nil }
@@ -1931,6 +1937,11 @@ private struct SessionRoot: View, Equatable {
                 CoPublisherAcceptance.shared.seedProvider = { accountIdentitySeed }
                 CoPublisherAcceptance.shared.openChannel = { channelId in
                     push(.channel(channelId: channelId), on: selectedTab)
+                }
+                // ADR-0045 decision 2 — a publisher request's Welcome lands
+                // through the mailbox loop whenever the owner approves.
+                contactsRepository.publisherWelcomeLander = { welcome, accountIdB64 in
+                    try CoPublisherAcceptance.shared.landPendingWelcome(welcome, accountIdB64: accountIdB64)
                 }
                 ReachCenter.shared.contactsProvider = { [contactsRepository] in
                     contactsRepository.state.accepted.compactMap { contact in

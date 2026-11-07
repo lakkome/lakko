@@ -926,6 +926,10 @@ public object CoPublisher {
         /** ADR-0087 section 7 — this account's profile envelope with its
          *  account id, so the owner can seal the admission seeds to it. */
         profileEnvelope: ByteArray = ByteArray(0),
+        /** Called with the request after its keys are on disk and before
+         *  the knock (the durable pending-request record); a throw sends
+         *  nothing. */
+        beforeKnock: (CoPublishRequest) -> Unit = {},
     ): CoPublishRequest {
         val idx = link.lastIndexOf(URL_PREFIX)
         if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
@@ -993,6 +997,12 @@ public object CoPublisher {
         // The KeyPackage's private key is what opens the owner's Welcome: on
         // disk before the knock, fail-closed.
         persistProposalKeys()
+        val request = CoPublishRequest(
+            groupId = groupId,
+            channelIdHex = channelIdHex,
+            joinerKey = identity.signaturePublicKey(),
+        )
+        beforeKnock(request)
         val row = uniffi.lakko_ffi_uniffi.sealKnockRow(
             key.publicKey,
             key.version,
@@ -1003,11 +1013,7 @@ public object CoPublisher {
         )
         ds.knock(groupId, listOf(row, binding))
         lastCoPublishRequestMs = System.currentTimeMillis()
-        return CoPublishRequest(
-            groupId = groupId,
-            channelIdHex = channelIdHex,
-            joinerKey = identity.signaturePublicKey(),
-        )
+        return request
     }
 
     /** ADR-0028 OQ3 — joiner side: read this identity's own mailbox (ADR-0053)
@@ -1067,19 +1073,37 @@ public object CoPublisher {
         // joins through its own entry point: `Group.joinFromWelcome` refuses
         // its Welcome, and this one refuses a Welcome for any other group (or
         // a chat's) before anything is written.
+        for (welcome in candidates.asReversed()) {
+            val keys = joinCoPublishWelcome(identity, welcome, groupId, channelIdHex, coPublished, existingSigningSeed)
+            if (keys != null) return keys
+            // else try an older candidate
+        }
+        return null
+    }
+
+    /**
+     * Join the PublisherGroup [groupId] of [channelIdHex] from one [welcome]
+     * (the raw Welcome a `WELCOME_RENDEZVOUS` or `WELCOME` row carries) and
+     * mint this device's publisher keys; `null` when the Welcome is not this
+     * request's (sealed to another KeyPackage, or for another group). Shared
+     * by the Accept wait ([pollForCoPublishWelcome]) and the account mailbox
+     * loop, which lands a late approval (`landPendingPublisherWelcome`).
+     */
+    public fun joinCoPublishWelcome(
+        identity: Identity,
+        welcome: ByteArray,
+        groupId: ByteArray,
+        channelIdHex: String,
+        coPublished: CoPublishedJournalMarks,
+        existingSigningSeed: ByteArray? = null,
+    ): ChannelPublisherKeys? {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
-        var joined = false
-        for (welcome in candidates.asReversed()) {
-            try {
-                uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(identity, welcome, groupId, channelId).close()
-                joined = true
-                break
-            } catch (_: Throwable) {
-                // try an older candidate
-            }
+        try {
+            uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(identity, welcome, groupId, channelId).close()
+        } catch (_: Throwable) {
+            return null
         }
-        if (!joined) return null
         // ADR-0059 section 9 — this account now publishes as a co-publisher;
         // its signed writes go out once under that key.
         ChannelPublisherRoles.rememberFor(identity, channelIdHex, ChannelPublisherRole.COPUBLISHER)

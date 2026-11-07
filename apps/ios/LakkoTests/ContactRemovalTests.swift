@@ -904,6 +904,28 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertEqual(senderKey, "member-2")
     }
 
+    // MARK: - Publisher requests (ADR-0045 decision 2)
+
+    /// The mailbox loop holds its cursor when a rendezvous row arrives while
+    /// publisher requests are pending and nothing can land them yet; a plain
+    /// Welcome goes on to the chat join.
+    func testTheMailboxLoopHoldsARendezvousRowWhenTheLanderIsNotReady() throws {
+        PendingPublisherRequests.clear(accountIdB64: account)
+        defer { PendingPublisherRequests.clear(accountIdB64: account) }
+        let contacts = makeRepository()
+        XCTAssertFalse(try contacts.landPublisherWelcome(Data([1]), accountIdB64: account, holdWhenNotReady: true))
+        try PendingPublisherRequests.record(
+            PendingPublisherRequest(
+                channelIdHex: "ee", groupIdHex: "0c", joinerKeyB64: base64Encode(Data(repeating: 1, count: 32)),
+                name: "", description: "", requestedAtMs: 1),
+            accountIdB64: account)
+        XCTAssertThrowsError(
+            try contacts.landPublisherWelcome(Data([1]), accountIdB64: account, holdWhenNotReady: true))
+        XCTAssertFalse(try contacts.landPublisherWelcome(Data([1]), accountIdB64: account, holdWhenNotReady: false))
+        contacts.publisherWelcomeLander = { (_: Data, _: String) throws -> Bool in true }
+        XCTAssertTrue(try contacts.landPublisherWelcome(Data([1]), accountIdB64: account, holdWhenNotReady: true))
+    }
+
     // MARK: - Fixtures
 
     private func makeRepository(sentStore: SentRequestsStoring? = nil) -> ContactsRepository {

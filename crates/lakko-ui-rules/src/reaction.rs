@@ -282,7 +282,8 @@ pub fn reaction_tap_verdict(
 /// Where the chips are drawn: what a chip may show differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipConversation {
-    /// A one-to-one chat: the emoji alone, a count of 2 when both gave it.
+    /// A one-to-one chat: the reactors' avatars, as in a group (who reacted
+    /// is shown in a one-to-one too, maintainer 2026-11-07).
     OneToOne,
     /// A group: avatars when three or fewer gave it, a count otherwise.
     Group,
@@ -375,8 +376,8 @@ pub fn chip_sources_from_held(held: &[HeldReaction], own: &ReactorKey) -> Vec<Ch
 ///   emoji's bytes, so every device draws the same row;
 /// * at most [`MAX_REACTION_KINDS_SHOWN`] chips; the rest are counted in
 ///   [`ChipRow::overflow_kinds`] for the `+N` chip;
-/// * face: [`ChipConversation`] decides; a group shows avatars only when it
-///   knows every one of the at most three people.
+/// * face: [`ChipConversation`] decides; a one-to-one or a group shows
+///   avatars only when it knows every one of the at most three people.
 #[must_use]
 pub fn reaction_chips(
     sources: &[ChipSource],
@@ -402,12 +403,14 @@ pub fn reaction_chips(
             count: s.count,
             mine: s.mine,
             face: match conversation {
-                ChipConversation::OneToOne if s.count >= 2 => ChipFace::Count(s.count),
-                ChipConversation::OneToOne => ChipFace::EmojiOnly,
-                ChipConversation::Group if s.count <= 3 && s.reactors.len() == s.count as usize => {
+                ChipConversation::OneToOne | ChipConversation::Group
+                    if s.count <= 3 && s.reactors.len() == s.count as usize =>
+                {
                     ChipFace::Avatars(s.reactors.clone())
                 },
-                ChipConversation::Group | ChipConversation::Channel => ChipFace::Count(s.count),
+                ChipConversation::OneToOne | ChipConversation::Group | ChipConversation::Channel => {
+                    ChipFace::Count(s.count)
+                },
             },
         })
         .collect();
@@ -597,11 +600,16 @@ mod tests {
         };
         assert_eq!(
             face(ChipConversation::OneToOne, source(1, vec![A])),
-            ChipFace::EmojiOnly
+            ChipFace::Avatars(vec![A])
         );
         assert_eq!(
             face(ChipConversation::OneToOne, source(2, vec![A, B])),
-            ChipFace::Count(2)
+            ChipFace::Avatars(vec![A, B])
+        );
+        // A one-to-one that does not know the reactor shows the number.
+        assert_eq!(
+            face(ChipConversation::OneToOne, source(1, vec![])),
+            ChipFace::Count(1)
         );
         assert_eq!(
             face(ChipConversation::Group, source(3, vec![A, B, C])),

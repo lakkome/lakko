@@ -1317,7 +1317,15 @@ public class ChannelsClient(
     ): ChannelsApiException {
         return try {
             val env = response.body<ErrEnvelope>()
-            ChannelsApiException(response.status.value, env.code, env.detail)
+            ChannelsApiException(response.status.value, env.code, env.detail).also { e ->
+                // ADR-0087 section 9 (phase B) — a `410 channel-deleted` from
+                // any channels route: the owner deleted that channel.
+                if (e.status == 410 && e.code == "channel-deleted") {
+                    channelIdInPath(response.call.request.url.encodedPath)?.let { id ->
+                        runCatching { onChannelDeleted?.invoke(id) }
+                    }
+                }
+            }
         } catch (_: Throwable) {
             // Some routes return plain text (or no body) on
             // unexpected errors. Capture the text so the caller
@@ -1333,6 +1341,24 @@ public class ChannelsClient(
     }
 
     public companion object {
+        /** Told the channel id of every `410 channel-deleted` answer (the
+         *  session shell drops a pending publisher request for it). */
+        @Volatile
+        public var onChannelDeleted: ((channelIdHex: String) -> Unit)? = null
+
+        /** The channel id a `/v1/channels/{id}/...` path names, or `null`. */
+        internal fun channelIdInPath(path: String): String? {
+            val parts = path.split('/').filter { it.isNotEmpty() }
+            // The first `channels/<32 hex>` pair: a prefix such as
+            // `/native/channels/v1/channels/...` names the service first.
+            for (i in 0 until parts.size - 1) {
+                if (parts[i] != "channels") continue
+                val id = parts[i + 1].lowercase()
+                if (id.length == 32 && id.all { c -> c in '0'..'9' || c in 'a'..'f' }) return id
+            }
+            return null
+        }
+
         /** The owner signer of [channelIdHex] for the account identity
          *  (ADR-0059 section 1). Only the account that created the channel
          *  derives the key the server registered for it. Deriving it needs

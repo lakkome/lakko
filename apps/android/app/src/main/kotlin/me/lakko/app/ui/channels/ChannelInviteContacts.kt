@@ -43,6 +43,9 @@ internal fun ChannelInviteContactsDialog(
     contactsRepository: ContactsRepository,
     linkFor: suspend (name: String) -> me.lakko.app.channels.ChannelLinkMint?,
     onClose: () -> Unit,
+    /** True for `Add publisher` (section 15.2): the title says so instead
+     *  of `Invite people`. */
+    publisher: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     var busyKey by remember { mutableStateOf<String?>(null) }
@@ -88,6 +91,7 @@ internal fun ChannelInviteContactsDialog(
             cannotMessageKeys = cannotMessage,
             error = error,
             onBack = onClose,
+            titleKey = channelInvitePickerTitleKey(publisher),
             onInvite = { row ->
                 if (busyKey == null && row.key !in invited && row.key !in requested) {
                     busyKey = row.key
@@ -125,3 +129,8 @@ internal fun ChannelInviteContactsDialog(
         )
     }
 }
+
+/** The picker's title: what the pick does — `Add publisher` or `Invite
+ *  people`, the same keys web and iOS use for this screen. */
+internal fun channelInvitePickerTitleKey(publisher: Boolean): String =
+    if (publisher) "channels.publishers.add" else "channels.info.invite_people"

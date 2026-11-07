@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-noise-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Raw wasm exports of lakko-noise for the web AudioWorklet, ADR-0088"
+
+[lib]
+# cdylib: the `.wasm` the web client's AudioWorklet instantiates itself
+# (`apps/web/wasm/lakko_noise.wasm`, built by `npm run build:noise`).
+# rlib: so the host tests below can call the exports.
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-noise.workspace = true

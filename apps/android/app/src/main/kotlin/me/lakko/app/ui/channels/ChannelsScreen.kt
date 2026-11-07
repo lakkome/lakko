@@ -92,6 +92,8 @@ import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelPublisherSigners
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
+import me.lakko.app.channels.PendingPublisherRequests
+import kotlinx.coroutines.sync.withLock
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CoPublishedJournalMarks
@@ -635,6 +637,7 @@ public fun JoinCoPublisherScreen(
             )
             // Sends the request; reached from `Request to join` and from
             // `Try again` after a general failure.
+            var waitingForOwner by remember { mutableStateOf(false) }
             fun submit() {
                 val trimmed = link.trim()
                 if (busy || trimmed.isEmpty()) return
@@ -653,7 +656,9 @@ public fun JoinCoPublisherScreen(
                             coPublished,
                         ) { status = it }
                         if (joined == null) {
-                            error = UiText("channels.join.no_approval")
+                            // Not approved yet: the request stays and lands
+                            // by itself (no deadline).
+                            waitingForOwner = true
                             return@launch
                         }
                         onJoined(joined)
@@ -673,13 +678,13 @@ public fun JoinCoPublisherScreen(
                         offerRetry = me.lakko.app.chat.joinFailureOffersRetry(copy)
                     } finally {
                         busy = false
-                        status = null
+                        status = if (waitingForOwner) UiText("channels.join.waiting") else null
                     }
                 }
             }
             Button(
                 onClick = { submit() },
-                enabled = !busy && link.trim().isNotEmpty(),
+                enabled = !busy && !waitingForOwner && link.trim().isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (busy) t("channels.join.requesting") else t("group.join.request")) }
 
@@ -701,10 +706,14 @@ public fun JoinCoPublisherScreen(
  * Ask to join a channel as a co-publisher through [link] (a `/g/` co-publisher
  * link), wait for the owner's device to approve, then mint local publisher
  * keys and add the channel. Returns the channel id, or `null` when the owner's
- * device did not approve within the wait (the request stays and is approved
- * later). [onStatus] receives the progress line. Throws on a refused or
- * failed request ([LegacyChannelException] for an old link). Shared by the
- * join page and the publisher invitation card (UX section 15.2).
+ * device did not approve within this wait. The REQUEST has no deadline
+ * (ADR-0045 decision 2): it is recorded before the knock
+ * ([PendingPublisherRequests]) and the account mailbox loop lands the
+ * owner's Welcome whenever it arrives ([landPendingPublisherWelcome]), so a
+ * `null` means "waiting", never "refused". [onStatus] receives the progress
+ * line. Throws on a refused or failed request ([LegacyChannelException] for
+ * an old link). Shared by the join page and the publisher invitation card
+ * (UX section 15.2).
  */
 public suspend fun joinAsCoPublisher(
     context: android.content.Context,
@@ -717,6 +726,7 @@ public suspend fun joinAsCoPublisher(
 ): String? {
     val publisher = state.publisher
         ?: throw IllegalStateException("channel publisher identity not available")
+    val account = state.boundAccount ?: throw IllegalStateException("no account bound")
     onStatus(UiText("group.join.sending"))
     // The request mints a KeyPackage whose private keys live in the shared
     // identity's provider; the join below must run on the SAME identity, and
@@ -731,47 +741,142 @@ public suspend fun joinAsCoPublisher(
                 persistNow,
                 { blobId -> discovery.fetchGroupInvite(blobId) },
                 ownProfileEnvelopeWithAccount(context, state.boundAccount),
+                beforeKnock = { r ->
+                    PendingPublisherRequests.record(
+                        context,
+                        account,
+                        PendingPublisherRequests.Request(
+                            channelIdHex = r.channelIdHex,
+                            groupIdHex = ChannelsComposer.bytesToHex(r.groupId),
+                            joinerKeyB64 = java.util.Base64.getEncoder().encodeToString(r.joinerKey),
+                            name = channelName,
+                            requestedAtMs = System.currentTimeMillis(),
+                        ),
+                    )
+                },
             )
         }
     }
     onStatus(UiText("channels.join.waiting"))
-    var keys: ChannelPublisherKeys? = null
     var attempts = 0
-    while (keys == null && attempts < 60) {
-        keys = publisher.withIdentity(persist = false) { identity ->
-            CoPublisher.pollForCoPublishWelcome(
-                ds,
-                identity,
-                request.groupId,
-                request.joinerKey,
-                request.channelIdHex,
-                coPublished,
-                // G-29 — reuse the persisted signing seed on a re-poll.
-                state.persistedPublisherSigningSeed(request.channelIdHex),
-            )
+    while (attempts < ACCEPT_WAIT_POLLS) {
+        // Landed by the account mailbox loop meanwhile.
+        if (!PendingPublisherRequests.isPending(context, account, request.channelIdHex) &&
+            state.keysByChannel.value.containsKey(request.channelIdHex)
+        ) {
+            return request.channelIdHex
         }
-        if (keys == null) {
-            delay(3_000L)
-            attempts += 1
-        } else {
-            // Joined: the PublisherGroup now lives in the provider at the
-            // post-approve epoch.
-            publisher.persist()
+        val landed = publisherLanding.withLock {
+            if (!PendingPublisherRequests.isPending(context, account, request.channelIdHex)) {
+                return@withLock state.keysByChannel.value.containsKey(request.channelIdHex)
+            }
+            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+                CoPublisher.pollForCoPublishWelcome(
+                    ds,
+                    identity,
+                    request.groupId,
+                    request.joinerKey,
+                    request.channelIdHex,
+                    coPublished,
+                    // G-29 — reuse the persisted signing seed on a re-poll.
+                    state.persistedPublisherSigningSeed(request.channelIdHex),
+                )?.also {
+                    // Joined: the PublisherGroup now lives in the provider at
+                    // the post-approve epoch; on disk before anything else.
+                    persistNow()
+                }
+            } ?: return@withLock false
+            settleLandedRequest(context, state, account, request.channelIdHex, channelName, keys)
+            true
         }
+        if (landed) return request.channelIdHex
+        delay(3_000L)
+        attempts += 1
     }
-    val resolved = keys ?: return null
-    if (state.channels.value.none { it.id == request.channelIdHex }) {
+    return null
+}
+
+/** How many 3-second passes the Accept wait itself makes (three minutes,
+ *  chosen); the request outlives it. */
+private const val ACCEPT_WAIT_POLLS = 60
+
+/** One landing at a time: the Accept wait and the mailbox loop may hold the
+ *  same Welcome. */
+private val publisherLanding = kotlinx.coroutines.sync.Mutex()
+
+/** A request landed: the channel and its keys, then the record goes. */
+private fun settleLandedRequest(
+    context: android.content.Context,
+    state: ChannelsUiState,
+    account: String,
+    channelIdHex: String,
+    channelName: String,
+    keys: ChannelPublisherKeys,
+) {
+    if (state.channels.value.none { it.id == channelIdHex }) {
         state.addChannel(
             ChannelHandle(
-                id = request.channelIdHex,
+                id = channelIdHex,
                 localName = channelName,
                 localDescription = "",
                 addedAtMs = System.currentTimeMillis().toULong(),
             ),
         )
     }
-    state.setKeys(request.channelIdHex, resolved)
-    return request.channelIdHex
+    state.setKeys(channelIdHex, keys)
+    PendingPublisherRequests.drop(context, account, channelIdHex)
+}
+
+/**
+ * The account mailbox loop's half of a publisher request (ADR-0045 decision
+ * 2: no deadline): try one Welcome from the account mailbox (the raw Welcome a
+ * `WELCOME_RENDEZVOUS` or `WELCOME` row carries) against every pending
+ * request of this account. Returns whether it landed one; a Welcome that is
+ * no request's changes nothing. Throws when a landed join could not be made
+ * durable (the caller then holds its mailbox cursor).
+ */
+public suspend fun landPendingPublisherWelcome(
+    context: android.content.Context,
+    state: ChannelsUiState,
+    coPublished: CoPublishedJournalMarks,
+    welcome: ByteArray,
+): Boolean {
+    val account = state.boundAccount ?: return false
+    if (PendingPublisherRequests.load(context, account).isEmpty()) return false
+    val publisher = state.publisher ?: return false
+    return publisherLanding.withLock {
+        val ownKey = publisher.withIdentity(persist = false) { it.signaturePublicKey() }
+            .let { java.util.Base64.getEncoder().encodeToString(it) }
+        for (r in PendingPublisherRequests.load(context, account)) {
+            // The Welcome is sealed to the knocked KeyPackage, whose private
+            // key is in this identity's provider only when the request was
+            // made with it.
+            if (r.joinerKeyB64 != ownKey) continue
+            val groupId = hexToBytesOrNull(r.groupIdHex) ?: continue
+            val keys = publisher.withIdentityPersistingFirst { identity, persistNow ->
+                CoPublisher.joinCoPublishWelcome(
+                    identity,
+                    welcome,
+                    groupId,
+                    r.channelIdHex,
+                    coPublished,
+                    state.persistedPublisherSigningSeed(r.channelIdHex),
+                )?.also { persistNow() }
+            } ?: continue
+            settleLandedRequest(context, state, account, r.channelIdHex, r.name, keys)
+            return@withLock true
+        }
+        false
+    }
+}
+
+private fun hexToBytesOrNull(hex: String): ByteArray? {
+    if (hex.isEmpty() || hex.length % 2 != 0) return null
+    return try {
+        ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    } catch (_: NumberFormatException) {
+        null
+    }
 }
 
 /** ADR-0087 section 7 — this account's profile envelope carrying its account

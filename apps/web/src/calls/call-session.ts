@@ -124,6 +124,7 @@ import {
   type CodecPreferenceTransceiver,
 } from "./video-codec-preference";
 import { CallPathLog } from "./call-path";
+import { NoiseSuppressionController } from "./noise-suppression";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
 import type { CallSignalingWake } from "./call-signaling-wake";
@@ -411,6 +412,9 @@ export class CallSession {
   private state: WebCallState = "idle";
   private isOfferer = false;
   private localStream: MediaStream | null = null;
+  /** Which microphone track the sender carries, raw or noise-suppressed
+   *  (ADR-0088). Created with the first capture, disposed in `dispose()`. */
+  private noise: NoiseSuppressionController | null = null;
   private pc: RTCPeerConnection | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
@@ -1066,6 +1070,7 @@ export class CallSession {
     for (const track of this.localStream.getAudioTracks()) {
       track.enabled = on;
     }
+    this.noise?.setMuted(!on);
   }
 
   /**
@@ -1189,9 +1194,11 @@ export class CallSession {
       .find((s) => s.track?.kind === kind);
     if (sender === undefined) return;
 
+    // The microphone asks for the same echo cancellation, noise suppression
+    // and gain control as the first capture (`audioTrackConstraint`).
     const constraints: MediaStreamConstraints =
       kind === "audio"
-        ? { audio: { deviceId: { exact: deviceId } } }
+        ? { audio: audioTrackConstraint(true, deviceId) }
         : { video: { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } } };
 
     let captured: MediaStream;
@@ -1224,12 +1231,17 @@ export class CallSession {
     // Preserve the current mute (enabled) state so a switch never unmutes.
     newTrack.enabled = oldTracks[0]?.enabled ?? true;
 
+    // A noise-suppression build in flight for the old microphone must not
+    // land on the sender after the new one (ADR-0088).
+    if (kind === "audio") this.noise?.detach();
     try {
       await sender.replaceTrack(newTrack);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`replaceTrack (${kind} device switch) failed`, err);
       newTrack.stop();
+      const previous = oldTracks[0];
+      if (kind === "audio" && previous !== undefined) void this.noise?.attach(previous);
       return;
     }
     if (this.pc !== pc || this.localStream !== localStream) {
@@ -1245,6 +1257,8 @@ export class CallSession {
       t.stop();
     }
     localStream.addTrack(newTrack);
+    // The suppressor follows the microphone to the new device.
+    if (kind === "audio") void this.noise?.attach(newTrack);
     this.callbacks.onLocalStream?.(localStream);
   }
 
@@ -1275,6 +1289,8 @@ export class CallSession {
       }
       this.pc = null;
     }
+    this.noise?.dispose();
+    this.noise = null;
     if (this.localStream !== null) {
       for (const track of this.localStream.getTracks()) {
         track.stop();
@@ -1387,12 +1403,30 @@ export class CallSession {
       void this.onNegotiationNeeded();
     };
 
+    let microphone: { readonly sender: RTCRtpSender; readonly track: MediaStreamTrack } | null =
+      null;
     for (const track of stream.getTracks()) {
       const sender = pc.addTrack(track, stream);
       // Attached between `addTrack` and the SDP build, the ordering the native
       // shims keep (C-48): the sender's track decides the stream index the
       // KID carries, so it must already be set.
       this.sealSender(sender, key);
+      if (track.kind === "audio" && microphone === null) microphone = { sender, track };
+    }
+    // The microphone goes out raw first; the noise suppressor swaps its
+    // processed track onto the same sender once its graph runs (ADR-0088),
+    // so building it never delays the offer or the answer.
+    if (microphone !== null && this.noise === null) {
+      const { sender: micSender, track: micTrack } = microphone;
+      const noise = new NoiseSuppressionController({
+        label: "1x1",
+        replaceSenderTrack: async (track): Promise<void> => {
+          if (this.pc !== pc) throw new Error("the call ended");
+          await micSender.replaceTrack(track);
+        },
+      });
+      this.noise = noise;
+      void noise.attach(micTrack);
     }
 
     pc.onicecandidate = (ev): void => {

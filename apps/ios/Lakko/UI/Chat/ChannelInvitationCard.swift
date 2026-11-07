@@ -172,6 +172,16 @@ struct CoPublisherInvitationCard: View {
                 if failure.offersRetry {
                     pill(joinTryAgain) { acceptance.accept(facts) }
                 }
+            case nil where acceptance.isPending(facts.channelIdHex):
+                // A request sent earlier (this session or before a restart)
+                // waits for the owner; it lands by itself when approved.
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(l10n.t("channels.join.waiting"))
+                        .font(.footnote)
+                        .opacity(0.8)
+                }
+                .padding(.vertical, 5)
             case nil:
                 pill(l10n.t("channels.publishers.accept")) { acceptance.accept(facts) }
             }

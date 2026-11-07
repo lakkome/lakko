@@ -1670,9 +1670,11 @@ public class ContactsClient(
             if (env.kind == MailboxRowKind.WELCOME) welcomeRows += 1
             when (env.kind) {
                 MailboxRowKind.WELCOME_RENDEZVOUS -> {
-                    // The channel co-publisher join reads its own rows
-                    // ([me.lakko.app.channels.CoPublisher]); not a chat event.
-                    continue
+                    // ADR-0087 section 15 — an owner's device approved a
+                    // publisher request of this account: its body is the raw
+                    // Welcome, landed by the mailbox loop against the pending
+                    // requests whenever it arrives; never a chat event.
+                    events.add(IncomingMailboxEvent.PublisherWelcome(messageId = message.id, welcomeBytes = env.body))
                 }
 
                 MailboxRowKind.LINK_REFUSAL -> {
@@ -2016,6 +2018,15 @@ public sealed interface IncomingMailboxEvent {
         /** ADR-0060 (2026-11-06) — the reach key that admitted the row. */
         val reachPk: ByteArray? = null,
     ) : IncomingMailboxEvent
+
+    /** ADR-0087 section 15 — a `WELCOME_RENDEZVOUS` row: the raw Welcome an
+     *  owner's device sent after approving a publisher request of this
+     *  account ([me.lakko.app.channels.PendingPublisherRequests]). */
+    public data class PublisherWelcome(val messageId: Long, val welcomeBytes: ByteArray) : IncomingMailboxEvent {
+        override fun equals(other: Any?): Boolean =
+            other is PublisherWelcome && messageId == other.messageId && welcomeBytes.contentEquals(other.welcomeBytes)
+        override fun hashCode(): Int = messageId.hashCode() * 31 + welcomeBytes.contentHashCode()
+    }
 
     /** ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
      *  the receiver checks it against each pending contact

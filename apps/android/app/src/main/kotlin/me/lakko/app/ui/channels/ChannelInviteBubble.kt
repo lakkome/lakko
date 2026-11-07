@@ -42,6 +42,9 @@ public interface ChannelInviteActions {
     /** The link's facts when it is a channel's, else `null`. */
     public suspend fun inspect(link: me.lakko.app.contacts.LakkoLink.Group): ChannelInviteFacts?
     public fun isFollowed(channelIdHex: String): Boolean
+    /** ADR-0087 section 15 — a publisher request this account sent for the
+     *  channel is waiting for the owner's device (it lands by itself). */
+    public fun isPublisherRequestPending(channelIdHex: String): Boolean = false
     public suspend fun subscribe(facts: ChannelInviteFacts)
     public fun openChannel(channelIdHex: String)
     /** A publisher invitation's `Accept` (UX section 15.2): asks to join and
@@ -109,6 +112,38 @@ private fun openCard(card: ByteArray): OpenedCard? {
         link,
     )
 }
+
+/** What a chat-list row says for a message carrying a channel invitation
+ *  card: the channel's name and whether it invites to publish. */
+internal data class ChannelInviteSummary(val channelName: String, val publisher: Boolean)
+
+/** The card's summary, opened offline; `null` when it does not open. */
+internal fun channelInviteSummary(card: ByteArray): ChannelInviteSummary? = try {
+    openCard(card)?.facts?.let { ChannelInviteSummary(it.name, it.publisherInvite) }
+} catch (_: Throwable) {
+    // No native core (a host test), or a card this build cannot read.
+    null
+}
+
+/**
+ * The second line of a chat-list row whose last message is a channel
+ * invitation: "Invitation to {channel}" or "Invitation to publish in
+ * {channel}", never the link the message carries as text.
+ */
+internal fun channelInvitePreviewText(
+    summary: ChannelInviteSummary,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String = strings.format(
+    if (summary.publisher) "chats.preview.publisher_invite" else "chats.preview.channel_invite",
+    mapOf("channel" to summary.channelName),
+)
+
+/** The link a publisher invitation's `Accept` hands to the co-publisher
+ *  join (`CoPublisher.requestToCoPublish`, which reads what follows `/g/`):
+ *  the card's own slug and secret. */
+internal fun coPublisherJoinUrl(link: me.lakko.app.contacts.LakkoLink.Group): String =
+    "https://lakko.me" + me.lakko.app.channels.CoPublisher.URL_PREFIX +
+        me.lakko.app.chat.composeGroupJoinArgument(me.lakko.app.chat.GroupJoinLink(link.slug, link.fragment))
 
 private object ChannelsComposerHex {
     fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
@@ -188,6 +223,14 @@ internal fun ChannelInviteBubbleCard(
             when {
                 f.publisherInvite && actions.isFollowed(f.channelIdHex) && acceptStatus == null ->
                     CardButton(t("common.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
+                // The request is sent and waits for the owner's device; it
+                // lands by itself (no deadline), so there is nothing to press.
+                f.publisherInvite && !busy && acceptStatus == null && actions.isPublisherRequestPending(f.channelIdHex) ->
+                    Text(
+                        t("channels.join.waiting"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = contentColor?.copy(alpha = 0.8f) ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 f.publisherInvite -> {
                     CardButton(
                         label = if (busy) t("channels.join.requesting") else t("channels.publishers.accept"),
@@ -201,11 +244,10 @@ internal fun ChannelInviteBubbleCard(
                                 try {
                                     val joined = actions.acceptPublisher(f, link) { acceptStatus = it }
                                     acceptStatus = null
-                                    if (joined == null) {
-                                        acceptError = me.lakko.app.l10n.UiText("channels.join.no_approval")
-                                    } else {
-                                        actions.openChannel(joined)
-                                    }
+                                    // `null`: not approved yet; the request
+                                    // stays and lands by itself (the waiting
+                                    // line above, from the pending record).
+                                    if (joined != null) actions.openChannel(joined)
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: me.lakko.app.channels.LegacyChannelException) {

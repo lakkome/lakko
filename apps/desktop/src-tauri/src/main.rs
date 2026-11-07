@@ -65,6 +65,17 @@ fn main() {
     let probe_mode = std::env::var("LAKKO_DESKTOP_PROBE").is_ok_and(|v| v == "1");
     let start_hidden = std::env::args().any(|a| a == app_shell::HIDDEN_ARG);
     info!(api_origin = %config.api_origin, probe_mode, start_hidden, "lakko desktop host starting");
+    // macOS asks for the camera and the microphone on behalf of the process
+    // responsible for the app. Started through Launch Services the app is its
+    // own; started as a child of a terminal or another app, that program is,
+    // and the camera is then refused or offered under its name.
+    #[cfg(target_os = "macos")]
+    if std::os::unix::process::parent_id() != 1 {
+        warn!(
+            "started as a child process, not through Launch Services: macOS attributes camera and \
+             microphone requests to the parent program (`just dev-desktop` starts the app with `open`)"
+        );
+    }
 
     let handler_config = Arc::clone(&config);
     let setup_config = Arc::clone(&config);

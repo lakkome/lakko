@@ -299,7 +299,25 @@ public final class ChatRepository: ObservableObject {
     /// a caller waits, so any code that waits on an `await` must re-read this
     /// map afterwards rather than hold the `GroupRecord` it captured before the
     /// wait.
-    var groups: [String: GroupRecord] = [:]
+    var groups: [String: GroupRecord] = [:] {
+        didSet {
+            // One person, one one-to-one row: the held set moved, so a
+            // duplicate may have landed (``foldDuplicateOneToOnes()``). Run
+            // once the current turn has settled, never mid-mutation.
+            guard Set(oldValue.keys) != Set(groups.keys), !duplicateFoldScheduled else { return }
+            duplicateFoldScheduled = true
+            Task { @MainActor [weak self] in
+                self?.duplicateFoldScheduled = false
+                self?.foldDuplicateOneToOnes()
+            }
+        }
+    }
+    /// A ``foldDuplicateOneToOnes()`` run is queued for the next turn.
+    var duplicateFoldScheduled = false
+    /// Whether the DeviceGroup synced state is loaded, so the lineage this
+    /// repository holds is the account's and a register written now is not
+    /// a guess (wired by the composition root; `false` until then).
+    var lineageReady: @MainActor () -> Bool = { false }
 
     /// ADR-0073 R.5 — the conversation lineage: which group continues which
     /// conversation. A projection of the DeviceGroup synced state's lineage
@@ -351,6 +369,9 @@ public final class ChatRepository: ObservableObject {
     /// The subscription that feeds ``applyLineage(_:)``; owned here so the
     /// composition root needs no cancellable bag of its own.
     var lineageWatch: AnyCancellable?
+    /// The composition root's subscription to the sync repository's `ready`
+    /// (``foldDuplicateOneToOnes()``).
+    var lineageReadyWatch: AnyCancellable?
     var lineageWriter: @MainActor (_ successorGroupId: Data, _ rootConversationId: Data) async -> Bool = {
         _, _ in false
     }

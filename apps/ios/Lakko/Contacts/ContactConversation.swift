@@ -74,3 +74,89 @@ enum ContactConversation {
         return conversations.first(where: isTheirs)
     }
 }
+
+/// One person, one one-to-one row.
+///
+/// Mirror of `apps/web/src/contacts/duplicate-one-to-one.ts`.
+///
+/// A device can hold two one-to-ones with the same person: it founded one
+/// (A) whose Welcome the other person's device never opened, and later that
+/// person founded another (B) in answer to a request this account sent (a link
+/// answer, an Add). Both showed as rows in Chats (seen live 2026-11-07,
+/// desktop and Pixel).
+///
+/// The other person founding B settles it: a device founds a one-to-one in
+/// answer to a request only when it holds none live with the requester
+/// (ADR-0079 section 5, the restore step), so A is dead on their side and B
+/// is where they read. B is therefore recorded as A's successor in the
+/// conversation lineage (ADR-0073 R.5): one row, whose head is B, with A's
+/// history above it, and A's journal no longer polled.
+///
+/// Only a one-to-one founded by the PEER continues one founded by THIS
+/// account. Two one-to-ones founded by the same side, or by each side about
+/// the same time, are left as they are: neither side's founding then says
+/// which one the other reads.
+///
+/// Pure: the caller reads the rosters, founders and lineage.
+enum DuplicateOneToOne {
+    /// A conversation group this device holds, as the rule reads it.
+    struct Held: Equatable {
+        /// Lower-case hex of the group id.
+        let groupHex: String
+        /// The conversation the lineage puts it in (its root's hex).
+        let conversationHex: String
+        /// Kind `chat` (ADR-0062).
+        let isOneToOne: Bool
+        /// The distinct people of the roster, base64 account keys.
+        let people: [String]
+        /// The founder's account key (base64), or `nil` when unreadable.
+        let founderKeyB64: String?
+    }
+
+    /// One lineage register to write: `successorHex` continues `rootHex`.
+    struct Fold: Equatable {
+        let successorHex: String
+        let rootHex: String
+    }
+
+    /// The other person of a two-person roster, or `nil`.
+    static func peerKey(people: [String], ownKeyB64: String) -> String? {
+        guard people.count == 2 else { return nil }
+        let peers = people.filter { $0 != ownKeyB64 }
+        return peers.count == 1 ? peers[0] : nil
+    }
+
+    /// The registers that fold each peer-founded one-to-one into the
+    /// conversation of an older one-to-one with the same person that this
+    /// account founded. Only a group that is its own conversation (no lineage
+    /// yet) is folded; when several own-founded one-to-ones with the person
+    /// exist, the one whose conversation id sorts first is the root, so every
+    /// device of the account writes the same register.
+    static func folds(held: [Held], ownKeyB64: String?) -> [Fold] {
+        guard let ownKeyB64 else { return [] }
+        func peerOf(_ group: Held) -> String? {
+            group.isOneToOne ? peerKey(people: group.people, ownKeyB64: ownKeyB64) : nil
+        }
+        var out: [Fold] = []
+        for joined in held {
+            guard let peer = peerOf(joined), joined.founderKeyB64 == peer else { continue }
+            // Already part of a conversation (a successor, or a root others
+            // continue).
+            guard joined.conversationHex == joined.groupHex else { continue }
+            if held.contains(where: { $0.groupHex != joined.groupHex && $0.conversationHex == joined.groupHex }) {
+                continue
+            }
+            let roots = held
+                .filter {
+                    $0.groupHex != joined.groupHex
+                        && $0.conversationHex != joined.conversationHex
+                        && $0.founderKeyB64 == ownKeyB64
+                        && peerOf($0) == peer
+                }
+                .map(\.conversationHex)
+                .sorted()
+            if let root = roots.first { out.append(Fold(successorHex: joined.groupHex, rootHex: root)) }
+        }
+        return out
+    }
+}

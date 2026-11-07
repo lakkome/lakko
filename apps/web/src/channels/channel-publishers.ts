@@ -30,6 +30,7 @@ import { b64ToBytes, bytesToB64 } from "../profile/avatar-model";
 import {
   boundCoPublisherKey,
   mintOneUseCoPublisherLink,
+  joinCoPublishWelcome,
   pollForCoPublishWelcome,
   requestToCoPublishSealed,
 } from "./copublisher";
@@ -40,6 +41,12 @@ import { channelIdFromHex, type WasmIdentity } from "./composer";
 
 import { recordGroupLink } from "../devices/sync/link-register";
 import { persistThenPublish } from "./publisher-app-messages";
+import { coPublishWaitMs } from "./co-publish-welcome-scan";
+import {
+  dropPendingPublisherRequest,
+  loadPendingPublisherRequests,
+  recordPendingPublisherRequest,
+} from "./pending-publisher-requests";
 
 type PublisherGroup = InstanceType<Awaited<ReturnType<typeof loadWasm>>["PublisherGroup"]>;
 
@@ -263,22 +270,35 @@ export async function mintPublisherInviteLink(identity: WasmIdentity, idHex: str
   return minted.url;
 }
 
-/** How long `Accept` waits for the owner's device (chosen): 60 tries, 3 s
- *  apart. The owner's device approves when it next runs. */
-const ACCEPT_TRIES = 60;
-const ACCEPT_INTERVAL_MS = 3000;
+/** How long the Accept page itself watches for the owner's device (chosen):
+ *  three minutes, the passes 3 s apart at first and backing off to 15 s
+ *  (`coPublishWaitMs`). The REQUEST has no deadline (ADR-0045 decision 2):
+ *  it is recorded (`pending-publisher-requests.ts`) and the mailbox receive
+ *  loop joins its Welcome whenever the owner's device approves. */
+const ACCEPT_WAIT_MS = 180_000;
+
+/** What `Accept` came to: this device can post, or the request is recorded
+ *  and waits for the owner's device (it lands by itself). */
+export type AcceptOutcome = "joined" | "waiting";
 
 /**
  * The person presses `Accept` on a publisher invitation (`publisherInvite`
- * of {@link OpenedChannelInvite}). Knocks with a sealed request, then waits
- * for the owner's device to approve and the Welcome to arrive. Resolves when
- * this device can post. ChannelError "link-invalid", "offline", "failed"
- * (not approved in the wait; the request stays and is approved later).
+ * of {@link OpenedChannelInvite}). Knocks with a sealed request, recorded
+ * for the account first, then watches for the owner's device to approve and
+ * the Welcome to arrive. Resolves `"joined"` when this device can post,
+ * `"waiting"` when the owner's device has not answered in the page's wait
+ * (the request stays; the mailbox receive loop lands it). ChannelError
+ * "link-invalid", "offline", "failed" when the request could not be sent.
  *
- * `persistBeforeKnock` is `channelsActions.persistPublisherGroupDurable`
- * (the request's private key must be on disk before the knock).
+ * Before the knock, durably: the PublisherGroup state holding the request's
+ * private key (`channelsActions.persistPublisherGroupDurable`) and the
+ * pending-request record.
  */
-export async function acceptPublisherInvite(identity: WasmIdentity, opened: OpenedChannelInvite): Promise<void> {
+export async function acceptPublisherInvite(
+  identity: WasmIdentity,
+  opened: OpenedChannelInvite,
+  accountIdB64: string,
+): Promise<AcceptOutcome> {
   if (!opened.publisherInvite || opened.link === undefined) throw new ChannelError("link-invalid");
   const ds = new DsClient();
   const discovery = new DiscoveryClient(undefined, { sessionToken: () => sessionTokens.peek() });
@@ -288,13 +308,28 @@ export async function acceptPublisherInvite(identity: WasmIdentity, opened: Open
       ds,
       identity,
       opened.link,
-      () => channelsActions.persistPublisherGroupDurable(),
+      async (r) => {
+        await channelsActions.persistPublisherGroupDurable();
+        recordPendingPublisherRequest(accountIdB64, {
+          channelIdHex: r.channelIdHex,
+          groupIdHex: bytesToHex(r.groupId),
+          joinerKeyB64: base64Encode(r.joinerKey),
+          name: opened.name,
+          description: opened.description,
+          requestedAtMs: Date.now(),
+        });
+      },
       discovery,
     );
   } catch (err) {
     throw new ChannelError(err instanceof ChannelError ? err.code : "offline", { cause: err });
   }
-  for (let i = 0; i < ACCEPT_TRIES; i += 1) {
+  const deadline = Date.now() + ACCEPT_WAIT_MS;
+  for (let pass = 0; Date.now() < deadline; pass += 1) {
+    // Landed by the mailbox receive loop meanwhile.
+    if (!isPending(accountIdB64, req.channelIdHex) && channelsState.keysByChannel().has(req.channelIdHex)) {
+      return "joined";
+    }
     const keys = await pollForCoPublishWelcome(
       ds,
       identity,
@@ -304,20 +339,89 @@ export async function acceptPublisherInvite(identity: WasmIdentity, opened: Open
       channelsState.keysByChannel().get(req.channelIdHex)?.signingKeySeed,
     ).catch(() => null);
     if (keys !== null) {
-      if (!channelsState.channels().some((c) => c.id === req.channelIdHex)) {
-        channelsActions.addChannel({
-          id: req.channelIdHex,
-          localName: opened.name,
-          localDescription: opened.description,
-          addedAtMs: Date.now(),
-        });
-      }
-      channelsActions.setKeys(req.channelIdHex, keys);
-      return;
+      await settleLandedRequest(accountIdB64, req.channelIdHex, opened.name, opened.description, keys);
+      return "joined";
     }
-    await new Promise((r) => setTimeout(r, ACCEPT_INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, coPublishWaitMs(pass)));
   }
-  throw new ChannelError("failed");
+  return isPending(accountIdB64, req.channelIdHex) ? "waiting" : "joined";
+}
+
+function isPending(accountIdB64: string, channelIdHex: string): boolean {
+  return loadPendingPublisherRequests(accountIdB64).some((r) => r.channelIdHex === channelIdHex);
+}
+
+/** A request landed: the channel and its keys, durably, then the record goes. */
+async function settleLandedRequest(
+  accountIdB64: string,
+  channelIdHex: string,
+  name: string,
+  description: string,
+  keys: Parameters<typeof channelsActions.setKeys>[1],
+): Promise<void> {
+  if (!channelsState.channels().some((c) => c.id === channelIdHex)) {
+    channelsActions.addChannel({
+      id: channelIdHex,
+      localName: name,
+      localDescription: description,
+      addedAtMs: Date.now(),
+    });
+  }
+  channelsActions.setKeys(channelIdHex, keys);
+  // The joined group and the keys on disk before the record goes (and before
+  // the mailbox cursor moves past the Welcome).
+  await channelsActions.persistPublisherGroupDurable();
+  dropPendingPublisherRequest(accountIdB64, channelIdHex);
+}
+
+/**
+ * The mailbox receive loop's half of a publisher request (ADR-0045 decision
+ * 2: no deadline): try one Welcome from the account mailbox against every
+ * pending request. `welcome` is the Welcome itself (a `welcome` row's body,
+ * or the inner Welcome of a `welcome-rendezvous` row opened for this
+ * account's key). Returns whether it landed a request. A Welcome that is no
+ * request's changes nothing. Throws when a landed join could not be made
+ * durable (the caller holds its mailbox cursor).
+ */
+export async function landPendingPublisherWelcome(
+  identity: WasmIdentity,
+  accountIdB64: string,
+  welcome: Uint8Array,
+): Promise<boolean> {
+  const pending = loadPendingPublisherRequests(accountIdB64);
+  if (pending.length === 0) return false;
+  const ownKey = base64Encode(identity.signaturePublicKey);
+  for (const r of pending) {
+    // The Welcome is sealed to the knocked KeyPackage, whose private key is
+    // in this identity's provider only when the request was made with it.
+    if (r.joinerKeyB64 !== ownKey) continue;
+    const groupId = hexBytes(r.groupIdHex);
+    if (groupId === null) continue;
+    const keys = await joinCoPublishWelcome(
+      identity,
+      welcome,
+      groupId,
+      r.channelIdHex,
+      channelsState.keysByChannel().get(r.channelIdHex)?.signingKeySeed,
+    );
+    if (keys === null) continue;
+    await settleLandedRequest(accountIdB64, r.channelIdHex, r.name, r.description, keys);
+    return true;
+  }
+  return false;
+}
+
+function hexBytes(hex: string): Uint8Array | null {
+  if (hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += b.toString(16).padStart(2, "0");
+  return s;
 }
 
 /**

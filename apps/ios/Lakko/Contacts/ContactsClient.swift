@@ -1392,9 +1392,9 @@ public final class ContactsClient {
 
     /// ADR-0078 — open every fetched row with the own mailbox key and
     /// dispatch it by the kind inside the seal. A row that does not open is
-    /// dropped (it may be garbage); a Welcome rendezvous (the channel
-    /// co-publisher join) is not this poll's to act on and is skipped. The
-    /// cursor moves past every row either way.
+    /// dropped (it may be garbage); a Welcome rendezvous (the Welcome of an
+    /// approved publisher request) is surfaced as ``IncomingMailboxEvent/publisherWelcome(messageId:welcomeBytes:)``.
+    /// The cursor moves past every row either way.
     static func dispatch(
         rows: [MailboxMessage], after: Int64, hasMore: Bool,
         mailboxKey: MailboxKey, myX25519Secret: Data
@@ -1409,9 +1409,10 @@ public final class ContactsClient {
             let body = opened.body
             switch opened.kind {
             case .welcomeRendezvous:
-                // The co-publisher join reads its own rows
-                // (``CoPublisher/pollForCoPublishWelcome``).
-                continue
+                // ADR-0045 decision 2 — a publisher request has no deadline:
+                // the owner's Welcome lands whenever it arrives, after a
+                // restart too, not only while a screen waits.
+                events.append(.publisherWelcome(messageId: message.id, welcomeBytes: body))
             case .linkRefusal:
                 events.append(.linkRefusal(body))
             case .welcome:
@@ -1652,6 +1653,11 @@ public enum IncomingMailboxEvent: Equatable {
     case contactRequest(
         IncomingContactRequest, replyGrant: FfiReachGrant? = nil, linkAnswer: FfiLinkAnswer? = nil)
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
+    /// ADR-0087 section 15, ADR-0045 decision 2 — a Welcome rendezvous row:
+    /// the Welcome of an approved publisher request of this account, its body
+    /// being the Welcome itself. Landed by the mailbox loop against the
+    /// pending requests (``CoPublisherJoin``) whenever it arrives.
+    case publisherWelcome(messageId: Int64, welcomeBytes: Data)
     /// 1.9b1 — original recipient's accept-reply.
     case contactAck(IncomingContactAck)
     /// ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:

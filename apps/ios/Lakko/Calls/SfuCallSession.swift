@@ -277,8 +277,6 @@ final class SfuCallSession {
     private var avAlignTask: Task<Void, Never>?
 
     // ---- The camera's three senders (ADR-0070) -----------------------------
-    /// The camera's own source: the copies are further tracks on it.
-    private var localCameraSource: RTCVideoSource?
     /// The SFU's last `video-needed` frame: which of this device's camera
     /// senders somebody is being sent. `nil` before the first frame, which
     /// means every sender is needed.
@@ -787,7 +785,6 @@ final class SfuCallSession {
         avAlign.clear()
         avReceivers.removeAll()
         offerQueue.removeAll()
-        localCameraSource = nil
         videoNeeded = nil
         for activity in senderActivity.values { activity.reset() }
         publishBudget = nil
@@ -916,7 +913,7 @@ final class SfuCallSession {
         }
         // Three ordinary senders (ADR-0070 steps 1 and 5); the SFrame arm
         // that follows in the caller seals each under its own stream index.
-        addCameraSenders(on: connection, source: source)
+        addCameraSenders(on: connection, source: source, capture: capture)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack?(connection.currentLocalVideoTrack())
         Task { [weak self] in
@@ -938,14 +935,21 @@ final class SfuCallSession {
     /// Add the camera's main sender and its two copies, in that order. The
     /// middle one is created sending or not as the roster and the SFU say
     /// now; the main and the light one are created sending.
-    private func addCameraSenders(on connection: WebRTCPeerConnection, source: RTCVideoSource) {
+    ///
+    /// The main sender is on `source`; each copy is on a source of its own
+    /// that `capture` feeds the same frames (``CapturerFan``), so one
+    /// encoder's adaptation narrows only its own picture.
+    private func addCameraSenders(
+        on connection: WebRTCPeerConnection, source: RTCVideoSource,
+        capture: LocalCameraCapture
+    ) {
         connection.addLocalCameraTrack(source)
         var input = activityInput()
         // The camera is being turned on by this very call.
         input.cameraOn = true
         connection.addCameraCopies(
-            source, middleActive: SenderActivityRule.active(.middle, exists: true, input))
-        localCameraSource = source
+            sources: { capture.copySource($0) },
+            middleActive: SenderActivityRule.active(.middle, exists: true, input))
         NSLog(
             "SfuCallSession: camera senders added main=%@ light=%@ middle=%@",
             connection.cameraSender(.main) != nil ? "yes" : "no",
@@ -1051,12 +1055,11 @@ final class SfuCallSession {
         // (ADR-0070). The arm below seals the main one, which decides the
         // outcome, and each copy; a copy that cannot be sealed is removed
         // there and the camera is published without it.
-        addCameraSenders(on: liveConn, source: source)
+        addCameraSenders(on: liveConn, source: source, capture: capture)
         localCameraCapture = capture
         guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
             liveConn.removeLocalVideoTrack()
             localCameraCapture = nil
-            localCameraSource = nil
             callbacks.onLocalVideoTrack?(nil)
             await capture.stop()
             // The call may have ended while the camera stopped; a hang-up

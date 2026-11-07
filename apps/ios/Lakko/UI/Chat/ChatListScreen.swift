@@ -1332,8 +1332,19 @@ public final class ChatListViewModel: ObservableObject {
         let senderName = last.authorKeyB64.flatMap {
             ProfileDirectory.shared.resolve(signatureKeyB64: $0)?.name
         }
+        // ADR-0087 sections 14 and 15.2 — a message that carries a channel
+        // invitation card holds the `/g/` link as its text; the row reads like
+        // the card instead. Cards are filed under the group the bubble reads
+        // them from (the conversation's current group).
+        var text = last.text
+        if let channel = last.channelInvite(conversationIdHex: thread.groupIdHex) {
+            text = ChatListFormatting.channelInvitePreview(channelName: channel.name, publisher: false)
+        } else if let publisher = last.coPublisherInvite(conversationIdHex: thread.groupIdHex) {
+            text = ChatListFormatting.channelInvitePreview(
+                channelName: publisher.channelName, publisher: true)
+        }
         return ChatListFormatting.preview(
-            text: last.text,
+            text: text,
             attachmentLabels: last.attachments.map {
                 ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
             },

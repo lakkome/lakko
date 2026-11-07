@@ -188,16 +188,21 @@ final class GroupCallSendersTests: XCTestCase {
 
     /// Both publish paths of the SFU session create the camera's senders
     /// through these two calls. This asks the real binding, on a peer
-    /// connection that never negotiates: three senders, three tracks on one
-    /// source, and no media line named before a description is set.
+    /// connection that never negotiates: three senders, three tracks, each
+    /// on a source of its own, and no media line named before a description
+    /// is set.
     func testThePeerConnectionCreatesThreeOrdinarySenders() {
         let connection = WebRTCPeerConnection(iceServers: [])
         defer { connection.close() }
         XCTAssertTrue(connection.isReady)
         let source = WebRTCPeerConnection.newVideoSource()
+        let copySources: [CameraCopyKind: RTCVideoSource] = [
+            .light: WebRTCPeerConnection.newVideoSource(),
+            .middle: WebRTCPeerConnection.newVideoSource(),
+        ]
 
         connection.addLocalCameraTrack(source)
-        connection.addCameraCopies(source, middleActive: false)
+        connection.addCameraCopies(sources: { copySources[$0] }, middleActive: false)
 
         let main = connection.cameraSender(.main)
         let light = connection.cameraSender(.light)
@@ -210,13 +215,61 @@ final class GroupCallSendersTests: XCTestCase {
         XCTAssertEqual(main?.track?.trackId, CameraSender.trackId(of: .main))
         XCTAssertEqual(light?.track?.trackId, CameraSender.trackId(of: .light))
         XCTAssertEqual(middle?.track?.trackId, CameraSender.trackId(of: .middle))
+        // Each sender is on its own source: on one shared source the smallest
+        // picture any encoder asked for went to all three. The binding hands
+        // out a fresh wrapper for `track.source`, so this asks which track a
+        // frame pushed into each source reaches.
+        let tracks: [CameraSenderKind: RTCVideoTrack] = [
+            .main: main?.track as? RTCVideoTrack,
+            .light: light?.track as? RTCVideoTrack,
+            .middle: middle?.track as? RTCVideoTrack,
+        ].compactMapValues { $0 }
+        XCTAssertEqual(tracks.count, 3)
+        let pushInto: [(CameraSenderKind, RTCVideoSource?)] = [
+            (.main, source), (.light, copySources[.light]), (.middle, copySources[.middle]),
+        ]
+        for (kind, pushed) in pushInto {
+            guard let pushed else { return XCTFail("no source for \(kind)") }
+            XCTAssertEqual(
+                Self.tracksReached(by: pushed, among: tracks), [kind],
+                "a frame pushed into the \(kind) source")
+        }
         // No transceiver has a mid before a local description is set.
         XCTAssertEqual(connection.cameraCopyMids(.light), [])
         XCTAssertEqual(connection.cameraCopyMids(.middle), [])
         // Adding again adds nothing.
-        connection.addCameraCopies(source, middleActive: true)
+        connection.addCameraCopies(sources: { copySources[$0] }, middleActive: true)
         XCTAssertTrue(connection.cameraSender(.light) === light)
         XCTAssertTrue(connection.cameraSender(.middle) === middle)
+    }
+
+    /// Which of `tracks` render a frame pushed into `source`.
+    private static func tracksReached(
+        by source: RTCVideoSource, among tracks: [CameraSenderKind: RTCVideoTrack]
+    ) -> Set<CameraSenderKind> {
+        final class Seen: NSObject, RTCVideoRenderer {
+            private let lock = NSLock()
+            private var frames = 0
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return frames
+            }
+            func setSize(_ size: CGSize) {}
+            func renderFrame(_ frame: RTCVideoFrame?) {
+                lock.lock()
+                frames += 1
+                lock.unlock()
+            }
+        }
+        let seen = tracks.mapValues { _ in Seen() }
+        for (kind, track) in tracks { track.add(seen[kind]!) }
+        defer { for (kind, track) in tracks { track.remove(seen[kind]!) } }
+        let frame = RTCVideoFrame(
+            buffer: RTCI420Buffer(width: 640, height: 360), rotation: ._0,
+            timeStampNs: 1_000_000_000)
+        source.capturer(RTCVideoCapturer(delegate: source), didCapture: frame)
+        return Set(seen.filter { $0.value.count > 0 }.keys)
     }
 
     /// The camera toggle switches every copy with the camera, and removing
@@ -224,9 +277,9 @@ final class GroupCallSendersTests: XCTestCase {
     func testTheCopiesFollowTheCamera() {
         let connection = WebRTCPeerConnection(iceServers: [])
         defer { connection.close() }
-        let source = WebRTCPeerConnection.newVideoSource()
-        connection.addLocalCameraTrack(source)
-        connection.addCameraCopies(source, middleActive: true)
+        connection.addLocalCameraTrack(WebRTCPeerConnection.newVideoSource())
+        connection.addCameraCopies(
+            sources: { _ in WebRTCPeerConnection.newVideoSource() }, middleActive: true)
 
         connection.setCameraEnabled(false)
         XCTAssertEqual(connection.cameraSender(.main)?.track?.isEnabled, false)
@@ -238,6 +291,20 @@ final class GroupCallSendersTests: XCTestCase {
         connection.removeLocalVideoTrack()
         XCTAssertNil(connection.cameraSender(.main))
         XCTAssertNil(connection.cameraSender(.light))
+        XCTAssertNil(connection.cameraSender(.middle))
+    }
+
+    /// A copy no source can be made for is absent; the others are added.
+    func testACopyWithNoSourceIsAbsent() {
+        let connection = WebRTCPeerConnection(iceServers: [])
+        defer { connection.close() }
+        connection.addLocalCameraTrack(WebRTCPeerConnection.newVideoSource())
+        connection.addCameraCopies(
+            sources: { $0 == .light ? WebRTCPeerConnection.newVideoSource() : nil },
+            middleActive: true)
+
+        XCTAssertNotNil(connection.cameraSender(.main))
+        XCTAssertNotNil(connection.cameraSender(.light))
         XCTAssertNil(connection.cameraSender(.middle))
     }
 

@@ -1157,6 +1157,18 @@
       "text": "अभी कोई डिवाइस नहीं मिला। माइक्रोफ़ोन या कैमरे की अनुमति देने के बाद वे यहाँ दिखेंगे।",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "शोर कम करना",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "आपके माइक्रोफ़ोन से टाइपिंग और पृष्ठभूमि का शोर हटाता है।",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "ध्वनि",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "सिस्टम डिफ़ॉल्ट",
       "status": "machine"

@@ -197,3 +197,43 @@ export function describeLocalCamera(
     copies.map(([name, track]) => ` | ${name} ${describeTrackState(track)}`).join("")
   );
 }
+
+/** Where a remote picture's element sits on screen, as far as the line
+ *  below reports it: its drawn size in CSS pixels and the computed styles
+ *  that can hide an element that plays. */
+export interface PictureLayout {
+  readonly width: number;
+  readonly height: number;
+  readonly opacity: string;
+  readonly zIndex: string;
+  readonly visibility: string;
+  readonly display: string;
+  /** The element's `data-shown`: which of two stacked pictures is on top;
+   *  `-` where there is only one. */
+  readonly shown: string;
+}
+
+/**
+ * A remote picture's element, its track and its place on screen in one line,
+ * for the console. The remote pictures are bound the way the own camera is
+ * (`LocalPreviewBinder`), so the same reading applies, and the layout part
+ * says whether an element that plays is drawn: a zero size, `opacity: 0` on
+ * the element that should be on top, or a `display` / `visibility` that hides
+ * it.
+ */
+export function describeRemotePicture(
+  where: string,
+  el: PreviewElement<unknown>,
+  track: PreviewTrack | null,
+  counts: { readonly binds: number; readonly playCalls: number; readonly playRefusals: number },
+  layout: PictureLayout,
+): string {
+  return (
+    `call remote picture ${where}: el_ready=${el.readyState ?? "-"}` +
+    ` paused=${el.paused === undefined ? "-" : String(el.paused)} width=${el.videoWidth ?? "-"}` +
+    ` binds=${counts.binds} play_calls=${counts.playCalls} play_refused=${counts.playRefusals}` +
+    ` track ${describeTrackState(track)}` +
+    ` box=${Math.round(layout.width)}x${Math.round(layout.height)} opacity=${layout.opacity}` +
+    ` z=${layout.zIndex} visibility=${layout.visibility} display=${layout.display} shown=${layout.shown}`
+  );
+}

@@ -71,10 +71,13 @@ struct CameraSenderSpec: Equatable {
 /// the call on. No simulcast: which of them is sent is this client's and the
 /// SFU's decision, never a layer allocator's.
 ///
-/// All three are fed by ONE capturer: each copy is a further `RTCVideoTrack`
-/// on the camera's `RTCVideoSource`, and its sender scales the picture down
-/// with `scaleResolutionDownBy` on its one encoding. That is the binding's
-/// form of what the web client does with a cloned track.
+/// All three are fed by ONE capturer: each copy is an `RTCVideoTrack` on an
+/// `RTCVideoSource` of its own that the capturer feeds the same frames
+/// (``CapturerFan``), and its sender scales the picture down with
+/// `scaleResolutionDownBy` on its one encoding. That is the binding's form of
+/// what the web client does with a cloned track; a further track on the
+/// camera's own source is not, since that source serves every track the
+/// smallest picture any of their encoders asks for.
 ///
 /// Used by the SFU session only: the one-to-one call sends one sender.
 ///

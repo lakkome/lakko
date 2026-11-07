@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeLocalCamera,
   describeLocalPreview,
+  describeRemotePicture,
   describeTrackState,
   LocalPreviewBinder,
   type PreviewElement,
@@ -190,6 +191,23 @@ describe("the diagnostic lines", () => {
     );
     expect(describeLocalCamera(null, [["light", undefined]])).toBe(
       "call local camera: main ready=- muted=- enabled=- | light ready=- muted=- enabled=-",
+    );
+  });
+});
+
+describe("describeRemotePicture", () => {
+  it("says how the element plays and where it is drawn", () => {
+    const el = { srcObject: null, paused: false, readyState: 4, videoWidth: 640 };
+    const line = describeRemotePicture(
+      "peer-ab heavy",
+      el,
+      track("t1"),
+      { binds: 1, playCalls: 1, playRefusals: 0 },
+      { width: 320.4, height: 179.6, opacity: "1", zIndex: "1", visibility: "visible", display: "block", shown: "true" },
+    );
+    expect(line).toBe(
+      "call remote picture peer-ab heavy: el_ready=4 paused=false width=640 binds=1 play_calls=1 play_refused=0" +
+        " track ready=live muted=false enabled=true box=320x180 opacity=1 z=1 visibility=visible display=block shown=true",
     );
   });
 });

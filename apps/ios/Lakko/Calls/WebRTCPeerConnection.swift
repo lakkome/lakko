@@ -657,9 +657,10 @@ public final class WebRTCPeerConnection: NSObject {
 
     // MARK: - The SFU call's camera: three senders (ADR-0070 steps 1 and 5)
 
-    /// A copy of the camera beside the main sender: a further track on the
-    /// camera's own `RTCVideoSource`, on a transceiver of its own, scaled
-    /// down by its one encoding (``CameraSender``).
+    /// A copy of the camera beside the main sender: a further track on a
+    /// source of its own fed the camera's frames (``CapturerFan``), on a
+    /// transceiver of its own, scaled down by its one encoding
+    /// (``CameraSender``).
     struct CameraCopy {
         let track: RTCVideoTrack
         let transceiver: RTCRtpTransceiver
@@ -675,7 +676,7 @@ public final class WebRTCPeerConnection: NSObject {
     /// as before. Created with `add(_:streamIds:)`, the way the one-to-one
     /// call creates its sender, on the first publish and on a mid-call
     /// camera-on alike (mid-call it may reuse a video transceiver the SFU
-    /// already negotiated). The copies are added by ``addCameraCopies(_:middleActive:)``.
+    /// already negotiated). The copies are added by ``addCameraCopies(sources:middleActive:)``.
     func addLocalCameraTrack(_ source: RTCVideoSource) {
         guard let peer = peer else { return }
         let track = Self.sharedFactory.videoTrack(
@@ -724,11 +725,16 @@ public final class WebRTCPeerConnection: NSObject {
     /// right after ``addLocalCameraTrack(_:)``, before SFrame is armed and
     /// before any offer is built.
     ///
-    /// `source` is the camera's own source: each copy is a further track on
-    /// it, so one capturer feeds all three senders, and the copy's size is
-    /// its encoding's `scaleResolutionDownBy`. `middleActive` says whether
-    /// the middle sender is created sending (``SenderActivityRule``); the
-    /// light one always is.
+    /// `sources` gives each copy its own source, never the main sender's:
+    /// one capturer feeds all three through a ``CapturerFan``
+    /// (``LocalCameraCapture/copySource(_:)``). On one shared source the
+    /// smallest picture any of the three encoders asked for was served to
+    /// all of them, so the adaptation at the low start bitrate held the main
+    /// and the middle picture down for the whole call. The copy's size is
+    /// its encoding's `scaleResolutionDownBy` of its own source.
+    /// `middleActive` says whether the middle sender is created sending
+    /// (``SenderActivityRule``); the light one always is. A copy with no
+    /// source is absent, said once.
     ///
     /// Never fails the call: a copy the binding will not take is absent,
     /// said once, and the call goes on without it. A copy that exists is
@@ -740,11 +746,19 @@ public final class WebRTCPeerConnection: NSObject {
     /// the web client's fallback). A copy that cannot be sized that way is
     /// removed here, before SFrame is armed and before any offer: the camera
     /// is never sent another time at full size.
-    func addCameraCopies(_ source: RTCVideoSource, middleActive: Bool) {
+    func addCameraCopies(
+        sources: (CameraCopyKind) -> RTCVideoSource?, middleActive: Bool
+    ) {
         guard let peer = peer, localVideoSender != nil else { return }
         let plan = CameraSender.plan(middleActive: middleActive)
         for kind in CameraCopyKind.addOrder where cameraCopies[kind] == nil {
             guard let spec = plan.first(where: { $0.kind == kind.senderKind }) else { continue }
+            guard let source = sources(kind) else {
+                NSLog(
+                    "WebRTCPeerConnection: publishing the camera without a %@ sender: "
+                        + "no video source for it", kind.rawValue)
+                continue
+            }
             let track = Self.sharedFactory.videoTrack(with: source, trackId: spec.trackId)
             track.isEnabled = localVideoTrack?.isEnabled ?? true
             let transceiverInit = RTCRtpTransceiverInit()

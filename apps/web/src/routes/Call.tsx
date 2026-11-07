@@ -114,12 +114,18 @@ import {
 import { heavyStreamForGiven } from "../calls/video-given";
 import {
   describeLocalPreview,
+  describeRemotePicture,
   LocalPreviewBinder,
   PREVIEW_CHECK_MS,
   PREVIEW_DIAG_AFTER_MS,
 } from "../calls/local-preview";
 import { callBarPhase } from "../calls/call-bar-model";
 import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
+import {
+  noiseSuppressionOn,
+  onNoiseSuppressionChange,
+  setNoiseSuppression,
+} from "../calls/noise-setting";
 import {
   gridLayout,
   gridPage,
@@ -496,6 +502,11 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
     );
   });
 
+  // Noise suppression (UX section 4.1.3): per device, applies at once to
+  // the live call through the session's subscription.
+  const [noiseOn, setNoiseOn] = createSignal(noiseSuppressionOn());
+  onCleanup(onNoiseSuppressionChange(setNoiseOn));
+
   const choose = (kind: SettingsSectionKind, id: string | null): void => {
     if (kind === "microphone") callActions.setSelectedAudioInput(id);
     else if (kind === "camera") callActions.setSelectedVideoInput(id);
@@ -514,11 +525,33 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
     >
       <div class="lk-call-modal lk-call-settings">
         <h2 id="lk-call-settings-title">{t("call.settings.title")}</h2>
-        <Show
-          when={sections().length > 0}
-          fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
-        >
-          <div class="lk-call-settings-body">
+        <div class="lk-call-settings-body">
+          <section>
+            <h3 id="lk-call-settings-sound">{t("call.settings.sound")}</h3>
+            <div class="lk-call-settings-switch">
+              <div class="lk-call-settings-switch-text">
+                <span>{t("call.settings.noise_suppression")}</span>
+                <span class="lk-call-settings-hint">
+                  {t("call.settings.noise_suppression_hint")}
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={noiseOn()}
+                aria-label={t("call.settings.noise_suppression")}
+                class="lk-card-row-action"
+                classList={{ primary: noiseOn() }}
+                onClick={(): void => setNoiseSuppression(!noiseOn())}
+              >
+                {noiseOn() ? t("common.on") : t("common.off")}
+              </button>
+            </div>
+          </section>
+          <Show
+            when={sections().length > 0}
+            fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
+          >
             <For each={sections()}>
               {(section) => (
                 <section>
@@ -544,8 +577,8 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
                 </section>
               )}
             </For>
-          </div>
-        </Show>
+          </Show>
+        </div>
         <div class="lk-encryption-sheet-actions">
           <button
             type="button"
@@ -1151,6 +1184,7 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
           class={props.light !== undefined ? `${props.class} lk-call-layer` : props.class}
           shown={props.light !== undefined ? !lightShown() : undefined}
           ariaLabel={props.ariaLabel}
+          where={`${props.peerId} heavy`}
           elRef={(el): void => {
             heavyEl = el;
           }}
@@ -1170,6 +1204,7 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
             shown={lightShown()}
             ariaLabel={lightOnly() ? props.ariaLabel : undefined}
             ariaHidden={!lightOnly()}
+            where={`${props.peerId} light`}
             elRef={(el): void => {
               lightEl = el;
               setLightMounted(el !== undefined);
@@ -1250,8 +1285,19 @@ const LocalVideo: Component<{
 
 /**
  * One `<video>` of a remote picture: the heavy one or the light companion.
- * It keeps its element while its stream is replaced (`srcObject` is swapped),
- * and reports each frame it shows.
+ * It keeps its element while its stream is replaced, and reports each frame
+ * it shows.
+ *
+ * Bound the way the own camera is (`calls/local-preview.ts`): only once the
+ * element is in the document, to a stream of its own made from the video
+ * track, with `play()` called after every bind and again while the element is
+ * paused with a track, looked at when the stream changes and on a slow timer.
+ * The `autoplay` attribute alone was what started these before; whether an
+ * engine honours it for a stream given by script is the engine's choice, and
+ * the desktop app's WebKit view showed no remote picture on 2026-11-07 while
+ * the same pictures were decoded. A little after each bind the element's
+ * state and its place on screen are written to the console once
+ * (`describeRemotePicture`).
  */
 const LayerVideo: Component<{
   stream: MediaStream;
@@ -1264,15 +1310,49 @@ const LayerVideo: Component<{
   /** The element, and `undefined` when it is gone. */
   elRef: (el: HTMLVideoElement | undefined) => void;
   onFrame: (now: number) => void;
+  /** Which picture this is, for the console line (`peer-<id> heavy`). */
+  where: string;
 }> = (props) => {
   let el: HTMLVideoElement | undefined;
-  createEffect(() => {
-    const stream = props.stream;
-    if (el !== undefined && el.srcObject !== stream) el.srcObject = stream;
-  });
+  const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
+    (track) => new MediaStream([track]),
+  );
+  let diagTimer: ReturnType<typeof setTimeout> | undefined;
+  const look = (): void => {
+    if (el === undefined) return;
+    if (!el.muted) el.muted = true;
+    if (!binder.sync(el, props.stream)) return;
+    if (diagTimer !== undefined) clearTimeout(diagTimer);
+    if (binder.track() === null) return;
+    diagTimer = setTimeout(() => {
+      diagTimer = undefined;
+      if (el === undefined) return;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      // eslint-disable-next-line no-console
+      console.info(
+        describeRemotePicture(props.where, el, binder.track(), binder.counts(), {
+          width: rect.width,
+          height: rect.height,
+          opacity: style.opacity,
+          zIndex: style.zIndex,
+          visibility: style.visibility,
+          display: style.display,
+          shown: el.dataset["shown"] ?? "-",
+        }),
+      );
+    }, PREVIEW_DIAG_AFTER_MS);
+  };
   onMount(() => {
     if (el === undefined) return;
     props.elRef(el);
+    // The stream changed: look at once. Created here, so the first look is
+    // with the element in the document.
+    createEffect(() => {
+      void props.stream;
+      look();
+    });
+    const timer = setInterval(look, PREVIEW_CHECK_MS);
     const stopFrames = watchVideoFrames(
       el,
       (now) => props.onFrame(now),
@@ -1280,7 +1360,11 @@ const LayerVideo: Component<{
       () => props.stream.getVideoTracks()[0],
     );
     onCleanup(() => {
+      clearInterval(timer);
+      if (diagTimer !== undefined) clearTimeout(diagTimer);
       stopFrames();
+      if (el !== undefined) el.srcObject = null;
+      binder.reset();
       props.elRef(undefined);
     });
   });

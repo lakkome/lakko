@@ -351,6 +351,10 @@ public final class ChannelsUiState: ObservableObject {
     /// or this device's owner deleted it): the section 9 end of membership,
     /// here and, through ``onRemovedHere``, on the account's other devices.
     public func endDeleted(_ channelId: String) {
+        // A publisher request for a channel that is gone waits for nothing.
+        if let account = AcceptedContactsStore.boundAccountIdB64 {
+            PendingPublisherRequests.drop(channelIdHex: channelId, accountIdB64: account)
+        }
         guard channels.contains(where: { $0.id == channelId }) else { return }
         let name = channels.first { $0.id == channelId }?.title
         ChannelMemberCards.forgetUploads(channelId: channelId)
@@ -633,6 +637,7 @@ public final class ChannelsUiState: ObservableObject {
         ChannelAdmissionKeyStore.delete(accountIdB64: accountIdB64)
         ChannelAdmissionSeedShare.forget(accountIdB64: accountIdB64)
         ChannelInviteCardStore.shared.delete(accountIdB64: accountIdB64)
+        PendingPublisherRequests.clear(accountIdB64: accountIdB64)
         PendingChannelReactionStore.delete(accountIdB64)
         ChannelPublisherKeyStore.deleteLegacy()
         ChannelPublishCounterStore.deleteLegacy()

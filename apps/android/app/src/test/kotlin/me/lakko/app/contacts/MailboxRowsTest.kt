@@ -248,7 +248,9 @@ class MailboxRowsTest {
             crypto.seal(malloryMailbox, MailboxRowKind.WELCOME, byteArrayOf(9)),
             // A Welcome for this mailbox.
             crypto.seal(aliceMailbox, MailboxRowKind.WELCOME, welcome),
-            // The co-publisher rendezvous is read by the channel join, not here.
+            // ADR-0087 section 15 — the owner's answer to a publisher request:
+            // its own event (landed against the pending requests), never a
+            // chat Welcome.
             crypto.seal(aliceMailbox, MailboxRowKind.WELCOME_RENDEZVOUS, byteArrayOf(7)),
         )
         val result = contactsClient(rows).use {
@@ -256,10 +258,13 @@ class MailboxRowsTest {
         }
         assertEquals(4L, result.cursor)
         val events = result.events
-        assertEquals(1, events.size)
-        val event = events.single() as IncomingMailboxEvent.Welcome
+        assertEquals(2, events.size)
+        val event = events.filterIsInstance<IncomingMailboxEvent.Welcome>().single()
         assertArrayEquals(welcome, event.welcomeBytes)
         assertEquals(3L, event.messageId)
+        val publisher = events.filterIsInstance<IncomingMailboxEvent.PublisherWelcome>().single()
+        assertArrayEquals(byteArrayOf(7), publisher.welcomeBytes)
+        assertEquals(4L, publisher.messageId)
     }
 
     @Test

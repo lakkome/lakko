@@ -25,6 +25,8 @@ import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
+import { channelInviteRowPreview } from "./channel-invite-preview";
+import { publicOrigin } from "../platform";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, loadLeaveRequestedAt, membershipState, readIsActive } from "./membership-ended";
@@ -241,8 +243,16 @@ export function createConversationRows() {
       return t("chat.members.pending.waiting_leave");
     }
     const s = summaryFor(g.group.groupId);
+    // ADR-0087 section 14 — a channel invitation reads as the invitation,
+    // never as the `/g/` link the message's text is.
+    let invitation: string | null = null;
+    try {
+      invitation = channelInviteRowPreview(s.preview, publicOrigin());
+    } catch {
+      invitation = null;
+    }
     const line = previewLine({
-      preview: s.preview,
+      preview: invitation ?? s.preview,
       isOwn: s.previewIsOwn,
       senderName:
         s.lastAuthorKeyB64 === null ? null : memberNameOf(profiles.resolve(s.lastAuthorKeyB64), "a Chats row last sender"),

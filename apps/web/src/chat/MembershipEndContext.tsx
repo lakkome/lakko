@@ -57,6 +57,7 @@ import { onGroupMlsIdle, withGroupMlsLock } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { retireOldPushGid } from "../push/group-routing";
+import { dropPendingPublisherRequest } from "../channels/pending-publisher-requests";
 import { getGroupRoutingSecretForAccount } from "../push/group-routing-store";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { useChats, type ActiveGroup } from "./ChatContext";
@@ -880,6 +881,9 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
   // ADR-0087 section 9 (phase B) — a `410 channel-deleted` from any channels
   // route ends that channel on this device: the owner deleted it.
   installChannelDeletedHandler(async (idHex) => {
+    // A publisher request for a channel that is gone waits for nothing.
+    const account = accountNow();
+    if (account !== null) dropPendingPublisherRequest(account, idHex);
     const held = channelsState.channels().find((c) => c.id === idHex);
     if (held === undefined && !channelsState.keysByChannel().has(idHex)) return;
     const title = channelsState.metaByChannel().get(idHex)?.name ?? held?.localName ?? "";

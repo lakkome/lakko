@@ -100,6 +100,7 @@ import {
 } from "./join-group-preview";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { openChannelLink, type OpenedChannelInvite } from "../channels/channel-invites";
+import { groupInviteRouteLink } from "../contacts/group-invite";
 import { channelErrorCode } from "../channels/channel-error-copy";
 import { ChannelLinkPage } from "./ChannelLinkPage";
 
@@ -406,9 +407,13 @@ export default function JoinGroup() {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
   const source = createMemo(() => ({ slug: params.slug, hash: location.hash }));
-  const [channel] = createResource(source, async (): Promise<OpenedChannelInvite | "group" | "invalid" | "damaged"> => {
+  const [channel] = createResource(source, async (s): Promise<OpenedChannelInvite | "group" | "invalid" | "damaged"> => {
     try {
-      return (await openChannelLink(window.location.href)) ?? "group";
+      // The link from the router, never `window.location`: on an in-app
+      // navigation (Accept on a publisher card) this runs inside the
+      // router's transition, before the address bar changes, so
+      // `window.location` still names the chat the person came from.
+      return (await openChannelLink(groupInviteRouteLink(s.slug, s.hash))) ?? "group";
     } catch (err) {
       const code = channelErrorCode(err);
       if (code === "link-damaged") return "damaged";

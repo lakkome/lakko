@@ -442,6 +442,11 @@ export type IncomingMailboxEvent =
       reachPk?: Uint8Array;
     }
   | { kind: "welcome"; welcome: IncomingWelcome; reachPk?: Uint8Array }
+  /** A Welcome rendezvous row: the Welcome a channel owner's device sent
+   *  when it approved this account's publisher request (ADR-0087 section
+   *  15). The body IS the MLS Welcome; only a pending publisher request
+   *  joins it (`landPendingPublisherWelcome`). */
+  | { kind: "publisher-welcome"; messageId: number; welcomeBytes: Uint8Array }
   | { kind: "contact-ack"; ack: IncomingContactAck; reachPk?: Uint8Array }
   /** ADR-0079 amendment of 2026-10-19: a link refusal, NOT yet verified.
    *  The receiver checks it against each pending contact
@@ -5213,8 +5218,8 @@ export class ContactsClient {
  * log (it may be garbage, a row sealed for another mailbox, or an unknown
  * kind), and the cursor still advances past it. The opened kind decides the
  * decoder: a Welcome is surfaced as is, an ack and a request are verified as
- * before. A Welcome rendezvous (the co-publisher join) is read by the
- * co-publisher flow itself, never here. With `welcomesOnly` (a predecessor
+ * before. A Welcome rendezvous (the Welcome of an approved publisher request)
+ * is surfaced as `publisher-welcome`, its body being the Welcome. With `welcomesOnly` (a predecessor
  * mailbox, ADR-0074 section 3.5a rules 4 and 5) a request or an ack is
  * neither opened further nor acted on. Exported for the host tests.
  */
@@ -5251,7 +5256,10 @@ export function dispatchMailboxRows(
       });
       continue;
     }
-    if (row.kind === "welcome-rendezvous") continue;
+    if (row.kind === "welcome-rendezvous") {
+      events.push({ kind: "publisher-welcome", messageId: message.id, welcomeBytes: row.body });
+      continue;
+    }
     if (options.welcomesOnly === true) continue;
     if (row.kind === "link-refusal") {
       events.push({ kind: "link-refusal", refusal: row.body });

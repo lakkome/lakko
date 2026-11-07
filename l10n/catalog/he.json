@@ -1157,6 +1157,18 @@
       "text": "עדיין לא דווחו מכשירים. הם יופיעו כאן אחרי שתאשרו גישה למיקרופון או למצלמה.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "הפחתת רעשים",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "מסיר רעשי הקלדה ורעשי רקע מהמיקרופון שלך.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "צליל",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "ברירת המחדל של המערכת",
       "status": "machine"

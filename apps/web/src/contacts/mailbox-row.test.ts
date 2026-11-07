@@ -97,12 +97,17 @@ describe("dispatching the rows of one mailbox read", () => {
         // Garbage: dropped.
         { id: 13, payload: new Uint8Array([1, 2, 3, 4]), createdAt: "t3" },
         { id: 14, payload: sealRowFor(wasm, toBob, "contact-ack", ackWire), createdAt: "t4" },
-        // A Welcome rendezvous is the co-publisher flow's, never surfaced here.
+        // A Welcome rendezvous: an approved publisher request's Welcome.
         { id: 15, payload: sealRowFor(wasm, toBob, "welcome-rendezvous", welcome), createdAt: "t5" },
       ];
       const out = dispatchMailboxRows(wasm, bobKey, messages, 10, bob.x25519SecretKey);
       expect(out.cursor).toBe(15);
-      expect(out.events.map((e) => e.kind)).toEqual(["welcome", "contact-ack"]);
+      expect(out.events.map((e) => e.kind)).toEqual(["welcome", "contact-ack", "publisher-welcome"]);
+      const rendezvous = out.events[2];
+      if (rendezvous?.kind !== "publisher-welcome") throw new Error("expected a publisher welcome");
+      // The body is the Welcome itself, as the owner's device seals it.
+      expect(Array.from(rendezvous.welcomeBytes)).toEqual(Array.from(welcome));
+      expect(rendezvous.messageId).toBe(15);
       const first = out.events[0];
       if (first?.kind !== "welcome") throw new Error("expected a welcome");
       expect(Array.from(first.welcome.welcomeBytes)).toEqual(Array.from(welcome));
@@ -115,7 +120,7 @@ describe("dispatching the rows of one mailbox read", () => {
       const welcomesOnly = dispatchMailboxRows(wasm, bobKey, messages, 10, bob.x25519SecretKey, {
         welcomesOnly: true,
       });
-      expect(welcomesOnly.events.map((e) => e.kind)).toEqual(["welcome"]);
+      expect(welcomesOnly.events.map((e) => e.kind)).toEqual(["welcome", "publisher-welcome"]);
       expect(welcomesOnly.cursor).toBe(15);
     } finally {
       bobKey.free();

@@ -268,11 +268,13 @@ portrait.
   short one (under 520 pt) the words under the circles go (each circle keeps
   its spoken name), and the circles are sized from the width and the number of
   controls, never below 38 pt.
-- **No switches for echo cancellation, noise suppression or gain control.** The
-  engine keeps all three on; the settings sheet once offered three toggles that
-  changed a stored flag nothing read, and a switch that does nothing is worse than
-  none. Echo between two devices in one room is not something a switch fixes: each
-  device cancels only what it played itself.
+- **No switches for echo cancellation or gain control.** The engine keeps both
+  on; the settings sheet once offered three toggles that changed a stored flag
+  nothing read, and a switch that does nothing is worse than none. Echo between
+  two devices in one room is not something a switch fixes: each device cancels
+  only what it played itself. The one audio switch the sheet does carry,
+  `Noise suppression`, drives Lakko's own suppressor and is specified in
+  section 4.1.3.
 - The row sits inside one rounded translucent bar, floating above the bottom safe area
   with a margin, not welded to the edge. On a voice call it is vertically placed in the
   lower third, under the portrait, not at the very bottom of an empty screen.
@@ -347,6 +349,53 @@ is alone, which ends the call for it by the rule of section 4.3.
 | Alone in the call | `End` ends the call, no menu |
 | `End call for everyone` pressed | The call screen closes as on any hang-up; the message is sent in the background |
 | The message could not be sent | The starter has still left; the others stay until they hang up or the call empties. No error is shown: there is nothing the person can do about it from outside the call |
+
+### 4.1.3 Noise suppression
+
+Decided by the maintainer on 2026-11-07 after a group call where typing and room
+noise reached everyone. Each client runs Lakko's own noise suppressor on the
+microphone before the sound is encoded ([ADR-0088](../adr/0088-client-noise-suppression-rnnoise.md));
+the platform's echo canceller stays on underneath it.
+
+**Where.** One switch in the Settings sheet, above the device lists, in its own
+section headed `Sound`:
+
+```
+Sound
+  Noise suppression                          [on]
+  Removes typing and background noise from your microphone.
+```
+
+The sheet is the only place it appears. The rule "never a switch inside a call"
+(section 4.1) is about the control row; the Settings sheet is a settings page and
+uses the platform's switch there, like any other preference. The section shows
+even when no device list is shown (before a permission is granted the device
+lists are absent, the switch is not).
+
+| Property | Rule |
+|---|---|
+| Default | On |
+| Scope | This device only. Stored on the device, not synced to the account's other devices, never sent to anyone in the call: the others hear the result, not the setting |
+| When it applies | At once, mid-call, without renegotiating and without a gap the person must wait out. It also holds for the next call on this device |
+| Off | The microphone is sent as it was before this feature: the platform's own echo cancellation, noise suppression and gain control, nothing of Lakko's |
+| Who sees it | Every call kind (one-to-one, group, link call), on every client that can run the suppressor |
+
+**States.**
+
+| State | What the person sees |
+|---|---|
+| On, suppressor running | The switch on. Nothing else: no badge on the microphone button, no indicator on the tile |
+| Off | The switch off |
+| On, but the suppressor could not start on this device (no audio worklet, the module failed to load, the platform hook is missing) | The switch stays on and the call goes on with the platform's own processing, exactly as with the switch off. No error, no toast: there is nothing the person can do about it, and the call is not worse than it was before this feature. The client logs one line saying which processing is applied |
+| A client that cannot run the suppressor at all (no platform support yet) | The section is absent rather than a switch that does nothing (section 4.1's rule) |
+
+**Copy.** `Sound` (section heading), `Noise suppression` (switch label), the hint
+line above. Spoken name of the switch is its label; its state is read by the
+platform as on / off. No word about models, machine learning, AI, or RNNoise:
+the person needs to know what it removes, not how.
+
+**Not here.** No strength slider, no per-participant suppression of what others
+send (each device cleans its own microphone), no "voice isolation" mode.
 
 ### 4.2 Measured against the messengers people already use
 

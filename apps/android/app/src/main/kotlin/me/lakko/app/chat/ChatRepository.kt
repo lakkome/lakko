@@ -13679,6 +13679,63 @@ public class ChatRepository(
         )
 
     /**
+     * One person, one one-to-one row ([duplicateOneToOneFolds], the web
+     * client's `duplicate-one-to-one.ts`): a one-to-one the other person
+     * founded continues an older one this account founded with them, which
+     * their device never opened. Recorded in the conversation lineage
+     * (ADR-0073 R.5) through [lineageRecorder], so the list shows one row
+     * whose head is the new group and the old journal is no longer polled
+     * ([oldSegmentPolled]). Run whenever the held groups or the lineage move;
+     * the recorder writes a register this device holds only once.
+     */
+    public suspend fun foldDuplicateOneToOnes() {
+        val recorder = lineageRecorder ?: return
+        val own = ownPersonKeyB64() ?: return
+        val lineage = lineageNow()
+        val records = synchronized(groups) { groups.entries.map { it.key to it.value } }
+        val held = records.mapNotNull { (hex, record) ->
+            if (hex.lowercase() in endingGroups) return@mapNotNull null
+            try {
+                val members = record.group.members()
+                HeldConversationGroup(
+                    groupHex = hex.lowercase(),
+                    conversationHex = lineage.conversationOf(hex.lowercase()),
+                    isOneToOne = record.group.groupKind() == GroupKind.ONE_TO_ONE,
+                    people = personKeysOf(members),
+                    founderKey = founderKeyOf(record.group, members),
+                )
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        for (fold in duplicateOneToOneFolds(held, own)) {
+            val successor = hexToBytes(fold.successorHex) ?: continue
+            val root = hexToBytes(fold.rootHex) ?: continue
+            try {
+                if (recorder(successor, root)) {
+                    android.util.Log.i("ChatRepository", "a one-to-one the other person founded continues an older one")
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "duplicate one-to-one not folded: ${cause.javaClass.simpleName}")
+            }
+        }
+        publishThreadList()
+    }
+
+    /** The account key (standard base64) that founded [group]: the role
+     *  table's owner, else the person at leaf 0; `null` when unreadable. */
+    private fun founderKeyOf(group: Group, members: List<GroupMember>): String? {
+        try {
+            group.groupRoles()?.owner?.takeIf { it.size == 32 }?.let { return outboxB64(it) }
+        } catch (_: Throwable) {
+            // fall through to the roster
+        }
+        return members.firstOrNull { it.leafIndex == 0u }?.let { outboxB64(personKeyOf(it)) }
+    }
+
+    /**
      * `docs/ux/who-can-find-me.md` section 6.4 — where a contact request that
      * arrived inside [groupIdHex] goes: the contacts repository opens it with
      * this account's key and runs the person's setting. Installed by it; the

@@ -1157,6 +1157,18 @@
       "text": "هنوز دستگاهی گزارش نشده است. پس از دادن اجازه دسترسی به میکروفون یا دوربین اینجا نمایش داده می‌شوند.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "حذف نویز",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "صدای تایپ و نویز پس‌زمینه را از میکروفون شما حذف می‌کند.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "صدا",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "پیش‌فرض سیستم",
       "status": "machine"

@@ -1237,6 +1237,18 @@
       "text": "Устройства пока не найдены. Они появятся здесь, когда вы разрешите доступ к микрофону или камере.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "Шумоподавление",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Убирает звук клавиатуры и фоновый шум из вашего микрофона.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "Звук",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "По умолчанию",
       "status": "machine"

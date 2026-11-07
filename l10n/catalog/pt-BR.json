@@ -1157,6 +1157,18 @@
       "text": "Nenhum dispositivo informado ainda. Eles aparecem aqui quando você permitir o acesso ao microfone ou à câmera.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "Supressão de ruído",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Remove o barulho de digitação e o ruído de fundo do seu microfone.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "Som",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "Padrão do sistema",
       "status": "machine"

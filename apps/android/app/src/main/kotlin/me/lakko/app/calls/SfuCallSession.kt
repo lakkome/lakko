@@ -12,7 +12,6 @@ import kotlinx.coroutines.launch
 import me.lakko.sframe.SFrameAvailability
 import org.webrtc.PeerConnection
 import org.webrtc.RtpReceiver
-import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
@@ -348,10 +347,6 @@ class SfuCallSession(
     // callbacks hop; the tiles report from the main thread [scope] is
     // confined to).
 
-    /** The video source the camera's senders are fed from, while there is a
-     *  capture: what a copy of the camera is made over. */
-    private var localCameraSource: VideoSource? = null
-
     /** This device's SFU peer id, from the Welcome. */
     private var selfPeerId: String? = null
 
@@ -592,7 +587,7 @@ class SfuCallSession(
      * by the connection. Returns whether a copy was added, which a caller
      * mid-call takes as "renegotiate".
      */
-    private fun addCameraCopies(connection: WebRtcPeerConnection, source: VideoSource, seed: ByteArray): Boolean {
+    private fun addCameraCopies(connection: WebRtcPeerConnection, capture: CameraVideoCapture, seed: ByteArray): Boolean {
         // What the people count says of each sender (`cameraSenderPlan`): the
         // light copy is created sending, the middle one only from the count
         // the shared rule names.
@@ -614,6 +609,14 @@ class SfuCallSession(
                 )
             } else {
                 null
+            }
+            // Each copy is sent from a source of its own, fed the same frames
+            // (`CapturerFan.kt`): on the main sender's source one encoder's
+            // adaptation narrowed all three pictures.
+            val source = capture.copySource(kind)
+            if (source == null) {
+                android.util.Log.w(MEDIA_LOG_TAG, "call camera senders: no source for the ${kind.sender.wireName} copy")
+                continue
             }
             if (connection.addCameraCopySender(kind, source, seed, publishLeaf, active)) added = true
         }
@@ -860,7 +863,6 @@ class SfuCallSession(
         // the peer connection after it: off the main thread, in that order.
         val capture = localCameraCapture
         localCameraCapture = null
-        localCameraSource = null
         val closing = pc
         pc = null
         CallMediaCloser.close {
@@ -971,7 +973,7 @@ class SfuCallSession(
         }
         // The camera's copies (ADR-0070 steps 1 and 5), each added and sealed
         // in one step, like every sender before the offer is built.
-        localCameraSource?.let { source -> addCameraCopies(connection, source, seed) }
+        localCameraCapture?.let { capture -> addCameraCopies(connection, capture, seed) }
         // Serialize (piece B): mark our initial publish offer in flight so an
         // SFU subscribe-offer arriving during it waits in the queue until the
         // first answer clears `makingOffer` + arms renegotiation.
@@ -1035,16 +1037,14 @@ class SfuCallSession(
         // light and middle copies follow once it is sealed ([addCameraCopies]).
         connection.addLocalVideoTrack(source, groupCamera = true)
         localCameraCapture = capture
-        localCameraSource = source
         callbacks.onLocalVideoTrack(connection.currentLocalVideoTrack())
         try {
             capture.start()
         } catch (cause: CameraVideoCapture.CaptureError) {
             android.util.Log.w("SfuCallSession", "camera start failed", cause)
             capture.dispose()
-            localCameraCapture = null
             // No capture, no copies: the main sender keeps the media line.
-            localCameraSource = null
+            localCameraCapture = null
             callbacks.onLocalVideoTrack(null)
         }
     }
@@ -1247,19 +1247,18 @@ class SfuCallSession(
             // would seal the same (leaf, stream) KID under a second encryptor
             // with its own counter (ADR-0035, ADR-0069). Nothing is added to
             // the SDP, so there is no renegotiation either.
-            if (!connection2.replaceLocalVideoTrack(source)) {
+            if (!connection2.replaceLocalVideoTrack(source, capture::copySource)) {
                 capture.stop()
                 capture.dispose()
                 setVideoPublishState(VideoPublishState.FAILED)
                 throw SfuCallException("could not put the camera on the existing video sender")
             }
             localCameraCapture = capture
-            localCameraSource = source
             // The copies followed the camera onto the new source inside
             // `replaceLocalVideoTrack` (same senders, same encryptors). One
             // that was never there, or was dropped, is added now, which is a
             // new media line and so a renegotiation.
-            val copyAdded = addCameraCopies(connection2, source, seed)
+            val copyAdded = addCameraCopies(connection2, capture, seed)
             connection2.setCameraEnabled(true)
             setVideoPublishState(VideoPublishState.LIVE)
             callbacks.onLocalVideoTrack(connection2.currentLocalVideoTrack())
@@ -1292,10 +1291,9 @@ class SfuCallSession(
         // The camera is now published + sealed. Hold the capture for teardown
         // in [hangUp].
         localCameraCapture = capture
-        localCameraSource = source
         // Its copies (ADR-0070 steps 1 and 5), each added and sealed in one
         // step, before the renegotiation offer that carries their media lines.
-        addCameraCopies(connection2, source, seed)
+        addCameraCopies(connection2, capture, seed)
         syncSenderActivity()
 
         // 5. Live: surface the self-preview track + report the state.

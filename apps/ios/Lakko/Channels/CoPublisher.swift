@@ -709,7 +709,12 @@ public enum CoPublisher {
         discovery: DiscoveryClient = DiscoveryClient(),
         persistProposalKeys: @escaping @MainActor () throws -> Void = {
             try ChannelPublisherIdentity.shared.persistOrThrow()
-        }
+        },
+        // ADR-0045 decision 2, ADR-0087 section 15 — the request has no
+        // deadline: it is recorded durably BEFORE the knock, so the mailbox
+        // loop can land the owner's Welcome whenever it arrives. A throw here
+        // sends no knock.
+        recordRequest: @escaping @MainActor (CoPublishRequest) throws -> Void = { _ in }
     ) async throws -> CoPublishRequest {
         // ADR-0028 amendment 2026-09-28 — `<origin>/g/<id>#<secret>`: the
         // sealed capability is fetched from the ledger and opened under the
@@ -784,12 +789,14 @@ public enum CoPublisher {
             replyGrant: replyGrant,
             profile: await MainActor.run { ProfileDirectory.shared.ownDeviceEnvelope() } ?? Data(),
             capability: wire)
-        _ = try await ds.knock(groupId: groupId, payloads: [row, binding])
-        return CoPublishRequest(
+        let request = CoPublishRequest(
             groupId: groupId,
             channelIdHex: channelIdHex,
             joinerKey: identity.signaturePublicKey()
         )
+        try await recordRequest(request)
+        _ = try await ds.knock(groupId: groupId, payloads: [row, binding])
+        return request
     }
 
     /// ADR-0028 OQ3 — joiner side: look for the Welcome the owner sent after
@@ -849,20 +856,41 @@ public enum CoPublisher {
         // joins through its own entry point: `Group.joinFromWelcome` refuses
         // its Welcome, and this one refuses a Welcome for any other group (or
         // a chat's) before anything is written.
-        guard let channelId = Self.hexToData(channelIdHex) else {
+        guard Self.hexToData(channelIdHex) != nil else {
             throw CoPublisherError.badChannelId(channelIdHex)
         }
-        var joined = false
         for welcome in candidates.reversed() {
             // Only this channel's PublisherGroup counts: `identity` may hold
             // the keys of other requests.
-            if (try? publisherGroupJoinFromWelcome(
-                identity: identity, welcome: welcome, groupId: groupId, channelId: channelId)) != nil {
-                joined = true
-                break
+            if let keys = try joinCoPublishWelcome(
+                identity: identity, accountIdB64: accountIdB64, welcome: welcome, groupId: groupId,
+                channelIdHex: channelIdHex, existingSigningSeed: existingSigningSeed) {
+                return keys
             }
         }
-        guard joined else { return nil }
+        return nil
+    }
+
+    /// Join the PublisherGroup `groupId` of channel `channelIdHex` from one
+    /// Welcome and become a publisher: the keys at the post-approve epoch, or
+    /// `nil` when the Welcome is not this group's or not sealed to a
+    /// KeyPackage `identity` holds (nothing is written then). Used by the
+    /// Accept wait and by the mailbox receive loop
+    /// (``CoPublisherJoin/landPendingWelcome(_:accountIdB64:identity:state:)``).
+    public static func joinCoPublishWelcome(
+        identity: Identity,
+        accountIdB64: String?,
+        welcome: Data,
+        groupId: Data,
+        channelIdHex: String,
+        existingSigningSeed: Data? = nil
+    ) throws -> ChannelPublisherKeys? {
+        guard let channelId = Self.hexToData(channelIdHex) else {
+            throw CoPublisherError.badChannelId(channelIdHex)
+        }
+        guard (try? publisherGroupJoinFromWelcome(
+            identity: identity, welcome: welcome, groupId: groupId, channelId: channelId)) != nil
+        else { return nil }
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         CoPublishedJournals.shared.mark(

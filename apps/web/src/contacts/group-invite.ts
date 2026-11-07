@@ -80,6 +80,16 @@ export function appendGroupInviteLinkSecret(
   return appendInviteLinkSecret(url, secret, widths);
 }
 
+/** The `/g/` link the `/g/:slug` route names, from the ROUTER's slug and
+ *  hash (`useParams` / `useLocation`), as a path the link openers accept. A
+ *  route must not read `window.location` for this: after an in-app
+ *  navigation the route renders inside the router's transition, before the
+ *  address changes, so `window.location` still names the previous screen. */
+export function groupInviteRouteLink(slug: string, hash: string): string {
+  const h = hash === "" || hash.startsWith("#") ? hash : `#${hash}`;
+  return `${GROUP_INVITE_URL_PREFIX}${slug}${h}`;
+}
+
 /** Split a full `/g/` link into its slug and its fragment (missing or
  *  malformed = damaged). `null` when the string is not a group-invite link. */
 export function splitGroupInviteLink(

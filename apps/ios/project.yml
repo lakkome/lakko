@@ -125,6 +125,15 @@ targets:
         # under (`ApiEndpoints.webOrigin`): the host the same stack's web
         # client and app-link association live on. Debug: the test stack.
         LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
+        # `docs/ux/desktop.md` section 7.1 — the app's own scheme. Safari
+        # never hands a link to the app while the person stays on the same
+        # site, so "Open in the app" on a link's web page opens
+        # `lakko://<kind>/<id>#<secret>` (or `lakko://feed/import#<rule>`);
+        # `InviteIntake.appSchemeLink` reads it as this build's own link.
+        CFBundleURLTypes:
+          - CFBundleURLName: me.lakko.links
+            CFBundleURLSchemes:
+              - lakko
         # Portrait in practice: the app delegate answers portrait everywhere
         # except the call screen while a shared screen is on the large place
         # (ADR-0083, `CallOrientation`). The landscape entries make that one

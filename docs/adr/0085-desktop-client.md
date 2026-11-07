@@ -417,8 +417,12 @@ hidden window for longer than two minutes.
   `platform/desktop-notifications.ts`, host-tested and unit-tested.
 - **A notification needs a bundle:** macOS attributes one to the app's bundle
   identifier, so `just dev-desktop` now builds `target/debug/Lakko.app`
-  (Info.plist, icon, signature), registers it with Launch Services and runs
-  the executable inside it. Without a registered bundle the host logs that
+  (Info.plist, icon, signature), registers it with Launch Services and
+  starts it with `open` (since 2026-11-07; before, the executable inside was
+  run as a child of the shell, and macOS then asked for the camera and the
+  microphone on behalf of that shell's program: started from Claude Code the
+  camera was refused with no prompt, while the microphone worked because
+  that program may use it). Without a registered bundle the host logs that
   notifications are unavailable and the route answers
   `503 notifications-unsupported`.
 - **Not built:** "Open system settings" when notifications are off. Nothing

@@ -101,6 +101,15 @@ public final class InviteIntake: ObservableObject {
             }
             return
         }
+        // `docs/ux/desktop.md` section 7.1 — "Open in the app" on a link's
+        // page in Safari opens `lakko://<kind>/<id>#<secret>` (or
+        // `lakko://feed/import#<rule>`): Safari never hands a link to the app
+        // while the person stays on the same site. It is read as this build's
+        // own `https` link and goes the same way; anything else is ignored.
+        if url.scheme?.lowercased() == Self.appScheme {
+            if let link = Self.appSchemeLink(url) { handle(link) }
+            return
+        }
         let path = url.path
         if let slug = Self.slug(from: path, prefix: "/i/") {
             // ADR-0028 amendment 2026-09-28 — the sealed-link secret rides the
@@ -140,6 +149,46 @@ public final class InviteIntake: ObservableObject {
         let path = url.path
         let isLink = ["/i/", "/g/", "/c/"].contains { slug(from: path, prefix: $0) != nil }
         return isLink ? url : nil
+    }
+
+    /// The app's own URL scheme, registered in `project.yml`
+    /// (`CFBundleURLTypes`), the same scheme the desktop app takes.
+    nonisolated static let appScheme = "lakko"
+
+    /// A `lakko://` address as this build's `https` link on `webOrigin`, or
+    /// `nil`. Strict, as the desktop host's parse is (`apps/desktop/src-tauri/
+    /// src/link.rs`): a ledger link is `lakko://<i|c|g>/<8 base64url>#<16
+    /// base64url>`, a shared feed `lakko://feed/import#<base64url>`, with no
+    /// query and nothing else in the path. Any page or app can open this
+    /// scheme, so nothing here trusts it beyond its shape: the landing that
+    /// follows opens the sealed link and asks the person before anything
+    /// happens, exactly as for a tapped `https` link.
+    nonisolated static func appSchemeLink(_ url: URL, webOrigin: String = ApiEndpoints.webOrigin) -> URL? {
+        guard url.scheme?.lowercased() == appScheme,
+              url.query == nil, url.user == nil, url.port == nil,
+              let kind = url.host,
+              let fragment = url.fragment, !fragment.isEmpty,
+              fragment.allSatisfy(isBase64UrlCharacter) else { return nil }
+        let origin = webOrigin.hasSuffix("/") ? String(webOrigin.dropLast()) : webOrigin
+        let path = url.path
+        switch kind {
+        case "i", "c", "g":
+            let id = path.hasPrefix("/") ? String(path.dropFirst()) : ""
+            guard id.count == 8, id.allSatisfy(isBase64UrlCharacter),
+                  fragment.count == 16 else { return nil }
+            return URL(string: "\(origin)/\(kind)/\(id)#\(fragment)")
+        case "feed":
+            guard path == "/import" else { return nil }
+            return URL(string: "\(origin)/feed/import#\(fragment)")
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func isBase64UrlCharacter(_ character: Character) -> Bool {
+        guard character.isASCII, let ascii = character.asciiValue else { return false }
+        return (ascii >= 0x30 && ascii <= 0x39) || (ascii >= 0x41 && ascii <= 0x5A)
+            || (ascii >= 0x61 && ascii <= 0x7A) || ascii == 0x2D || ascii == 0x5F
     }
 
     /// Extract + trim the slug after `prefix`, or `nil` if the path

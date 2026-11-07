@@ -1157,6 +1157,18 @@
       "text": "Пристрої поки не знайдено. Вони з’являться тут, коли ви дозволите доступ до мікрофона або камери.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "Шумозаглушення",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Прибирає звук клавіатури й фоновий шум із вашого мікрофона.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "Звук",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "Типово",
       "status": "machine"

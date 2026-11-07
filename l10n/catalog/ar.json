@@ -1157,6 +1157,18 @@
       "text": "لم تُكتشف أجهزة بعد. ستظهر هنا بعد منح إذن الميكروفون أو الكاميرا.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "كتم الضوضاء",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "يزيل صوت الكتابة وضوضاء الخلفية من الميكروفون.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "الصوت",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "الافتراضي في النظام",
       "status": "machine"

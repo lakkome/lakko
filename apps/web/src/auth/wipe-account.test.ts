@@ -217,6 +217,10 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.contacts.inbox.v1.${acct}`, JSON.stringify({ cursor: 3, pending: [] }));
   put(`lakko.contacts.sent.v1:${acct}`, JSON.stringify([{ recipientUsername: "bob", recipientAccountIdHex: "00", sentAtMs: 1 }]));
+  put(
+    `lakko.channels.pending-publisher.v1:${acct}`,
+    JSON.stringify([{ channelIdHex: "07", groupIdHex: "ab", joinerKeyB64: "k", name: "", description: "", requestedAtMs: 1 }]),
+  );
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
@@ -615,6 +619,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.contacts.v3.": "account",
   "lakko.contacts.inbox.v1.": "account",
   "lakko.contacts.sent.v1:": "account",
+  "lakko.channels.pending-publisher.v1:": "account",
   "lakko/invite-link-secrets/v1/": "account",
   "lakko.readmission.removed.v1:": "account",
   "lakko:signup-phrase-unacknowledged:": "account",
@@ -724,6 +729,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // A diagnostic switch of this device (`calls/av-align.ts`): `off` makes a
   // call without audio/video alignment. Names no account.
   "lakko.call.av-align": "device",
+  // ADR-0088 / docs/ux/calls.md 4.1.3: the noise suppression switch is
+  // chosen per device and names no account.
+  "lakko.call.noise-suppression": "device",
   // not storage names
   // The notification tag of identity-recovery 17.5 (`added-notice.ts`).
   "lakko-device-added:": "not-storage",

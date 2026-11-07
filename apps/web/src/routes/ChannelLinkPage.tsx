@@ -19,6 +19,10 @@ import { channelErrorText } from "../channels/channel-error-copy";
 import { channelHeaderLine } from "../channels/channel-facts";
 import type { OpenedChannelInvite } from "../channels/channel-invites";
 import { acceptPublisherInvite } from "../channels/channel-publishers";
+import {
+  loadPendingPublisherRequests,
+  pendingPublisherRequestsVersion,
+} from "../channels/pending-publisher-requests";
 import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { screenAnchor } from "../ui/screen-anchor";
@@ -63,14 +67,34 @@ export function ChannelLinkPage(props: { readonly slug: string; readonly opened:
     }
   }
 
+  const accountIdB64 = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+  /** A publisher request for this channel is recorded and waits for the
+   *  owner's device. Reactive. */
+  const requestPending = (): boolean => {
+    pendingPublisherRequestsVersion();
+    const account = accountIdB64();
+    return (
+      account !== null &&
+      loadPendingPublisherRequests(account).some((r) => r.channelIdHex === props.opened.channelIdHex)
+    );
+  };
+
   async function accept(): Promise<void> {
     const identity = chats.conversationAccountIdentity();
-    if (identity === null || phase() === "busy") return;
+    const account = accountIdB64();
+    if (identity === null || account === null || phase() === "busy") return;
     const here = screenAnchor(location);
     setPhase("busy");
     setError(null);
     try {
-      await acceptPublisherInvite(identity, props.opened);
+      const outcome = await acceptPublisherInvite(identity, props.opened, account);
+      if (outcome === "waiting") {
+        setPhase("idle");
+        return;
+      }
       if (here()) navigate(paths.channel(props.opened.channelIdHex), { replace: true });
     } catch (err) {
       setError(channelErrorText(err, () => t("channels.subscribe.error.generic")));
@@ -128,6 +152,11 @@ export function ChannelLinkPage(props: { readonly slug: string; readonly opened:
             >
               {t("search.conversation.open")}
             </button>
+          </Match>
+          <Match when={props.opened.publisherInvite && phase() !== "busy" && requestPending()}>
+            {/* The request is sent and recorded: it lands by itself when the
+                owner's device approves, whether or not this page is open. */}
+            <p role="status">{t("channels.join.waiting")}</p>
           </Match>
           <Match when={props.opened.publisherInvite}>
             <button type="button" class="primary" disabled={phase() === "busy"} onClick={() => void accept()}>

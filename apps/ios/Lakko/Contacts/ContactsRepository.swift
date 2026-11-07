@@ -126,6 +126,35 @@ public final class ContactsRepository: ObservableObject {
         return client
     }
 
+    /// ADR-0087 section 15, ADR-0045 decision 2 — lands one mailbox Welcome
+    /// against this account's pending publisher requests
+    /// (``CoPublisherAcceptance/landPendingWelcome(_:accountIdB64:)``):
+    /// `true` when it landed one, `false` when the Welcome is no request's; a
+    /// throw (the landed join could not be made durable) holds the cursor.
+    /// Wired by the signed-in shell; `nil` lands nothing.
+    public var publisherWelcomeLander: (@MainActor (_ welcome: Data, _ accountIdB64: String) throws -> Bool)?
+
+    /// The landing could not run (no lander wired yet, or the shell's
+    /// channel state is not up) while publisher requests are pending: the
+    /// poll holds its cursor so the Welcome is read again.
+    struct PublisherWelcomeNotReady: Error {}
+
+    /// Try one mailbox Welcome against this account's pending publisher
+    /// requests. With nothing pending, `false` at once. A landing that could
+    /// not run throws when `holdWhenNotReady` (a rendezvous row, which is a
+    /// publisher Welcome by kind), else reads as `false` (a plain Welcome
+    /// row goes on to the chat join).
+    func landPublisherWelcome(_ welcome: Data, accountIdB64: String, holdWhenNotReady: Bool) throws -> Bool {
+        guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty else { return false }
+        do {
+            guard let lander = publisherWelcomeLander else { throw PublisherWelcomeNotReady() }
+            return try lander(welcome, accountIdB64)
+        } catch is PublisherWelcomeNotReady {
+            if holdWhenNotReady { throw PublisherWelcomeNotReady() }
+            return false
+        }
+    }
+
     /// Optional bridge to the chat surface. Wired in 1.14f4. When
     /// non-nil, ``refreshInbox(waitSecs:)`` forwards Welcome
     /// envelopes to ``ChatRepository/joinGroupFromWelcome(welcomeBytes:)``
@@ -688,7 +717,20 @@ public final class ContactsRepository: ObservableObject {
                         continue
                     }
                     newPending.append(req)
+                case .publisherWelcome(_, let welcomeBytes):
+                    // ADR-0087 section 15, ADR-0045 decision 2 — an owner's
+                    // device approved a publisher request of this account; it
+                    // lands whenever it arrives. Not a request's: nothing. A
+                    // landed join that cannot be made durable throws, which
+                    // holds the cursor.
+                    _ = try landPublisherWelcome(welcomeBytes, accountIdB64: pollAccountIdB64, holdWhenNotReady: true)
+                    continue
                 case .welcome(_, let welcomeBytes, _):
+                    // A pending publisher request's Welcome sent as a plain
+                    // Welcome row is the request's, never a chat to join.
+                    if try landPublisherWelcome(welcomeBytes, accountIdB64: pollAccountIdB64, holdWhenNotReady: false) {
+                        continue
+                    }
                     // 1.14f4 wires `ChatRepository.joinGroupFromWelcome`
                     // here. Best-effort: a single bad Welcome
                     // doesn't block the inbox poll from advancing
@@ -874,7 +916,7 @@ public final class ContactsRepository: ObservableObject {
                         } catch {
                             NSLog("contacts inbox: a predecessor-mailbox Welcome did not open as a chat: \(error)")
                         }
-                    case .contactRequest, .contactAck, .linkRefusal:
+                    case .contactRequest, .contactAck, .linkRefusal, .publisherWelcome:
                         // Rule 5 — a predecessor mailbox carries Welcomes
                         // only. A request sent here was sealed to the old
                         // key and its sender still addresses the old
@@ -924,7 +966,7 @@ public final class ContactsRepository: ObservableObject {
             guard let proving = reachKeys[messageId] else { return (.process, nil) }
             let founder = welcomeFounder(welcomeBytes)
             return (verdict(proving, founder.map(isContact) ?? false), founder)
-        case .linkRefusal:
+        case .linkRefusal, .publisherWelcome:
             return (.process, nil)
         }
     }

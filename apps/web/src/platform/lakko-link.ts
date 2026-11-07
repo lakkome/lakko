@@ -67,3 +67,80 @@ export function mayHaveDesktopApp(userAgent: string, touchPoints: number): boole
   // An iPad reports itself as a Mac, with a touch screen no Mac has.
   return !(/Macintosh/.test(userAgent) && touchPoints > 1);
 }
+
+/**
+ * A link the phone app opens, read off the page a phone browser shows
+ * (`docs/ux/desktop.md` section 7.1): the three ledger links, and a shared
+ * feed (`/feed/import#<rule>`, ADR-0063). `path` is the route, `fragment` what
+ * rides after `#`; neither is ever sent to a server by this module.
+ */
+export interface PhoneAppLink {
+  readonly path: string;
+  readonly fragment: string;
+}
+
+const FEED_IMPORT_PATH = "/feed/import";
+/** A shared rule is at most 4096 bytes (`lakko-feed`), 5462 base64url
+ *  characters; anything longer is not a feed and is not offered. */
+const FEED_FRAGMENT = /^[A-Za-z0-9_-]{1,5462}$/;
+
+/** The link `pathname` + `hash` show, if a phone app opens it, else `null`. */
+export function phoneAppLinkOf(pathname: string, hash: string, origin: string): PhoneAppLink | null {
+  const ledger = parseLakkoLink(`${origin}${pathname}${hash}`, origin);
+  if (ledger !== null) return { path: `/${ledger.kind}/${ledger.id}`, fragment: ledger.secret };
+  const fragment = hash.startsWith("#") ? hash.slice(1) : "";
+  if (pathname.replace(/\/$/, "") === FEED_IMPORT_PATH && FEED_FRAGMENT.test(fragment)) {
+    return { path: FEED_IMPORT_PATH, fragment };
+  }
+  return null;
+}
+
+/** The phone the page runs on, when it is one an app of ours runs on. */
+export type PhoneAppPlatform = "android" | "ios";
+
+/** Which phone app this browser could have beside it, or `null` on a computer.
+ *  An iPad reports itself as a Mac, with a touch screen no Mac has. */
+export function phoneAppPlatform(userAgent: string, touchPoints: number): PhoneAppPlatform | null {
+  if (/Android/.test(userAgent)) return "android";
+  if (/iPhone|iPad|iPod/.test(userAgent)) return "ios";
+  if (/Macintosh/.test(userAgent) && touchPoints > 1) return "ios";
+  return null;
+}
+
+/** The Android package the page opens when the build names none: the one
+ *  package every Android build has today (`apps/android/app/build.gradle.kts`
+ *  `applicationId`), for the test stack and for `lakko.me` alike. */
+export const DEFAULT_ANDROID_PACKAGE = "me.lakko.dev";
+
+/** The package `VITE_LAKKO_ANDROID_PACKAGE` names, the default when unset, or
+ *  `null` when it is not a package name (then Android is offered nothing). */
+export function androidPackageFromEnv(value: string | undefined): string | null {
+  const name = value === undefined || value.trim() === "" ? DEFAULT_ANDROID_PACKAGE : value.trim();
+  return /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$/.test(name) ? name : null;
+}
+
+/**
+ * The `intent:` address that opens `link` in the Android app `pkg`. Chrome
+ * does not hand a link to an app when the person opened it inside Chrome, so
+ * the page names the app. The data is the `https` link itself, the one the app
+ * claims; with no app installed the browser goes to `browser_fallback_url`,
+ * the same page. `#` inside an extra would end the data early, so the
+ * fallback is percent-encoded.
+ */
+export function androidIntentUrl(link: PhoneAppLink, origin: string, pkg: string): string {
+  const url = new URL(origin);
+  const scheme = url.protocol.replace(/:$/, "");
+  const https = `${url.origin}${link.path}#${link.fragment}`;
+  return (
+    `intent://${url.host}${link.path}#${link.fragment}` +
+    `#Intent;scheme=${scheme};package=${pkg};` +
+    `S.browser_fallback_url=${encodeURIComponent(https)};end`
+  );
+}
+
+/** The `lakko:` address that opens `link` in the iOS app: Safari never hands a
+ *  link to an app while the person stays on the same site, so the page uses
+ *  the app's own scheme, the same form the desktop app takes. */
+export function iosAppUrl(link: PhoneAppLink): string {
+  return `lakko:/${link.path}#${link.fragment}`;
+}

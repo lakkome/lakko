@@ -112,6 +112,77 @@ final class ContactConversationTests: XCTestCase {
     }
 }
 
+/// One person, one one-to-one row (walk of 2026-11-07). Mirror of
+/// `apps/web/src/contacts/duplicate-one-to-one.test.ts`.
+final class DuplicateOneToOneTests: XCTestCase {
+    private let me = "me-key"
+    private let vg3 = "vg3-key"
+    private let anna = "anna-key"
+
+    private func chat(
+        _ groupHex: String, _ founder: String?, peer: String? = nil, conversation: String? = nil
+    ) -> DuplicateOneToOne.Held {
+        DuplicateOneToOne.Held(
+            groupHex: groupHex, conversationHex: conversation ?? groupHex, isOneToOne: true,
+            people: [me, peer ?? vg3], founderKeyB64: founder)
+    }
+
+    private func fold(_ successor: String, _ root: String) -> DuplicateOneToOne.Fold {
+        DuplicateOneToOne.Fold(successorHex: successor, rootHex: root)
+    }
+
+    /// The desktop founded aa (VG3 never opened it); VG3 founded bb in answer
+    /// to the desktop's link answer (seen live 2026-11-07).
+    func testContinuesTheOwnFoundedOneToOneWithThePeerFoundedOne() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [chat("aa", me), chat("bb", vg3)], ownKeyB64: me),
+            [fold("bb", "aa")])
+    }
+
+    func testIsOrderIndependentAndWritesNothingOnceFolded() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [chat("bb", vg3), chat("aa", me)], ownKeyB64: me),
+            [fold("bb", "aa")])
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(
+                held: [chat("aa", me), chat("bb", vg3, conversation: "aa")], ownKeyB64: me),
+            [])
+    }
+
+    func testLeavesOneToOnesWithDifferentPeopleApart() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [chat("aa", me, peer: anna), chat("bb", vg3)], ownKeyB64: me),
+            [])
+    }
+
+    func testDoesNothingForOneSideOrAnUnknownFounder() {
+        XCTAssertEqual(DuplicateOneToOne.folds(held: [chat("aa", me), chat("bb", me)], ownKeyB64: me), [])
+        XCTAssertEqual(DuplicateOneToOne.folds(held: [chat("aa", vg3), chat("bb", vg3)], ownKeyB64: me), [])
+        XCTAssertEqual(DuplicateOneToOne.folds(held: [chat("aa", nil), chat("bb", vg3)], ownKeyB64: me), [])
+        XCTAssertEqual(DuplicateOneToOne.folds(held: [chat("aa", me), chat("bb", vg3)], ownKeyB64: nil), [])
+    }
+
+    func testNeverFoldsAGroupNorIntoOne() {
+        let group = DuplicateOneToOne.Held(
+            groupHex: "aa", conversationHex: "aa", isOneToOne: false, people: [me, vg3], founderKeyB64: me)
+        XCTAssertEqual(DuplicateOneToOne.folds(held: [group, chat("bb", vg3)], ownKeyB64: me), [])
+    }
+
+    /// bb is already a successor of cc.
+    func testDoesNotFoldAGroupThatAlreadyContinuesOrIsContinued() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(
+                held: [chat("aa", me), chat("bb", vg3, conversation: "cc"), chat("cc", vg3)], ownKeyB64: me),
+            [])
+    }
+
+    func testPicksTheSameRootOnEveryDeviceWhenSeveralOwnOneToOnesExist() {
+        XCTAssertEqual(
+            DuplicateOneToOne.folds(held: [chat("cc", me), chat("aa", me), chat("bb", vg3)], ownKeyB64: me),
+            [fold("bb", "aa")])
+    }
+}
+
 // MARK: - The rows and the filter
 
 final class InviteContactRowsTests: XCTestCase {

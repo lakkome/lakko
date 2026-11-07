@@ -1157,6 +1157,18 @@
       "text": "Henüz aygıt bildirilmedi. Mikrofon veya kamera izni verdiğinizde burada görünürler.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "Gürültü engelleme",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Mikrofonunuzdan klavye sesini ve arka plan gürültüsünü kaldırır.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "Ses",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "Sistem varsayılanı",
       "status": "machine"

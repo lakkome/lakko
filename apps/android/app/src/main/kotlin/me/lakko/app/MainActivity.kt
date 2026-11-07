@@ -235,6 +235,26 @@ class MainActivity : ComponentActivity() {
         // ADR-0073 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
+        // One person, one one-to-one row (`chat/DuplicateOneToOne.kt`): a
+        // one-to-one the other person founded continues an older one this
+        // account founded with them. Re-run whenever the held groups or the
+        // lineage move; a register already held is not written again.
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.flow.combine(
+                chatRepository.state,
+                deviceGroupSync.lineage,
+            ) { chats, lineage -> Triple(chats.bootstrapped, chats.threads.map { it.groupIdHex }.toSet(), lineage) }
+                .distinctUntilChanged()
+                .collect { (bootstrapped, held, _) ->
+                    if (!bootstrapped || held.size < 2) return@collect
+                    try {
+                        chatRepository.foldDuplicateOneToOnes()
+                    } catch (cause: Throwable) {
+                        if (cause is kotlinx.coroutines.CancellationException) throw cause
+                        android.util.Log.w("MainActivity", "duplicate one-to-one fold failed: ${cause.javaClass.simpleName}")
+                    }
+                }
+        }
         // ADR-0065 section 4 — a saved message its author deleted for everyone
         // leaves the saved list, as it leaves the pinned bar.
         chatRepository.onMessagesDeleted = { segmentHex, ids ->
@@ -1891,6 +1911,11 @@ private fun SessionRoot(
             override fun isFollowed(channelIdHex: String): Boolean =
                 channelsState.channels.value.any { it.id == channelIdHex }
 
+            override fun isPublisherRequestPending(channelIdHex: String): Boolean =
+                channelsState.boundAccount?.let { acct ->
+                    me.lakko.app.channels.PendingPublisherRequests.isPending(inviteCardContext, acct, channelIdHex)
+                } == true
+
             override suspend fun subscribe(facts: me.lakko.app.ui.channels.ChannelInviteFacts) {
                 val invite = facts.preview.subscriber ?: return
                 val idHex = me.lakko.app.channels.ChannelInviteLinks.subscribeFromLink(
@@ -1915,15 +1940,12 @@ private fun SessionRoot(
                 link: me.lakko.app.contacts.LakkoLink.Group,
                 onStatus: (me.lakko.app.l10n.UiText?) -> Unit,
             ): String? {
-                val argument = me.lakko.app.chat.composeGroupJoinArgument(
-                    me.lakko.app.chat.GroupJoinLink(link.slug, link.fragment),
-                )
                 return me.lakko.app.ds.DsClient().use { ds ->
                     me.lakko.app.ui.channels.joinAsCoPublisher(
                         inviteCardContext,
                         channelsState,
                         ds,
-                        "https://lakko.me/g/$argument",
+                        me.lakko.app.ui.channels.coPublisherJoinUrl(link),
                         facts.name,
                         me.lakko.app.channels.CoPublishedJournals.onDevice(inviteCardContext) { channelsState.boundAccount },
                         onStatus,
@@ -1931,7 +1953,27 @@ private fun SessionRoot(
                 }
             }
         }
-        onDispose { me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions = null }
+        // ADR-0087 section 15, ADR-0045 decision 2 — a publisher request has
+        // no deadline: the account mailbox loop lands the owner's Welcome
+        // whenever it arrives, and a deleted channel's request goes.
+        me.lakko.app.channels.PendingPublisherRequests.lander = { welcome ->
+            me.lakko.app.ui.channels.landPendingPublisherWelcome(
+                inviteCardContext,
+                channelsState,
+                me.lakko.app.channels.CoPublishedJournals.onDevice(inviteCardContext) { channelsState.boundAccount },
+                welcome,
+            )
+        }
+        me.lakko.app.channels.ChannelsClient.onChannelDeleted = { id ->
+            channelsState.boundAccount?.let { acct ->
+                me.lakko.app.channels.PendingPublisherRequests.drop(inviteCardContext, acct, id)
+            }
+        }
+        onDispose {
+            me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions = null
+            me.lakko.app.channels.PendingPublisherRequests.lander = null
+            me.lakko.app.channels.ChannelsClient.onChannelDeleted = null
+        }
     }
     // ADR-0087 section 9.5 — a removal from a private channel is noticed
     // app-wide, not only with the channel open: every few minutes each

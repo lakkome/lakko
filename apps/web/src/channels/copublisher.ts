@@ -78,6 +78,7 @@ import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
 import { scanJournal } from "../chat/journal-head-epoch";
+import { createWelcomeScanState } from "./co-publish-welcome-scan";
 import {
   dsAccess,
   knockToJoin,
@@ -637,7 +638,11 @@ export async function requestToCoPublishSealed(
   ds: DsClient,
   identity: Identity,
   link: string,
-  persistBeforeKnock: () => Promise<void>,
+  persistBeforeKnock: (request: {
+    readonly groupId: Uint8Array;
+    readonly channelIdHex: string;
+    readonly joinerKey: Uint8Array;
+  }) => Promise<void>,
   discovery: Pick<DiscoveryClient, "fetchGroupInvite">,
 ): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
   const wasm = await loadWasm();
@@ -704,7 +709,7 @@ export async function requestToCoPublishSealed(
   } finally {
     replyGrant.free();
   }
-  await persistBeforeKnock();
+  await persistBeforeKnock({ groupId, channelIdHex, joinerKey: identity.signaturePublicKey });
   await ds.knock(groupId, [row, binding]);
   return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }
@@ -1012,6 +1017,10 @@ export async function requestToCoPublish(
   return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }
 
+/** What the co-publisher Welcome wait has read of each mailbox in this
+ *  session (`co-publish-welcome-scan.ts`). */
+const welcomeScan = createWelcomeScanState();
+
 /** ADR-0028 OQ3 — joiner side: look in this identity's own mailbox for the
  *  Welcome the owner sent after approving, join from it, and mint local
  *  publisher keys so this device can now publish to the channel. The joined
@@ -1042,34 +1051,48 @@ export async function pollForCoPublishWelcome(
   existingSigningSeed?: Uint8Array,
   currentIdentity?: Identity | null,
 ): Promise<ChannelPublisherKeys | null> {
+  // The mailbox rows are this account's own, so the joiner key is not
+  // matched: a Welcome sealed to another KeyPackage simply does not open.
+  void joinerKey;
   const wasm = await loadWasm();
   const owners: Identity[] = [];
   if (currentIdentity !== undefined && currentIdentity !== null && currentIdentity !== identity) {
     owners.push(currentIdentity);
   }
   owners.push(identity);
-  // Paged to the end: the Welcome is among the newest rows.
-  const candidates: Uint8Array[] = [];
+  // Only the rows after what an earlier pass of this session read: the
+  // Welcome is among the newest rows, and the account mailbox holds every
+  // Welcome of every device of the account (22 of them, seen live
+  // 2026-11-07), none of which opens as a PublisherGroup.
+  const candidates: { readonly key: string; readonly welcome: Uint8Array }[] = [];
   let scanned = 0;
   let scanError: unknown = null;
   for (const owner of owners) {
     const key = wasm.MailboxKey.fromAccountIdentity(owner);
     try {
       const address = key.address();
+      const addressHex = bytesToHex(address);
+      let newest = welcomeScan.cursorOf(addressHex);
       await scanJournal<never>(
         (after, limit) => ds.fetchMailbox(address, { after, limit, waitSecs: 0 }),
         (m) => {
+          if (m.id > newest) newest = m.id;
           const row = openOwnRow(wasm, key, m.payload);
           if (row === null) return undefined;
-          if (row.kind === "welcome-rendezvous") {
-            const rendezvous = wasm.welcomeRendezvousFor(row.body, joinerKey);
-            if (rendezvous !== undefined) candidates.push(rendezvous);
-          } else if (row.kind === "welcome") {
-            candidates.push(row.body);
+          const rowKey = `${addressHex}:${m.id}`;
+          // The owner's device seals the raw MLS Welcome as the row's body
+          // (web `approvePorts`, Android `CoPublisher.kt`): the row is the
+          // Welcome, not a versioned rendezvous envelope. The mailbox row is
+          // already this account's, so no joiner key match is needed; a
+          // Welcome sealed to another KeyPackage simply does not open.
+          if (row.kind === "welcome-rendezvous" || row.kind === "welcome") {
+            candidates.push({ key: rowKey, welcome: row.body });
           }
           return undefined;
         },
+        newest,
       );
+      welcomeScan.advance(addressHex, newest);
       scanned += 1;
     } catch (err) {
       scanError = err;
@@ -1082,24 +1105,61 @@ export async function pollForCoPublishWelcome(
   if (scanned === 0 && scanError !== null) throw scanError;
   // Newest first, and a Welcome sealed to a KeyPackage this device no longer
   // holds (or a Welcome for another group) is skipped rather than ending the
-  // wait.
+  // wait. Opening is local and deterministic, so a Welcome that failed once
+  // never opens later: it is remembered and not tried again.
   // ADR-0081 amendment — a PublisherGroup carries no role table, so it joins
   // through its own entry point: `Group.joinFromWelcome` refuses its Welcome,
   // and this one refuses a Welcome for any other group (another channel this
   // identity was invited to, or a chat) before anything is written.
+  let refused = 0;
+  for (const c of candidates.reverse()) {
+    if (welcomeScan.hasFailed(c.key)) continue;
+    const keys = await joinCoPublishWelcome(identity, c.welcome, groupId, channelIdHex, existingSigningSeed);
+    if (keys !== null) {
+      if (refused > 0) logRefused(refused);
+      return keys;
+    }
+    welcomeScan.markFailed(c.key);
+    refused += 1;
+  }
+  if (refused > 0) logRefused(refused);
+  return null;
+}
+
+function logRefused(n: number): void {
+  // eslint-disable-next-line no-console
+  console.info(`co-publish: ${n} Welcome(s) in the mailbox are not this request's; not tried again`);
+}
+
+/**
+ * Join the PublisherGroup `groupId` of channel `channelIdHex` from one
+ * Welcome, and become a publisher: the keys at the post-approve epoch, or
+ * `null` when the Welcome is not this group's or not sealed to a KeyPackage
+ * `identity` holds (nothing is written then).
+ *
+ * ADR-0081 amendment — a PublisherGroup carries no role table, so it joins
+ * through its own entry point: `Group.joinFromWelcome` refuses its Welcome,
+ * and this one refuses a Welcome for any other group (another channel this
+ * identity was invited to, or a chat) before anything is written. Used by
+ * the Accept page's wait and by the mailbox receive loop
+ * (`landPendingPublisherWelcome`).
+ */
+export async function joinCoPublishWelcome(
+  identity: Identity,
+  welcome: Uint8Array,
+  groupId: Uint8Array,
+  channelIdHex: string,
+  existingSigningSeed?: Uint8Array,
+): Promise<ChannelPublisherKeys | null> {
+  const wasm = await loadWasm();
   const channelId = hexToBytes(channelIdHex);
   if (channelId === null) throw new Error(`channel id hex is not valid: ${channelIdHex}`);
-  let group: PublisherGroup | null = null;
-  for (const welcome of candidates.reverse()) {
-    try {
-      group = wasm.PublisherGroup.joinFromWelcome(identity, welcome, groupId, channelId);
-      break;
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("co-publish: a Welcome could not be opened; waiting for a newer one", err);
-    }
+  let group: PublisherGroup;
+  try {
+    group = wasm.PublisherGroup.joinFromWelcome(identity, welcome, groupId, channelId);
+  } catch {
+    return null;
   }
-  if (group === null) return null;
   group.free();
   // The Welcome landed: the single-use reply key of this request goes.
   void reachSession()?.closeRepliesTo(journalHex(groupId));

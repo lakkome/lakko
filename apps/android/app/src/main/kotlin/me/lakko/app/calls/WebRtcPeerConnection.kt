@@ -891,21 +891,22 @@ public class WebRtcPeerConnection(
 
     /**
      * Add the [kind] copy of the camera and seal it, in one step: a second
-     * video track over the camera's [source] on a send-only transceiver of
+     * video track over the copy's own [source] on a send-only transceiver of
      * its own, with its size and its bitrate ceiling, and an SFrame encryptor
      * of its own under the copy's stream index, attached before this returns
      * and so before any offer that carries the new media line can be built
      * (security invariant #4).
      *
-     * ## Why a second track over the same source
+     * ## Why a source of its own
      *
      * The web client clones the camera track. libwebrtc's Java API has no
-     * clone; a second `VideoTrack` created over the same `VideoSource` is the
-     * same thing: the one capturer feeds the source, and each sender encodes
-     * the source's frames by itself, scaled down by its own encoding's
-     * `scaleResolutionDownBy`. A second `VideoSource` narrowed with
-     * `adaptOutputFormat` would need the capturer's frames fanned out to two
-     * sources by hand, for the same picture.
+     * clone, and a second `VideoTrack` over the camera's own `VideoSource` is
+     * not the same thing: that source serves every track the smallest picture
+     * any of their encoders asks for, so one sender's adaptation held all
+     * three down (the Pixel 7a call of 2026-11-07: main 480x270 at 2.5
+     * Mbit/s, middle 240x135). [source] is therefore the
+     * copy's own, fed the capturer's frames by [CapturerFan]; the sender
+     * scales it down by its own encoding's `scaleResolutionDownBy`.
      *
      * Never fails the call. `false` when libwebrtc takes no such sender,
      * takes none with the right size, or the encryptor cannot be created:
@@ -1246,10 +1247,16 @@ public class WebRtcPeerConnection(
      * keeps the sender, and with it the encryptor already armed on it and
      * that encryptor's counter. Nothing is re-armed and no m-line is added.
      *
+     * @param copySource the source each copy of the camera moves to: a source
+     *   of its own per copy ([CapturerFan]), never [source]. A copy with no
+     *   source is removed. The one-to-one call has no copies.
      * @return `false` when there is no sender or libwebrtc refused the swap;
      *   the connection is then exactly as it was and the caller fails closed.
      */
-    public fun replaceLocalVideoTrack(source: VideoSource): Boolean {
+    internal fun replaceLocalVideoTrack(
+        source: VideoSource,
+        copySource: (CameraCopyKind) -> VideoSource? = { null },
+    ): Boolean {
         val factory = sharedFactory ?: return false
         val sender = localVideoSender ?: return false
         val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
@@ -1267,12 +1274,18 @@ public class WebRtcPeerConnection(
         }
         localVideoTrack?.dispose()
         localVideoTrack = track
-        // The copies follow the camera to the new source: same senders, same
-        // encryptors, same counters, no renegotiation. A copy that will not
-        // take the new track is removed.
+        // The copies follow the camera to the new capture, each to its own
+        // source: same senders, same encryptors, same counters, no
+        // renegotiation. A copy that will not take the new track is removed.
         for (kind in CAMERA_COPY_KINDS) {
             val copy = cameraCopies[kind] ?: continue
-            val next = factory.createVideoTrack(copyTrackId(kind), source)
+            val nextSource = copySource(kind)
+            if (nextSource == null) {
+                Log.w(TAG, "camera sender: no source for the ${kind.sender.wireName} copy of the new camera")
+                removeCameraCopySender(kind)
+                continue
+            }
+            val next = factory.createVideoTrack(copyTrackId(kind), nextSource)
             val taken = try {
                 copy.sender.setTrack(next, false)
             } catch (cause: RuntimeException) {

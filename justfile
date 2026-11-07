@@ -515,8 +515,16 @@ build-desktop-web:
 # The binary runs from a minimal `Lakko.app` bundle in the debug target
 # directory, registered with Launch Services: macOS attributes system
 # notifications to an app by its bundle, so a bare binary cannot show them as
-# Lakko (ADR-0085 section 5). The executable inside is started directly, so
-# its log stays in this terminal.
+# Lakko (ADR-0085 section 5). The bundle is started through Launch Services
+# (`open`), not as a child of this shell: macOS asks for the camera and the
+# microphone on behalf of the process responsible for the app, and a process
+# started from a terminal (or from another app) is that program's
+# responsibility. Started from Claude Code, whose bundle may use the
+# microphone but not the camera, the camera was refused with no prompt
+# (tccd: "requires entitlement com.apple.security.device.camera but it is
+# missing for responsible=com.anthropic.claude-code"), 2026-11-07. The log
+# goes to target/debug/lakko-desktop.log and is followed here; Ctrl-C stops
+# the app.
 #
 # The linker only ad-hoc signs a debug binary, with an identifier derived
 # from its own hash, so after every rebuild macOS takes it for a new app and
@@ -586,7 +594,22 @@ dev-desktop:
         echo "WARN no Apple Development certificate; running ad-hoc signed (keychain will ask after each rebuild)"
     fi
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
-    RUST_LOG="${RUST_LOG:-info}" "./$app/Contents/MacOS/lakko-desktop"
+    log=target/debug/lakko-desktop.log
+    : > "$log"
+    # `open` starts the app without this shell's environment; pass on what
+    # the host reads at run time.
+    env_args=(--env "RUST_LOG=${RUST_LOG:-info}")
+    for name in $(compgen -e); do
+        case "$name" in LAKKO_DESKTOP_*) env_args+=(--env "$name=${!name}") ;; esac
+    done
+    exe="$PWD/$app/Contents/MacOS/lakko-desktop"
+    open -n -W --stdout "$log" --stderr "$log" "${env_args[@]}" "$app" &
+    open_pid=$!
+    tail -n +1 -f "$log" &
+    tail_pid=$!
+    trap 'pkill -INT -f "$exe" || true' INT TERM
+    wait "$open_pid" || wait "$open_pid" || true
+    kill "$tail_pid" 2>/dev/null || true
 
 # Production build of apps/web — wasm-pack release + tsc --noEmit +
 # `vite build`. Output lands in `apps/web/dist/`.

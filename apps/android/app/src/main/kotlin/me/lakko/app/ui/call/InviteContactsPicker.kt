@@ -76,6 +76,9 @@ internal fun InviteContactsPicker(
     cannotMessageKeys: Set<String> = emptySet(),
     onInvite: (ContactRowModel) -> Unit,
     modifier: Modifier = Modifier,
+    /** Catalog key of the title: what the pick does. The call screen's
+     *  `Invite to call` by default; a channel passes its own. */
+    titleKey: String = "call.invite.picker_title",
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     val visible = remember(rows, query) { filterInviteContactRows(rows, query) }
@@ -85,7 +88,7 @@ internal fun InviteContactsPicker(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(t("call.invite.picker_title")) },
+                title = { Text(t(titleKey)) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !busy) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))

@@ -21,6 +21,44 @@ extension ChatRepository {
         conversationLineage = next
         state = state.with(threads: buildThreadList())
         lineageDidChange()
+        foldDuplicateOneToOnes()
+    }
+
+    /// One person, one one-to-one row (``DuplicateOneToOne``): a one-to-one
+    /// the other person founded continues an older one this account founded
+    /// with them, which their device never opened. Recorded in the lineage,
+    /// so the list shows one row and the old journal is not polled. Re-run
+    /// whenever the held groups or the lineage move; writing the same
+    /// register again changes nothing.
+    func foldDuplicateOneToOnes() {
+        guard currentAccountIdB64 != nil, lineageReady() else { return }
+        let held: [DuplicateOneToOne.Held] = groups.keys.sorted().map { hex in
+            DuplicateOneToOne.Held(
+                groupHex: hex,
+                conversationHex: conversationLineage.conversationOf(hex),
+                isOneToOne: isOneToOne(groupIdHex: hex),
+                people: (members(groupIdHex: hex) ?? []).map { base64Encode($0.signaturePublicKey) },
+                founderKeyB64: founderKeyB64(groupIdHex: hex))
+        }
+        let own = conversationAccountIdentity.map { base64Encode($0.signaturePublicKey()) }
+        for fold in DuplicateOneToOne.folds(held: held, ownKeyB64: own) {
+            guard let successor = Self.hexToBytes(fold.successorHex),
+                  let root = Self.hexToBytes(fold.rootHex) else { continue }
+            let writer = lineageWriter
+            Task { @MainActor in _ = await writer(successor, root) }
+        }
+    }
+
+    /// Who founded a group: the role table's owner, else the person at leaf
+    /// 0; `nil` when neither can be read.
+    func founderKeyB64(groupIdHex: String) -> String? {
+        guard let record = groups[groupIdHex] else { return nil }
+        if let owner = (try? record.group.groupRoles())??.owner, owner.count == 32 {
+            return base64Encode(owner)
+        }
+        guard let roster = try? record.group.members(),
+              let first = roster.first(where: { $0.leafIndex == 0 }) else { return nil }
+        return base64Encode(PersonKey.of(first))
     }
 
     /// The per-account continuity bookkeeping (moved-at stamps, re-send and

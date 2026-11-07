@@ -87,20 +87,24 @@ final class SealedMailboxRowTests: XCTestCase {
             myX25519Secret: alice.x25519SecretKey())
 
         XCTAssertEqual(result.cursor, 6, "the cursor moves past every row, dropped ones included")
-        XCTAssertEqual(result.events.count, 3)
+        XCTAssertEqual(result.events.count, 4)
         guard case .welcome(let welcomeId, let welcomeBytes, _) = result.events[0] else {
             return XCTFail("first event: \(result.events[0])")
         }
         XCTAssertEqual(welcomeId, 1)
         XCTAssertEqual(welcomeBytes, welcome)
-        guard case .contactRequest(let req, _, _) = result.events[1] else {
-            return XCTFail("second event: \(result.events[1])")
+        // ADR-0045 decision 2 — a Welcome rendezvous (an approved publisher
+        // request) is surfaced, its body being the Welcome, so the mailbox
+        // loop lands it whenever it arrives.
+        XCTAssertEqual(result.events[1], .publisherWelcome(messageId: 2, welcomeBytes: welcome))
+        guard case .contactRequest(let req, _, _) = result.events[2] else {
+            return XCTFail("third event: \(result.events[2])")
         }
         XCTAssertEqual(req.messageId, 5)
         XCTAssertEqual(req.fromPubkey, bob.signaturePublicKey())
         XCTAssertEqual(req.intro, "hello")
-        guard case .contactAck(let incomingAck) = result.events[2] else {
-            return XCTFail("third event: \(result.events[2])")
+        guard case .contactAck(let incomingAck) = result.events[3] else {
+            return XCTFail("fourth event: \(result.events[3])")
         }
         XCTAssertEqual(incomingAck.accepterPubkey, bob.signaturePublicKey())
     }
@@ -386,5 +390,135 @@ final class SealedMailboxRowTests: XCTestCase {
         let c = try center()
         XCTAssertNil(c.writePlan(toAccountKey: try identity(0x91).signaturePublicKey()))
         XCTAssertTrue(c.writeAuthCandidates(toMailbox: Data(repeating: 9, count: 32)).isEmpty)
+    }
+}
+
+/// A publisher request has no deadline (ADR-0045 decision 2, ADR-0087
+/// section 15): it is recorded before the knock, and the Welcome the owner's
+/// device sends whenever it approves lands through the mailbox receive loop.
+/// Mirror of `apps/web/src/channels/publisher-welcome-landing.test.ts`,
+/// driven through the real core: an owner retains a bare KeyPackage and
+/// approves it, the Welcome is sealed raw into a `welcomeRendezvous` row, and
+/// the joiner's mailbox dispatch surfaces it and lands the request.
+@MainActor
+final class PendingPublisherRequestTests: XCTestCase {
+    private let account = "pending-publisher-test-\(UUID().uuidString)"
+
+    override func tearDown() {
+        PendingPublisherRequests.clear(accountIdB64: account)
+        super.tearDown()
+    }
+
+    private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+    private func record(channel: String, group: String, joiner: Data, name: String = "Pixel Pub Walk") throws {
+        try PendingPublisherRequests.record(
+            PendingPublisherRequest(
+                channelIdHex: channel, groupIdHex: group, joinerKeyB64: base64Encode(joiner),
+                name: name, description: "", requestedAtMs: 1),
+            accountIdB64: account)
+    }
+
+    private let keys = ChannelPublisherKeys(
+        seed: Data(repeating: 0x11, count: 32), signingKeySeed: Data(repeating: 0x22, count: 32))
+
+    func testTheStoreRecordsReplacesDropsAndClears() throws {
+        let joiner = Data(repeating: 1, count: 32)
+        try record(channel: "aa", group: "01", joiner: joiner)
+        try record(channel: "bb", group: "02", joiner: joiner)
+        // A second request for the same channel replaces the first.
+        try record(channel: "aa", group: "03", joiner: joiner)
+        XCTAssertEqual(PendingPublisherRequests.load(accountIdB64: account).map(\.channelIdHex), ["bb", "aa"])
+        XCTAssertEqual(PendingPublisherRequests.load(accountIdB64: account).last?.groupIdHex, "03")
+        XCTAssertTrue(PendingPublisherRequests.isPending(channelIdHex: "aa", accountIdB64: account))
+        PendingPublisherRequests.drop(channelIdHex: "aa", accountIdB64: account)
+        XCTAssertFalse(PendingPublisherRequests.isPending(channelIdHex: "aa", accountIdB64: account))
+        XCTAssertTrue(PendingPublisherRequests.isPending(channelIdHex: "bb", accountIdB64: account))
+        PendingPublisherRequests.clear(accountIdB64: account)
+        XCTAssertTrue(PendingPublisherRequests.load(accountIdB64: account).isEmpty)
+    }
+
+    func testARawWelcomeInARendezvousRowLandsTheRecordedRequest() throws {
+        let owner = try Identity.fromSeed(seed: Data(repeating: 0x51, count: 32))
+        let joiner = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32))
+        let channelId = Data(repeating: 0x07, count: 16)
+        let group = try PublisherGroup.create(identity: owner, channelId: channelId)
+        // The joiner knocks with a KeyPackage and records the request.
+        let keyPackage = try joiner.createKeyPackage()
+        try record(channel: hex(channelId), group: hex(try group.groupId()), joiner: joiner.signaturePublicKey())
+        // The owner approves, any time later.
+        let request = try group.retainJoinRequest(identity: owner, keyPackage: keyPackage)
+        let welcome = try group.approveExternalJoin(identity: owner, proposalRef: request.joinerSignatureKey).welcome
+
+        // Its Welcome reaches the joiner's mailbox as a rendezvous row whose
+        // body is the raw Welcome.
+        let target = try MailboxTarget.verified(
+            binding: signMailboxBinding(accountIdentity: joiner), accountKey: joiner.signaturePublicKey())
+        let row = MailboxMessage(id: 40, payload: try target.seal(kind: .welcomeRendezvous, body: welcome), createdAt: "t")
+        let result = ContactsClient.dispatch(
+            rows: [row], after: 0, hasMore: false,
+            mailboxKey: MailboxKey.fromAccountIdentity(accountIdentity: joiner),
+            myX25519Secret: joiner.x25519SecretKey())
+        guard case .publisherWelcome(_, let welcomeBytes) = result.events.first else {
+            return XCTFail("expected a publisher welcome, got \(result.events)")
+        }
+
+        let state = ChannelsUiState(accountIdB64: account)
+        var persisted = 0
+        var joinedGroups: [Data] = []
+        let landed = try CoPublisherJoin.landPendingWelcome(
+            welcomeBytes, accountIdB64: account, identity: joiner, state: state,
+            join: { identity, welcome, groupId, channelIdHex, _ in
+                // The real join through the PublisherGroup entry point.
+                _ = try publisherGroupJoinFromWelcome(
+                    identity: identity, welcome: welcome, groupId: groupId,
+                    channelId: CoPublisher.hexToData(channelIdHex) ?? Data())
+                joinedGroups.append(groupId)
+                return self.keys
+            },
+            persist: { persisted += 1 })
+
+        XCTAssertEqual(landed, hex(channelId))
+        XCTAssertEqual(joinedGroups, [try group.groupId()])
+        XCTAssertEqual(state.keysByChannel[hex(channelId)], keys)
+        XCTAssertTrue(state.channels.contains { $0.id == hex(channelId) && $0.localName == "Pixel Pub Walk" })
+        XCTAssertEqual(persisted, 1)
+        XCTAssertTrue(PendingPublisherRequests.load(accountIdB64: account).isEmpty)
+        state.removeChannel(hex(channelId))
+    }
+
+    func testAWelcomeThatIsNoPendingRequestsChangesNothing() throws {
+        let joiner = try Identity.fromSeed(seed: Data(repeating: 0x53, count: 32))
+        let state = ChannelsUiState(accountIdB64: account)
+        // No request recorded.
+        XCTAssertNil(try CoPublisherJoin.landPendingWelcome(
+            Data([1, 2, 3]), accountIdB64: account, identity: joiner, state: state))
+        try record(channel: String(repeating: "07", count: 16), group: String(repeating: "ab", count: 32),
+                   joiner: joiner.signaturePublicKey())
+        // Garbage, or another group's Welcome: the request stays.
+        XCTAssertNil(try CoPublisherJoin.landPendingWelcome(
+            Data([1, 2, 3]), accountIdB64: account, identity: joiner, state: state, persist: {}))
+        XCTAssertEqual(PendingPublisherRequests.load(accountIdB64: account).count, 1)
+        XCTAssertTrue(state.keysByChannel.isEmpty)
+    }
+
+    func testARequestMadeUnderAnotherKeyIsNotTried() throws {
+        let joiner = try Identity.fromSeed(seed: Data(repeating: 0x54, count: 32))
+        try record(channel: "cc", group: "0102", joiner: Data(repeating: 9, count: 32))
+        var tried = false
+        XCTAssertNil(try CoPublisherJoin.landPendingWelcome(
+            Data([1]), accountIdB64: account, identity: joiner, state: ChannelsUiState(accountIdB64: account),
+            join: { _, _, _, _, _ in tried = true; return self.keys }, persist: {}))
+        XCTAssertFalse(tried)
+    }
+
+    func testAJoinThatCannotBeMadeDurableKeepsTheRecordAndThrows() throws {
+        let joiner = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
+        try record(channel: "dd", group: "0a0b", joiner: joiner.signaturePublicKey())
+        struct DiskFull: Error {}
+        XCTAssertThrowsError(try CoPublisherJoin.landPendingWelcome(
+            Data([1]), accountIdB64: account, identity: joiner, state: ChannelsUiState(accountIdB64: account),
+            join: { _, _, _, _, _ in self.keys }, persist: { throw DiskFull() }))
+        XCTAssertTrue(PendingPublisherRequests.isPending(channelIdHex: "dd", accountIdB64: account))
     }
 }

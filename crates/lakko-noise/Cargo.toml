@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-noise"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Client-side noise suppression for call audio (RNNoise via nnnoiseless), ADR-0088"
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-0088: the Rust port of xiph's RNNoise (BSD-3-Clause, same notice as
+# xiph/rnnoise COPYING plus the port's author). Default features pull a CLI
+# (clap, hound, dasp); none of them is wanted, so they are off.
+nnnoiseless.workspace = true

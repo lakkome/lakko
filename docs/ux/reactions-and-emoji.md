@@ -200,8 +200,9 @@ needed. One chip per emoji.
   given. Stable: a chip does not jump while the person looks at it, except when
   its count passes another's.
 - **What a chip shows:**
-  - One-to-one chat: the emoji alone. A count of 2 when both gave the same
-    emoji.
+  - One-to-one chat: the emoji, then the avatar of whoever gave it (both
+    avatars when both gave the same emoji), as in a group (decided 2026-11-07,
+    maintainer: who reacted is shown in a one-to-one too).
   - Group: the emoji, then up to three reactors' avatars (16 px circles,
     overlapping) when three or fewer people gave it; a number when more did.
     Telegram does this in small groups; the threshold is Lakko's choice

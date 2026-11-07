@@ -2055,8 +2055,33 @@ public class ContactsRepository(
                     if (welcomes.isNotEmpty()) {
                         Log.i(TAG, "inbox: ${welcomes.size} Welcome row(s) received")
                     }
+                    // ADR-0087 section 15, ADR-0045 decision 2 — an owner's
+                    // device approved a publisher request of this account; it
+                    // lands whenever it arrives, after a restart too. Not a
+                    // request's: nothing. A landed join that cannot be made
+                    // durable holds the cursor.
+                    val publisherLander = me.lakko.app.channels.PendingPublisherRequests.lander
+                    suspend fun landPublisherWelcome(bytes: ByteArray): Boolean {
+                        val land = publisherLander ?: return false
+                        return try {
+                            land(bytes)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "inbox: a publisher Welcome was not kept (${e.javaClass.simpleName})")
+                            welcomeNotKept = true
+                            true
+                        }
+                    }
+                    for (pw in result.events.filterIsInstance<IncomingMailboxEvent.PublisherWelcome>()) {
+                        if (!bound.isCurrent) return@useClientWith
+                        if (landPublisherWelcome(pw.welcomeBytes)) Log.i(TAG, "inbox: a publisher request landed")
+                    }
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
+                        // A pending publisher request's Welcome sent as a plain
+                        // Welcome row is the request's, never a chat to join.
+                        if (landPublisherWelcome(welcome.welcomeBytes)) continue
                         if (chatRepo != null) {
                             // ADR-0060 section 1 (2026-11-06) — a Welcome admitted
                             // by a retired contact key: its founder is read

@@ -521,16 +521,21 @@ private fun PublisherAccept(
     var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var status by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
     var error by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
+    // ADR-0087 section 15 — once sent, the request waits for the owner's
+    // device with no deadline: the page says so and offers nothing to press.
+    var waitingForOwner by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     Button(
-        enabled = !busy,
+        enabled = !busy && !waitingForOwner,
         onClick = {
             busy = true
             error = null
             scope.launch {
                 try {
                     val joined = onAccept { status = it }
-                    status = null
-                    if (joined == null) error = me.lakko.app.l10n.UiText("channels.join.no_approval")
+                    waitingForOwner = joined == null
+                    // `null`: not approved yet. The request has no deadline
+                    // and lands by itself, so the page keeps saying it waits.
+                    status = if (joined == null) me.lakko.app.l10n.UiText("channels.join.waiting") else null
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: me.lakko.app.channels.LegacyChannelException) {

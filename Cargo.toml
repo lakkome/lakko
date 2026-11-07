@@ -37,6 +37,8 @@ members = [
     "crates/lakko-circle",
     "crates/lakko-l10n",
     "crates/lakko-log-hygiene",
+    "crates/lakko-noise",
+    "crates/lakko-noise-wasm",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
@@ -153,6 +155,9 @@ unicode-segmentation = "1.13"
 # lakko-l10n already uses; Unicode-3.0. Default features keep the compiled
 # data.
 icu_properties = "2"
+# ADR-0088 noise suppression: the Rust port of xiph's RNNoise, BSD-3-Clause.
+# Pinned exactly; default features (a CLI: clap, hound, dasp) off.
+nnnoiseless = { version = "=0.5.2", default-features = false }
 
 # Internal crates — path + version (cargo-deny rejects wildcard-only deps).
 # The version is kept in lockstep with workspace.package.version so they
@@ -186,6 +191,7 @@ lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "
 lakko-log-hygiene = { path = "crates/lakko-log-hygiene", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
+lakko-noise = { path = "crates/lakko-noise", version = "0.0.0" }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-vault = { path = "crates/lakko-vault", version = "0.0.0" }
 lakko-circle = { path = "crates/lakko-circle", version = "0.0.0" }

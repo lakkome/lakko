@@ -3,21 +3,32 @@
 
 package me.lakko.app.ui.call
 
-import androidx.compose.foundation.layout.width
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -728,6 +739,7 @@ private fun LaunchedEffectOnSession(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JoinCallScreen(
     viewModel: JoinCallViewModel,
@@ -767,193 +779,276 @@ fun JoinCallScreen(
         if (ui.phase == JoinCallPhase.Ended && !ui.guest) onExit()
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            text = t(if (ui.decoded?.isOwner == true) "call.link.title_start" else "call.link.title_join"),
-            style = MaterialTheme.typography.headlineMedium,
-        )
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(t(if (ui.decoded?.isOwner == true) "call.link.title_start" else "call.link.title_join"))
+                },
+                navigationIcon = {
+                    // The system back of every other link page (the invite and
+                    // group pages): leaves this screen, a running call goes on.
+                    IconButton(onClick = onExit) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Column(
+                modifier = Modifier.widthIn(max = PANEL_MAX_WIDTH).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                JoinCallPanel(
+                    ui = ui,
+                    viewModel = viewModel,
+                    onExit = onExit,
+                    offer = offer,
+                    onJoin = { video, start ->
+                        callPermissions.request(video = video) { v -> start(v) }
+                    },
+                )
+            }
+        }
+    }
+}
 
-        when {
-            ui.loading -> Text(t("call.link.loading"))
-            ui.rateLimited -> {
-                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text())
-                TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
-                TextButton(onClick = onExit) { Text(t("common.back")) }
+/** The panel's width cap: the auth card's (design system section 2), so the
+ *  page reads as one card on a tablet too. */
+private val PANEL_MAX_WIDTH = 400.dp
+
+/**
+ * What the link page shows, state by state: the same states and controls as
+ * the web page (`routes/JoinCall.tsx`) and the iOS one
+ * (`JoinCallLandingScreen.swift`), in the shape of this client's other link
+ * pages (the contact and group invite pages): centred, the host's picture and
+ * name, one full-width primary action and the secondary ones under it.
+ */
+@Composable
+private fun JoinCallPanel(
+    ui: JoinCallUiState,
+    viewModel: JoinCallViewModel,
+    onExit: () -> Unit,
+    offer: (@Composable () -> Unit)?,
+    onJoin: (video: Boolean, start: (videoAllowed: Boolean) -> Unit) -> Unit,
+) {
+    val decodedOrNull = ui.decoded
+    when {
+        ui.loading -> {
+            CircularProgressIndicator()
+            CenteredText(t("call.link.loading"))
+        }
+        ui.rateLimited -> {
+            CenteredText(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text())
+            Button(onClick = { viewModel.retryDecode() }, modifier = Modifier.fillMaxWidth()) {
+                Text(t("common.try_again"))
             }
-            ui.damaged -> {
-                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
-                TextButton(onClick = onExit) { Text(t("common.back")) }
+            CloseButton(onExit)
+        }
+        ui.damaged -> {
+            CenteredText(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
+            CloseButton(onExit)
+        }
+        ui.openFailed -> {
+            CenteredText(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text())
+            Button(onClick = { viewModel.retryDecode() }, modifier = Modifier.fillMaxWidth()) {
+                Text(t("common.try_again"))
             }
-            ui.openFailed -> {
-                Text(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text())
-                TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
-                TextButton(onClick = onExit) { Text(t("common.back")) }
+            CloseButton(onExit)
+        }
+        decodedOrNull == null || !decodedOrNull.valid -> {
+            CenteredText(t("call.link.invalid"))
+            CloseButton(onExit)
+        }
+        else -> {
+            val decoded: DecodedCall = decodedOrNull
+            if (ui.guestDeleted) {
+                CenteredText(t("guest.offer.deleted"), muted = true)
             }
-            ui.decoded == null || ui.decoded?.valid == false -> {
-                Text(t("call.link.invalid"))
-                TextButton(onClick = onExit) { Text(t("common.back")) }
+            HostHeader(decoded)
+            ui.busyMessage?.let { message ->
+                CenteredText(message.text(), color = MaterialTheme.colorScheme.error)
+                Button(
+                    onClick = viewModel::onEndCurrentCall,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text(t("call.link.end_current")) }
+                CloseButton(onExit)
             }
-            else -> {
-                val decoded = ui.decoded!!
-                if (ui.guestDeleted) {
-                    Text(
-                        text = t("guest.offer.deleted"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            when (ui.phase) {
+                JoinCallPhase.Idle -> {
+                    // ADR-0048 UX §4 — a guest (no session) is asked for a
+                    // name before Join mints the guest account.
+                    val asksName = viewModel.needsGuestName()
+                    if (asksName) {
+                        OutlinedTextField(
+                            value = ui.guestName,
+                            onValueChange = viewModel::onGuestNameChange,
+                            label = { Text(t("settings.profile.name.label")) },
+                            singleLine = true,
+                            isError = ui.guestNameError != null,
+                            supportingText = ui.guestNameError?.let { reason -> { Text(reason.text()) } },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Button(
+                        enabled = !asksName || ui.guestNameError == null,
+                        onClick = {
+                            onJoin(decoded.mediaVideo) { v -> viewModel.onStart(videoAllowed = v) }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (decoded.isOwner) t("call.link.start") else t("call.link.join"))
+                    }
+                    // No login required: a visitor with no session joins as
+                    // a guest, and is told so before pressing.
+                    if (asksName && !decoded.isOwner) {
+                        CenteredText(t("call.guest.note"), muted = true, small = true)
+                    }
+                    // A guest who is here and not in the call (the app was
+                    // restarted, or they stopped waiting) is asked too;
+                    // anyone else gets the way out.
+                    if (offer != null) {
+                        offer()
+                    } else if (ui.busyMessage == null) {
+                        CloseButton(onExit)
+                    }
+                }
+                JoinCallPhase.Starting -> {
+                    CircularProgressIndicator()
+                    if (ui.guestWorking) {
+                        // ADR-0054 UX section 1 - the guest account's one
+                        // heavy piece of work.
+                        CenteredText(t("call.guest.working.title"))
+                        CenteredText(t("auth.signup.working.line"), muted = true, small = true)
+                        if (ui.guestSolving) {
+                            OutlinedButton(onClick = viewModel::onCancelGuest, modifier = Modifier.fillMaxWidth()) {
+                                Text(t("common.cancel"))
+                            }
+                        }
+                    } else {
+                        CenteredText(t("call.link.connecting"))
+                        // Cancel only once the host holds the call.
+                        RunningButtons(
+                            onBack = onExit,
+                            onCancel = viewModel::onCancel.takeIf { viewModel.hostHoldsThisCall(ui) },
+                        )
+                    }
+                }
+                JoinCallPhase.Waiting -> {
+                    CircularProgressIndicator()
+                    CenteredText(t("call.link.waiting"))
+                    CenteredText(t("call.link.waiting_hint"), muted = true, small = true)
+                    RunningButtons(onBack = onExit, onCancel = viewModel::onCancel)
+                }
+                JoinCallPhase.Live -> {
+                    CenteredText(t("call.link.live"))
+                    OutlinedButton(onClick = onExit, modifier = Modifier.fillMaxWidth()) { Text(t("common.back")) }
+                }
+                // What follows a call that is over: a guest is asked whether
+                // to keep the account; anyone else gets the way on.
+                JoinCallPhase.Dead -> {
+                    CenteredText(t("call.link.dead"))
+                    if (offer != null) offer() else CloseButton(onExit)
+                }
+                JoinCallPhase.Ended -> {
+                    CenteredText(t("call.link.ended"))
+                    if (offer != null) offer() else CloseButton(onExit)
+                }
+                JoinCallPhase.Error -> {
+                    CenteredText(
+                        (ui.error ?: UiText("call.link.error.generic")).text(),
+                        color = MaterialTheme.colorScheme.error,
                     )
-                }
-                // ADR-0048 — the host through the one resolver, shown only
-                // when this device knows a name (a contact or a received
-                // profile). Never a fingerprint or a placeholder: a string of
-                // digits names nobody, and the owner's own page has nothing to
-                // say about its host.
-                val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
-                val host = androidx.compose.runtime.remember(decoded.ownerSignatureKey) {
-                    me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
-                }
-                if (!decoded.isOwner && !host.isPlaceholder) {
-                    // ADR-0084 — the host's photo beside their name.
-                    androidx.compose.foundation.layout.Row(
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    ) {
-                        me.lakko.app.ui.components.LakkoAvatar(
-                            name = host.primary,
-                            seed = host.primary,
-                            size = 32.dp,
-                            personKey = decoded.ownerSignatureKey,
-                        )
-                        androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = t("call.link.host", mapOf("name" to host.primary)),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
+                    Button(onClick = viewModel::onTryAgain, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("common.try_again"))
                     }
-                }
-                ui.busyMessage?.let { message ->
-                    Text(text = message.text(), color = MaterialTheme.colorScheme.error)
-                    androidx.compose.foundation.layout.Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Button(onClick = viewModel::onEndCurrentCall) { Text(t("call.link.end_current")) }
-                        TextButton(onClick = onExit) { Text(t("common.back")) }
-                    }
-                }
-                when (ui.phase) {
-                    JoinCallPhase.Idle -> {
-                        // ADR-0048 UX §4 — a guest (no session) is asked for a
-                        // name before Join mints the guest account.
-                        val asksName = viewModel.needsGuestName()
-                        if (asksName) {
-                            androidx.compose.material3.OutlinedTextField(
-                                value = ui.guestName,
-                                onValueChange = viewModel::onGuestNameChange,
-                                label = { Text(t("settings.profile.name.label")) },
-                                singleLine = true,
-                                isError = ui.guestNameError != null,
-                                supportingText = ui.guestNameError?.let { reason -> { Text(reason.text()) } },
-                            )
-                        }
-                        Button(
-                            enabled = !asksName || ui.guestNameError == null,
-                            onClick = {
-                                callPermissions.request(video = decoded.mediaVideo) { v ->
-                                    viewModel.onStart(videoAllowed = v)
-                                }
-                            },
-                        ) {
-                            Text(if (decoded.isOwner) t("call.link.start") else t("call.link.join"))
-                        }
-                        // No login required: a visitor with no session joins as
-                        // a guest, and is told so before pressing.
-                        if (asksName && !decoded.isOwner) {
-                            Text(
-                                text = t("call.guest.note"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (ui.busyMessage == null) {
-                            TextButton(onClick = onExit) { Text(t("common.back")) }
-                        }
-                        // A guest who is here and not in the call (the app was
-                        // restarted, or they stopped waiting) is asked too.
-                        offer?.invoke()
-                    }
-                    JoinCallPhase.Starting -> {
-                        if (ui.guestWorking) {
-                            // ADR-0054 UX section 1 - the guest account's one
-                            // heavy piece of work.
-                            androidx.compose.material3.CircularProgressIndicator()
-                            Text(t("call.guest.working.title"))
-                            Text(
-                                text = t("auth.signup.working.line"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            if (ui.guestSolving) {
-                                TextButton(onClick = viewModel::onCancelGuest) { Text(t("common.cancel")) }
-                            }
-                        } else {
-                            Text(t("call.link.connecting"))
-                            // Only once the host holds the call.
-                            if (viewModel.hostHoldsThisCall(ui)) {
-                                TextButton(onClick = viewModel::onCancel) { Text(t("common.cancel")) }
-                            }
-                        }
-                    }
-                    JoinCallPhase.Waiting -> {
-                        Text(t("call.link.waiting"))
-                        Text(
-                            text = t("call.link.waiting_hint"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        androidx.compose.foundation.layout.Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            TextButton(onClick = viewModel::onCancel) { Text(t("common.cancel")) }
-                            TextButton(onClick = onExit) { Text(t("common.back")) }
-                        }
-                    }
-                    JoinCallPhase.Live -> {
-                        Text(t("call.link.live"))
-                        TextButton(onClick = onExit) { Text(t("common.back")) }
-                    }
-                    // What follows a call that is over: a guest is asked
-                    // whether to keep the account; anyone else gets the way on.
-                    JoinCallPhase.Dead -> {
-                        Text(t("call.link.dead"))
-                        if (offer != null) offer() else TextButton(onClick = onExit) { Text(t("common.back")) }
-                    }
-                    JoinCallPhase.Ended -> {
-                        Text(t("call.link.ended"))
-                        if (offer != null) offer() else TextButton(onClick = onExit) { Text(t("common.back")) }
-                    }
-                    JoinCallPhase.Error -> {
-                        Text(
-                            text = (ui.error ?: UiText("call.link.error.generic")).text(),
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                        androidx.compose.foundation.layout.Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            TextButton(onClick = viewModel::onTryAgain) { Text(t("common.try_again")) }
-                            TextButton(onClick = onExit) { Text(t("common.back")) }
-                        }
-                        // The join failed: the guest can still be asked.
-                        offer?.invoke()
-                    }
+                    // The join failed: the guest can still be asked.
+                    if (offer != null) offer() else CloseButton(onExit)
                 }
             }
         }
     }
+}
+
+/**
+ * The host's picture and the line naming them, shown only when this device
+ * knows a name (a contact or a received profile; ADR-0048, ADR-0084). Never
+ * a fingerprint or a placeholder: a string of digits names nobody, and the
+ * owner's own page has nothing to say about its host.
+ */
+@Composable
+private fun HostHeader(decoded: DecodedCall) {
+    if (decoded.isOwner) return
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val host = androidx.compose.runtime.remember(decoded.ownerSignatureKey) {
+        me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
     }
+    if (host.isPlaceholder) return
+    me.lakko.app.ui.components.LakkoAvatar(
+        name = host.primary,
+        seed = host.primary,
+        size = 72.dp,
+        personKey = decoded.ownerSignatureKey,
+    )
+    Text(
+        text = t("call.link.host", mapOf("name" to host.primary)),
+        style = MaterialTheme.typography.titleMedium,
+        textAlign = TextAlign.Center,
+    )
+}
+
+/** A starting or waiting call: leave the screen with the call still going,
+ *  or cancel it ([onCancel] `null` when there is nothing to cancel yet). */
+@Composable
+private fun RunningButtons(onBack: () -> Unit, onCancel: (() -> Unit)?) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text(t("common.back")) }
+        if (onCancel != null) {
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(t("common.cancel")) }
+        }
+    }
+}
+
+/** The way out of the page when there is nothing else to do. */
+@Composable
+private fun CloseButton(onExit: () -> Unit) {
+    TextButton(onClick = onExit, modifier = Modifier.fillMaxWidth()) { Text(t("common.close")) }
+}
+
+/** One centred line of the page. */
+@Composable
+private fun CenteredText(
+    text: String,
+    muted: Boolean = false,
+    small: Boolean = false,
+    color: androidx.compose.ui.graphics.Color? = null,
+) {
+    Text(
+        text = text,
+        style = if (small) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
+        color = color ?: if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }

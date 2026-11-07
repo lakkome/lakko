@@ -36,6 +36,7 @@
  *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.
  */
+import { clearPendingPublisherRequests } from "../channels/pending-publisher-requests";
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
 import {
   WIPED_MARKER_TTL_MS,
@@ -281,6 +282,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "verified-bindings", run: () => clearVerifiedBindingsForAccount(accountIdB64) },
     { name: "contact-inbox", run: () => clearInboxForAccount(accountIdB64) },
     { name: "sent-requests", run: () => clearSentRequests(accountIdB64) },
+    { name: "pending-publisher-requests", run: () => clearPendingPublisherRequests(accountIdB64) },
     {
       name: "invite-link-secrets",
       run: () => (urlKey === null ? undefined : clearInviteLinkSecrets(urlKey)),

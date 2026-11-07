@@ -19,15 +19,15 @@ import { A, useNavigate } from "@solidjs/router";
 import { channelRoleOf, subscribeToChannel } from "../channels/channel-access";
 import { channelErrorText } from "../channels/channel-error-copy";
 import { channelHeaderLine } from "../channels/channel-facts";
-import { openChannelLink, type OpenedChannelInvite } from "../channels/channel-invites";
+import { type OpenedChannelInvite } from "../channels/channel-invites";
+import { cardTitle, openOnce } from "./channel-invite-preview";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { channelAvatarKey } from "../channels/channel-avatar";
-import { channelTitle } from "../channels/channel-row";
-import { channelsState } from "../state/channels-state";
 
 export { groupLinkOf } from "./group-link";
+export { channelInviteRowPreview } from "./channel-invite-preview";
 
 /** UX 15.2 — "{name} invites you to be a publisher of {channel}." when the
  *  link names its owner, else the sentence without a name. */
@@ -35,28 +35,6 @@ export function publisherInviteLine(o: Pick<OpenedChannelInvite, "name" | "invit
   return o.inviterName === undefined
     ? t("channels.publishers.invite_page", { channel: o.name })
     : t("channels.publishers.invite_page_from", { name: o.inviterName, channel: o.name });
-}
-
-/** Opened channel invitations, by link, for the session: a timeline redraw
- *  does not open the same link again. */
-const opened = new Map<string, Promise<OpenedChannelInvite | null>>();
-
-function openOnce(url: string): Promise<OpenedChannelInvite | null> {
-  let p = opened.get(url);
-  if (p === undefined) {
-    p = openChannelLink(url).catch(() => null);
-    opened.set(url, p);
-  }
-  return p;
-}
-
-/** The card's title: the name the link carries, else the name this device
- *  knows for the channel, else the generic word. */
-function cardTitle(o: Pick<OpenedChannelInvite, "name" | "channelIdHex">): string {
-  const carried = o.name.trim();
-  if (carried.length > 0) return carried;
-  const c = channelsState.channels().find((x) => x.id === o.channelIdHex);
-  return channelTitle(channelsState.metaByChannel().get(o.channelIdHex)?.name, c?.localName ?? "", c?.localHandle);
 }
 
 export function ChannelInviteCard(props: {

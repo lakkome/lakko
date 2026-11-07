@@ -357,6 +357,17 @@ public class ChannelsUiState(
                     joinedGroupId = joinedGroupIdOf(channelId),
                 )
             }
+            // Section 13 — the seed being replaced still opens what this
+            // device posted under its epoch (the channel's record at creation
+            // first): kept as an older epoch's seed, or the publisher's own
+            // channel reads "Earlier posts aren't available." after every
+            // approve or rotation.
+            outgoingPublisherSeed(
+                previousSeed = _keysByChannel.value[channelId]?.seed,
+                previousEpoch = _epochByChannel.value[channelId],
+                nextSeed = keys.seed,
+                held = subscribedSeeds(channelId),
+            )?.let { (epoch, seed) -> setSubscribedSeed(channelId, epoch, seed) }
             setKeys(channelId, keys)
         } catch (e: Throwable) {
             me.lakko.app.rethrowIfCancelled(e)
@@ -887,3 +898,22 @@ public data class ChannelHandle(
      *  carrying the @name, photo and reactions setting; "" when none. */
     public val sharedRecordB64: String = "",
 )
+
+/**
+ * The (epoch, seed) a publisher keeps when its keys are replaced: the
+ * outgoing seed under the epoch it was used for, once, when the seed really
+ * changes and that epoch holds no seed yet. `null` when there is nothing to
+ * keep (no previous keys, an unknown epoch, the same seed again).
+ */
+internal fun outgoingPublisherSeed(
+    previousSeed: ByteArray?,
+    previousEpoch: UInt?,
+    nextSeed: ByteArray,
+    held: Map<UInt, ByteArray>,
+): Pair<UInt, ByteArray>? {
+    val seed = previousSeed ?: return null
+    val epoch = previousEpoch ?: return null
+    if (seed.contentEquals(nextSeed)) return null
+    if (held.containsKey(epoch)) return null
+    return epoch to seed.copyOf()
+}

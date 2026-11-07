@@ -1157,6 +1157,18 @@
       "text": "Aún no se ha detectado ningún dispositivo. Aparecerán aquí cuando concedas permiso al micrófono o a la cámara.",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "Supresión de ruido",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Elimina el tecleo y el ruido de fondo de tu micrófono.",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "Sonido",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "Predeterminado del sistema",
       "status": "machine"

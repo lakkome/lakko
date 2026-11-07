@@ -1157,6 +1157,18 @@
       "text": "尚未检测到设备。授予麦克风或摄像头权限后，设备会显示在这里。",
       "status": "machine"
     },
+    "call.settings.noise_suppression": {
+      "text": "降噪",
+      "status": "machine"
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "去除麦克风中的打字声和背景噪音。",
+      "status": "machine"
+    },
+    "call.settings.sound": {
+      "text": "声音",
+      "status": "machine"
+    },
     "call.settings.system_default": {
       "text": "系统默认",
       "status": "machine"

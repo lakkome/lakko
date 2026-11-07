@@ -18,9 +18,9 @@ import WebRTC
 ///     ship via `lakko-calls::media` (3a7), narrow enough to
 ///     keep mobile encode budget sane;
 ///   - drives frames into a caller-supplied `RTCVideoSource`
-///     via libwebrtc's standard
-///     `RTCVideoCapturerDelegate` channel (the source is
-///     itself the delegate).
+///     via libwebrtc's standard `RTCVideoCapturerDelegate`
+///     channel, through a ``CapturerFan`` that also feeds the
+///     sources of a group call's camera copies (``copySource(_:)``).
 ///
 /// Lifecycle:
 ///   1. Caller asks `WebRTCPeerConnection.newVideoSource()`
@@ -51,6 +51,15 @@ public final class LocalCameraCapture {
     /// The libwebrtc capturer instance. Strong-ref'd here so
     /// it outlives the `start` continuation.
     private let capturer: RTCCameraVideoCapturer
+
+    /// The capturer's delegate: hands every frame to the main source and to
+    /// each copy's source (``CapturerFan``). Held here because the
+    /// capturer's delegate reference is weak.
+    private let fan: CapturerFan
+
+    /// The sources of the camera's copies in a group call, one per copy, fed
+    /// by ``fan``; made on first ask (``copySource(_:)``).
+    private let copySources: CameraCopySources
 
     /// Selected capture device (front camera by default).
     /// `nil` only if the device has no cameras — the caller
@@ -111,7 +120,12 @@ public final class LocalCameraCapture {
     /// virtual camera, or a hypothetical Mac Catalyst host
     /// running without a webcam).
     public init?(source: RTCVideoSource) {
-        self.capturer = RTCCameraVideoCapturer(delegate: source)
+        let fan = CapturerFan(first: source)
+        self.fan = fan
+        self.copySources = CameraCopySources(fan: fan) { @MainActor in
+            WebRTCPeerConnection.newVideoSource()
+        }
+        self.capturer = RTCCameraVideoCapturer(delegate: fan)
         let devices = RTCCameraVideoCapturer.captureDevices()
         let chosen = Self.preferredDeviceId.flatMap { id in
             devices.first { $0.uniqueID == id }
@@ -125,6 +139,17 @@ public final class LocalCameraCapture {
         let picked = Self.pickFormat(for: device)
         self.format = picked.format
         self.targetFps = picked.fps
+    }
+
+    /// The video source the `kind` copy of the camera is sent from in a
+    /// group call: a source of its own, fed the same frames as the main one,
+    /// so the copy's encoder can narrow only its own picture
+    /// (``CapturerFan``). The same source for the same copy for the life of
+    /// this capture, across a flip and a camera change; `nil` when no source
+    /// can be made.
+    @MainActor
+    func copySource(_ kind: CameraCopyKind) -> RTCVideoSource? {
+        copySources.source(for: kind)
     }
 
     /// Move this capture to the camera `deviceId` names, or back to the
@@ -286,7 +311,11 @@ public final class LocalCameraCapture {
     /// flight when this was called. A camera turned on again later is a new
     /// `LocalCameraCapture`.
     public func stop() async {
-        guard withGate({ $0.release() }) else { return }
+        let wasRunning = withGate { $0.release() }
+        // The capture is over for good: the copies' sources get no more
+        // frames. Their tracks hold references of their own.
+        copySources.release()
+        guard wasRunning else { return }
         await stopCapturer()
     }
 

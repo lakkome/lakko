@@ -56,6 +56,22 @@ final class ChatListRedesignTests: XCTestCase {
 
     // MARK: - Row preview
 
+    /// ADR-0087 sections 14 and 15.2 — a channel invitation card reads like
+    /// the invitation in the row, never as its `/g/` link, and the own prefix
+    /// still applies (walk of 2026-11-07).
+    func testChannelInvitationPreviewIsNotTheLink() {
+        let subscribe = ChatListFormatting.channelInvitePreview(channelName: "Pixel Pub Walk", publisher: false)
+        let publish = ChatListFormatting.channelInvitePreview(channelName: "Pixel Pub Walk", publisher: true)
+        XCTAssertEqual(subscribe.withoutIsolates, "Invitation to Pixel Pub Walk")
+        XCTAssertEqual(publish.withoutIsolates, "Invitation to publish in Pixel Pub Walk")
+        XCTAssertFalse(publish.contains("/g/"))
+        XCTAssertEqual(
+            ChatListFormatting.preview(
+                text: publish, attachmentLabels: [], direction: .outgoing, deleted: false,
+                isGroup: false, senderName: nil).withoutIsolates,
+            "You: Invitation to publish in Pixel Pub Walk")
+    }
+
     func testPreviewPrefixes() {
         XCTAssertEqual(
             ChatListFormatting.preview(

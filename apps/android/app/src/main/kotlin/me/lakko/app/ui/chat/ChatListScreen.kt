@@ -1083,8 +1083,13 @@ internal fun rowPreview(
         // never shown raw.
         return last.call?.let { me.lakko.app.calls.callRowText(it, strings) } ?: noMessages
     }
+    // ADR-0087 section 14 — a channel invitation reads like its card, never
+    // as the link it carries.
+    val inviteText = last.channelInvite?.takeIf { !last.deleted }
+        ?.let { me.lakko.app.ui.channels.channelInviteSummary(it) }
+        ?.let { me.lakko.app.ui.channels.channelInvitePreviewText(it, strings) }
     val line = previewLine(
-        text = last.text,
+        text = inviteText ?: last.text,
         attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),

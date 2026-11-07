@@ -85,6 +85,15 @@ public enum ChatListFormatting {
         }
     }
 
+    /// ADR-0087 sections 14 and 15.2 — what the row says for a message that
+    /// carries a channel invitation card: the invitation, never the `/g/`
+    /// link the message's text holds.
+    public static func channelInvitePreview(channelName: String, publisher: Bool) -> String {
+        Localization.text(
+            publisher ? "chats.preview.publisher_invite" : "chats.preview.channel_invite",
+            texts: ["channel": channelName])
+    }
+
     /// The second line of a row. `senderName` is the resolved name of the
     /// message's author and is shown as a prefix only in a group; own
     /// messages read "You: ...".

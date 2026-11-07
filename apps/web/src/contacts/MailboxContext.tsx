@@ -138,6 +138,9 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { conversationWithContact } from "./contact-conversation";
+import { duplicateOneToOneFolds, type HeldConversationGroup } from "./duplicate-one-to-one";
+import { landPendingPublisherWelcome } from "../channels/channel-publishers";
+import { buildLineage } from "../chat/lineage";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { dropCarriedCopies, moveCarriedCopies } from "./carried-copies";
 import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
@@ -336,6 +339,50 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     return true;
   });
   onCleanup(() => installGroupContactRequestSink(null));
+
+  // One person, one one-to-one row (`duplicate-one-to-one.ts`): a
+  // one-to-one the other person founded continues an older one this account
+  // founded with them, which their device never opened. Recorded in the
+  // lineage, so the list shows one row. Re-run whenever the groups or the
+  // lineage move (a reload merges rows already held); writing the same
+  // register again changes nothing.
+  createEffect(() => {
+    if (!sync.ready()) return;
+    const entries = sync.lineage();
+    const groups = chats.groups();
+    const identity = chats.identity();
+    untrack(() => {
+      const lineage = buildLineage(entries);
+      const held: HeldConversationGroup[] = [];
+      for (const g of groups) {
+        let groupHex: string;
+        try {
+          groupHex = groupIdHex(g.group.groupId);
+        } catch {
+          continue;
+        }
+        held.push({
+          groupHex,
+          conversationHex: lineage.conversationOf(groupHex),
+          isOneToOne: conversationKindOf(g.group) === "chat",
+          people: personKeysOf(g.group),
+          founderKeyB64: founderKeyOf(g.group),
+        });
+      }
+      for (const fold of duplicateOneToOneFolds(held, ownPersonKeyB64(identity))) {
+        void sync.setLineage(hexBytes(fold.successorHex), hexBytes(fold.rootHex)).catch(() => false);
+      }
+    });
+  });
+
+  /** Try one mailbox Welcome against this account's pending publisher
+   *  requests (`channels/pending-publisher-requests.ts`), under the identity
+   *  the requests are made with. */
+  async function landPublisherWelcome(accountIdB64: string, welcome: Uint8Array): Promise<boolean> {
+    const identity = chats.conversationAccountIdentity();
+    if (identity === null) return false;
+    return landPendingPublisherWelcome(identity, accountIdB64, welcome);
+  }
 
   /** Whether this device holds a live one-to-one with the person. */
   function holdsOneToOneWith(keyB64: string): boolean {
@@ -1210,8 +1257,18 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             if (replaced.has(fresh[i]?.request.messageId ?? -1)) fresh.splice(i, 1);
           }
           fresh.push({ request: ev.request, row: ev.row, replaces: verdict.replaces });
+        } else if (ev.kind === "publisher-welcome") {
+          // ADR-0087 section 15, ADR-0045 decision 2 - an owner's device
+          // approved a publisher request of this account; it lands whenever
+          // it arrives, after a restart too. Not a request's: nothing. A
+          // landed join that cannot be made durable throws, which holds the
+          // cursor.
+          await landPublisherWelcome(accountIdB64, ev.welcomeBytes);
         } else if (ev.kind === "welcome") {
           if (joinedWelcomeIds.has(ev.welcome.messageId)) continue;
+          // A pending publisher request's Welcome sent as a plain Welcome row
+          // is the request's, never a chat to join.
+          if (await landPublisherWelcome(accountIdB64, ev.welcome.welcomeBytes)) continue;
           welcomeAttempted = true;
           // An end under way goes first: the Welcome may replace its group.
           await membershipEnd.settle();
@@ -1638,4 +1695,35 @@ export function isWelcomeForAnotherLeaf(err: unknown): boolean {
       ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
       : String(err);
   return /NoMatchingKeyPackage|no matching key ?package/i.test(text);
+}
+
+/** The founder of a conversation: the role table's owner (a one-to-one's
+ *  never changes, ADR-0062), else the person at leaf 0; `null` when neither
+ *  reads. */
+function founderKeyOf(group: WasmGroupHandle): string | null {
+  try {
+    const owner = group.roleTableOwner();
+    if (owner !== undefined && owner.length === 32) return base64Encode(owner);
+  } catch {
+    // fall through to the roster
+  }
+  try {
+    const roster = group.members() as unknown as {
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+      accountKey?: Uint8Array;
+    }[];
+    const first = roster.find((m) => m.leafIndex === 0);
+    if (first === undefined) return null;
+    const key = first.accountKey !== undefined && first.accountKey.length === 32 ? first.accountKey : first.signaturePublicKey;
+    return base64Encode(key);
+  } catch {
+    return null;
+  }
+}
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }

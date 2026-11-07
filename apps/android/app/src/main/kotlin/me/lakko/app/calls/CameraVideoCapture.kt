@@ -64,6 +64,28 @@ public class CameraVideoCapture private constructor(
      */
     private var didStart: Boolean = false
 
+    /** Hands the capturer's frames to [source] and to every copy's source
+     *  ([copySource]); see [CapturerFan] for why each copy has its own. */
+    private val fan = CapturerFan(source.capturerObserver)
+
+    /** The sources made for the camera's copies, by copy. Touched on the
+     *  call's thread only. */
+    private val copySources = java.util.EnumMap<CameraCopyKind, VideoSource>(CameraCopyKind::class.java)
+
+    /**
+     * The video source the [kind] copy of the camera is sent from: a source of
+     * its own, fed the same frames as the main one, so the copy's encoder can
+     * narrow only its own picture ([CapturerFan]). Made on first ask and kept
+     * until [dispose]; `null` when no source can be made.
+     */
+    internal fun copySource(kind: CameraCopyKind): VideoSource? {
+        copySources[kind]?.let { return it }
+        val made = WebRtcPeerConnection.newVideoSource(context) ?: return null
+        copySources[kind] = made
+        fan.attach(made.capturerObserver)
+        return made
+    }
+
     /**
      * Begin delivering frames into the source. May throw
      * `CaptureError.StartFailed` if libwebrtc's `startCapture`
@@ -74,7 +96,7 @@ public class CameraVideoCapture private constructor(
         capturer.initialize(
             surfaceHelper,
             context,
-            source.capturerObserver,
+            fan,
         )
         try {
             capturer.startCapture(TARGET_WIDTH, TARGET_HEIGHT, TARGET_FPS)
@@ -229,6 +251,14 @@ public class CameraVideoCapture private constructor(
     public fun dispose() {
         capturer.dispose()
         surfaceHelper.dispose()
+        // The copies' sources are this capture's own (the main one is the
+        // caller's). A track still on one holds a reference of its own, so
+        // releasing ours here is safe before the connection closes.
+        for ((_, copy) in copySources) {
+            fan.detach(copy.capturerObserver)
+            runCatching { copy.dispose() }
+        }
+        copySources.clear()
     }
 
     public sealed class CaptureError(msg: String, cause: Throwable? = null) :

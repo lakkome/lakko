@@ -1267,6 +1267,18 @@
       "text": "No devices reported yet. They appear here once you grant microphone or camera permission.",
       "comment": "Hint under a device picker in the call settings when the phone has listed no microphone, camera or speaker yet."
     },
+    "call.settings.noise_suppression": {
+      "text": "Noise suppression",
+      "comment": "Switch in the call settings. When on, this device removes typing and background noise from its own microphone before sending. Stored on this device only."
+    },
+    "call.settings.noise_suppression_hint": {
+      "text": "Removes typing and background noise from your microphone.",
+      "comment": "Explanation under the Noise suppression switch in the call settings."
+    },
+    "call.settings.sound": {
+      "text": "Sound",
+      "comment": "Heading of the section in the call settings that holds the noise suppression switch."
+    },
     "call.settings.system_default": {
       "text": "System default",
       "comment": "Option in a call settings device picker: use the device the phone picks."
@@ -4055,9 +4067,17 @@
       "text": "New group",
       "comment": "Title of the screen that creates a group."
     },
+    "chats.preview.channel_invite": {
+      "text": "Invitation to {channel}",
+      "comment": "Chat list row, second line, when the last message is a channel invitation card; channel is the channel name. Never the link."
+    },
     "chats.preview.own": {
       "text": "You: {text}",
       "comment": "Chat list row, second line: the last message was sent by the reader. {text} is that message or its kind."
+    },
+    "chats.preview.publisher_invite": {
+      "text": "Invitation to publish in {channel}",
+      "comment": "Chat list row, second line, when the last message is an invitation to be a publisher of a channel; channel is the channel name. Never the link."
     },
     "chats.preview.sender": {
       "text": "{name}: {text}",
@@ -7621,7 +7641,7 @@
     },
     "open_in_app.button": {
       "text": "Open in the app",
-      "comment": "Button on the invite, call-link and group-invite web pages: opens the desktop app."
+      "comment": "Button on the invite, call-link, group-invite and shared-feed web pages: opens the Lakko app installed on this computer, phone or tablet, on the same screen."
     },
     "profile.avatar.change": {
       "text": "Change photo",

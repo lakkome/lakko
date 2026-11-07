@@ -58,9 +58,12 @@ export default function FeedImport(): JSX.Element {
   onMount(() => {
     void loadWasm().then((w) => {
       setCore(() => w);
-      const bytes = bytesFromFragment(window.location.hash);
+      // The router's hash, not `window.location`: an in-app navigation
+      // renders this route before the address changes.
+      const hash = location.hash;
+      const bytes = bytesFromFragment(hash);
       if (bytes !== null) open(w, bytes);
-      else if (window.location.hash.length > 1) setError(REFUSED);
+      else if (hash.length > 1) setError(REFUSED);
       // UX spec section 5 — a `.lakkofeed` opened from another app lands
       // here: the installed app's file handler (`manifest.webmanifest`
       // `file_handlers`) launches this route and hands the file over through
