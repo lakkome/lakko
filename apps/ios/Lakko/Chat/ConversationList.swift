@@ -62,6 +62,11 @@ public struct ConversationListRow: Identifiable, Equatable {
     /// row's circle can show their profile photo. `nil` for a group or a
     /// channel (their avatars are not profile photos).
     public let personKey: Data?
+
+    /// What an avatar's tint is derived from: the person for a one-to-one
+    /// (the same input every person screen uses, so one person has one
+    /// colour everywhere), else the conversation.
+    public var tintIdentity: String { personKey?.base64EncodedString() ?? id }
     /// ADR-0087 section 18 — the group whose photo the row's circle shows
     /// (`nil` for a one-to-one or a channel).
     public let photoGroupIdHex: String?

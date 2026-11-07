@@ -804,7 +804,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         groupNames.nameOf(groupIdB64) ?? entry.label,
         memberKeysB64
           .filter((k) => k !== ownKeyB64)
-          .map((k) => memberNameOf(profiles.resolve(k))),
+          .map((k) => memberNameOf(profiles.resolve(k), "the call roster")),
       ),
       isGroup,
     });
@@ -2884,7 +2884,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           const name = profiles.resolve(contact.signaturePubkeyB64);
           recordSentRequest(s.account.accountId, {
             recipientUsername: name.username ?? "",
-            recipientName: memberNameOf(name),
+            recipientName: memberNameOf(name, "a call invitation's sent request"),
             recipientAccountIdHex: accountIdHex,
             sentAtMs: Date.now(),
             recipientKeyB64: contact.signaturePubkeyB64,

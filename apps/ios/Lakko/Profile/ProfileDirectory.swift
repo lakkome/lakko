@@ -358,11 +358,11 @@ public final class ProfileDirectory: ObservableObject {
     /// `group` where the setting allows it) in a group; and the username
     /// only where the setting lets this conversation's members find the
     /// owner (UX section 6.2), always with its certificate.
-    func ownProfileEnvelope(groupId: Data? = nil, oneToOne: Bool = false) -> Data? {
+    func ownProfileEnvelope(groupId: Data? = nil, oneToOne: Bool = false, contactGrant: Bool = true) -> Data? {
         guard var profile = ownProfileForRequest() else { return nil }
         if let groupId {
             let reach = ReachCenter.shared
-            profile.grants = reach.profileGrants(groupId: groupId, oneToOne: oneToOne)
+            profile.grants = reach.profileGrants(groupId: groupId, oneToOne: oneToOne, contactGrant: contactGrant)
             if !oneToOne, !reach.allowsGroup(groupId) {
                 profile.username = nil
                 profile.usernameCertificate = nil

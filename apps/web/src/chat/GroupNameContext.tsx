@@ -62,6 +62,8 @@ import { avatarToWasm, b64ToBytes, bytesToB64, type AvatarData } from "../profil
 import type { ProfileAvatar as WasmProfileAvatar } from "../../wasm/lakko_ffi_wasm";
 import { usernameCertKey } from "../reach/scoped-discovery";
 import { avatarLookupChanged, setConversationAvatarLookup } from "../profile/avatar-runtime";
+import { channelAvatarOf } from "../channels/channel-access";
+import { channelIdOfAvatarKey, isChannelAvatarKey } from "../channels/channel-avatar";
 import { avatarBlobIdsHex } from "../profile/avatar-upload";
 import { deleteBlobs } from "../storage/blob-deletes";
 import { installGroupPublicLookup } from "../ds/knock-seeds";
@@ -171,7 +173,11 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
     avatarLookupChanged();
   });
   // UX 4.5.5 — the one avatar circle draws a group from this store.
-  setConversationAvatarLookup((groupIdB64) => photos.get(groupIdB64)?.avatar ?? null);
+  // ADR-0087 section 18.2 — a channel's photo comes from its newest metadata
+  // record; its key is `channel:<hex id>` (`channels/channel-avatar.ts`).
+  setConversationAvatarLookup((key) =>
+    isChannelAvatarKey(key) ? channelAvatarOf(channelIdOfAvatarKey(key)) : (photos.get(key)?.avatar ?? null),
+  );
   const unsubscribeReactions = reactionSettings.subscribe(bump);
   const unsubscribeHandles = handles.subscribe(bump);
   // ADR-0087 section 5 — the knock reader asks whether a group is public.

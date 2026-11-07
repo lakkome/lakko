@@ -32,6 +32,7 @@ import { fetchPosts } from "../channels/api";
 import { foldChannelMeta } from "../channels/channel-meta";
 import { decodeAndDecryptPost } from "../channels/composer";
 import { toPostDecode, type PostDecode } from "../channels/post-decode";
+import { parseBodyEnvelopeWith } from "../chat/attachments";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import {
@@ -138,7 +139,14 @@ export async function syncAll(
       if (!res.hadSeed) {
         return res.epochId > channel.newestSeedEpoch ? { kind: "wait" } : { kind: "skip" };
       }
-      const d = toPostDecode(res, (bytes) => wasm.classifyChannelPostPlaintext(bytes));
+      // ADR-0087 section 13 — a post's plaintext is the chat envelope: the
+      // feed files its text; an edit or delete op, a ban list and a record
+      // are not posts.
+      const d = toPostDecode(
+        res,
+        (bytes) => wasm.classifyChannelPostPlaintext(bytes),
+        (bytes) => parseBodyEnvelopeWith(wasm, bytes),
+      );
       if (d.kind === "meta") metas.push(d);
       return d.kind === "text" ? { kind: "text", text: d.text } : { kind: "skip" };
     };

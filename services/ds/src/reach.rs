@@ -84,8 +84,13 @@ pub(crate) const MAX_REACH_KEYS: usize = 4096;
 /// What the mailbox gate decided for a write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MailboxWrite {
-    /// Store it (a valid reach proof or delegation was consumed).
-    Store,
+    /// Store it (a valid reach proof or delegation was consumed), recording
+    /// the registered reach key that admitted it: the key a direct proof
+    /// named, or a delegation's issuer (ADR-0060 section 2, 2026-11-06).
+    Store {
+        /// The admitting reach key.
+        reach_pk: [u8; 32],
+    },
     /// Store it once the caller has spent one `mailbox-write` anonymous token
     /// (a proofless write to an open or unclaimed mailbox, ADR-0078).
     StoreAfterToken,
@@ -154,7 +159,7 @@ async fn check_delegated(
     proof: &Proof,
     req: &RequestParts<'_>,
     now: u64,
-) -> Result<(), HandlerError> {
+) -> Result<[u8; 32], HandlerError> {
     // 1. Parse, bounded and fail-closed.
     let value = headers
         .get(DELEGATION_HEADER_NAME)
@@ -192,7 +197,7 @@ async fn check_delegated(
         return Err(refused());
     }
     tx.commit().await.map_err(db_error("commit delegation"))?;
-    Ok(())
+    Ok(delegation.issuer_pk)
 }
 
 /// Gate a mailbox write (ADR-0060 section 2). See the module documentation
@@ -226,23 +231,24 @@ pub(crate) async fn gate_mailbox_write(
     }
     let req = parts(method, uri, body);
     let now = now_ms();
-    if has_delegation {
-        check_delegated(&state.db, mailbox, headers, &proof, &req, now).await?;
+    let reach_pk = if has_delegation {
+        check_delegated(&state.db, mailbox, headers, &proof, &req, now).await?
     } else {
-        check_direct(&state.db, mailbox, &proof, &req, now).await?;
-    }
-    Ok(MailboxWrite::Store)
+        check_direct(&state.db, mailbox, &proof, &req, now).await?
+    };
+    Ok(MailboxWrite::Store { reach_pk })
 }
 
 /// A direct reach proof: the key it names is an unexpired reach key of the
 /// mailbox, the proof verifies under that key, and its nonce is fresh.
+/// Returns that key.
 async fn check_direct(
     pool: &MySqlPool,
     mailbox: &[u8; PSEUDONYM_LEN],
     proof: &Proof,
     req: &RequestParts<'_>,
     now: u64,
-) -> Result<(), HandlerError> {
+) -> Result<[u8; 32], HandlerError> {
     // `parse_reach_proof` only returns reach proofs, which always name a key.
     let named = proof.reach_key.ok_or_else(refused)?;
     if !reach_key_registered(pool, mailbox, &named, now).await? {
@@ -254,7 +260,7 @@ async fn check_direct(
         .await
         .map_err(db_error("record proof nonce"))?
     {
-        Ok(())
+        Ok(named)
     } else {
         Err(refused())
     }
@@ -1452,6 +1458,144 @@ mod tests {
             )
             .await,
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    /// Each row the owner reads back with the reach key that admitted it
+    /// (`None` for a proofless write).
+    async fn stored_with_keys(
+        app: &Router,
+        identity: &SigningKey,
+        mailbox: &[u8; PSEUDONYM_LEN],
+    ) -> Vec<(Vec<u8>, Option<[u8; 32]>)> {
+        let (status, body) = send(
+            app,
+            Req {
+                method: "GET",
+                uri: &format!("{}?after=0", messages_uri("mailbox", mailbox)),
+                body: vec![],
+                proof: Some((identity, MAILBOX_EPOCH)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                let payload =
+                    mailbox_body(&B64.decode(m["payload_b64"].as_str().unwrap()).unwrap());
+                let key = m
+                    .get("reach_pk_b64")
+                    .and_then(|k| k.as_str())
+                    .map(|k| <[u8; 32]>::try_from(B64.decode(k).unwrap().as_slice()).unwrap());
+                (payload, key)
+            })
+            .collect()
+    }
+
+    /// 2026-11-06: removing a contact rotates the shared `contact` key; the
+    /// owner keeps the retired versions of `contact_key_versions` registered,
+    /// every stored row names the key that admitted it, and a version past the
+    /// window is refused at the sender.
+    #[tokio::test]
+    async fn a_row_names_the_key_that_admitted_it_and_retired_contact_keys_still_write() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let (identity, mailbox) = claimed_mailbox(&app, 84).await;
+        let owner_seed = [0x85u8; 32];
+        let contact = |v: u32| {
+            let seed = lakko_contacts::reach::reach_seed(
+                &owner_seed,
+                lakko_contacts::reach::ReachClass::Contact,
+                b"",
+                v,
+            )
+            .unwrap();
+            (*seed.as_bytes(), SigningKey::from_seed(seed.as_bytes()))
+        };
+        // Version 10 is current after ten removals; the window is 10..=2.
+        let window = lakko_contacts::reach::contact_key_versions(10);
+        let add: Vec<serde_json::Value> = window
+            .iter()
+            .map(|v| serde_json::json!({ "reach_pk_b64": pk_b64(&contact(*v).1) }))
+            .collect();
+        assert_eq!(
+            put_reach(
+                &app,
+                &mailbox,
+                Some((&identity, MAILBOX_EPOCH)),
+                &serde_json::json!({ "add": add }),
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let (_, current) = contact(10);
+        // Version 2 is the oldest kept: the owner's device classifies it
+        // with `classify_contact_key` (tested in `lakko-contacts`).
+        let (retired_seed, retired) = contact(2);
+        let (_, too_old) = contact(1);
+        for (body, signer) in [(b"current".as_slice(), &current), (b"retired", &retired)] {
+            let (status, _) = write(&app, &mailbox, body, Some((signer, REACH_EPOCH)), &[]).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        // Past the window: never registered, refused at the sender.
+        let (status, _) = write(&app, &mailbox, b"old", Some((&too_old, REACH_EPOCH)), &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // A delegated write records the delegation's issuer.
+        let delegate = key(86);
+        let header = sign_delegation(
+            &retired_seed,
+            &mailbox,
+            &delegate.verifying_key().to_bytes(),
+            now_ms() + 3_600_000,
+            fresh_nonce(),
+        )
+        .to_header_value();
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"delegated",
+            Some((&delegate, REACH_EPOCH)),
+            &[(DELEGATION_HEADER_NAME, &header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // A proofless write to the mailbox once open records no key.
+        assert_eq!(
+            put_reach(
+                &app,
+                &mailbox,
+                Some((&identity, MAILBOX_EPOCH)),
+                &serde_json::json!({ "open": true }),
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let token = mailbox_token();
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"anyone",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let rows = stored_with_keys(&app, &identity, &mailbox).await;
+        let pk = |k: &SigningKey| k.verifying_key().to_bytes();
+        assert_eq!(
+            rows,
+            vec![
+                (b"current".to_vec(), Some(pk(&current))),
+                (b"retired".to_vec(), Some(pk(&retired))),
+                (b"delegated".to_vec(), Some(pk(&retired))),
+                (b"anyone".to_vec(), None),
+            ]
         );
     }
 

@@ -145,6 +145,9 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake dropped: not a subscription the signed-in account holds")
             return
         }
+        // The app-wide receive sweep, when the app is open, runs at once and
+        // stays short for a while (`ReceiveCadence`).
+        me.lakko.app.chat.ReceiveCadence.noteWake()
         // ADR-0073 R.5 — a wake for the old segment of a moved one-to-one posts
         // nothing at all, in the FOREGROUND too. The background pass below
         // already answers this, but a foregrounded app runs no background

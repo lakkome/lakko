@@ -186,12 +186,16 @@ internal object KeyRotationChannels {
         accountIdB64: String,
         predecessorSeed: ByteArray,
         currentSeed: ByteArray,
+        /** ADR-0078 phase 6 — the lineage (oldest) seed the PublisherGroup ids
+         *  derive from; `null` skips the owed handle rekeys. */
+        lineageSeed: ByteArray? = null,
     ): Boolean {
         val channelIds = OrphanedChannelsStore.publisherChannelIds(
             ChannelPublisherKeyStore.encryptedPrefs(context),
             accountIdB64,
         ).sorted()
         if (channelIds.isEmpty()) return true
+        if (lineageSeed != null) queueOwedHandleRekeys(context, accountIdB64, channelIds, predecessorSeed, lineageSeed)
         val settled = Identity.fromSeed(predecessorSeed).use { old ->
             Identity.fromSeed(currentSeed).use { new ->
                 ChannelsClient().use { client ->
@@ -219,5 +223,53 @@ internal object KeyRotationChannels {
         // A role learned under the old owner key is not the new key's.
         ChannelPublisherRoles.shared.clear()
         return settled
+    }
+
+    /**
+     * ADR-0087 section 3 + ADR-0074 — each owned channel's @name was written
+     * under the handle key of the PREDECESSOR seed: keep that key as an owed
+     * `rekey`, which the publisher loop signs with it to move the name to the
+     * current seed's key. A channel with no @name drops the row there.
+     * Idempotent: a row already owed is kept (it names the older key).
+     */
+    private fun queueOwedHandleRekeys(
+        context: Context,
+        accountIdB64: String,
+        channelIds: List<String>,
+        predecessorSeed: ByteArray,
+        lineageSeed: ByteArray,
+    ) {
+        try {
+            Identity.fromSeed(lineageSeed).use { lineage ->
+                Identity.fromSeed(predecessorSeed).use { old ->
+                    val oldAccountSeed = old.ed25519Seed()
+                    try {
+                        for (id in channelIds) {
+                            val held = me.lakko.app.chat.GroupSettingsStore.owedRekeySeed(context, accountIdB64, id)
+                            if (held != null) {
+                                held.fill(0)
+                                continue
+                            }
+                            val journal = uniffi.lakko_ffi_uniffi.publisherGroupIdFor(
+                                lineage,
+                                ChannelsClient.channelIdBytes(id),
+                            )
+                            val seed = me.lakko.app.chat.groupHandleSeed(oldAccountSeed, journal)
+                            try {
+                                me.lakko.app.chat.GroupSettingsStore.saveOwedRekeySeed(context, accountIdB64, id, seed)
+                            } finally {
+                                seed.fill(0)
+                            }
+                        }
+                    } finally {
+                        oldAccountSeed.fill(0)
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "owed channel handle rekeys not recorded", e)
+        }
     }
 }

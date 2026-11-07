@@ -53,10 +53,14 @@ use lakko_contacts::introduction::{
 };
 use lakko_contacts::profile::{ProfileError, ACCOUNT_ID_LEN};
 use lakko_contacts::reach::{
+    classify_contact_key as rust_classify_contact_key,
+    contact_key_row_verdict as rust_contact_key_row_verdict,
+    contact_key_versions as rust_contact_key_versions,
     continuity_reach_seed as rust_continuity_reach_seed, reach_seed as rust_reach_seed,
-    reach_verifying_key as rust_reach_verifying_key, ReachClass as RustReachClass, ReachError,
+    reach_verifying_key as rust_reach_verifying_key, ContactKeyRowVerdict as RustRowVerdict,
+    ContactKeyStanding as RustStanding, ReachClass as RustReachClass, ReachError,
     ReachGrant as RustReachGrant, CONTINUITY_ACCOUNT_ID_LEN, MAX_REACH_SCOPE_ID_LEN,
-    REACH_GRANT_LEN, REACH_SEED_LEN,
+    REACH_GRANT_LEN, REACH_SEED_LEN, RETIRED_CONTACT_VERSIONS_KEPT,
 };
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
@@ -478,6 +482,148 @@ pub fn derive_reach_grant(
         class,
         scope_id,
         version,
+    ))
+}
+
+// ============================================================================
+// Retired contact keys (ADR-0060 section 1, amended 2026-11-06)
+// ============================================================================
+
+/// What the receiving device does with a mailbox row (mirror of
+/// `lakko_contacts::reach::ContactKeyRowVerdict`).
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactKeyRowVerdict {
+    /// Process the row as before.
+    Process = 0,
+    /// Process it, and republish the profile (with the current `contact`
+    /// grant) in the one-to-one with its sender, without anything shown.
+    ProcessAndRegrant = 1,
+    /// Drop it without anything shown; log nothing that names anyone.
+    Drop = 2,
+}
+
+impl From<RustRowVerdict> for ContactKeyRowVerdict {
+    fn from(v: RustRowVerdict) -> Self {
+        match v {
+            RustRowVerdict::Process => Self::Process,
+            RustRowVerdict::ProcessAndRegrant => Self::ProcessAndRegrant,
+            RustRowVerdict::Drop => Self::Drop,
+        }
+    }
+}
+
+/// A mailbox row's admitting key, classified for the `contact` class.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactKeyStanding {
+    inner: RustStanding,
+}
+
+#[wasm_bindgen]
+impl ContactKeyStanding {
+    /// `"current"`, `"retired"` or `"notContactKey"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        match self.inner {
+            RustStanding::Current => "current",
+            RustStanding::Retired { .. } => "retired",
+            RustStanding::NotContactKey => "notContactKey",
+        }
+        .to_string()
+    }
+
+    /// The version of a retired key, else `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn version(&self) -> Option<u32> {
+        match self.inner {
+            RustStanding::Retired { version } => Some(version),
+            _ => None,
+        }
+    }
+}
+
+/// How many retired `contact` versions are kept registered beside the
+/// current one: 8 (chosen, not measured).
+#[wasm_bindgen(js_name = retiredContactVersionsKept)]
+#[must_use]
+pub fn retired_contact_versions_kept() -> u32 {
+    RETIRED_CONTACT_VERSIONS_KEPT
+}
+
+/// The `contact` versions to keep registered when the current one is
+/// `current`: `current`, then up to eight retired ones.
+#[wasm_bindgen(js_name = contactKeyVersions)]
+#[must_use]
+pub fn contact_key_versions(current: u32) -> Vec<u32> {
+    rust_contact_key_versions(current)
+}
+
+fn classify_contact_key_inner(
+    account_seed: &[u8],
+    current_version: u32,
+    proving_key: &[u8],
+) -> Result<RustStanding, Refusal> {
+    let account = seed32(account_seed, "account seed")?;
+    let key = seed32(proving_key, "proving key")?;
+    Ok(rust_classify_contact_key(&account, current_version, &key))
+}
+
+/// Classify a mailbox row's admitting key (its `reach_pk_b64`, decoded)
+/// against this account's `contact` keys at `currentVersion`.
+///
+/// # Errors
+///
+/// Throws with `reachError` `seedLength`.
+#[wasm_bindgen(js_name = classifyContactKey)]
+pub fn classify_contact_key(
+    account_seed: &[u8],
+    current_version: u32,
+    proving_key: &[u8],
+) -> Result<ContactKeyStanding, JsValue> {
+    js(
+        classify_contact_key_inner(account_seed, current_version, proving_key)
+            .map(|inner| ContactKeyStanding { inner }),
+    )
+}
+
+fn mailbox_row_contact_verdict_inner(
+    account_seed: &[u8],
+    current_contact_version: u32,
+    proving_key: Option<Vec<u8>>,
+    sender_is_contact: bool,
+) -> Result<ContactKeyRowVerdict, Refusal> {
+    let Some(key) = proving_key else {
+        return Ok(ContactKeyRowVerdict::Process);
+    };
+    let standing = classify_contact_key_inner(account_seed, current_contact_version, &key)?;
+    Ok(rust_contact_key_row_verdict(standing, sender_is_contact).into())
+}
+
+/// The one rule for the receive path: classify the row's admitting key
+/// (`provingKey`, its `reach_pk_b64` decoded, or `undefined` for a proofless
+/// row) and judge it with `senderIsContact` (the account the row's verified
+/// content names as sender is a CURRENT contact). A row under a retired
+/// `contact` key from a contact is `ProcessAndRegrant`, from anyone else
+/// `Drop`; every other row `Process`.
+///
+/// # Errors
+///
+/// Throws with `reachError` `seedLength`.
+#[wasm_bindgen(js_name = mailboxRowContactVerdict)]
+pub fn mailbox_row_contact_verdict(
+    account_seed: &[u8],
+    current_contact_version: u32,
+    proving_key: Option<Vec<u8>>,
+    sender_is_contact: bool,
+) -> Result<ContactKeyRowVerdict, JsValue> {
+    js(mailbox_row_contact_verdict_inner(
+        account_seed,
+        current_contact_version,
+        proving_key,
+        sender_is_contact,
     ))
 }
 
@@ -2692,5 +2838,51 @@ mod tests {
         for (e, code) in table {
             assert_eq!(username_cert_code(&e), code);
         }
+    }
+
+    #[test]
+    fn retired_contact_keys_cross_the_boundary_as_the_core_has_them() {
+        assert_eq!(retired_contact_versions_kept(), 8);
+        assert_eq!(contact_key_versions(2), vec![2, 1, 0]);
+        let pk = |v: u32| {
+            rust_reach_verifying_key(
+                &<[u8; 32]>::try_from(
+                    reach_seed_inner(&ACCOUNT_SEED, ReachClass::Contact, &[], v)
+                        .unwrap()
+                        .as_slice(),
+                )
+                .unwrap(),
+            )
+            .to_vec()
+        };
+        let s = classify_contact_key_inner(&ACCOUNT_SEED, 9, &pk(1)).unwrap();
+        assert_eq!(s, RustStanding::Retired { version: 1 });
+        let standing = ContactKeyStanding { inner: s };
+        assert_eq!(
+            (standing.kind().as_str(), standing.version()),
+            ("retired", Some(1))
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict_inner(&ACCOUNT_SEED, 9, Some(pk(3)), true).unwrap(),
+            ContactKeyRowVerdict::ProcessAndRegrant
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict_inner(&ACCOUNT_SEED, 9, Some(pk(3)), false).unwrap(),
+            ContactKeyRowVerdict::Drop
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict_inner(&ACCOUNT_SEED, 9, Some(pk(9)), false).unwrap(),
+            ContactKeyRowVerdict::Process
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict_inner(&ACCOUNT_SEED, 9, None, false).unwrap(),
+            ContactKeyRowVerdict::Process
+        );
+        assert_eq!(
+            classify_contact_key_inner(&ACCOUNT_SEED, 9, &[1; 31])
+                .unwrap_err()
+                .code,
+            "seedLength"
+        );
     }
 }

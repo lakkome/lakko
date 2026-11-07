@@ -704,6 +704,12 @@ pub enum LinkRecordKind {
     Contact,
     /// A call invite link (`/c/`).
     Call,
+    /// A group invite link (`/g/`; ADR-0087 phase B, appended 2026-11-05).
+    Group,
+    /// A channel subscriber invitation (`/g/` preview kind 3).
+    Channel,
+    /// A channel publisher invitation (`/g/` preview kind 2).
+    Publisher,
 }
 
 impl From<LinkRecordKind> for core::LinkRecordKind {
@@ -711,6 +717,9 @@ impl From<LinkRecordKind> for core::LinkRecordKind {
         match k {
             LinkRecordKind::Contact => Self::Contact,
             LinkRecordKind::Call => Self::Call,
+            LinkRecordKind::Group => Self::Group,
+            LinkRecordKind::Channel => Self::Channel,
+            LinkRecordKind::Publisher => Self::Publisher,
         }
     }
 }
@@ -720,6 +729,9 @@ impl From<core::LinkRecordKind> for LinkRecordKind {
         match k {
             core::LinkRecordKind::Contact => Self::Contact,
             core::LinkRecordKind::Call => Self::Call,
+            core::LinkRecordKind::Group => Self::Group,
+            core::LinkRecordKind::Channel => Self::Channel,
+            core::LinkRecordKind::Publisher => Self::Publisher,
         }
     }
 }
@@ -797,6 +809,22 @@ pub struct LinkRecord {
     /// never answered. Computed by the core on read; ignored on write.
     #[uniffi(default = false)]
     pub editable: bool,
+    /// What a `/g/` link targets (ADR-0087 phase B): the 32-byte group id of
+    /// a group link, the 16-byte channel id of a channel or publisher link;
+    /// empty for `/i/` and `/c/`. Byte fields carry no default (Swift `Data`
+    /// has no literal one): pass empty for a contact or call link.
+    pub target_id: Vec<u8>,
+    /// A private channel subscriber link's 32-byte invite seed, else empty.
+    /// SECRET.
+    pub invite_seed: Vec<u8>,
+    /// The admission-key version a private channel subscriber link names; 0
+    /// for every other link.
+    #[uniffi(default = 0)]
+    pub admission_version: u16,
+    /// The sealed `/g/` blob the ledger holds (what an invitation card
+    /// carries), at most `lakko_contacts::group_invite::MAX_SEALED_LEN`
+    /// bytes; empty for `/i/` and `/c/`.
+    pub capability: Vec<u8>,
 }
 
 fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
@@ -817,6 +845,10 @@ fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
         shared: s.value.shared,
         label: s.value.label,
         answered: s.value.answered.iter().map(|k| k.to_vec()).collect(),
+        target_id: s.value.target_id,
+        invite_seed: s.value.invite_seed,
+        admission_version: s.value.admission_version,
+        capability: s.value.capability,
     }
 }
 
@@ -844,7 +876,26 @@ fn link_record_entry(r: LinkRecord) -> Result<core::LinkRecordEntry, FfiError> {
             .iter()
             .map(|k| fixed(k, "requester key"))
             .collect::<Result<Vec<_>, _>>()?,
+        target_id: r.target_id,
+        invite_seed: r.invite_seed,
+        admission_version: r.admission_version,
+        capability: r.capability,
     })
+}
+
+/// The register id of a `/g/` link (a group, channel subscriber or publisher
+/// invitation) in the synced link register: a BLAKE3 derive-key of its
+/// 6-byte ledger id, truncated to 16 bytes (ADR-0087 phase B). A `LinkRecord`
+/// of kind `Group` / `Channel` / `Publisher` must carry exactly this
+/// `link_id`.
+///
+/// # Errors
+///
+/// [`FfiError::SyncedState`] when `ledger_id` is not 6 bytes.
+#[uniffi::export]
+pub fn group_link_record_id(ledger_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let ledger: [u8; core::LINK_RECORD_LEDGER_ID_LEN] = fixed(&ledger_id, "ledger id")?;
+    Ok(lakko_contacts::group_invite::group_link_record_id(&ledger).to_vec())
 }
 
 fn link_record_refusal(e: core::LinkRecordEnvelopeError) -> FfiError {
@@ -1520,7 +1571,7 @@ impl SyncedState {
         self.with(|s| s.has_channel_reaction(&channel, post_cursor, &emoji))
     }
 
-    /// The emoji this account holds on the post.
+    /// The emoji this account holds on the post itself (not its comments).
     ///
     /// # Errors
     ///
@@ -1533,6 +1584,75 @@ impl SyncedState {
         let channel =
             fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
         self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// The same as [`Self::set_channel_reaction`] for a reaction on the
+    /// comment at `comment_cursor` under the post at `post_cursor` (ADR-0087
+    /// phase B). `post_at_ms` is the POST's time: a comment lives as long as
+    /// its post. Three reactions a comment, counted apart from the post.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] `"bounds: ..."` for a fourth own reaction on
+    /// one comment or a bad argument; [`FfiError::LockPoisoned`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_comment_reaction(
+        &self,
+        hlc: u64,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: String,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| {
+            s.set_comment_reaction(
+                hlc,
+                channel,
+                post_cursor,
+                comment_cursor,
+                &emoji,
+                reacted,
+                post_at_ms,
+            )
+        })?
+        .map_err(synced_err)
+    }
+
+    /// Whether this account holds `emoji` on the comment.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn has_comment_reaction(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: String,
+    ) -> Result<bool, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.has_comment_reaction(&channel, post_cursor, comment_cursor, &emoji))
+    }
+
+    /// The emoji this account holds on the comment.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for a bad channel id; [`FfiError::LockPoisoned`].
+    pub fn comment_reactions_on(
+        &self,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Vec<String>, FfiError> {
+        let channel =
+            fixed::<{ core::CHANNEL_REACTION_CHANNEL_ID_LEN }>(&channel_id, "channel id")?;
+        self.with(|s| s.comment_reactions_on(&channel, post_cursor, comment_cursor))
     }
 
     /// Every held own channel reaction as envelopes (the catch-up re-send).
@@ -2310,6 +2430,51 @@ mod tests {
         assert_eq!(lineage_group_id_max_len(), 64);
     }
 
+    /// ADR-0087 phase B: a channel subscriber link names its channel and
+    /// carries its invite seed and the capability to re-share.
+    #[test]
+    fn a_channel_link_record_carries_its_target_seed_and_capability() {
+        let a = SyncedState::new();
+        let ledger = vec![0x0D; 6];
+        let channel = LinkRecord {
+            hlc: 0,
+            link_id: group_link_record_id(ledger.clone()).unwrap(),
+            link_secret: vec![2; 12],
+            kind: LinkRecordKind::Channel,
+            ledger_id: ledger,
+            revocation_seed: vec![4; 32],
+            expiry_ms: 0,
+            max_uses: 0,
+            uses: 0,
+            revoked: false,
+            minted_at_ms: 9,
+            label: String::new(),
+            answered: vec![],
+            shared: false,
+            editable: false,
+            target_id: vec![0xC1; 16],
+            invite_seed: vec![0x5E; 32],
+            admission_version: 2,
+            capability: vec![0xCA; 120],
+        };
+        assert!(a.set_link_record(5, channel.clone()).unwrap());
+        let stored = a.link_record(channel.link_id.clone()).unwrap().unwrap();
+        assert_eq!(stored.target_id, vec![0xC1; 16]);
+        assert_eq!(stored.invite_seed, vec![0x5E; 32]);
+        assert_eq!(stored.admission_version, 2);
+        assert!(a
+            .set_link_record(
+                5,
+                LinkRecord {
+                    target_id: vec![0xC1; 15],
+                    ..channel.clone()
+                }
+            )
+            .is_err());
+        assert!(a.revoke_link_record(6, channel.link_id.clone()).unwrap());
+        assert!(group_link_record_id(vec![0; 5]).is_err());
+    }
+
     #[test]
     fn link_records_are_set_used_revoked_carried_and_persisted() {
         const { assert!(core::LINK_RECORD_ENVELOPE_MAX_LEN <= lakko_mls::MAX_SERVICE_ENVELOPE_LEN) };
@@ -2330,6 +2495,10 @@ mod tests {
             answered: vec![],
             shared: false,
             editable: false,
+            target_id: vec![],
+            invite_seed: vec![],
+            admission_version: 0,
+            capability: vec![],
         };
         assert!(a.set_link_record(5, record.clone()).unwrap());
         assert!(a.all_link_records().unwrap()[0].editable);
@@ -3193,6 +3362,23 @@ mod tests {
             .has_channel_reaction(channel.clone(), 7, "\u{1F44D}".into())
             .unwrap());
         assert_eq!(a.channel_reaction_envelopes().unwrap().len(), 1);
+        // A reaction on a comment is its own register.
+        let env = a
+            .set_comment_reaction(5, channel.clone(), 7, 12, "\u{1F44D}".into(), true, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(b.apply_channel_reaction_envelope(env).unwrap());
+        assert!(b
+            .has_comment_reaction(channel.clone(), 7, 12, "\u{1F44D}".into())
+            .unwrap());
+        assert_eq!(
+            b.comment_reactions_on(channel.clone(), 7, 12).unwrap(),
+            vec!["\u{1F44D}".to_string()]
+        );
+        assert_eq!(
+            b.channel_reactions_on(channel.clone(), 7).unwrap(),
+            vec!["\u{1F44D}".to_string()]
+        );
 
         let env = a
             .record_channel_comment(3, channel.clone(), 7, vec![9; 16], 1_000)
@@ -3209,7 +3395,7 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(a.channel_comments_on(channel, 7).unwrap().is_empty());
-        assert_eq!(a.prune_channel_activity(u64::MAX).unwrap(), 2);
+        assert_eq!(a.prune_channel_activity(u64::MAX).unwrap(), 3);
         assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

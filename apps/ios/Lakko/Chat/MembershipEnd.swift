@@ -175,7 +175,6 @@ public final class MembershipEndStore {
 
     private struct Payload: Codable, Equatable {
         var owed: [String: OwedMembershipEnd] = [:]
-        var notices: [MembershipEndNotice] = []
         var held: [HeldWelcome] = []
     }
 
@@ -234,18 +233,11 @@ public final class MembershipEndStore {
         read(accountIdB64).owed[groupIdHex]
     }
 
-    /// Step 1 — the end and its notice, in one write.
+    /// Step 1 — the end. Its notice is not kept (UX 9.1, 2026-11-06): it
+    /// is shown once while the app runs, never at the next start.
     @discardableResult
-    public func record(
-        _ end: OwedMembershipEnd, notice: MembershipEndNotice?, accountIdB64: String
-    ) -> Bool {
-        update(accountIdB64) { payload in
-            payload.owed[end.groupIdHex] = end
-            if let notice {
-                payload.notices.removeAll { $0.groupIdHex == notice.groupIdHex }
-                payload.notices.append(notice)
-            }
-        }
+    public func record(_ end: OwedMembershipEnd, accountIdB64: String) -> Bool {
+        update(accountIdB64) { $0.owed[end.groupIdHex] = end }
     }
 
     public func put(_ end: OwedMembershipEnd, accountIdB64: String) {
@@ -254,16 +246,6 @@ public final class MembershipEndStore {
 
     public func removeOwed(accountIdB64: String, groupIdHex: String) {
         update(accountIdB64) { $0.owed[groupIdHex] = nil }
-    }
-
-    // MARK: Notices
-
-    public func notices(accountIdB64: String) -> [MembershipEndNotice] {
-        read(accountIdB64).notices
-    }
-
-    public func removeNotice(accountIdB64: String, groupIdHex: String) {
-        update(accountIdB64) { $0.notices.removeAll { $0.groupIdHex == groupIdHex } }
     }
 
     // MARK: Held Welcomes
@@ -310,21 +292,95 @@ public protocol ConversationEndSync: AnyObject {
     func clearConversation(_ conversations: [FolderConversationRef]) async -> Bool
 }
 
-/// The banner's model. Its own object, so the list is not re-evaluated by it.
+/// UX group-and-channel-privacy section 9.1 (decided 2026-11-06) — "You are
+/// no longer in {name}." as a short notice at the bottom of the screen that
+/// goes away by itself after 4 seconds. One at a time: removals noticed
+/// together give one notice ("... {name} and {n} more."), and a removal
+/// noticed while one is up replaces it with the combined text. A
+/// conversation whose own dialog showed it (``claim(groupIdHex:)``) gets no
+/// notice. Nothing is kept: a notice the person did not see is gone.
 @MainActor
 public final class MembershipEndNoticeCenter: ObservableObject {
-    @Published public private(set) var notices: [MembershipEndNotice] = []
+    /// The notice on screen.
+    public struct Shown: Equatable, Identifiable {
+        public let id = UUID()
+        /// The names it stands for, oldest first.
+        public let names: [String]
+        public var text: String { MembershipEndNoticeCenter.text(names: names) }
+    }
+
+    @Published public private(set) var shown: Shown?
+
+    /// How long removals are gathered into one notice, and long enough for an
+    /// open conversation to claim its own first.
+    var gatherNanos: UInt64 = 400_000_000
+    /// How long a notice stays.
+    var visibleNanos: UInt64 = 4_000_000_000
+
+    private var pending: [MembershipEndNotice] = []
+    private var gatherTask: Task<Void, Never>?
+    private var hideTask: Task<Void, Never>?
 
     public init() {}
 
-    func replace(_ notices: [MembershipEndNotice]) {
-        if notices != self.notices { self.notices = notices }
+    /// Every name pending or on screen (tests).
+    var noticeNames: [String] { (shown?.names ?? []) + pending.map(\.name) }
+
+    /// A removal was noticed.
+    func post(_ notice: MembershipEndNotice) {
+        pending.removeAll { $0.groupIdHex == notice.groupIdHex }
+        pending.append(notice)
+        guard gatherTask == nil else { return }
+        gatherTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: self?.gatherNanos ?? 0)
+            guard !Task.isCancelled else { return }
+            self?.flush()
+        }
     }
 
-    /// The banners at the top of Chats, top to bottom: one per removal not
-    /// yet closed, the newest on top (UX 9.1, decided 2026-11-04). A newer
-    /// removal never hides an older one; closing one leaves the others.
-    public static func stacked(_ notices: [MembershipEndNotice]) -> [MembershipEndNotice] {
-        notices.reversed()
+    /// The open conversation shows its own dialog: its notice, if not shown
+    /// yet, goes to that dialog and nowhere else.
+    func claim(groupIdHex: String) -> MembershipEndNotice? {
+        guard let index = pending.firstIndex(where: { $0.groupIdHex == groupIdHex }) else { return nil }
+        return pending.remove(at: index)
+    }
+
+    /// The person is back in it: a notice not shown yet would be false.
+    func withdraw(groupIdHex: String) {
+        pending.removeAll { $0.groupIdHex == groupIdHex }
+    }
+
+    /// Show what was gathered, joined to the notice already up.
+    func flush() {
+        gatherTask?.cancel()
+        gatherTask = nil
+        let names = pending.map(\.name)
+        pending = []
+        guard !names.isEmpty else { return }
+        shown = Shown(names: (shown?.names ?? []) + names)
+        hideTask?.cancel()
+        hideTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: self?.visibleNanos ?? 0)
+            guard !Task.isCancelled else { return }
+            self?.shown = nil
+        }
+    }
+
+    /// Sign-out, account switch: nothing carries.
+    func reset() {
+        gatherTask?.cancel()
+        hideTask?.cancel()
+        gatherTask = nil
+        hideTask = nil
+        pending = []
+        shown = nil
+    }
+
+    /// The notice's text.
+    nonisolated static func text(names: [String]) -> String {
+        guard let first = names.first else { return "" }
+        if names.count == 1 { return Localization.text("chat.ended.notice", texts: ["name": first]) }
+        return Localization.text(
+            "chat.ended.notice_more", texts: ["name": first], counts: ["count": UInt64(names.count - 1)])
     }
 }

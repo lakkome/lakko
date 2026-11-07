@@ -59,8 +59,34 @@
  */
 import { backoffFor } from "../ds/long-poll-loop";
 
-/** Pause between two sweeps. */
+/** Pause between two sweeps while something is arriving: a push wake's
+ *  catch-up window, or a call in progress. */
 export const BACKGROUND_SWEEP_INTERVAL_MS = 4_000;
+/** Pause between two sweeps when idle and a push wake reaches this tab: the
+ *  wake is what brings a message in, the sweep is only a safety net. */
+export const BACKGROUND_IDLE_PUSH_MS = 120_000;
+/** Pause between two sweeps when idle and no push wake is known to reach
+ *  this tab: the sweep is the only way in, so it stays, but not every few
+ *  seconds (seen live 2026-11-05: an idle client with six groups made 25
+ *  journal reads in 20 s). Chosen, not measured. */
+export const BACKGROUND_IDLE_NO_PUSH_MS = 30_000;
+
+/**
+ * The pause before the next background sweep (Telegram-scale: an idle client
+ * must not poll every group every few seconds). Short only while something is
+ * known to be arriving; otherwise long, longest when push covers the tab. A
+ * push wake, the tab becoming visible and a call starting all end the pause
+ * early (`BackgroundReceiveContext.tsx`), so a long pause costs no latency on
+ * those paths.
+ */
+export function backgroundSweepIntervalMs(input: {
+  readonly wakeWindowOpen: boolean;
+  readonly callInProgress: boolean;
+  readonly pushWake: "reachable" | "unreachable" | "unknown";
+}): number {
+  if (input.wakeWindowOpen || input.callInProgress) return BACKGROUND_SWEEP_INTERVAL_MS;
+  return input.pushWake === "reachable" ? BACKGROUND_IDLE_PUSH_MS : BACKGROUND_IDLE_NO_PUSH_MS;
+}
 /** Uniform jitter applied to the pause, in both directions. */
 export const BACKGROUND_SWEEP_JITTER_MS = 1_000;
 /** Background requests in flight at once. */
@@ -197,6 +223,9 @@ export interface BackgroundLoopDeps extends SweepDeps {
   readonly random: () => number;
   readonly intervalMs: number;
   readonly jitterMs: number;
+  /** The pause for this moment, when it varies; `intervalMs` otherwise. The
+   *  jitter is then a quarter of it. */
+  readonly intervalFor?: () => number;
 }
 
 /** The pause after a sweep: `interval ± jitter`, never negative. */
@@ -220,6 +249,8 @@ export async function runBackgroundReceiveLoop(
     }
     await runSweep(deps, signal);
     if (signal.aborted) return;
-    await deps.sleep(sweepPauseMs(deps.intervalMs, deps.jitterMs, deps.random()), signal);
+    const interval = deps.intervalFor?.() ?? deps.intervalMs;
+    const jitter = deps.intervalFor === undefined ? deps.jitterMs : Math.round(interval / 4);
+    await deps.sleep(sweepPauseMs(interval, jitter, deps.random()), signal);
   }
 }

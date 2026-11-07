@@ -104,6 +104,8 @@ public object AttachmentBridge {
         media: AttachmentMediaMeta? = null,
         /** ADR-0047 — upload progress, 0..1, for the determinate ring. */
         onProgress: ((Float) -> Unit)? = null,
+        /** ADR-0087 section 13 — a channel file lives 45 idle days. */
+        idleDays: Int? = null,
     ): AttachmentRef {
         if (bytes.size > MAX_ATTACHMENT_BYTES) {
             throw AttachmentBridgeException.TooLarge(
@@ -133,6 +135,7 @@ public object AttachmentBridge {
                         report(if (total <= 0L) 0f else (sent.toFloat() / total).coerceIn(0f, 1f))
                     }
                 },
+                idleDays = idleDays,
             )
         } catch (e: Throwable) {
             throw AttachmentBridgeException.Upload(e)

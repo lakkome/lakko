@@ -199,6 +199,8 @@ class AnonTokenPoolTest {
                 AnonTokenContext.MAILBOX_WRITE to 4,
                 AnonTokenContext.CALL_JOIN to 4,
                 AnonTokenContext.CIRCLE_CLAIM to 2,
+                AnonTokenContext.CHANNEL_REACT to 16,
+                AnonTokenContext.CHANNEL_COMMENT to 8,
             ),
             firstBatch,
         )
@@ -281,9 +283,9 @@ class AnonTokenPoolTest {
     }
 
     @Test
-    fun theContextListIsTheCoresTwelveNamesInWireOrder() {
+    fun theContextListIsTheCoresNamesInWireOrder() {
         // The source of truth is `TokenContext::ALL` / `TokenContext::name` in
-        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=12), which
+        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=15), which
         // `anonTokenContexts()` in `crates/lakko-ffi-uniffi/src/anon_token.rs`
         // returns in that order. The host JVM cannot load the native library,
         // so the names are pinned here as literals: a context added to or
@@ -304,6 +306,8 @@ class AnonTokenPoolTest {
                 "mailbox-write",
                 "call-join",
                 "circle-claim",
+                "channel-react",
+                "channel-comment",
             ),
             AnonTokenContext.entries.map { it.wire },
         )

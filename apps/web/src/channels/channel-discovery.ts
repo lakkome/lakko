@@ -12,13 +12,18 @@
  * `@name` is the handle lookup plus `openSearchRecord` with the name's own
  * OPRF output. The old `/discovery/channel/*` routes are gone.
  *
- * Phase B (public / private channels, the read key's use, comments) is not
- * built: a named channel is public, found by its `@name` and its name.
+ * Phase B: a channel's name is public or private (section 7); a private
+ * one answers no lookup.
  */
 
 import { DiscoveryHttpError } from "../discovery/client";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
-import { claimChannelHandle, lookupChannelByHandle, type PublicChannelFacts } from "../chat/group-handle";
+import {
+  claimChannelHandle,
+  lookupChannelByHandle,
+  type ChannelHandleWrite,
+  type PublicChannelFacts,
+} from "../chat/group-handle";
 import { HandleWriteError } from "../discovery/handle-lookup";
 import { noteHandleWrite } from "../chat/handle-owed";
 import { loadWasm } from "../wasm";
@@ -43,43 +48,43 @@ export function looksLikeChannelIdHex(input: string): boolean {
 
 /**
  * Claim the channel's `@name` at channel-create time (ADR-0087 section 3):
- * one `discovery-register` token for the claim, one `discovery-lookup` token
- * per name term of the public record.
+ * one `discovery-register` token for the claim; a public name also spends
+ * the terms of its record.
  *
- * @param handle        User-typed handle, with or without a leading `@`.
- * @param channelIdHex  The freshly minted 32-char hex channel id.
- * @param ownerIdentity The identity the PublisherGroup is founded under.
- * @param facts         The channel's name and description, for its record.
- * @returns The canonical name actually claimed.
+ * @returns The canonical name claimed and the certificate the server signed.
  * @throws  `HandleWriteError` with `code === "name-taken"` (409) when the
  *          name is held.
  */
-export async function registerChannelHandle(
-  handle: string,
-  channelIdHex: string,
-  ownerIdentity: WasmIdentity,
-  facts: PublicChannelFacts,
-  accountIdB64?: string | null,
-): Promise<{ readonly handle: string }> {
+export async function registerChannelHandle(args: {
+  readonly handle: string;
+  readonly channelIdHex: string;
+  readonly lineageIdentity: WasmIdentity;
+  readonly currentIdentity: WasmIdentity;
+  readonly isPublic: boolean;
+  readonly facts: PublicChannelFacts;
+  readonly accountIdB64?: string | null;
+}): Promise<ChannelHandleWrite> {
   const wasm = await loadWasm();
   const written = await claimChannelHandle({
     wasm,
-    ownerIdentity,
-    channelId: channelIdFromHex(channelIdHex),
-    handle,
-    facts,
+    lineageIdentity: args.lineageIdentity,
+    currentIdentity: args.currentIdentity,
+    channelId: channelIdFromHex(args.channelIdHex),
+    handle: args.handle,
+    isPublic: args.isPublic,
+    facts: args.facts,
   });
-  if (accountIdB64 !== undefined && accountIdB64 !== null) {
+  if (args.accountIdB64 !== undefined && args.accountIdB64 !== null) {
     await noteHandleWrite({
       kind: "channel",
-      id: channelIdHex,
+      id: args.channelIdHex,
       handle: written.handle,
-      isPublic: true,
+      isPublic: args.isPublic,
       lastWriteMs: Date.now(),
       leaseUntilMs: written.leaseUntilMs,
     }).catch(() => undefined);
   }
-  return { handle: written.handle };
+  return written;
 }
 
 /**

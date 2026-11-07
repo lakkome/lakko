@@ -395,6 +395,9 @@ public data class PersistedMessage(
      * catalog sentence. Nullable with a default like [reply].
      */
     val unsupportedVersion: Long? = null,
+    /** ADR-0087 section 14 — the channel invitation card, standard base64;
+     *  absent on every other row. */
+    val channelInviteB64: String? = null,
     /** ADR-0082 — [ChatMessage.lastOpId]; absent on older rows (= 0). */
     val lastOpId: Long = 0,
     /**
@@ -579,6 +582,11 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
             }
         },
         unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
+        channelInviteB64 = if (msg.deleted) {
+            null
+        } else {
+            msg.channelInvite?.let { java.util.Base64.getEncoder().encodeToString(it) }
+        },
         lastOpId = msg.lastOpId,
         membershipJoined = msg.membershipJoined,
         membershipLeft = msg.membershipLeft,
@@ -627,6 +635,13 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
             )
         },
         unsupportedVersion = unsupportedVersion,
+        channelInvite = channelInviteB64?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        },
         lastOpId = lastOpId,
         membershipJoined = membershipJoined,
         membershipLeft = membershipLeft,

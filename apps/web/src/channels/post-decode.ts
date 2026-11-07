@@ -8,6 +8,7 @@
  */
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { utf8Decode, type DecodedPostResult } from "./composer";
+import type { ParsedBodyResult } from "../chat/attachments";
 import { t } from "../l10n";
 
 /** The post-decode outcomes:
@@ -22,10 +23,27 @@ import { t } from "../l10n";
  *  - `dropped`    — a domain match the core refused as a whole (malformed).
  *                   Dropped, never rendered as text. */
 export type PostDecode =
-  | { readonly kind: "text"; readonly text: string }
+  | {
+      readonly kind: "text";
+      readonly text: string;
+      /** ADR-0087 section 13 — the post's chat envelope (text, attachments),
+       *  when the caller parsed it. Absent on a caller that passes no parser. */
+      readonly body?: Extract<ParsedBodyResult, { kind: "chat" }>;
+    }
+  /** ADR-0087 section 13 — an edit or delete of an earlier post (its cursor
+   *  is the target), never a card of its own. */
+  | { readonly kind: "op"; readonly body: Extract<ParsedBodyResult, { kind: "edit" } | { kind: "delete" }> }
+  /** ADR-0087 section 13a — the channel's ban list, folded, never shown. */
+  | { readonly kind: "ban-list"; readonly plaintext: Uint8Array }
   | { readonly kind: "unreadable" }
   | { readonly kind: "older-key" }
-  | { readonly kind: "meta"; readonly meta: ChannelSharedMeta }
+  | {
+      readonly kind: "meta";
+      readonly meta: ChannelSharedMeta;
+      /** The record's plaintext, for a fold that reads the v3 fields
+       *  (handle, photo, allowed reactions, flag) from it. */
+      readonly plaintext?: Uint8Array;
+    }
   | { readonly kind: "dropped" };
 
 /** The one wasm export the classification needs, structurally
@@ -49,7 +67,13 @@ export type PostPlaintextClassifier = (plaintext: Uint8Array) => {
  * metadata record must never reach the text path, and a record that fails
  * a bound is dropped rather than shown.
  */
-export function toPostDecode(res: DecodedPostResult, classify: PostPlaintextClassifier): PostDecode {
+export function toPostDecode(
+  res: DecodedPostResult,
+  classify: PostPlaintextClassifier,
+  /** Parses a post's plaintext as the chat envelope (ADR-0087 section 13).
+   *  Without it the plaintext is read as UTF-8 text, as before phase B. */
+  parseBody?: (plaintext: Uint8Array) => ParsedBodyResult,
+): PostDecode {
   if (res.plaintext === null) {
     return res.hadSeed ? { kind: "unreadable" } : { kind: "older-key" };
   }
@@ -58,6 +82,7 @@ export function toPostDecode(res: DecodedPostResult, classify: PostPlaintextClas
     if (c.kind === "meta" && c.name !== undefined && c.updatedAtMs !== undefined) {
       return {
         kind: "meta",
+        plaintext: res.plaintext,
         meta: {
           name: c.name,
           description: c.description ?? "",
@@ -69,7 +94,15 @@ export function toPostDecode(res: DecodedPostResult, classify: PostPlaintextClas
       };
     }
     if (c.kind === "malformed") return { kind: "dropped" };
-    return { kind: "text", text: utf8Decode(c.text ?? res.plaintext) };
+    if (c.kind === "ban-list") return { kind: "ban-list", plaintext: res.plaintext };
+    const bytes = c.text ?? res.plaintext;
+    if (parseBody === undefined) return { kind: "text", text: utf8Decode(bytes) };
+    const body = parseBody(bytes);
+    if (body.kind === "chat") return { kind: "text", text: body.text, body };
+    if (body.kind === "edit" || body.kind === "delete") return { kind: "op", body };
+    // Reactions, typing, receipts and service envelopes have no place in a
+    // channel: a post carries none of them.
+    return { kind: "dropped" };
   } finally {
     try {
       c.free?.();
@@ -81,7 +114,10 @@ export function toPostDecode(res: DecodedPostResult, classify: PostPlaintextClas
 
 /** `true` for an outcome the post list must not show at all. */
 export function isHiddenPostDecode(decoded: PostDecode | undefined): boolean {
-  return decoded !== undefined && (decoded.kind === "meta" || decoded.kind === "dropped");
+  return (
+    decoded !== undefined &&
+    (decoded.kind === "meta" || decoded.kind === "dropped" || decoded.kind === "op" || decoded.kind === "ban-list")
+  );
 }
 
 /** The one-line reason under "Not available", in plain words. */

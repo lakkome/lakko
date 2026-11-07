@@ -160,6 +160,7 @@ public final class StorageClient {
     public func putBlob(
         blobId: Data,
         ciphertext: Data,
+        idleDays: UInt8? = nil,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
         guard blobId.count == Self.blobIdLength else {
@@ -190,6 +191,10 @@ public final class StorageClient {
             request.setValue(String(ciphertext.count), forHTTPHeaderField: "Content-Length")
             request.setValue(pass, forHTTPHeaderField: BlobDeleteKeys.passHeader)
             request.setValue(deleteKeyValue, forHTTPHeaderField: BlobDeleteKeys.deleteKeyHeader)
+            // ADR-0087 section 13 — a shorter idle life (a channel file).
+            if let idleDays, idleDays > 0 {
+                request.setValue(String(idleDays), forHTTPHeaderField: "x-lakko-blob-idle-days")
+            }
             let raw: (Data, URLResponse)
             do {
                 let config = AntiCensorshipConfig.current

@@ -249,6 +249,9 @@ class PendingContactsTest {
         mintedAtMs = minted,
         label = "",
         answered = emptyList(),
+        targetId = ByteArray(0),
+        inviteSeed = ByteArray(0),
+        capability = ByteArray(0),
     )
 
     @Test

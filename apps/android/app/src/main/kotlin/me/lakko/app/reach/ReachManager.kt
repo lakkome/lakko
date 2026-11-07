@@ -3,6 +3,7 @@
 
 package me.lakko.app.reach
 
+import uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict
 import android.content.Context
 import android.util.Log
 import java.security.SecureRandom
@@ -1197,6 +1198,10 @@ public class ReachManager internal constructor(
                 .getOrDefault(false),
             links = doc.links.associate { it.linkIdHex to it.expiresAtMs },
             replies = doc.replies.associate { it.scopeHex to it.expiresAtMs },
+            registeredContactVersions = doc.registered
+                .filter { it.kind == ReachKind.CONTACT.name && it.scopeHex == "" }
+                .map { it.version }
+                .toSet(),
         )
     }
 
@@ -1253,6 +1258,44 @@ public class ReachManager internal constructor(
             throw cancellation
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "applying the setting to profiles failed: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * ADR-0060 section 1 (2026-11-06) — what to do with a mailbox row that
+     * [provingKey] admitted, sent by someone who is ([senderIsContact]) or is
+     * not a current contact: `PROCESS`, `PROCESS_AND_REGRANT` (a retired
+     * contact key from a current contact) or `DROP` (a retired contact key
+     * from anyone else). `PROCESS` with no session or a failure.
+     */
+    public fun mailboxRowVerdict(provingKey: ByteArray?, senderIsContact: Boolean): FfiContactKeyRowVerdict {
+        val b = binding.get() ?: return FfiContactKeyRowVerdict.PROCESS
+        return try {
+            uniffi.lakko_ffi_uniffi.mailboxRowContactVerdict(
+                b.accountSeed,
+                versionOf(doc, ReachSlot(ReachKind.CONTACT, "")).toUInt(),
+                provingKey,
+                senderIsContact,
+            )
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "mailbox row verdict failed: ${cause.javaClass.simpleName}")
+            FfiContactKeyRowVerdict.PROCESS
+        }
+    }
+
+    /** Whether [provingKey] is a retired `contact` key of this account (its
+     *  row's sender must be known before it is kept). */
+    public fun isRetiredContactKey(provingKey: ByteArray?): Boolean {
+        val b = binding.get() ?: return false
+        if (provingKey == null || provingKey.size != 32) return false
+        return try {
+            uniffi.lakko_ffi_uniffi.classifyContactKey(
+                b.accountSeed,
+                versionOf(doc, ReachSlot(ReachKind.CONTACT, "")).toUInt(),
+                provingKey,
+            ) is uniffi.lakko_ffi_uniffi.FfiContactKeyStanding.Retired
+        } catch (_: Throwable) {
+            false
         }
     }
 

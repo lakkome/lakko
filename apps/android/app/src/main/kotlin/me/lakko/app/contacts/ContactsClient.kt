@@ -1685,6 +1685,7 @@ public class ContactsClient(
                             messageId = message.id,
                             welcomeBytes = env.body,
                             createdAt = message.createdAt,
+                            reachPk = message.reachPk,
                         ),
                     )
                 }
@@ -1709,7 +1710,7 @@ public class ContactsClient(
                             createdAt = message.createdAt,
                         )
                     }
-                    events.add(IncomingMailboxEvent.ContactAck(ack))
+                    events.add(IncomingMailboxEvent.ContactAck(ack, message.reachPk))
                 }
 
                 MailboxRowKind.CONTACT_REQUEST -> {
@@ -1722,7 +1723,7 @@ public class ContactsClient(
                         createdAt = message.createdAt,
                         myX25519Secret = myX25519Secret,
                     ) ?: continue
-                    events.add(IncomingMailboxEvent.ContactRequest(request))
+                    events.add(IncomingMailboxEvent.ContactRequest(request, message.reachPk))
                 }
             }
         }
@@ -1990,11 +1991,17 @@ public data class PublishedAck(
 /** Discriminated mailbox event surfaced by
  *  [ContactsClient.pollStrangerInbox]. */
 public sealed interface IncomingMailboxEvent {
-    public data class ContactRequest(val request: IncomingContactRequest) : IncomingMailboxEvent
+    public data class ContactRequest(
+        val request: IncomingContactRequest,
+        /** ADR-0060 (2026-11-06) — the reach key that admitted the row. */
+        val reachPk: ByteArray? = null,
+    ) : IncomingMailboxEvent
     public data class Welcome(
         val messageId: Long,
         val welcomeBytes: ByteArray,
         val createdAt: String,
+        /** ADR-0060 (2026-11-06) — the reach key that admitted the row. */
+        val reachPk: ByteArray? = null,
     ) : IncomingMailboxEvent {
         override fun equals(other: Any?): Boolean =
             other is Welcome && messageId == other.messageId &&
@@ -2004,7 +2011,11 @@ public sealed interface IncomingMailboxEvent {
             messageId.hashCode() * 31 + welcomeBytes.contentHashCode() * 31 + createdAt.hashCode()
     }
     /** 1.9b1 — original recipient's accept-reply. */
-    public data class ContactAck(val ack: IncomingContactAck) : IncomingMailboxEvent
+    public data class ContactAck(
+        val ack: IncomingContactAck,
+        /** ADR-0060 (2026-11-06) — the reach key that admitted the row. */
+        val reachPk: ByteArray? = null,
+    ) : IncomingMailboxEvent
 
     /** ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
      *  the receiver checks it against each pending contact

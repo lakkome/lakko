@@ -31,7 +31,8 @@ import { publishPost } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { notePublicRecordChangedHere } from "../chat/handle-owed";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
+import { avatarFromWasm, avatarToWasm, b64ToBytes, bytesToB64, type AvatarData } from "../profile/avatar-model";
 
 /** UX spec §4 — an empty channel name is refused. */
 export const CHANNEL_NEEDS_NAME = (): string => t("channels.meta.error.name_empty");
@@ -48,12 +49,71 @@ export function newestChannelMeta(
   decodes: Iterable<PostDecode>,
   isNewer: ChannelMetaIsNewer,
 ): ChannelSharedMeta | null {
-  let best: ChannelSharedMeta | null = null;
+  return newestChannelMetaRecord(decodes, isNewer)?.meta ?? null;
+}
+
+/** {@link newestChannelMeta} with the record's plaintext, when the decode
+ *  kept it (the v3 fields are re-read from it). */
+export function newestChannelMetaRecord(
+  decodes: Iterable<PostDecode>,
+  isNewer: ChannelMetaIsNewer,
+): { readonly meta: ChannelSharedMeta; readonly plaintext: Uint8Array | undefined } | null {
+  let best: { meta: ChannelSharedMeta; plaintext: Uint8Array | undefined } | null = null;
   for (const d of decodes) {
     if (d.kind !== "meta") continue;
-    if (best === null || isNewer(d.meta.updatedAtMs, best.updatedAtMs)) best = d.meta;
+    if (best === null || isNewer(d.meta.updatedAtMs, best.meta.updatedAtMs)) {
+      best = { meta: d.meta, plaintext: d.plaintext };
+    }
   }
   return best;
+}
+
+/** The ADR-0087 metadata v3 fields of a record's plaintext (`handle`, photo,
+ *  allowed reactions), each absent when the record does not carry it. The
+ *  handle is the SIGNED envelope as received: a reader shows it, a re-issue
+ *  carries it verbatim. Never throws. */
+export function metaV3FromPlaintext(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  plaintext: Uint8Array,
+): Pick<ChannelSharedMeta, "handle" | "avatar" | "reactions"> {
+  const out: { handle?: NonNullable<ChannelSharedMeta["handle"]>; avatar?: AvatarData; reactions?: NonNullable<ChannelSharedMeta["reactions"]> } = {};
+  let c: ReturnType<typeof wasm.classifyChannelPostPlaintext> | undefined;
+  try {
+    c = wasm.classifyChannelPostPlaintext(plaintext);
+    if (c.kind !== "meta") return out;
+    const h = c.handle;
+    if (h !== undefined) {
+      try {
+        out.handle = {
+          handle: h.handle,
+          isPublic: h.public,
+          envelopeB64: bytesToB64(wasm.composeConversationHandleEnvelope(h)),
+        };
+      } finally {
+        h.free();
+      }
+    }
+    const a = avatarFromWasm(c.avatar);
+    if (a !== null) out.avatar = a;
+    const r = c.reactions;
+    if (r !== undefined) {
+      try {
+        const mode = r.mode;
+        if (mode === "all" || mode === "off" || mode === "only") out.reactions = { mode, emoji: [...r.emoji] };
+      } finally {
+        r.free();
+      }
+    }
+  } catch {
+    /* a record the core refuses carries nothing */
+  } finally {
+    try {
+      c?.free();
+    } catch {
+      /* best effort */
+    }
+  }
+  return out;
 }
 
 /**
@@ -79,8 +139,10 @@ export async function foldChannelMeta(
   try {
     const wasm = await loadWasm();
     const isNewer: ChannelMetaIsNewer = (a, b) => wasm.channelMetaIsNewer(a, b);
-    const newest = newestChannelMeta(decodes, isNewer);
-    if (newest === null) return;
+    const record = newestChannelMetaRecord(decodes, isNewer);
+    if (record === null) return;
+    const newest: ChannelSharedMeta =
+      record.plaintext === undefined ? record.meta : { ...record.meta, ...metaV3FromPlaintext(wasm, record.plaintext) };
     const held = channelsState.metaByChannel().get(channelIdHex);
     if (channelMetaSupersedes(newest, held, isNewer)) {
       // Owed before the change is kept (no crash loses it) and after (a
@@ -175,6 +237,11 @@ export async function publishChannelMeta(
     readonly topic?: number;
     readonly language?: string;
     readonly listed?: boolean;
+    /** ADR-0087 v3; each absent field keeps what this device holds. `null`
+     *  clears the photo / the name. */
+    readonly handle?: ChannelSharedMeta["handle"] | null;
+    readonly avatar?: AvatarData | null;
+    readonly reactions?: ChannelSharedMeta["reactions"];
   },
   identity: WasmIdentity,
   stampMs: bigint = BigInt(Date.now()),
@@ -194,16 +261,72 @@ export async function publishChannelMeta(
   const topic = input.topic ?? held?.topic ?? 0;
   const language = input.language ?? held?.language ?? "";
   const listed = input.listed ?? held?.listed ?? false;
-  const plaintext = wasm.composeChannelMeta(name, description, stampMs, topic, language, listed);
+  const handle = input.handle === undefined ? held?.handle : (input.handle ?? undefined);
+  const avatar = input.avatar === undefined ? held?.avatar : (input.avatar ?? undefined);
+  const reactions = input.reactions ?? held?.reactions;
+  const plaintext = composeMetaV3(wasm, { name, description, stampMs, topic, language, listed, handle, avatar, reactions });
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
-  const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs, topic, language, listed };
+  const meta: ChannelSharedMeta = {
+    name,
+    description,
+    updatedAtMs: stampMs,
+    topic,
+    language,
+    listed,
+    ...(handle === undefined ? {} : { handle }),
+    ...(avatar === undefined ? {} : { avatar }),
+    ...(reactions === undefined ? {} : { reactions }),
+  };
   await owePublicChannelRecord(channelIdHex, held, meta);
   await publishPost(channelIdHex, wire, identity);
   channelsActions.setSharedMeta(channelIdHex, meta);
   await owePublicChannelRecord(channelIdHex, held, meta);
   return meta;
+}
+
+/** Compose a v3 record, freeing every wasm handle it builds. */
+function composeMetaV3(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  m: {
+    readonly name: string;
+    readonly description: string;
+    readonly stampMs: bigint;
+    readonly topic: number;
+    readonly language: string;
+    readonly listed: boolean;
+    readonly handle: ChannelSharedMeta["handle"] | undefined;
+    readonly avatar: AvatarData | undefined;
+    readonly reactions: ChannelSharedMeta["reactions"] | undefined;
+  },
+): Uint8Array {
+  let h: Wasm["ConversationHandle"]["prototype"] | undefined;
+  let a: Wasm["ProfileAvatar"]["prototype"] | undefined;
+  let r: Wasm["AllowedReactions"]["prototype"] | undefined;
+  try {
+    if (m.handle !== undefined) {
+      try {
+        h = wasm.decodeConversationHandleEnvelope(b64ToBytes(m.handle.envelopeB64));
+      } catch {
+        h = undefined;
+      }
+    }
+    if (m.avatar !== undefined) a = avatarToWasm<Wasm["ProfileAvatar"]["prototype"]>(wasm, m.avatar);
+    if (m.reactions !== undefined) {
+      r =
+        m.reactions.mode === "off"
+          ? wasm.AllowedReactions.off()
+          : m.reactions.mode === "only"
+            ? wasm.AllowedReactions.only([...m.reactions.emoji])
+            : wasm.AllowedReactions.all();
+    }
+    return wasm.composeChannelMeta(m.name, m.description, m.stampMs, m.topic, m.language, m.listed, h, a, r);
+  } finally {
+    h?.free();
+    a?.free();
+    r?.free();
+  }
 }
 
 /**

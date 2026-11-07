@@ -43,7 +43,7 @@ import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
 import type { FoundName } from "../contacts/contact-list-model";
-import { loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import { isRemovedContact, loadAccepted, loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadPendingContacts, pendingContacts, type PendingContact } from "../contacts/pending-contacts";
 import { loadWasm, type Wasm } from "../wasm";
 import {
@@ -100,6 +100,7 @@ import {
   unbindOwnProfileSync,
 } from "./own-profile-sync";
 import { durableSnapshotHook } from "../chat/persist-hooks";
+import { ownPersonKeyB64, personKeysOf as groupPeopleOf } from "../chat/person-key";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -408,12 +409,22 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /** ADR-0060 section 1 (as amended 2026-11-06): a one-to-one carries the
+   *  current contact grant only while its other person is a contact; a
+   *  removed contact's conversation is not handed the rotated key. */
+  function carriesContactGrant(group: Parameters<typeof isOneToOne>[0]): boolean {
+    if (!isOneToOne(group)) return false;
+    const own = ownPersonKeyB64(chats.identity());
+    const peer = groupPeopleOf(group).find((k) => k !== own);
+    return peer !== undefined && !isRemovedContact(peer);
+  }
+
   /** ADR-0060 — the grants a profile into `groupIdB64` carries. */
   function grantsFor(groupIdB64: string): ReturnType<NonNullable<ReturnType<typeof reachSession>>["profileGrants"]> {
     const session = reachSession();
     const entry = chats.get(groupIdB64);
     if (session === null || entry === undefined) return [];
-    return session.profileGrants(base64Decode(groupIdB64), isOneToOne(entry.group));
+    return session.profileGrants(base64Decode(groupIdB64), isOneToOne(entry.group), carriesContactGrant(entry.group));
   }
 
   async function publishInto(groupIdB64: string, reason: PublishReason): Promise<void> {
@@ -444,7 +455,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const session = reachSession();
     const entry = chats.get(groupIdB64);
     if (session === null || entry === undefined) return null;
-    return session.profileGrantSignature(base64Decode(groupIdB64), isOneToOne(entry.group));
+    return session.profileGrantSignature(base64Decode(groupIdB64), isOneToOne(entry.group), carriesContactGrant(entry.group));
   }
 
   /** The conversations whose profile (and grants) is not published yet. */
@@ -462,7 +473,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         groupIdB64: g.groupIdB64,
         active: readIsActive(g.group) !== false,
         publishedSignature: grantSignatureOf(account, g.groupIdB64),
-        currentSignature: session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group)),
+        currentSignature: session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group), carriesContactGrant(g.group)),
       });
     }
     return owedProfileConversations(rows);
@@ -560,7 +571,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       const due: string[] = [];
       for (const g of groups) {
         if (readIsActive(g.group) === false) continue;
-        const signature = session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group));
+        const signature = session.profileGrantSignature(base64Decode(g.groupIdB64), isOneToOne(g.group), carriesContactGrant(g.group));
         if (grantSignatureOf(account, g.groupIdB64) === signature) continue;
         if (resendInFlight.has(g.groupIdB64)) continue;
         resendInFlight.add(g.groupIdB64);

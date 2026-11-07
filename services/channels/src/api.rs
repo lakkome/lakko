@@ -7,7 +7,8 @@
 //!
 //! | Method | Path | Gate | Purpose |
 //! |---|---|---|---|
-//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex, private?}` (`private` defaults to `false`, applied only when the channel is created). Re-creating a channel never changes its owner key or its flag. |
+//! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex, private?}` (`private` defaults to `false`, applied only when the channel is created). Re-creating a channel never changes its owner key or its flag. A deleted channel's id answers `410 channel-deleted`. |
+//! | `DELETE` | `/v1/channels/:id` | owner proof | Delete the channel (ADR-0087 phase B): every row goes, a tombstone stays. `204`, also on a repeat. Afterwards every route that would answer `404 unknown-channel` for it answers `410 channel-deleted`. |
 //! | `PUT`  | `/v1/channels/:id/access` | owner proof | Set the flag (ADR-0087 section 8): `{"private": bool}`. Going private withdraws the listing and deletes every public seed. |
 //! | `PUT`  | `/v1/channels/:id/public-seed/:epoch` | publisher proof | File a public channel's seed envelope for the epoch (ADR-0087 section 6): the 64 bytes of `lakko_channels::seal_public_seed`, `application/octet-stream`. Immutable once stored. |
 //! | `GET`  | `/v1/channels/:id/public-seed/:epoch` | none | The envelope, raw bytes, `Cache-Control: public, max-age=31536000, immutable`. |
@@ -587,11 +588,58 @@ async fn create_channel(
             )),
         )
             .into_response(),
+        Err(StorageError::ChannelDeleted) => channel_deleted(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(err("storage", e.to_string())),
         )
             .into_response(),
+    }
+}
+
+/// `DELETE /v1/channels/:channel_id` — the owner deletes the channel
+/// (ADR-0087 phase B, 2026-11-05). Owner proof over the request with an
+/// empty body. Every row of the channel goes and a tombstone stays: from
+/// then on its reads answer `410 channel-deleted` (distinct from a
+/// subscriber's `410 subscriber-removed`), so every subscriber's device ends
+/// the channel as deleted, and the id is never registered again. `204`;
+/// a second delete answers `204` without a proof (the channel is gone and
+/// its tombstone is what every reader already learns).
+async fn delete_channel(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    match state.store.is_deleted(channel).await {
+        Ok(true) => return StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {},
+        Err(e) => {
+            tracing::error!(error = %e, "deleted-channel lookup failed");
+            return internal_error();
+        },
+    }
+    match state.store.owner_pubkey(channel).await {
+        Ok(Some(_)) => {},
+        Ok(None) => return unknown_channel(channel),
+        Err(e) => {
+            tracing::error!(error = %e, "owner key lookup failed");
+            return internal_error();
+        },
+    }
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    match state.store.delete_channel(channel, unix_ms()).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "channel delete failed");
+            internal_error()
+        },
     }
 }
 
@@ -625,14 +673,7 @@ async fn publish_post(
         .await
     {
         Ok(stored) => (StatusCode::CREATED, Json(PostView::from_stored(stored))).into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "unknown-channel",
-                "register the channel via POST /v1/channels first",
-            )),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::EmptyPost) => (
             StatusCode::BAD_REQUEST,
             Json(err("empty-post", "post body cannot be empty")),
@@ -685,11 +726,7 @@ async fn fetch_posts(
             };
             (StatusCode::OK, Json(resp)).into_response()
         },
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::BadChannelId) => (
             StatusCode::BAD_REQUEST,
             Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
@@ -751,16 +788,7 @@ async fn subscribe(
     };
     let private = match state.store.is_private(channel).await {
         Ok(Some(p)) => p,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(err(
-                    "unknown-channel",
-                    "register the channel via POST /v1/channels first",
-                )),
-            )
-                .into_response()
-        },
+        Ok(None) => return unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "channel flag lookup failed");
             return internal_error();
@@ -824,14 +852,7 @@ async fn finish_subscribe(
         },
         Err(StorageError::UnknownChannel) => {
             release_claim(state, channel, claimed).await;
-            (
-                StatusCode::NOT_FOUND,
-                Json(err(
-                    "unknown-channel",
-                    "register the channel via POST /v1/channels first",
-                )),
-            )
-                .into_response()
+            unknown_channel(channel)
         },
         Err(e) => {
             release_claim(state, channel, claimed).await;
@@ -1007,11 +1028,7 @@ async fn list_subscribers(
             }),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(err("internal", "unexpected error")),
@@ -1037,11 +1054,7 @@ async fn subscriber_count(
     }
     match state.store.subscriber_count(channel).await {
         Ok(count) => (StatusCode::OK, Json(SubscriberCountResponse { count })).into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "subscriber count failed");
             internal_error()
@@ -1117,11 +1130,7 @@ async fn deliver_envelope(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => (
             StatusCode::NOT_FOUND,
             Json(err(
@@ -1224,11 +1233,7 @@ async fn fetch_envelope(
             )
                 .into_response()
         },
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1281,11 +1286,7 @@ async fn fetch_envelopes(
                 .collect();
             (StatusCode::OK, Json(FetchEnvelopesResponse { envelopes })).into_response()
         },
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => no_subscriber_row(&state, channel, sub).await,
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1309,11 +1310,7 @@ async fn fetch_epoch(
     };
     match state.store.current_epoch(channel).await {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(err("internal", "unexpected error")),
@@ -1384,11 +1381,7 @@ async fn rotate_channel(
         .await
     {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::UnknownSubscriber) => (
             StatusCode::CONFLICT,
             Json(err(
@@ -1508,11 +1501,7 @@ async fn rotate_stage(
             }),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::StaleTargetEpoch { expected, got }) => (
             StatusCode::CONFLICT,
             Json(err(
@@ -1573,11 +1562,7 @@ async fn rotate_commit(
     };
     match state.store.commit_rotation(channel, req.target_epoch).await {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::StaleTargetEpoch { expected, got }) => (
             StatusCode::CONFLICT,
             Json(err(
@@ -1687,13 +1672,9 @@ fn bad_member_signature() -> Response {
         .into_response()
 }
 
-fn member_store_error(e: StorageError) -> Response {
+fn member_store_error(channel: ChannelId, e: StorageError) -> Response {
     match e {
-        StorageError::UnknownChannel => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        StorageError::UnknownChannel => unknown_channel(channel),
         StorageError::UnknownSubscriber => (
             StatusCode::NOT_FOUND,
             Json(err(
@@ -1765,7 +1746,7 @@ async fn put_member_card(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => member_store_error(e),
+        Err(e) => member_store_error(channel, e),
     }
 }
 
@@ -1786,7 +1767,7 @@ async fn delete_member_card(
     }
     match state.store.delete_member_card(channel, sub).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => member_store_error(e),
+        Err(e) => member_store_error(channel, e),
     }
 }
 
@@ -1850,7 +1831,7 @@ async fn unsubscribe(
     }
     match state.store.unsubscribe(channel, sub).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => member_store_error(e),
+        Err(e) => member_store_error(channel, e),
     }
 }
 
@@ -1880,11 +1861,7 @@ async fn remove_subscriber(
             )),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "remove subscriber failed");
             internal_error()
@@ -2001,7 +1978,7 @@ async fn list_member_cards(
             )
                 .into_response()
         },
-        Err(e) => member_store_error(e),
+        Err(e) => member_store_error(channel, e),
     }
 }
 
@@ -2119,11 +2096,7 @@ async fn put_listing(
         )
             .into_response(),
         Err(StorageError::ChannelPrivate) => channel_private(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "put listing failed");
             internal_error()
@@ -2255,11 +2228,7 @@ async fn replace_owner(
             )),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "replace owner failed");
             internal_error()
@@ -2309,11 +2278,7 @@ async fn appoint_copublisher(
             )),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => (
-            StatusCode::NOT_FOUND,
-            Json(err("unknown-channel", "no such channel")),
-        )
-            .into_response(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "appoint co-publisher failed");
             internal_error()
@@ -2367,12 +2332,54 @@ fn channel_private() -> Response {
         .into_response()
 }
 
-fn unknown_channel() -> Response {
-    (
+/// Marks a `404 unknown-channel` response with the channel it names, so
+/// [`deleted_channel_layer`] can answer `410 channel-deleted` instead when
+/// the owner deleted it.
+#[derive(Clone, Copy)]
+pub(crate) struct MissingChannel(pub(crate) ChannelId);
+
+fn unknown_channel(channel: ChannelId) -> Response {
+    let mut resp = (
         StatusCode::NOT_FOUND,
         Json(err("unknown-channel", "no such channel")),
     )
+        .into_response();
+    resp.extensions_mut().insert(MissingChannel(channel));
+    resp
+}
+
+/// `410 channel-deleted`: the owner deleted the channel (ADR-0087 phase B,
+/// 2026-11-05). Distinct from `410 subscriber-removed`: every subscriber
+/// gets it, and the client ends the channel as deleted.
+pub(crate) fn channel_deleted() -> Response {
+    (
+        StatusCode::GONE,
+        Json(err("channel-deleted", "the owner deleted this channel")),
+    )
         .into_response()
+}
+
+/// Turn a `404 unknown-channel` for a channel its owner deleted into
+/// `410 channel-deleted`. Runs after every handler; it reads the store only
+/// when a handler answered `unknown-channel`, so no ordinary request pays
+/// for it.
+async fn deleted_channel_layer(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let resp = next.run(req).await;
+    let Some(MissingChannel(channel)) = resp.extensions().get::<MissingChannel>().copied() else {
+        return resp;
+    };
+    match state.store.is_deleted(channel).await {
+        Ok(true) => channel_deleted(),
+        Ok(false) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "deleted-channel lookup failed");
+            resp
+        },
+    }
 }
 
 /// `PUT /v1/channels/:channel_id/access` — set the channel's flag
@@ -2406,7 +2413,7 @@ async fn put_access(
             }
             StatusCode::NO_CONTENT.into_response()
         },
-        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "set channel flag failed");
             internal_error()
@@ -2485,7 +2492,7 @@ async fn put_public_seed(
         Ok(PublicSeedOutcome::Stored | PublicSeedOutcome::AlreadyStored) => {
             StatusCode::NO_CONTENT.into_response()
         },
-        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(StorageError::ChannelPrivate) => channel_private(),
         Err(StorageError::PublicSeedEpochInFuture { current, got }) => (
             StatusCode::CONFLICT,
@@ -2595,7 +2602,7 @@ async fn list_invite_keys(
             }),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "list invite keys failed");
             internal_error()
@@ -2649,7 +2656,7 @@ async fn put_invite_key(
             )),
         )
             .into_response(),
-        Err(StorageError::UnknownChannel) => unknown_channel(),
+        Err(StorageError::UnknownChannel) => unknown_channel(channel),
         Err(e) => {
             tracing::error!(error = %e, "put invite key failed");
             internal_error()
@@ -2831,6 +2838,10 @@ pub(crate) fn unix_ms() -> u64 {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/channels", post(create_channel))
+        .route(
+            "/v1/channels/{channel_id}",
+            axum::routing::delete(delete_channel),
+        )
         .route("/v1/channels/{channel_id}/owner", put(replace_owner))
         .route("/v1/channels/{channel_id}/access", put(put_access))
         .route(
@@ -2900,6 +2911,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/version", get(version))
         // ADR-0087 section 13a — comments and reactions.
         .merge(crate::feedback_api::routes())
+        // ADR-0087 phase B: a deleted channel's `unknown-channel` is a 410.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            deleted_channel_layer,
+        ))
         .with_state(state)
 }
 

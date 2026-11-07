@@ -153,6 +153,16 @@ describe("running a recorded PublisherGroup commit", () => {
     expect(again.finished()?.done).toEqual(["reseal", "journal"]);
   });
 
+  it("a publisher removal runs like a rotation: journal then reseal, its journal step deferred alone", async () => {
+    const REMOVAL: PublisherCommitEntry = { ...ROTATION, kind: "removal" };
+    const t = ports({ failAt: "commit:rotation" });
+    await runPublisherCommit(REMOVAL, t.p);
+    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
+    expect(t.finished()).toBeNull();
+    expect(remainingSteps(t.saved.at(-1)!)).toEqual(["journal"]);
+    expect(parsePublisherCommitEntry(JSON.parse(JSON.stringify(REMOVAL)))?.kind).toBe("removal");
+  });
+
   it("a rotation commit the DS refused (409) is lost and does not hold the rotation", async () => {
     const t = ports({ failAt: "commit:rotation", lost: true });
     await runPublisherCommit(ROTATION, t.p);

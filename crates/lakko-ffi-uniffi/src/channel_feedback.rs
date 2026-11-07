@@ -25,10 +25,12 @@ use lakko_channels::comment::{
     COMMENT_TEXT_MAX_BYTES,
 };
 use lakko_channels::owner::OWNER_PROOF_NONCE_LEN;
-use lakko_channels::reaction::{ReactionKey, ReactionLabel, REACTION_LABEL_LEN};
+use lakko_channels::reaction::{
+    CommentReactionKey, ReactionKey, ReactionLabel, REACTION_LABEL_LEN,
+};
 use lakko_channels::write_key::{
-    new_comment_nonce as rust_new_comment_nonce, CommentWriteKey, ReactionWriteKey,
-    COMMENT_NONCE_LEN, WRITE_PROOF_HEADER_NAME,
+    new_comment_nonce as rust_new_comment_nonce, CommentReactionWriteKey, CommentWriteKey,
+    ReactionWriteKey, COMMENT_NONCE_LEN, WRITE_PROOF_HEADER_NAME,
 };
 use lakko_channels::{EpochId, CHANNEL_ID_LEN};
 
@@ -379,6 +381,82 @@ impl ChannelReactionKey {
     }
 }
 
+/// The comment-reaction key of one channel epoch (ADR-0087 section 13a,
+/// phase B): it makes the labels of reactions on comments under posts sealed
+/// in that epoch. Separate from [`ChannelReactionKey`] so a comment's label
+/// can never equal a post's.
+#[derive(uniffi::Object)]
+pub struct ChannelCommentReactionKey {
+    inner: CommentReactionKey,
+}
+
+#[uniffi::export]
+impl ChannelCommentReactionKey {
+    /// The comment-reaction key of `channel_id` at `epoch_id`, from the
+    /// 32-byte seed of the epoch the commented post was sealed in.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Channels`] for a wrong-length seed or channel id.
+    #[uniffi::constructor]
+    pub fn derive(
+        epoch_seed: Vec<u8>,
+        channel_id: Vec<u8>,
+        epoch_id: u32,
+    ) -> Result<Arc<Self>, FfiError> {
+        let seed = content_seed(&epoch_seed)?;
+        let channel = channel_id_from_vec(channel_id)?;
+        Ok(Arc::new(Self {
+            inner: CommentReactionKey::derive(&seed, &channel, EpochId::new(epoch_id))?,
+        }))
+    }
+
+    /// The 16-byte label of `emoji` on the comment `comment_cursor` under
+    /// the post at `post_cursor`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Channels`] when `emoji` fails the chat reaction rule.
+    pub fn label(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: String,
+    ) -> Result<Vec<u8>, FfiError> {
+        Ok(self
+            .inner
+            .label(post_cursor, comment_cursor, &emoji)?
+            .to_vec())
+    }
+
+    /// Resolve the service's label counts for one comment against
+    /// `candidates`; the rules of [`ChannelReactionKey::resolve_counts`].
+    pub fn resolve_counts(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        candidates: Vec<String>,
+        counts: Vec<FfiReactionLabelCount>,
+    ) -> Vec<FfiReactionCount> {
+        let labels = self
+            .inner
+            .labels_for_comment(post_cursor, comment_cursor, &candidates);
+        let counts: Vec<(ReactionLabel, u64)> = counts
+            .into_iter()
+            .filter_map(|c| {
+                <ReactionLabel>::try_from(c.label.as_slice())
+                    .ok()
+                    .map(|l| (l, c.count))
+            })
+            .collect();
+        labels
+            .resolve_counts(&counts)
+            .into_iter()
+            .map(|(emoji, count)| FfiReactionCount { emoji, count })
+            .collect()
+    }
+}
+
 /// Length of a reaction label: 16.
 #[uniffi::export]
 #[must_use]
@@ -419,6 +497,62 @@ impl ChannelReactionWriteKey {
                 &account_identity.inner.ed25519_seed_bytes(),
                 &channel,
                 post_cursor,
+                label,
+            ),
+        }))
+    }
+
+    /// The 32-byte public half the reaction row names.
+    pub fn public_key(&self) -> Vec<u8> {
+        self.inner.public_key().to_vec()
+    }
+
+    /// The `x-lakko-channel-write-proof` header value for adding the
+    /// reaction.
+    pub fn sign_add(&self) -> String {
+        self.inner.sign_add(now_ms(), fresh_nonce()).encode()
+    }
+
+    /// The header value for taking the reaction off.
+    pub fn sign_delete(&self) -> String {
+        self.inner.sign_delete(now_ms(), fresh_nonce()).encode()
+    }
+}
+
+/// The account's key for one reaction on one comment (ADR-0087 phase B): it
+/// signs adding and taking off that reaction, nothing else
+/// (`POST .../posts/{post}/comments/{comment}/reactions`, op 5;
+/// `DELETE .../comments/{comment}/reactions/{writer}/{label}`, op 6).
+#[derive(uniffi::Object)]
+pub struct ChannelCommentReactionWriteKey {
+    inner: CommentReactionWriteKey,
+}
+
+#[uniffi::export]
+impl ChannelCommentReactionWriteKey {
+    /// The key of reaction `label` (from `ChannelCommentReactionKey.label`)
+    /// on the comment `comment_cursor` under the post at `post_cursor` in
+    /// `channel_id`, for `account_identity`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Channels`] for a wrong-length channel id or label.
+    #[uniffi::constructor]
+    pub fn new(
+        account_identity: &Identity,
+        channel_id: Vec<u8>,
+        post_cursor: u64,
+        comment_cursor: u64,
+        label: Vec<u8>,
+    ) -> Result<Arc<Self>, FfiError> {
+        let channel = channel_id_from_vec(channel_id)?;
+        let label = fixed::<REACTION_LABEL_LEN>("label", &label)?;
+        Ok(Arc::new(Self {
+            inner: CommentReactionWriteKey::new(
+                &account_identity.inner.ed25519_seed_bytes(),
+                &channel,
+                post_cursor,
+                comment_cursor,
                 label,
             ),
         }))

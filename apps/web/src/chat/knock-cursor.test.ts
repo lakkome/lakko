@@ -94,17 +94,17 @@ describe("the knock cursor belongs to the signed-in account", () => {
 });
 
 describe("takeKnockReadSlot", () => {
-  it("allows one read per group per 10 s, however often the poll returns", () => {
-    expect(KNOCK_READ_MIN_INTERVAL_MS).toBe(10_000);
+  it("allows one read per group per minute, however often the poll returns", () => {
+    expect(KNOCK_READ_MIN_INTERVAL_MS).toBe(60_000);
     const t0 = 1_000_000;
     expect(takeKnockReadSlot("g", t0)).toBe(true);
     // A burst of short journal fetches (two a second, the rate iOS was
     // measured at) gets no further read inside the window.
-    for (let t = t0 + 500; t < t0 + 10_000; t += 500) {
+    for (let t = t0 + 500; t < t0 + 60_000; t += 500) {
       expect(takeKnockReadSlot("g", t)).toBe(false);
     }
-    expect(takeKnockReadSlot("g", t0 + 10_000)).toBe(true);
-    expect(takeKnockReadSlot("g", t0 + 10_001)).toBe(false);
+    expect(takeKnockReadSlot("g", t0 + 60_000)).toBe(true);
+    expect(takeKnockReadSlot("g", t0 + 60_001)).toBe(false);
   });
 
   it("each group has its own window", () => {

@@ -1189,7 +1189,7 @@ struct TotpEnrollView: View {
             case .confirm(let otpauthUri, let secretB32):
                 Text(l10n.t("settings.recovery.totp.scan"))
                 .font(.footnote)
-                QrTextImageView(text: otpauthUri, size: 220)
+                QrTextImageView(text: otpauthUri)
                 keyLine(secretB32)
                 TextField(l10n.t("recovery.totp.code_label"), text: $code)
                     .textFieldStyle(.roundedBorder)

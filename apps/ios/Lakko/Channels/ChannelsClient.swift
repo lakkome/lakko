@@ -50,13 +50,13 @@ public final class ChannelsClient {
     public let baseURL: String
     private let session: URLSession
     /// The anonymous session the token route (subscribe) travels on.
-    private let anonymousSession: URLSession
-    private let tokens: AnonTokenSource
-    private let encoder: JSONEncoder
+    let anonymousSession: URLSession
+    let tokens: AnonTokenSource
+    let encoder: JSONEncoder
     private let decoder: JSONDecoder
     /// How a request on the session reaches the server (the anti-censorship
     /// tunnel when armed). A seam so tests can see the exact request sent.
-    private let transport: ChannelsTransport
+    let transport: ChannelsTransport
     /// ADR-0059 section 9 — the publisher role per (account, channel).
     let roles: ChannelPublisherRoleCache
 
@@ -139,14 +139,16 @@ public final class ChannelsClient {
     /// `accountIdentity` derives for it (ADR-0059 section 1). The same key
     /// again is idempotent; another key for an existing id is refused with
     /// 409 `channel-exists`.
-    public func createChannel(channelIdHex: String, accountIdentity: Identity) async throws -> String {
-        struct Req: Encodable { let channel_id: String; let owner_pubkey_hex: String }
+    public func createChannel(
+        channelIdHex: String, accountIdentity: Identity, isPrivate: Bool = false
+    ) async throws -> String {
+        struct Req: Encodable { let channel_id: String; let owner_pubkey_hex: String; let `private`: Bool }
         struct Resp: Decodable { let channel_id: String }
         let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
         let ownerHex = signer.verifyingKey().map { String(format: "%02x", $0) }.joined()
         let resp: Resp = try await postJson(
             endpoint: "/v1/channels",
-            body: Req(channel_id: channelIdHex, owner_pubkey_hex: ownerHex)
+            body: Req(channel_id: channelIdHex, owner_pubkey_hex: ownerHex, private: isPrivate)
         )
         roles.set(.owner, forKey: ownerHex)
         return resp.channel_id
@@ -320,6 +322,32 @@ public final class ChannelsClient {
             throw ChannelsApiError(
                 status: http.statusCode,
                 code: "unknown",
+                detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+        }
+    }
+
+    /// `DELETE /v1/channels/:id` (ADR-0087 phase B) — the owner deletes the
+    /// channel: owner proof over an empty body, `204` (also on a repeat).
+    /// Afterwards the service answers `410 channel-deleted` for it.
+    public func deleteChannel(channelIdHex: String, accountIdentity: Identity) async throws {
+        let path = "/v1/channels/\(channelIdHex)"
+        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        var request = URLRequest(url: try buildURL(endpoint: path))
+        request.httpMethod = "DELETE"
+        request.setValue(
+            signer.sign(method: "DELETE", path: path, query: "", body: Data()),
+            forHTTPHeaderField: channelOwnerProofHeaderName())
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) || http.statusCode == 410 else {
+            struct ErrEnvelope: Decodable { let code: String; let detail: String }
+            if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
+                throw ChannelsApiError(status: http.statusCode, code: body.code, detail: body.detail)
+            }
+            throw ChannelsApiError(
+                status: http.statusCode, code: "unknown",
                 detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
     }
@@ -892,14 +920,14 @@ public final class ChannelsClient {
         return try decode(data: data, http: http)
     }
 
-    private func getJson<R: Decodable>(endpoint: String) async throws -> R {
+    func getJson<R: Decodable>(endpoint: String) async throws -> R {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         return try await execute(request: request)
     }
 
-    private func execute<R: Decodable>(request: URLRequest) async throws -> R {
+    func execute<R: Decodable>(request: URLRequest) async throws -> R {
         let (data, response) = try await transport(request)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(
@@ -911,7 +939,7 @@ public final class ChannelsClient {
         return try decode(data: data, http: http)
     }
 
-    private func decode<R: Decodable>(data: Data, http: HTTPURLResponse) throws -> R {
+    func decode<R: Decodable>(data: Data, http: HTTPURLResponse) throws -> R {
         if !(200..<300).contains(http.statusCode) {
             // Server promises {code, detail} on every 4xx/5xx.
             // The decoded shape lives on the type
@@ -935,7 +963,7 @@ public final class ChannelsClient {
         return try decoder.decode(R.self, from: data)
     }
 
-    private func buildURL(endpoint: String) throws -> URL {
+    func buildURL(endpoint: String) throws -> URL {
         guard let url = URL(string: baseURL + endpoint) else {
             throw ChannelsApiError(
                 status: -1,
@@ -1061,6 +1089,15 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
     public let status: Int
     public let code: String
     public let detail: String
+
+    /// ADR-0087 phase B — the owner deleted the channel: every route answers
+    /// `410 channel-deleted` for it.
+    public static let channelDeletedCode = "channel-deleted"
+
+    /// Whether `error` says the channel was deleted.
+    public static func isChannelDeleted(_ error: Error) -> Bool {
+        (error as? ChannelsApiError)?.code == channelDeletedCode
+    }
 
     /// The one code the server answers every refused publisher proof with
     /// (`services/channels/src/owner_auth.rs`), whichever step failed.

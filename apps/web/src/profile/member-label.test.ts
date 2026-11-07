@@ -18,7 +18,7 @@ const key = new Uint8Array(32).fill(0xa1);
 describe("member labels", () => {
   it("keep a resolved name", () => {
     const r = resolveDisplay({ signatureKey: key, rename: "Anna" });
-    expect(memberNameOf(r)).toBe("Anna");
+    expect(memberNameOf(r, "a test label")).toBe("Anna");
     expect(memberListLabelOf(r)).toBe("Anna");
   });
 
@@ -29,13 +29,13 @@ describe("member labels", () => {
       verification: "verified",
     });
     expect(memberListLabelOf(r)).toBe("Anna · @anna");
-    expect(memberNameOf(r)).toBe("Anna");
+    expect(memberNameOf(r, "a test label")).toBe("Anna");
   });
 
   it("never show a fingerprint", () => {
     const r = resolveDisplay({ signatureKey: key });
     expect(r.source).toBe("fingerprint");
-    expect(memberNameOf(r)).toBe(UNNAMED_MEMBER());
+    expect(memberNameOf(r, "a test label")).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).not.toMatch(/[0-9a-f]{4} [0-9a-f]{4}/);
   });

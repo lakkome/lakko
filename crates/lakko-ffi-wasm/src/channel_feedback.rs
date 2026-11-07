@@ -22,10 +22,12 @@ use lakko_channels::comment::{
     seal_comment as rust_seal_comment, Comment, CommentAuthor, CommentError, CommentPlace,
     OpenedComment, COMMENT_TEXT_MAX_BYTES,
 };
-use lakko_channels::reaction::{ReactionKey, ReactionLabel, REACTION_LABEL_LEN};
+use lakko_channels::reaction::{
+    CommentReactionKey, ReactionKey, ReactionLabel, REACTION_LABEL_LEN,
+};
 use lakko_channels::write_key::{
-    new_comment_nonce as rust_new_comment_nonce, CommentWriteKey, ReactionWriteKey,
-    COMMENT_NONCE_LEN, WRITE_PROOF_HEADER_NAME,
+    new_comment_nonce as rust_new_comment_nonce, CommentReactionWriteKey, CommentWriteKey,
+    ReactionWriteKey, COMMENT_NONCE_LEN, WRITE_PROOF_HEADER_NAME,
 };
 use lakko_channels::{EpochId, CHANNEL_ID_LEN};
 use wasm_bindgen::prelude::*;
@@ -424,6 +426,110 @@ impl ChannelReactionKey {
     }
 }
 
+/// The comment-reaction key of one channel epoch (ADR-0087 section 13a,
+/// phase B): labels of reactions on comments under posts sealed in that
+/// epoch, never equal to a post's.
+#[wasm_bindgen]
+pub struct ChannelCommentReactionKey {
+    inner: CommentReactionKey,
+}
+
+#[wasm_bindgen]
+impl ChannelCommentReactionKey {
+    /// The comment-reaction key of `channelId` at `epochId`, from the seed of
+    /// the epoch the commented post was sealed in.
+    ///
+    /// # Errors
+    ///
+    /// Throws `reaction.<code>: ...`.
+    #[wasm_bindgen]
+    pub fn derive(
+        epoch_seed: &[u8],
+        channel_id: &[u8],
+        epoch_id: u32,
+    ) -> Result<ChannelCommentReactionKey, String> {
+        let seed = seed32("reaction", epoch_seed)?;
+        let channel = channel16("reaction", channel_id)?;
+        CommentReactionKey::derive(&seed, &channel, EpochId::new(epoch_id))
+            .map(|inner| Self { inner })
+            .map_err(|e| format!("reaction.keyDerivation: {e}"))
+    }
+
+    /// The 16-byte label of `emoji` on the comment `commentCursor` under the
+    /// post at `postCursor`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `reaction.invalidEmoji: ...`.
+    #[wasm_bindgen]
+    pub fn label(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.inner
+            .label(post_cursor, comment_cursor, emoji)
+            .map(|l| l.to_vec())
+            .map_err(|e| format!("reaction.invalidEmoji: {e}"))
+    }
+
+    /// The emoji that resolved for one comment, in candidate order; the
+    /// counts are [`Self::resolve_count_values`] index for index.
+    #[wasm_bindgen(js_name = resolveCountEmoji)]
+    #[must_use]
+    pub fn resolve_count_emoji(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        candidates: Vec<String>,
+        labels: &[u8],
+        counts: Vec<u64>,
+    ) -> Vec<String> {
+        self.resolve(post_cursor, comment_cursor, &candidates, labels, &counts)
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect()
+    }
+
+    /// The counts that go with [`Self::resolve_count_emoji`].
+    #[wasm_bindgen(js_name = resolveCountValues)]
+    #[must_use]
+    pub fn resolve_count_values(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        candidates: Vec<String>,
+        labels: &[u8],
+        counts: Vec<u64>,
+    ) -> Vec<u64> {
+        self.resolve(post_cursor, comment_cursor, &candidates, labels, &counts)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect()
+    }
+}
+
+impl ChannelCommentReactionKey {
+    fn resolve(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        candidates: &[String],
+        labels: &[u8],
+        counts: &[u64],
+    ) -> Vec<(String, u64)> {
+        let pairs: Vec<(ReactionLabel, u64)> = labels
+            .chunks_exact(REACTION_LABEL_LEN)
+            .zip(counts.iter())
+            .filter_map(|(l, n)| ReactionLabel::try_from(l).ok().map(|l| (l, *n)))
+            .collect();
+        self.inner
+            .labels_for_comment(post_cursor, comment_cursor, candidates)
+            .resolve_counts(&pairs)
+    }
+}
+
 /// Length of a reaction label: 16.
 #[wasm_bindgen(js_name = channelReactionLabelLen)]
 #[must_use]
@@ -462,6 +568,63 @@ impl ChannelReactionWriteKey {
                 &account_identity.mls_identity().ed25519_seed_bytes(),
                 &channel,
                 post_cursor,
+                label,
+            ),
+        })
+    }
+
+    /// The 32-byte public half the reaction row names.
+    #[wasm_bindgen(getter, js_name = publicKey)]
+    #[must_use]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.inner.public_key().to_vec()
+    }
+
+    /// The write-proof header value for adding the reaction.
+    #[wasm_bindgen(js_name = signAdd)]
+    #[must_use]
+    pub fn sign_add(&self) -> String {
+        self.inner.sign_add(now_ms(), fresh_nonce()).encode()
+    }
+
+    /// The write-proof header value for taking the reaction off.
+    #[wasm_bindgen(js_name = signDelete)]
+    #[must_use]
+    pub fn sign_delete(&self) -> String {
+        self.inner.sign_delete(now_ms(), fresh_nonce()).encode()
+    }
+}
+
+/// The account's key for one reaction on one comment (ADR-0087 phase B).
+#[wasm_bindgen]
+pub struct ChannelCommentReactionWriteKey {
+    inner: CommentReactionWriteKey,
+}
+
+#[wasm_bindgen]
+impl ChannelCommentReactionWriteKey {
+    /// The key of reaction `label` on the comment `commentCursor` under the
+    /// post at `postCursor`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `write.badLength: ...`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        account_identity: &Identity,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_cursor: u64,
+        label: &[u8],
+    ) -> Result<ChannelCommentReactionWriteKey, String> {
+        let channel = channel16("write", channel_id)?;
+        let label = fixed::<REACTION_LABEL_LEN>("write", "label", label)?;
+        Ok(Self {
+            inner: CommentReactionWriteKey::new(
+                &account_identity.mls_identity().ed25519_seed_bytes(),
+                &channel,
+                post_cursor,
+                comment_cursor,
                 label,
             ),
         })

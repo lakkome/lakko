@@ -65,7 +65,6 @@ import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
 import { t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
-import { MembershipEndBanners } from "./MembershipEndNotices";
 import { RestoredNotice, useRestoredList } from "./RestoredNotice";
 import { RecallDoneNotice } from "../devices/RecallDoneNotice";
 import { KeysRotatedNotice } from "../devices/KeysRotatedNotice";
@@ -100,6 +99,7 @@ import {
 } from "../contacts/pending-contacts";
 import { displayLocale } from "../l10n/display-locale";
 import { channelsState } from "../state/channels-state";
+import { channelAvatarKey } from "../channels/channel-avatar";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -183,6 +183,8 @@ function ChannelRow(props: {
   row: ConversationRow;
   /** Pinned inside the open folder (a channel has no global pin). */
   pinned: boolean;
+  /** The channel is the one open beside the list. */
+  selected: boolean;
   onMenu: (x: number, y: number) => void;
 }): JSX.Element {
   const press = createLongPress((x, y) => props.onMenu(x, y));
@@ -190,6 +192,7 @@ function ChannelRow(props: {
     <A
       href={paths.channel(props.row.id)}
       class="lk-row"
+      classList={{ selected: props.selected }}
       activeClass=""
       inactiveClass=""
       onContextMenu={(e) => {
@@ -203,7 +206,7 @@ function ChannelRow(props: {
       onPointerLeave={press.onPointerLeave}
       onClick={(e) => press.swallowClick(e)}
     >
-      <Avatar label={props.row.title} id={props.row.id} personKey={props.row.personKey} />
+      <Avatar label={props.row.title} id={props.row.id} conversationKey={channelAvatarKey(props.row.id)} />
       <div class="lk-row-body">
         <div class="lk-row-line">
           <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
@@ -423,16 +426,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return local.length > 0 ? local : null;
   };
 
-  /** A channel the people search found by its handle opens its subscribe
-   *  page. */
-  /** A channel from search: its Subscribe subscribes in one step and the
-   *  channel opens under its name (`docs/ux/group-and-channel-privacy.md`
-   *  section 5.1); a channel this account follows just opens. */
-  const openFoundChannel = (channelIdHex: string, handle: string, name?: string, subscribe?: boolean): void => {
+  /** A channel from search opens where every conversation opens (ADR-0087
+   *  section 12). Subscribing already happened on the card (UX 5.1). */
+  const openFoundChannel = (channelIdHex: string): void => {
     setQuery("");
-    navigate(paths.channelSubscribe(channelIdHex), {
-      state: { handle, ...(name !== undefined ? { name } : {}), ...(subscribe === true ? { subscribe: true } : {}) },
-    });
+    navigate(paths.channel(channelIdHex));
   };
 
   /** ADR-0050 section 2.9 — a device added through another device was
@@ -591,7 +589,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
       </label>
-      <MembershipEndBanners activeSlug={props.activeGroupIdB64} />
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />
@@ -697,6 +694,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   <ChannelRow
                     row={row}
                     pinned={currentFolder() !== null && pinnedHere(row)}
+                    selected={props.activeGroupIdB64 === row.id}
                     onMenu={(x, y) => setMenu({ row, g: null, x, y })}
                   />
                 );

@@ -1352,9 +1352,137 @@
       "comment": "Screen reader label of the 'Can't decrypt' badge when the participant has no name.",
       "security_critical": true
     },
+    "channel_reactions.all_sub": {
+      "text": "Subscribers can react with any emoji.",
+      "comment": "Channel Reactions screen, under All reactions."
+    },
+    "channel_reactions.none_sub": {
+      "text": "Subscribers can't react to posts.",
+      "comment": "Channel Reactions screen, under No reactions."
+    },
+    "channel_reactions.some_sub": {
+      "text": "Subscribers can react only with the emoji you choose.",
+      "comment": "Channel Reactions screen, under Some reactions."
+    },
+    "channel_type.confirm.private.body": {
+      "text": "It leaves search and Discover. People can subscribe only if you invite them. Everyone subscribed stays.",
+      "comment": "Dialog body before a public channel becomes private."
+    },
+    "channel_type.confirm.private.title": {
+      "text": "Make this channel private?",
+      "comment": "Dialog title before a public channel becomes private."
+    },
+    "channel_type.confirm.public.body": {
+      "text": "Anyone can find it and read it, and Lakko may suggest it in Discover. Its name, photo and description become visible to everyone. Posts from before stay readable only by people who already subscribe.",
+      "comment": "Dialog body before a private channel becomes public."
+    },
+    "channel_type.confirm.public.title": {
+      "text": "Make this channel public?",
+      "comment": "Dialog title before a private channel becomes public."
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "The old @name stops working now. It stays reserved for this channel for 30 days.",
+      "comment": "Dialog body before a channel's @name changes."
+    },
+    "channel_type.handle_private": {
+      "text": "Only subscribers see this.",
+      "comment": "Helper under a private channel's @name field."
+    },
+    "channel_type.handle_public": {
+      "text": "Anyone can find this channel by this name.",
+      "comment": "Helper under a public channel's @name field."
+    },
+    "channel_type.private_desc": {
+      "text": "Only people you invite can subscribe. It stays out of search.",
+      "comment": "Helper under the Private choice for a channel."
+    },
+    "channel_type.public_desc": {
+      "text": "Anyone can find this channel and subscribe. Lakko may suggest it in Discover.",
+      "comment": "Helper under the Public choice for a channel."
+    },
+    "channel_type.title": {
+      "text": "Channel type",
+      "comment": "Title of the owner's screen for a channel's public or private flag, @name, topic and language; also the row on channel info that opens it."
+    },
+    "channel_type.updating": {
+      "text": "Updating subscribers... {done} of {total}",
+      "comment": "Channel type screen: while a channel goes private, the new key is being handed to each subscriber; done and total are subscriber counts."
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "Who can subscribe",
+      "comment": "Label of the Public / Private picker for a channel."
+    },
     "channels.back": {
       "text": "Back to channels",
       "comment": "Accessible name of the back button in a channel's header on a narrow screen."
+    },
+    "channels.ban.action": {
+      "text": "Ban from comments",
+      "comment": "Menu item on a comment under a channel post, for the owner and publishers: hides that person's comments."
+    },
+    "channels.ban.empty": {
+      "text": "Nobody is banned.",
+      "comment": "The channel's Banned list when it is empty."
+    },
+    "channels.ban.failed": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Inline error when banning or unbanning someone from a channel's comments failed."
+    },
+    "channels.ban.title": {
+      "text": "Banned",
+      "comment": "Title of the list of people banned from comments in a channel's subscribers screen."
+    },
+    "channels.ban.unban": {
+      "text": "Unban",
+      "comment": "Button on a row of the channel's Banned list."
+    },
+    "channels.ban.unknown_name": {
+      "text": "Someone",
+      "comment": "Row title in the Banned list when this device never read the person's name."
+    },
+    "channels.comments.actions": {
+      "text": "Comment actions",
+      "comment": "Accessibility action name on a comment under a channel post; opens the menu (Reply, Copy, Delete, Ban from comments)."
+    },
+    "channels.comments.comment": {
+      "text": "Comment",
+      "comment": "Quiet link under a channel post with no comments."
+    },
+    "channels.comments.delete_failed": {
+      "text": "Couldn't delete the comment. Try again.",
+      "comment": "Inline error when deleting a comment under a channel post failed."
+    },
+    "channels.comments.failed": {
+      "text": "Comments didn't load.",
+      "comment": "In place of a thread whose comments could not be read; a Try again button follows."
+    },
+    "channels.comments.hide": {
+      "text": "Hide comments",
+      "comment": "The line at the end of an open thread that collapses it."
+    },
+    "channels.comments.invalid": {
+      "text": "This comment is too long or has characters that can't be sent.",
+      "comment": "Inline error under the comment field of a channel post."
+    },
+    "channels.comments.more": {
+      "text": "Show more",
+      "comment": "At the end of an open comment thread: loads the next page of comments."
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# new comment} other {# new comments}}",
+      "comment": "Line at the end of an open thread when comments arrived while it was open."
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {Show # more comment} other {Show # more comments}}",
+      "comment": "Under a channel post, after the first comments shown."
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "Show more comments",
+      "comment": "Under a channel post, opens its comments when the total is not known yet."
+    },
+    "channels.comments.write": {
+      "text": "Write a comment",
+      "comment": "Placeholder of the comment field under an open channel post thread."
     },
     "channels.compose.label": {
       "text": "New post",
@@ -1406,6 +1534,26 @@
       "text": "Co-publishers",
       "comment": "Heading of the co-publishers card on the channel's manage screen."
     },
+    "channels.delete.body": {
+      "text": "This removes the channel and its posts from all your devices and frees @{name} in 30 days. This cannot be undone.",
+      "comment": "Body of the delete-channel dialog; name is the channel's @name without the @."
+    },
+    "channels.delete.body_no_handle": {
+      "text": "This removes the channel and its posts from all your devices. This cannot be undone.",
+      "comment": "Body of the delete-channel dialog when the channel has no @name."
+    },
+    "channels.delete.control": {
+      "text": "Delete channel",
+      "comment": "Exit block of a channel's info, for its owner when no publisher remains."
+    },
+    "channels.delete.failed": {
+      "text": "Couldn't delete the channel. Try again.",
+      "comment": "Channel info, owner: deleting the channel failed."
+    },
+    "channels.delete.title": {
+      "text": "Delete this channel?",
+      "comment": "Title of the dialog before the owner deletes a channel."
+    },
     "channels.empty.action": {
       "text": "Create a channel",
       "comment": "Button on the empty channels list."
@@ -1413,6 +1561,10 @@
     "channels.empty.title": {
       "text": "No channels yet",
       "comment": "Empty channels list."
+    },
+    "channels.ended.notice_body": {
+      "text": "The channel and its posts are gone from your devices.",
+      "comment": "Body of the dialog over a channel the reader was removed from, under the title with the channel name."
     },
     "channels.error.empty_post": {
       "text": "Write something to post.",
@@ -1466,13 +1618,41 @@
       "text": "No channel found for {handle}.",
       "comment": "Looking up a channel by @handle found nothing. {handle} includes the @."
     },
+    "channels.header.private": {
+      "text": "Private channel",
+      "comment": "The one line under a private channel's name, in its conversation header and on its info screen."
+    },
+    "channels.header.public": {
+      "text": "Public channel",
+      "comment": "The one line under a public channel's name when its size is not known, in its conversation header and on its info screen."
+    },
+    "channels.header.public_count": {
+      "text": "Public channel · {band} subscribers",
+      "comment": "The one line under a public channel's name. {band} is a rough size such as 10k+ or 100+."
+    },
     "channels.index_hint": {
       "text": "Select a channel, or create one",
       "comment": "Web: hint in the empty main pane of the channels screen."
     },
+    "channels.info.handle_lapsed": {
+      "text": "This channel has no @name. Choose one.",
+      "comment": "Banner on a channel's info screen, for its owner, when the channel's @name lapsed or never landed (UX group-and-channel-privacy 4.4). Followed by a Choose button."
+    },
+    "channels.info.invite": {
+      "text": "Invite",
+      "comment": "Trailing button of the Invite people screen."
+    },
+    "channels.info.invite_people": {
+      "text": "Invite people",
+      "comment": "Row on channel info for the owner and publishers: invite contacts to subscribe; also the title of that screen."
+    },
     "channels.info.manage_sub": {
       "text": "Its name and description, who reads it, and who else may post.",
       "comment": "Line under \"Manage channel\" in channel info."
+    },
+    "channels.info.publishers": {
+      "text": "Publishers",
+      "comment": "Row on channel info and title of the list of the owner and the people who may post."
     },
     "channels.info.subscribers": {
       "text": "{count, plural, one {# subscriber} other {# subscribers}}",
@@ -1482,6 +1662,10 @@
       "text": "Takes the channel off your list and removes its posts from all your devices. You can subscribe again later.",
       "comment": "Line under \"Stop following\": says exactly what happens (the publisher is not told).",
       "security_critical": true
+    },
+    "channels.invite.failed": {
+      "text": "Could not invite {names}. Try again.",
+      "comment": "On channel info after Invite people when some invitations were not sent. {names} is a list of names."
     },
     "channels.join.default_name": {
       "text": "Co-published channel",
@@ -1540,6 +1724,30 @@
     "channels.legacy.copublisher_link": {
       "text": "This co-publisher invite link was created by an older version of Lakko and no longer works. Ask the channel owner to send you a new invite link.",
       "comment": "A co-publisher link from an old app version cannot be used."
+    },
+    "channels.link_page.needs_account": {
+      "text": "You need an account to subscribe. Create one, or log in.",
+      "comment": "Channel link page when nobody is signed in on this device."
+    },
+    "channels.link_page.title": {
+      "text": "Join a channel",
+      "comment": "Title of the page a channel's invite link opens (the channel counterpart of 'Join a group')."
+    },
+    "channels.link_page.waiting": {
+      "text": "Subscribed. Posts appear once the owner or an admin next opens Lakko.",
+      "comment": "On a private channel this device subscribed to, before a publisher's device has let it in."
+    },
+    "channels.links.failed": {
+      "text": "Couldn't make the link. Try again.",
+      "comment": "Invite link screen of a channel: making a link failed for a reason other than the network."
+    },
+    "channels.links.needs_owner": {
+      "text": "This device can't make links for this channel yet. It can once the owner's device has opened Lakko.",
+      "comment": "A publisher's device has not yet been given what links need; the owner's device sends it when it next runs."
+    },
+    "channels.links.revoke_failed": {
+      "text": "Couldn't revoke the link. Try again.",
+      "comment": "Invite link screen of a channel: revoking failed for a reason other than the network."
     },
     "channels.manage.back": {
       "text": "Back to posts",
@@ -1654,9 +1862,25 @@
       "text": "Channel",
       "comment": "Heading of the card on the manage screen where the channel's name and description are edited."
     },
+    "channels.moderation.ban": {
+      "text": "Ban from comments",
+      "comment": "Menu item on a comment, for the owner and publishers."
+    },
+    "channels.moderation.banned": {
+      "text": "Banned",
+      "comment": "The list of people banned from comments, in a channel's Subscribers screen."
+    },
+    "channels.moderation.unban": {
+      "text": "Unban",
+      "comment": "Control on a row of the Banned list."
+    },
     "channels.new.create": {
       "text": "Create",
       "comment": "Submit button of the create-channel form."
+    },
+    "channels.new.description_label": {
+      "text": "Description",
+      "comment": "Label of the description field on the New channel form."
     },
     "channels.new.error.create": {
       "text": "Could not create the channel. Try again.",
@@ -1682,6 +1906,10 @@
       "text": "Sign in again to create a channel.",
       "comment": "A channel cannot be created because this session holds no keys."
     },
+    "channels.new.failed": {
+      "text": "Couldn't create this channel. Nothing was created. Try again.",
+      "comment": "New channel: setting the channel up failed; nothing was created."
+    },
     "channels.new.handle_hint": {
       "text": "Others can find and subscribe to the channel by it.",
       "comment": "Hint under the handle field: the handle makes the channel findable by anyone.",
@@ -1695,6 +1923,10 @@
       "text": "@my_channel",
       "comment": "Example in the empty handle field. Keep the @ and Latin letters."
     },
+    "channels.new.name_label": {
+      "text": "Channel name",
+      "comment": "Label of the name field on the New channel form."
+    },
     "channels.new.subtitle": {
       "text": "Subscribers see the name and description.",
       "comment": "Line under \"New channel\": who sees the name and description.",
@@ -1704,21 +1936,49 @@
       "text": "New channel",
       "comment": "Heading of the create-channel screen."
     },
+    "channels.new.too_many": {
+      "text": "You've created a lot of channels today. Try again tomorrow.",
+      "comment": "New channel: the daily allowance for new names is used up."
+    },
     "channels.new_menu": {
       "text": "New channel or join one",
       "comment": "Accessible name of the + button on the channels list."
+    },
+    "channels.photo.only_owner": {
+      "text": "Only the owner can change the photo.",
+      "comment": "Under a channel's info header when this device may no longer change the photo."
+    },
+    "channels.photo.remove_body": {
+      "text": "Subscribers will see its initials instead.",
+      "comment": "Dialog body before the owner removes a channel's photo."
+    },
+    "channels.photo.remove_title": {
+      "text": "Remove the channel photo?",
+      "comment": "Dialog title before the owner removes a channel's photo."
     },
     "channels.post.not_available": {
       "text": "Not available",
       "comment": "Heading of a channel post this device cannot read."
     },
+    "channels.post.not_publisher": {
+      "text": "Only the owner and publishers can post here.",
+      "comment": "Shown in a channel when this device stopped being a publisher; the composer goes."
+    },
     "channels.post.older_key": {
       "text": "This post is older than what this device can read.",
       "comment": "A channel post sealed under a key older than the ones this device received; it is not decrypted."
     },
+    "channels.post.unavailable": {
+      "text": "This post isn't available.",
+      "comment": "In place of a channel post this device holds no key for."
+    },
     "channels.post.unreadable": {
       "text": "This post could not be opened on this device.",
       "comment": "A channel post that failed to decrypt or verify."
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "Earlier posts aren't available.",
+      "comment": "A line at the top of a channel's timeline when older posts exist that this device cannot read."
     },
     "channels.posts.empty": {
       "text": "No posts yet.",
@@ -1747,6 +2007,70 @@
     "channels.publish.error.sign_in": {
       "text": "Sign in again to post to this channel.",
       "comment": "Posting to a channel needs a signed-in account."
+    },
+    "channels.publishers.accept": {
+      "text": "Accept",
+      "comment": "Button on a publisher invitation: become a publisher of the channel."
+    },
+    "channels.publishers.add": {
+      "text": "Add publisher",
+      "comment": "Owner's control on the Publishers list."
+    },
+    "channels.publishers.invite_page": {
+      "text": "You are invited to be a publisher of {channel}.",
+      "comment": "Channel link page and the card in a chat when the link invites the person to post to the channel; channel is the channel name."
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} invites you to be a publisher of {channel}.",
+      "comment": "Channel link page and the card in a chat when a publisher invitation names who sent it; name is the inviting owner's display name, channel is the channel name."
+    },
+    "channels.publishers.remove": {
+      "text": "Remove publisher",
+      "comment": "Owner's control on a publisher's row; also the confirm button."
+    },
+    "channels.publishers.remove_body": {
+      "text": "Remove {name} as publisher? They can no longer post or invite.",
+      "comment": "Confirmation before the owner removes a publisher."
+    },
+    "channels.publishers.remove_failed": {
+      "text": "Couldn't remove the publisher. Try again.",
+      "comment": "Publishers list of a channel: removing a publisher failed."
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {# request to publish} other {# requests to publish}}",
+      "comment": "Heading over the people who asked to be a publisher, on the owner's Publishers list."
+    },
+    "channels.publishers.role_owner": {
+      "text": "Owner",
+      "comment": "Role shown on the owner's row of a channel's Publishers list."
+    },
+    "channels.publishers.role_publisher": {
+      "text": "Publisher",
+      "comment": "Role shown on a publisher's row of a channel's Publishers list."
+    },
+    "channels.publishers.step_down": {
+      "text": "Step down",
+      "comment": "A publisher's control on their own row: stop being a publisher."
+    },
+    "channels.publishers.step_down_body": {
+      "text": "You will no longer post or invite in this channel. The owner's device applies it the next time it opens Lakko.",
+      "comment": "Confirmation dialog body before a publisher steps down from a channel."
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "Couldn't step down. Try again.",
+      "comment": "Publishers list of a channel: stepping down failed."
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "Done. The owner's device applies it the next time it opens Lakko.",
+      "comment": "Publishers list of a channel, after a publisher stepped down."
+    },
+    "channels.reactions.anonymous": {
+      "text": "Reactions in a channel are anonymous. Nobody can see who reacted, not even the channel's owner.",
+      "comment": "Dialog shown on a long press of a reaction chip under a channel post (reactions spec 8.3), with one OK button."
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "Reactions in a channel are anonymous. Nobody can see who reacted, not even the channel's owner.",
+      "comment": "Note shown on a long press or right click on a reaction under a channel post. One OK button."
     },
     "channels.rotation.desc": {
       "text": "Lakko refreshes the channel's protection on its own. Refresh it now if you think a subscriber's device was compromised.",
@@ -1869,6 +2193,38 @@
       "text": "Could not load subscribers. Try again.",
       "comment": "The subscriber list on the manage screen failed to load."
     },
+    "channels.subscribers.from_invitation": {
+      "text": "From an invitation",
+      "comment": "Line on an unnamed subscriber of a private channel who came by a contact invitation."
+    },
+    "channels.subscribers.from_link": {
+      "text": "From link \"{label}\"",
+      "comment": "Line on an unnamed subscriber of a private channel: the invite link they came through."
+    },
+    "channels.subscribers.load_failed": {
+      "text": "Couldn't load subscribers. Try again.",
+      "comment": "A channel's subscriber list could not be read."
+    },
+    "channels.subscribers.more": {
+      "text": "Show more",
+      "comment": "Subscribers screen of a private channel: loads the next page of subscribers."
+    },
+    "channels.subscribers.none": {
+      "text": "No subscribers yet.",
+      "comment": "A channel's subscriber list when nobody subscribed."
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {# other.} other {# others.}}",
+      "comment": "End of a channel's subscriber list: subscribers who share no name."
+    },
+    "channels.subscribers.remove_body": {
+      "text": "They stop receiving new posts.",
+      "comment": "Dialog body before removing a subscriber from a private channel."
+    },
+    "channels.subscribers.remove_title": {
+      "text": "Remove this subscriber?",
+      "comment": "Dialog title before removing a subscriber from a private channel."
+    },
     "channels.subscribers.retrying": {
       "text": "Retrying...",
       "comment": "Sending the key to a subscriber again."
@@ -1893,8 +2249,12 @@
       "text": "Subscribers",
       "comment": "Heading of the subscribers card on the manage screen."
     },
+    "channels.subscribers.title_count": {
+      "text": "Subscribers ({count})",
+      "comment": "Title of a channel's subscriber list, with the count."
+    },
     "channels.unsubscribe.action": {
-      "text": "Stop following",
+      "text": "Unsubscribe",
       "comment": "Card title and button in channel info for a subscriber, and the confirm button of the dialog."
     },
     "channels.unsubscribe.body": {
@@ -1903,11 +2263,11 @@
       "security_critical": true
     },
     "channels.unsubscribe.title": {
-      "text": "Stop following this channel?",
+      "text": "Unsubscribe from this channel?",
       "comment": "Title of the confirmation before unsubscribing when the channel has no name."
     },
     "channels.unsubscribe.title_named": {
-      "text": "Stop following {name}?",
+      "text": "Unsubscribe from {name}?",
       "comment": "Title of the confirmation before unsubscribing from a channel. {name} is the channel's name."
     },
     "chat.attachment.error.attach": {
@@ -2239,11 +2599,15 @@
     },
     "chat.ended.notice": {
       "text": "You are no longer in {name}.",
-      "comment": "Banner at the top of Chats, and title of the dialog over the conversation if it is open, when the reader's membership of a group ended and everything from it was removed. {name} is the group's name. Never says who removed them."
+      "comment": "Short notice at the bottom of the screen (gone by itself after 4 s), and title of the dialog over the conversation if it is open, when the reader's membership of a group ended and everything from it was removed. {name} is the group's name. Never says who removed them."
     },
     "chat.ended.notice_body": {
       "text": "The group and its messages are gone from your devices.",
       "comment": "Body of the dialog over a conversation the reader is no longer in, under the title with the group name."
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {You are no longer in {name} and # more.} other {You are no longer in {name} and # more.}}",
+      "comment": "Short notice at the bottom of the screen when the reader's membership of several conversations ended together (or while a notice was up). {name} is the first conversation's name, {count} how many more. Never says who removed them."
     },
     "chat.ended.unsent_draft": {
       "text": "Unsent draft",
@@ -6922,6 +7286,22 @@
     "invite.links.expires_option_never": {
       "text": "Never",
       "comment": "Option of the Expires field: the link never expires."
+    },
+    "invite.links.group_title": {
+      "text": "Group and channel links",
+      "comment": "Heading of the list of invite links to groups and channels made on any device of the account, on the invite links sheet."
+    },
+    "invite.links.kind_channel": {
+      "text": "Channel link",
+      "comment": "Kind label of a channel subscribe link in the links list."
+    },
+    "invite.links.kind_group": {
+      "text": "Group link",
+      "comment": "Kind label of a group invite link in the links list."
+    },
+    "invite.links.kind_publisher": {
+      "text": "Co-publisher link",
+      "comment": "Kind label of a link that invites someone to publish in a channel, in the links list."
     },
     "invite.links.label_field": {
       "text": "Label (optional)",

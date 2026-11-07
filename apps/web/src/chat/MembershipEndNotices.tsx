@@ -5,19 +5,19 @@
  * `docs/ux/group-and-channel-privacy.md` section 9.1 — how a person learns
  * they are out of a group: once per device, and never who did it.
  *
- *   - anywhere else: a banner at the top of Chats, with a close icon;
+ *   - anywhere else: a short notice at the bottom that goes by itself after
+ *     4 s, no close icon, one at a time (2026-11-06: replaced the banners);
  *   - in that conversation: a dialog over it, with one button, and the text
  *     the composer held, selectable, with `Copy`.
  *
- * The rules are `membership-end.ts`; the name is held only until the notice
- * closes.
+ * The rules are `membership-end.ts` and `end-toast.ts`; the name is held
+ * in memory only until it was shown.
  */
 
-import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 
-import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { t } from "../l10n";
-import { Icon } from "../ui/icons";
+import { addToEndToast, END_TOAST_CLAIM_WAIT_MS, END_TOAST_MS, endToastText, type EndToast } from "./end-toast";
 import { copyMessageText } from "./copy-message";
 import { UNSENT_DRAFT_LABEL } from "./membership-ended";
 import type { EndNotice } from "./membership-end";
@@ -30,52 +30,83 @@ export function noticeTitle(notice: Pick<EndNotice, "title">): string {
   return t("chat.ended.notice", { name: name.length > 0 ? name : t("chat.group.default_name") });
 }
 
-/** The route slug of a chat as the id a notice is filed under, or `null`. */
-function routeIdOf(slug: string | null): string | null {
-  if (slug === null) return null;
-  try {
-    return base64Encode(base64UrlDecodeNoPad(slug));
-  } catch {
-    return null;
-  }
-}
-
-/** The banners at the top of Chats. A conversation open behind its dialog
- *  has its notice there, and shows none here. */
-export function MembershipEndBanners(props: { readonly activeSlug: string | null }): JSX.Element {
+/**
+ * The short notice at the bottom (UX section 9, 2026-11-06): one at a time,
+ * gone by itself after {@link END_TOAST_MS}, no close icon. Mounted once for
+ * the whole app. A new end waits {@link END_TOAST_CLAIM_WAIT_MS} for the
+ * dialog over its open conversation to claim it; an end not claimed is told
+ * here and forgotten (nothing is kept for later).
+ */
+export function MembershipEndToast(): JSX.Element {
   const end = useMembershipEnd();
-  const shown = (): readonly EndNotice[] => {
-    const open = routeIdOf(props.activeSlug);
-    return end.notices().filter((n) => open === null || !n.routeIdsB64.includes(open));
+  const [toast, setToast] = createSignal<EndToast | null>(null);
+  const handled = new Set<string>();
+  let hideTimer: ReturnType<typeof setTimeout> | null = null;
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+
+  const show = (names: readonly string[]): void => {
+    if (names.length === 0) return;
+    setToast((t0) => addToEndToast(t0, names));
+    if (hideTimer !== null) clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      hideTimer = null;
+      setToast(null);
+    }, END_TOAST_MS);
   };
+
+  createEffect(() => {
+    const fresh = end.notices().filter((n) => !handled.has(n.key));
+    if (fresh.length === 0) return;
+    for (const n of fresh) handled.add(n.key);
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      const tell = fresh.filter((n) => !end.isNoticeClaimed(n.key));
+      for (const n of tell) end.dismissNotice(n.key);
+      show(tell.map(noticeName));
+    }, END_TOAST_CLAIM_WAIT_MS);
+    timers.add(timer);
+  });
+  onCleanup(() => {
+    if (hideTimer !== null) clearTimeout(hideTimer);
+    for (const timer of timers) clearTimeout(timer);
+  });
+
   return (
-    <For each={shown()}>
-      {(notice) => (
-        <div class="lk-alert info lk-end-banner" role="status" aria-live="polite">
-          <span class="lk-fill">{noticeTitle(notice)}</span>
-          <button
-            type="button"
-            class="lk-icon-button"
-            aria-label={t("common.close")}
-            title={t("common.close")}
-            onClick={() => end.dismissNotice(notice.key)}
-          >
-            <Icon name="close" size={16} />
-          </button>
+    <Show when={toast()}>
+      {(t0) => (
+        <div class="lk-toast lk-end-toast" role="status" aria-live="polite">
+          {endToastText(
+            t0(),
+            (name) => t("chat.ended.notice", { name }),
+            (name, count) => t("chat.ended.notice_more", { name, count }),
+          )}
         </div>
       )}
-    </For>
+    </Show>
   );
+}
+
+/** The name a notice speaks of, with the generic word when none is known. */
+function noticeName(notice: Pick<EndNotice, "title">): string {
+  const name = notice.title.trim();
+  return name.length > 0 ? name : t("chat.group.default_name");
 }
 
 /** The dialog over a conversation that ended while it was open. */
 export function MembershipEndDialog(props: {
   readonly notice: EndNotice;
   readonly onDone: () => void;
+  /** The body line, when the conversation is not a group (a channel). */
+  readonly body?: string;
 }): JSX.Element {
   let el: HTMLDialogElement | undefined;
   const [copied, setCopied] = createSignal(false);
-  onMount(() => el?.showModal());
+  const end = useMembershipEnd();
+  onMount(() => {
+    // The dialog tells of this end: the notice at the bottom leaves it out.
+    end.claimNotice(props.notice.key);
+    el?.showModal();
+  });
   return (
     <dialog
       ref={el}
@@ -88,7 +119,7 @@ export function MembershipEndDialog(props: {
       <div class="lk-end-dialog-card">
         <strong id="lakko-end-title">{noticeTitle(props.notice)}</strong>
         <span id="lakko-end-body" class="lk-muted">
-          {t("chat.ended.notice_body")}
+          {props.body ?? t("chat.ended.notice_body")}
         </span>
         <Show when={props.notice.draft}>
           {(draft) => (

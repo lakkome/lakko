@@ -99,6 +99,9 @@ import {
   type GroupInvitePreviewData,
 } from "./join-group-preview";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { openChannelLink, type OpenedChannelInvite } from "../channels/channel-invites";
+import { channelErrorCode } from "../channels/channel-error-copy";
+import { ChannelLinkPage } from "./ChannelLinkPage";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
@@ -121,7 +124,7 @@ interface DecodedTicket {
 /** Why the page refuses to offer a join without the link being invalid. */
 type LinkRefusal = "rate-limited" | "damaged" | "open-failed";
 
-export default function JoinGroup() {
+function JoinGroupFlow() {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
   const auth = useAuth();
@@ -390,5 +393,65 @@ export default function JoinGroup() {
         </Show>
       </Show>
     </PublicLayout>
+  );
+}
+
+/**
+ * `/g/:slug` — a link to a group, or to a channel (ADR-0087 sections 7 and 15:
+ * a subscriber invitation, preview kind 3, or a publisher invitation, kind 2).
+ * The channel machinery opens the link first; a link it reads as an ordinary
+ * group link goes to the group flow above.
+ */
+export default function JoinGroup() {
+  const params = useParams<{ slug: string }>();
+  const location = useLocation();
+  const source = createMemo(() => ({ slug: params.slug, hash: location.hash }));
+  const [channel] = createResource(source, async (): Promise<OpenedChannelInvite | "group" | "invalid" | "damaged"> => {
+    try {
+      return (await openChannelLink(window.location.href)) ?? "group";
+    } catch (err) {
+      const code = channelErrorCode(err);
+      if (code === "link-damaged") return "damaged";
+      if (code === "link-invalid") return "invalid";
+      // Unreachable or unknown: the group flow below says what it says for
+      // the same link, with its own retry.
+      return "group";
+    }
+  });
+  const opened = (): OpenedChannelInvite | null => {
+    const c = channel();
+    return c === undefined || typeof c === "string" ? null : c;
+  };
+  return (
+    <Show
+      when={!channel.loading}
+      fallback={
+        <PublicLayout>
+          <h1>{t("group.join.title")}</h1>
+          <p>{t("invite.link.loading")}</p>
+        </PublicLayout>
+      }
+    >
+      <Show
+        when={opened()}
+        fallback={
+          <Show
+            when={channel() === "invalid" || channel() === "damaged"}
+            fallback={<JoinGroupFlow />}
+          >
+            <PublicLayout>
+              <p>{channel() === "damaged" ? INVITE_LINK_DAMAGED() : t("invite.link.invalid")}</p>
+              <A href={paths.home}>{t("common.open_lakko")}</A>
+            </PublicLayout>
+          </Show>
+        }
+      >
+        {(o) => (
+          <PublicLayout>
+            <ChannelLinkPage slug={params.slug} opened={o()} />
+          </PublicLayout>
+        )}
+      </Show>
+    </Show>
   );
 }

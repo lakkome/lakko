@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import android.content.ClipData
@@ -173,9 +174,12 @@ internal data class MessageActions(
      *  already showing its translation. */
     val canTranslate: Boolean = false,
     val translateLabel: String = Localization.strings.value["chat.message.translate"],
+    /** ADR-0087 section 13 — a publisher's `Ban from comments` on someone
+     *  else's comment, in the destructive group under Delete. */
+    val canBan: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave || canTranslate || canBan
 }
 
 /**
@@ -289,6 +293,8 @@ internal fun MessageActionMenuOverlay(
     onSave: () -> Unit = {},
     /** ADR-0082 — Translate / Show original was chosen. */
     onTranslate: () -> Unit = {},
+    /** ADR-0087 section 13 — Ban from comments was chosen. */
+    onBan: () -> Unit = {},
     /** reactions-and-emoji section 5 — the emoji this person already gave
      *  this message (drawn pressed; pressing one takes it off). */
     ownReactions: Set<String> = emptySet(),
@@ -406,6 +412,7 @@ internal fun MessageActionMenuOverlay(
                             onEdit = onEdit,
                             onDelete = onDelete,
                             onTranslate = onTranslate,
+                            onBan = onBan,
                         )
                     }
                 },
@@ -558,6 +565,7 @@ internal fun MessageActionCard(
     onSelect: () -> Unit = {},
     onSave: () -> Unit = {},
     onTranslate: () -> Unit = {},
+    onBan: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -650,7 +658,7 @@ internal fun MessageActionCard(
                     onClick = onEdit,
                 )
             }
-            if (actions.canDelete) {
+            if (actions.canDelete || actions.canBan) {
                 // Section 2 — the destructive action is separated and in the
                 // platform's destructive colour. The rule belongs to the
                 // destructive GROUP rather than to the Delete row, as on web,
@@ -670,12 +678,22 @@ internal fun MessageActionCard(
                         // Web's `padding-top: 2px` between the rule and the row.
                         Spacer(Modifier.height(DESTRUCTIVE_GAP))
                     }
-                    ActionRow(
-                        label = t("common.delete"),
-                        icon = Icons.Filled.Delete,
-                        onClick = onDelete,
-                        tint = MaterialTheme.colorScheme.error,
-                    )
+                    if (actions.canDelete) {
+                        ActionRow(
+                            label = t("common.delete"),
+                            icon = Icons.Filled.Delete,
+                            onClick = onDelete,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    if (actions.canBan) {
+                        ActionRow(
+                            label = t("channels.moderation.ban"),
+                            icon = Icons.Filled.Block,
+                            onClick = onBan,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
         }

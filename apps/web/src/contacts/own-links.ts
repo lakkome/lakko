@@ -93,7 +93,8 @@ export async function revokeMintedLink(
 
 /** What {@link deleteLedgerRowOfRecord} needs from a link record. */
 export interface LedgerRowRef {
-  readonly kind: "contact" | "call";
+  /** The `/g/` kinds (ADR-0087 phase B) live in the group-invite ledger. */
+  readonly kind: "contact" | "call" | "group" | "channel" | "publisher";
   /** The 6-byte ledger id. */
   readonly ledgerId: Uint8Array;
   /** The 32-byte seed the row was created under. */
@@ -108,13 +109,14 @@ export interface LedgerRowRef {
  * ledger's answer.
  */
 export async function deleteLedgerRowOfRecord(
-  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite">,
+  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite" | "revokeGroupInvite">,
   record: LedgerRowRef,
 ): Promise<OwnLinkRevokeOutcome> {
   if (record.revocationSeed.length === 0) return "no-key";
   try {
     if (record.kind === "contact") await discovery.revokeInvite(record.ledgerId, record.revocationSeed);
-    else await discovery.revokeCallInvite(record.ledgerId, record.revocationSeed);
+    else if (record.kind === "call") await discovery.revokeCallInvite(record.ledgerId, record.revocationSeed);
+    else await discovery.revokeGroupInvite(record.ledgerId, record.revocationSeed);
   } catch (err) {
     if (err instanceof Error && err.name === "DiscoveryNetworkError") return "unreachable";
     throw err;
@@ -175,7 +177,7 @@ const rowDeletionsInFlight = new Map<string, Promise<OwnLinkRevokeOutcome>>();
  * deletion then stays owed).
  */
 export function deleteRevokedLinkRow(
-  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite">,
+  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite" | "revokeGroupInvite">,
   accountIdB64: string,
   record: LedgerRowRef & { readonly linkIdHex: string },
 ): Promise<OwnLinkRevokeOutcome> {

@@ -63,6 +63,19 @@ pub struct PostReactionCounts {
     pub labels: Vec<(Label, u64)>,
 }
 
+/// The label counts of one comment (reactions on comments, UX 13.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentReactionCounts {
+    /// The comment cursor.
+    pub comment_cursor: u64,
+    /// At most [`MAX_LABELS_PER_POST`] `(label, count)`, ranked as a post's.
+    pub labels: Vec<(Label, u64)>,
+}
+
+/// The most comments one comment-reaction counts read names: a page of
+/// comments and more. Chosen, not measured.
+pub const MAX_COUNT_COMMENTS: usize = 50;
+
 /// Rank `(label, count)` pairs the way both stores answer: count descending,
 /// label ascending, at most [`MAX_LABELS_PER_POST`].
 pub(crate) fn top_labels(mut labels: Vec<(Label, u64)>) -> Vec<(Label, u64)> {
@@ -77,6 +90,8 @@ pub(crate) fn top_labels(mut labels: Vec<(Label, u64)>) -> Vec<(Label, u64)> {
 pub(crate) struct MemoryFeedback {
     reactions: HashMap<(ChannelId, u64), BTreeSet<(WriterKey, Label)>>,
     comments: HashMap<(ChannelId, u64), BTreeMap<u64, StoredComment>>,
+    /// (channel, post, comment) -> reaction rows on that comment.
+    comment_reactions: HashMap<(ChannelId, u64, u64), BTreeSet<(WriterKey, Label)>>,
     last_comment_id: u64,
     nonces: HashMap<[u8; WRITE_NONCE_LEN], u64>,
 }
@@ -172,9 +187,95 @@ impl MemoryFeedback {
         post_cursor: u64,
         comment_cursor: u64,
     ) -> bool {
-        self.comments
+        let removed = self
+            .comments
             .get_mut(&(channel, post_cursor))
-            .is_some_and(|page| page.remove(&comment_cursor).is_some())
+            .is_some_and(|page| page.remove(&comment_cursor).is_some());
+        if removed {
+            // The SQL store's cascade from `channel_comments`.
+            self.comment_reactions
+                .remove(&(channel, post_cursor, comment_cursor));
+        }
+        removed
+    }
+
+    /// The number of comments under each post, in the order asked.
+    pub(crate) fn comment_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Vec<(u64, u64)> {
+        post_cursors
+            .iter()
+            .map(|&p| {
+                let n = self.comments.get(&(channel, p)).map_or(0, BTreeMap::len);
+                (p, n as u64)
+            })
+            .collect()
+    }
+
+    pub(crate) fn has_comment(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> bool {
+        self.comments
+            .get(&(channel, post_cursor))
+            .is_some_and(|page| page.contains_key(&comment_cursor))
+    }
+
+    pub(crate) fn add_comment_reaction(
+        &mut self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> bool {
+        self.comment_reactions
+            .entry((channel, post_cursor, comment_cursor))
+            .or_default()
+            .insert((writer_key, label))
+    }
+
+    pub(crate) fn delete_comment_reaction(
+        &mut self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> bool {
+        self.comment_reactions
+            .get_mut(&(channel, post_cursor, comment_cursor))
+            .is_some_and(|rows| rows.remove(&(writer_key, label)))
+    }
+
+    pub(crate) fn comment_reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursors: &[u64],
+    ) -> Vec<CommentReactionCounts> {
+        comment_cursors
+            .iter()
+            .map(|&comment_cursor| {
+                let mut counts: HashMap<Label, u64> = HashMap::new();
+                if let Some(rows) =
+                    self.comment_reactions
+                        .get(&(channel, post_cursor, comment_cursor))
+                {
+                    for (_, label) in rows {
+                        *counts.entry(*label).or_default() += 1;
+                    }
+                }
+                CommentReactionCounts {
+                    comment_cursor,
+                    labels: top_labels(counts.into_iter().collect()),
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn list_comments(
@@ -214,6 +315,7 @@ impl MemoryFeedback {
     pub(crate) fn retain_posts(&mut self, mut keep: impl FnMut(ChannelId, u64) -> bool) {
         self.reactions.retain(|(c, p), _| keep(*c, *p));
         self.comments.retain(|(c, p), _| keep(*c, *p));
+        self.comment_reactions.retain(|(c, p, _), _| keep(*c, *p));
     }
 }
 

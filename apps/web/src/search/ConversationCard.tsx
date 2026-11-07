@@ -8,8 +8,9 @@
  *
  * The request is a sealed KeyPackage knocked once (ADR-0087 section 5,
  * `ContactsClient.requestToJoinSealed`); nothing to fill in. It cannot be
- * withdrawn and is never said to be refused. Subscribing to a channel stays
- * as it is today (phase B): the card of a channel opens its page.
+ * withdrawn and is never said to be refused. A channel's `Subscribe`
+ * subscribes at once with the read key its record carries and opens the
+ * channel under its name, with no second step (ADR-0087 section 6).
  */
 import { createSignal, Show, type JSX } from "solid-js";
 
@@ -30,6 +31,8 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
 import type { FoundConversation } from "./people-search";
+import { subscribeToChannel } from "../channels/channel-access";
+import { channelErrorText } from "../channels/channel-error-copy";
 
 /** `Public group · 100+ members` / `Public channel · 10k+ subscribers`. */
 export function sizeLine(c: FoundConversation): string {
@@ -135,6 +138,22 @@ export function ConversationCard(props: {
     return f !== null && !mayAskAgain(sentRequestFor(f.idB64), Date.now());
   };
 
+  async function subscribeChannel(f: FoundConversation): Promise<void> {
+    setState({ kind: "sending" });
+    try {
+      await subscribeToChannel(foundIdHex(f), { kind: "public", readKey: f.key }, {
+        name: f.name,
+        description: f.description,
+        handle: f.handle,
+        avatar: f.avatar,
+      });
+      setState({ kind: "idle" });
+      props.onOpenChannel?.(f, false);
+    } catch (err) {
+      setState({ kind: "error", message: channelErrorText(err, () => t("channels.subscribe.error.generic")) });
+    }
+  }
+
   async function request(): Promise<void> {
     const f = props.found;
     if (f === null || f.kind !== "group") return;
@@ -192,8 +211,15 @@ export function ConversationCard(props: {
               <Show
                 when={f().kind === "group"}
                 fallback={
-                  <button type="button" class="primary" onClick={() => props.onOpenChannel?.(f(), true)}>
-                    {t("search.conversation.subscribe")}
+                  <button
+                    type="button"
+                    class="primary"
+                    disabled={state().kind === "sending"}
+                    onClick={() => void subscribeChannel(f())}
+                  >
+                    {state().kind === "sending"
+                      ? t("channels.subscribe.status.subscribing")
+                      : t("search.conversation.subscribe")}
                   </button>
                 }
               >

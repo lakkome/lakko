@@ -24,6 +24,8 @@ vi.mock("../wasm", () => ({
     dsJournalRootSeed: () => new Uint8Array(32).fill(0x0b),
     groupKnockSeed: () => new Uint8Array(32).fill(0x0c),
     groupKnockPublicKey: () => new Uint8Array(32).fill(0x0d),
+    // ADR-0087 phase B: a `/g/` link's register key.
+    groupLinkRecordId: () => new Uint8Array(16).fill(0x0e),
     // The widths the real core exports (ADR-0028 short-link amendment).
     inviteBlobIdLen: () => 6,
     inviteBlobIdUrlLen: () => 8,

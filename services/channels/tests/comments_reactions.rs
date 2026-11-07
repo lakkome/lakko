@@ -17,8 +17,9 @@ use lakko_anon_token_server::{
 use lakko_channels::epoch::EpochId;
 use lakko_channels::owner::{ChannelOwnerSigner, OwnerRequest, OWNER_PROOF_HEADER_NAME};
 use lakko_channels::{
-    seal_comment, Comment, CommentAuthor, CommentPlace, CommentWriteKey, ContentKeySeed,
-    ReactionKey, ReactionWriteKey, WRITE_PROOF_HEADER_NAME,
+    seal_comment, Comment, CommentAuthor, CommentPlace, CommentReactionKey,
+    CommentReactionWriteKey, CommentWriteKey, ContentKeySeed, ReactionKey, ReactionWriteKey,
+    WRITE_PROOF_HEADER_NAME,
 };
 use lakko_svc_channels::{router, AppState, Config, InMemoryChannelStore};
 use serde_json::{json, Value};
@@ -28,6 +29,7 @@ const MASTER_HEX: &str = "030303030303030303030303030303030303030303030303030303
 const OWNER_SEED: [u8; 32] = [5; 32];
 const ALICE: [u8; 32] = [0x41; 32];
 const BOB: [u8; 32] = [0x42; 32];
+const CAROL: [u8; 32] = [0x43; 32];
 const CHANNEL: [u8; 16] = [0x0C; 16];
 const THUMBS: &str = "\u{1F44D}";
 
@@ -662,4 +664,351 @@ async fn a_comment_is_bounded_and_its_proof_binds_the_bytes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "the token was not spent on the 404");
+}
+
+fn comment_label_of(post: u64, comment: u64, emoji: &str) -> [u8; 16] {
+    CommentReactionKey::derive(
+        &ContentKeySeed::from_bytes_for_test([9; 32]),
+        &CHANNEL,
+        EpochId::new(0),
+    )
+    .unwrap()
+    .label(post, comment, emoji)
+    .unwrap()
+}
+
+async fn react_on_comment(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    account: &[u8; 32],
+    comment: u64,
+    label: [u8; 16],
+) -> reqwest::Response {
+    let key = CommentReactionWriteKey::new(account, &CHANNEL, 1, comment, label);
+    client
+        .post(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/{comment}/reactions",
+            channel_hex()
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            key.sign_add(now_ms(), nonce()).encode(),
+        )
+        .header(TOKEN_HEADER, token(TokenContext::ChannelReact))
+        .json(&json!({
+            "writer_key_hex": hex::encode(key.public_key()),
+            "label_hex": hex::encode(label),
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// 2026-11-05: reactions on a comment, counted per comment; a post's proof
+/// does not add one, a missing comment costs no token, a deleted comment
+/// takes its reactions with it.
+// One scenario over the comments it writes.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn reactions_on_comments_are_added_counted_and_taken_off() {
+    let addr = spawn().await;
+    let client = channel_with_posts(addr).await;
+    let (sealed, key) = sealed_comment(&ALICE, &nonce(), "first");
+    let comment = post_comment(&client, addr, &sealed, &key)
+        .await
+        .json::<Value>()
+        .await
+        .unwrap()["cursor"]
+        .as_u64()
+        .unwrap();
+    let label = comment_label_of(1, comment, THUMBS);
+    assert_eq!(
+        react_on_comment(&client, addr, &ALICE, comment, label)
+            .await
+            .status(),
+        201
+    );
+    assert_eq!(
+        react_on_comment(&client, addr, &ALICE, comment, label)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        react_on_comment(&client, addr, &BOB, comment, label)
+            .await
+            .status(),
+        201
+    );
+
+    // A post-reaction proof does not add a reaction on the comment.
+    let post_key = ReactionWriteKey::new(&CAROL, &CHANNEL, 1, label);
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/{comment}/reactions",
+            channel_hex()
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            post_key.sign_add(now_ms(), nonce()).encode(),
+        )
+        .header(TOKEN_HEADER, token(TokenContext::ChannelReact))
+        .json(&json!({
+            "writer_key_hex": hex::encode(post_key.public_key()),
+            "label_hex": hex::encode(label),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // A comment that is not there: 404 before the token is spent.
+    let ghost_token = token(TokenContext::ChannelReact);
+    let ghost_label = comment_label_of(1, 999, THUMBS);
+    let ghost = CommentReactionWriteKey::new(&ALICE, &CHANNEL, 1, 999, ghost_label);
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/999/reactions",
+            channel_hex()
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            ghost.sign_add(now_ms(), nonce()).encode(),
+        )
+        .header(TOKEN_HEADER, &ghost_token)
+        .json(&json!({
+            "writer_key_hex": hex::encode(ghost.public_key()),
+            "label_hex": hex::encode(ghost_label),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["code"],
+        "unknown-comment"
+    );
+
+    let counts_url = |list: &str| {
+        format!(
+            "http://{addr}/v1/channels/{}/posts/1/comment-reactions?comments={list}",
+            channel_hex()
+        )
+    };
+    let resp = client
+        .get(counts_url(&format!("{comment},999")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["cache-control"].to_str().unwrap(),
+        "public, max-age=15"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["comments"][0]["cursor"], comment);
+    assert_eq!(
+        body["comments"][0]["labels"][0]["label_hex"],
+        hex::encode(label)
+    );
+    assert_eq!(body["comments"][0]["labels"][0]["count"], 2);
+    assert!(body["comments"][1]["labels"].as_array().unwrap().is_empty());
+    let fifty_one: Vec<String> = (1..=51).map(|n: u64| n.to_string()).collect();
+    assert_eq!(
+        client
+            .get(counts_url(&fifty_one.join(",")))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+
+    // Bob takes his off with his key.
+    let bob = CommentReactionWriteKey::new(&BOB, &CHANNEL, 1, comment, label);
+    let resp = client
+        .delete(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/{comment}/reactions/{}/{}",
+            channel_hex(),
+            hex::encode(bob.public_key()),
+            hex::encode(label)
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            bob.sign_delete(now_ms(), nonce()).encode(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let body: Value = client
+        .get(counts_url(&comment.to_string()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["comments"][0]["labels"][0]["count"], 1);
+
+    // Deleting the comment takes its reactions.
+    let resp = client
+        .delete(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/{comment}",
+            channel_hex()
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            key.sign_delete(comment, now_ms(), nonce()).encode(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let body: Value = client
+        .get(counts_url(&comment.to_string()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["comments"][0]["labels"].as_array().unwrap().is_empty());
+}
+
+/// 2026-11-05: the batched counts read carries each post's comment count.
+#[tokio::test]
+async fn the_counts_read_carries_the_comment_count() {
+    let addr = spawn().await;
+    let client = channel_with_posts(addr).await;
+    let mut cursors = Vec::new();
+    for i in 0..3 {
+        let (sealed, key) = sealed_comment(&ALICE, &nonce(), &format!("c{i}"));
+        let cursor = post_comment(&client, addr, &sealed, &key)
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["cursor"]
+            .as_u64()
+            .unwrap();
+        cursors.push((cursor, key));
+    }
+    let body: Value = counts(&client, addr, "1,2").await.json().await.unwrap();
+    assert_eq!(body["posts"][0]["comments"], 3);
+    assert_eq!(body["posts"][1]["comments"], 0);
+    let (cursor, key) = &cursors[0];
+    let resp = client
+        .delete(format!(
+            "http://{addr}/v1/channels/{}/posts/1/comments/{cursor}",
+            channel_hex()
+        ))
+        .header(
+            WRITE_PROOF_HEADER_NAME,
+            key.sign_delete(*cursor, now_ms(), nonce()).encode(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let body: Value = counts(&client, addr, "1").await.json().await.unwrap();
+    assert_eq!(body["posts"][0]["comments"], 2);
+}
+
+/// 2026-11-05: the owner deletes the channel; afterwards its reads answer
+/// `410 channel-deleted`, its id cannot be registered again, a repeat
+/// delete is `204`, and nobody but the owner deletes.
+#[tokio::test]
+async fn the_owner_deletes_the_channel_and_reads_answer_gone() {
+    let addr = spawn().await;
+    let client = channel_with_posts(addr).await;
+    let path = format!("/v1/channels/{}", channel_hex());
+    // No proof: refused.
+    assert_eq!(
+        client
+            .delete(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    // A stranger's owner-shaped proof: refused.
+    let stranger = ChannelOwnerSigner::from_account_seed(&[0x77; 32], &CHANNEL);
+    let proof = stranger
+        .sign_at(
+            &OwnerRequest {
+                method: "DELETE",
+                canonical_path: &path,
+                query: "",
+                body: &[],
+            },
+            now_ms(),
+            nonce(),
+        )
+        .encode();
+    let resp = client
+        .delete(format!("http://{addr}{path}"))
+        .header(OWNER_PROOF_HEADER_NAME, proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = client
+        .delete(format!("http://{addr}{path}"))
+        .header(OWNER_PROOF_HEADER_NAME, owner_proof("DELETE", &path, &[]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    for url in [
+        format!("http://{addr}{path}/posts"),
+        format!("http://{addr}{path}/epoch"),
+        format!(
+            "http://{addr}{path}/subscribers/{}/envelope",
+            hex::encode([0x21u8; 32])
+        ),
+    ] {
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 410, "{url}");
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["code"],
+            "channel-deleted"
+        );
+    }
+    let resp = client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({
+            "channel_id": channel_hex(),
+            "owner_pubkey_hex": hex::encode(owner().verifying_key().to_bytes()),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 410);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["code"],
+        "channel-deleted"
+    );
+    // A repeat is 204, with no proof needed.
+    assert_eq!(
+        client
+            .delete(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    // An unknown channel stays 404.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{}/posts",
+            hex::encode([0x0Du8; 16])
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }

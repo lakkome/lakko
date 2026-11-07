@@ -68,9 +68,9 @@ describe("avatar initials come from the name, never the list label", () => {
 
   it("a member row with a username", () => {
     expect(memberListLabelOf(vg2)).toBe("VG2 · @vg2");
-    expect(initialsOf(memberNameOf(vg2))).toBe(core.avatarInitials("VG2"));
+    expect(initialsOf(memberNameOf(vg2, "a test label"))).toBe(core.avatarInitials("VG2"));
     // The defect seen live: initials taken from the label differ.
-    expect(initialsOf(memberListLabelOf(vg2))).not.toBe(initialsOf(memberNameOf(vg2)));
+    expect(initialsOf(memberListLabelOf(vg2))).not.toBe(initialsOf(memberNameOf(vg2, "a test label")));
   });
 
   it("a pending join request with a username", () => {

@@ -124,7 +124,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
       contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
       contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted())
         ?.displayName,
-      nameOf: (k) => memberNameOf(profiles.resolve(k)),
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "a forward picker title"),
       groupTitle,
     });
   };
@@ -142,7 +142,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
         senderName:
           summary.lastAuthorKeyB64 === null
             ? null
-            : memberNameOf(profiles.resolve(summary.lastAuthorKeyB64)),
+            : memberNameOf(profiles.resolve(summary.lastAuthorKeyB64), "a forward picker last sender"),
         isGroup: kind === "group",
       });
       const lastAt = summary.lastAt === null ? Number.NaN : new Date(summary.lastAt).getTime();

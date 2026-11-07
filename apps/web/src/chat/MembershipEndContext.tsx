@@ -46,6 +46,7 @@ import { useCallLog } from "../calls/CallLogContext";
 import { useTranslation } from "../translation/context";
 import { forgetUploadedCard } from "../channels/member-cards";
 import { leaveChannelOnServer } from "../channels/unsubscribe";
+import { installChannelDeletedHandler } from "../channels/api";
 import { loadKnownGroupIds, saveKnownGroupIds } from "../devices/state-bundle";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex } from "../devices/sync/state";
@@ -95,7 +96,9 @@ export interface MembershipEndApi {
   isEnding(groupIdB64: string): boolean;
   /** The same for a channel, by its hex id. Reactive. */
   isChannelEnding(channelIdHex: string): boolean;
-  /** The notices not yet closed, oldest first. Reactive. */
+  /** The notices of ends noticed this session and not yet shown, oldest
+   *  first. In memory only (UX section 9): nothing is shown at the next
+   *  start. Reactive. */
   readonly notices: Accessor<readonly EndNotice[]>;
   /** The notice of the conversation a chat route names. Reactive. */
   noticeForRoute(idB64: string): EndNotice | undefined;
@@ -104,6 +107,11 @@ export interface MembershipEndApi {
   leftHere(idB64: string): boolean;
   /** Close a notice; its name goes with it. */
   dismissNotice(key: string): void;
+  /** The dialog over the open conversation is showing this notice: the
+   *  short notice at the bottom leaves it out. */
+  claimNotice(key: string): void;
+  /** Whether a dialog claimed this notice. */
+  isNoticeClaimed(key: string): boolean;
   /** Bumped when a leave is requested here, so a row can say so. */
   readonly leaveVersion: Accessor<number>;
   noteLeaveRequested(): void;
@@ -119,8 +127,10 @@ export interface MembershipEndApi {
   /** Bumped when an end finished: a held Welcome may open now. */
   readonly settledVersion: Accessor<number>;
 
-  /** Unsubscribe: the same end, for a channel. Resolves when it ran. */
-  endChannel(channelIdHex: string, title: string): Promise<void>;
+  /** Unsubscribe: the same end, for a channel. Resolves when it ran.
+   *  `removed`: a publisher removed this device's key from a private
+   *  channel (UX 9.5), so the person is told once; an unsubscribe is not. */
+  endChannel(channelIdHex: string, title: string, removed?: boolean): Promise<void>;
   /** A Welcome put this group in the registry (first join or not). */
   noteJoined(entry: ActiveGroup): Promise<void>;
   /** This device subscribed to a channel. */
@@ -157,6 +167,8 @@ const INERT: MembershipEndApi = {
   noticeForRoute: () => undefined,
   leftHere: () => false,
   dismissNotice: () => undefined,
+  claimNotice: () => undefined,
+  isNoticeClaimed: () => false,
   leaveVersion: () => 0,
   noteLeaveRequested: () => undefined,
   registerOpenDraft: () => () => undefined,
@@ -466,7 +478,15 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
     for (const batch of chunkSaveEdits(edits)) await sync.applyFolderEdits(batch);
   }
 
-  const runtime = new MembershipEndRuntime(store, port);
+  // UX section 9 (2026-11-06): the notices live in memory only.
+  const [notices, setNotices] = createSignal<readonly EndNotice[]>([]);
+  const claimed = new Set<string>();
+  const dropNotice = (key: string): void => {
+    setNotices((list) => (list.some((n) => n.key === key) ? list.filter((n) => n.key !== key) : list));
+  };
+  const runtime = new MembershipEndRuntime(store, port, undefined, (notice) => {
+    setNotices((list) => [...list.filter((n) => n.key !== notice.key), notice]);
+  });
 
   function publishSettled(): void {
     setSettledVersion((v) => v + 1);
@@ -513,7 +533,7 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
     const own = new Set(ownPersonKeys());
     const names = (rosterPeople(entry.group) ?? [])
       .filter((k) => !own.has(k))
-      .map((k) => memberNameOf(profiles.resolve(k)));
+      .map((k) => memberNameOf(profiles.resolve(k), "a membership end title"));
     return groupTitle(entry.label, names);
   }
 
@@ -645,6 +665,9 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
     untrack(() => {
       if (account === store.boundAccount()) return;
       setOpenFor(null);
+      // Another account (or none): this one's notices are not shown.
+      setNotices([]);
+      claimed.clear();
       if (account === null) {
         store.close();
         return;
@@ -714,20 +737,22 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
       version();
       return store.record(endKey(3, channelIdHex)) !== undefined;
     },
-    notices() {
-      version();
-      return store.notices();
-    },
+    notices,
     noticeForRoute(idB64) {
-      version();
-      return store.notices().find((n) => n.routeIdsB64.includes(idB64));
+      return notices().find((n) => n.routeIdsB64.includes(idB64));
     },
     leftHere(idB64) {
       version();
       return store.records().some((r) => r.left && r.routeIdsB64.includes(idB64));
     },
     dismissNotice(key) {
-      void store.dismiss(key).catch((err: unknown) => logFailure("notice not dismissed", err));
+      dropNotice(key);
+    },
+    claimNotice(key) {
+      claimed.add(key);
+    },
+    isNoticeClaimed(key) {
+      return claimed.has(key);
     },
     leaveVersion,
     noteLeaveRequested: () => setLeaveVersion((v) => v + 1),
@@ -756,14 +781,14 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
       };
     },
     settledVersion,
-    async endChannel(channelIdHex, title) {
+    async endChannel(channelIdHex, title, removed) {
       await start({
         refKind: 3,
         idHex: channelIdHex,
         segmentsB64: [],
         routeIdsB64: [],
         title,
-        left: true,
+        left: removed !== true,
         origin: "applied",
         endedEpoch: 0n,
         draft: null,
@@ -775,7 +800,7 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
       const hex = groupIdHex(entry.group.groupId);
       const key = endKey(2, hex);
       // The sentence would be false now: this device is in the group.
-      await store.dismiss(key).catch((err: unknown) => logFailure("notice not closed", err));
+      dropNotice(key);
       if (store.record(key) !== undefined) {
         await runtime.run(key);
         // Only a tombstone step can be left: this device is in the group, so
@@ -851,6 +876,16 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
       }
     },
   };
+
+  // ADR-0087 section 9 (phase B) — a `410 channel-deleted` from any channels
+  // route ends that channel on this device: the owner deleted it.
+  installChannelDeletedHandler(async (idHex) => {
+    const held = channelsState.channels().find((c) => c.id === idHex);
+    if (held === undefined && !channelsState.keysByChannel().has(idHex)) return;
+    const title = channelsState.metaByChannel().get(idHex)?.name ?? held?.localName ?? "";
+    await api.endChannel(idHex, title, true);
+  });
+  onCleanup(() => installChannelDeletedHandler(null));
 
   return <MembershipEndContext.Provider value={api}>{props.children}</MembershipEndContext.Provider>;
 }

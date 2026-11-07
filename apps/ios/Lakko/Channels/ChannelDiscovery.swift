@@ -58,8 +58,10 @@ public enum ChannelDiscovery {
         // channel lookup and the channel-name register routes are gone.
         let channelId = try ChannelsComposer.channelIdFromHex(channelIdHex)
         let owner = try Identity.fromSeed(seed: ownerIdentitySeed)
+        let lineage = ChannelLineage.identity(
+            accountIdB64: AcceptedContactsStore.boundAccountIdB64, currentSeed: ownerIdentitySeed) ?? owner
         let (journal, facts) = try ConversationHandles.channelFacts(
-            ownerIdentity: owner, channelId: channelId, name: name, description: description)
+            lineageIdentity: lineage, channelId: channelId, name: name, description: description)
         let written = try await ConversationHandles.claim(
             discovery: DiscoveryClient(), accountSeed: owner.ed25519Seed(), journalId: journal,
             handle: handle, isPublic: true, facts: facts)

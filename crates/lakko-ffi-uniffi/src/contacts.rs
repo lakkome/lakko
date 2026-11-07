@@ -2531,8 +2531,13 @@ pub enum FfiIncomingEnvelopeKind {
     /// own X25519 secret and the sender's account key resolved at receipt
     /// (C-68); `None` means not for this member (drop silently). The member
     /// it opens for applies its "Who can find me" setting and hands the
-    /// returned request to the ordinary incoming-request flow. Appended last.
+    /// returned request to the ordinary incoming-request flow.
     GroupContactRequest,
+    /// A channel's read key sealed to one co-publisher (ADR-0087 section 7,
+    /// phase B). `payload` is the whole envelope; open it with
+    /// `openChannelReadKeyEnvelope` after checking the MLS sender resolved
+    /// to the channel's owner. Never render it. Appended last.
+    ChannelReadKey,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2750,6 +2755,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::GroupReactions(value) => FfiIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..FfiIncomingEnvelope::of(K::GroupReactions)
+        },
+        IncomingEnvelope::ChannelReadKey(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelReadKey)
         },
         IncomingEnvelope::GroupContactRequest(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
@@ -3498,7 +3507,8 @@ pub struct GroupInvitePreview {
     pub inviter_name: Option<String>,
     pub member_count: u16,
     /// ADR-0078 section 6: the 16-byte channel id a co-publisher link carries
-    /// (then `group_name` is the channel's name, `inviter_name` is `None` and
+    /// (then `group_name` is the channel's name, `inviter_name` the name of
+    /// the publisher who made the link or `None` (ADR-0087 phase B), and
     /// `member_count` 0). `None` for a group link.
     pub channel_id: Option<Vec<u8>>,
     /// ADR-0087 section 18.4: the photo of the group or channel when the link
@@ -3708,7 +3718,7 @@ pub fn compose_group_invite_capability_with_preview(
 ///
 /// * [`FfiError::Contacts`] for a bad seed, group id or channel id, or a name
 ///   the display-name rule refuses.
-#[uniffi::export(default(avatar = None))]
+#[uniffi::export(default(avatar = None, inviter_name = None))]
 #[allow(clippy::too_many_arguments)] // one argument per preview field
 pub fn compose_co_publisher_invite_capability(
     issuer_signing_seed: Vec<u8>,
@@ -3719,6 +3729,7 @@ pub fn compose_co_publisher_invite_capability(
     knock_public_key: Vec<u8>,
     knock_version: u16,
     avatar: Option<FfiAvatar>,
+    inviter_name: Option<String>,
 ) -> Result<InviteLinkMint, FfiError> {
     let knock = group_knock_key(&knock_public_key, knock_version)?;
     let seed: [u8; 32] = issuer_signing_seed
@@ -3737,7 +3748,7 @@ pub fn compose_co_publisher_invite_capability(
         .map_err(|_| FfiError::Contacts("channelId must be 16 bytes".to_string()))?;
     let preview = RustGroupInvitePreview {
         group_name: rust_normalize_display_name(channel_name.as_deref().unwrap_or(""))?,
-        inviter_name: None,
+        inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))?,
         member_count: 0,
         channel_id: Some(channel),
         subscriber: None,
@@ -3939,7 +3950,10 @@ pub struct FfiOpenedChannelInviteCard {
     /// The verified plaintext capability wire
     /// (`GroupInviteCapability.decodeAndVerify`).
     pub capability_wire: Vec<u8>,
-    /// The preview: always a subscriber invitation.
+    /// The preview: a subscriber invitation (`subscriber` set) or, since
+    /// ADR-0087 phase B, a co-publisher (publisher) invitation (`subscriber`
+    /// `None`, `inviter_name` the publisher who made it). `channel_id` is
+    /// always set.
     pub preview: GroupInvitePreview,
 }
 
@@ -3969,12 +3983,13 @@ pub fn compose_channel_invite_card(
 }
 
 /// Decode a channel invitation card, open its link under its own secret and
-/// check it carries a subscriber invitation. Does NOT check expiry.
+/// check it carries a channel invitation (subscriber or co-publisher). Does
+/// NOT check expiry.
 ///
 /// # Errors
 ///
 /// [`FfiError::Contacts`] / [`FfiError::InviteLinkDamaged`] when the card is
-/// malformed, the link does not open, or it is not a subscriber invitation.
+/// malformed, the link does not open, or it is not a channel invitation.
 #[uniffi::export]
 pub fn open_channel_invite_card(card: Vec<u8>) -> Result<FfiOpenedChannelInviteCard, FfiError> {
     let card = lakko_contacts::group_invite::ChannelInviteCard::decode(&card)?;
@@ -5637,6 +5652,7 @@ mod tests {
             vec![0x4B; 32],
             1,
             None,
+            Some("Anna".to_string()),
         )
         .expect("mint");
         let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
@@ -5647,7 +5663,7 @@ mod tests {
             .expect("some");
         assert_eq!(preview.channel_id, Some(vec![0xC4; 16]));
         assert_eq!(preview.group_name.as_deref(), Some("Daily notes"));
-        assert_eq!(preview.inviter_name, None);
+        assert_eq!(preview.inviter_name.as_deref(), Some("Anna"));
         assert_eq!(preview.member_count, 0);
         assert!(!cap.wire().windows(16).any(|w| w == [0xC4; 16]));
         assert!(compose_co_publisher_invite_capability(
@@ -5658,6 +5674,7 @@ mod tests {
             None,
             vec![0x4B; 32],
             1,
+            None,
             None,
         )
         .is_err());

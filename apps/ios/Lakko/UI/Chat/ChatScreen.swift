@@ -873,6 +873,7 @@ public struct ChatScreen: View {
                                 // UX spec section 5.2 — about 78 percent of
                                 // the timeline width.
                                 maxBubbleWidth: width * 0.78,
+                                conversationIdHex: viewModel.groupIdHex,
                                 reactorNames: { emoji in
                                     entry.message.heldReactions
                                         .filter { $0.emoji == emoji }
@@ -1890,7 +1891,7 @@ private struct AttachmentPayload {
 // MARK: - Message row
 
 /// A centred capsule opening a day: "Today", "Yesterday", "16 September".
-private struct DateSeparator: View {
+struct DateSeparator: View {
     let label: String
 
     var body: some View {
@@ -1922,6 +1923,12 @@ private struct DateSeparator: View {
 /// so a play disc or a photo under the finger receives nothing while selecting
 /// and the menu's long press never fires. Outside the mode it draws the row
 /// unchanged, with no leading inset.
+/// ADR-0087 section 12 — who is looking at a channel post.
+enum ChannelPostRole: Equatable {
+    case reader
+    case publisher
+}
+
 /// What a timeline row draws for the selection mode.
 enum SelectionRowState: Equatable {
     /// Not in selection mode: the row as it always was.
@@ -2010,6 +2017,9 @@ struct MessageRow: View {
     var timeLabel: String? = nil
     /// The widest a bubble may grow (about 78 percent of the timeline).
     var maxBubbleWidth: CGFloat = .infinity
+    /// The conversation the row is in (per-message state such as a channel
+    /// invitation card is kept under it).
+    var conversationIdHex: String? = nil
     /// ADR-0048 — the resolved names of who reacted with an emoji.
     var reactorNames: (String) -> [String] = { _ in [] }
     /// ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
@@ -2087,6 +2097,11 @@ struct MessageRow: View {
     /// quote names it "You" on this device, whatever name the snapshot
     /// carries (`docs/ux/message-actions.md` section 3.1).
     var quotesOwnMessage: Bool = false
+    /// ADR-0087 section 12 — this row is a channel post: it is drawn as an
+    /// incoming bubble with no sender on every device, takes no reply and no
+    /// selection, and offers Edit and Delete to the owner and publishers
+    /// (`.publisher`) rather than to its author.
+    var channelPost: ChannelPostRole? = nil
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -2171,7 +2186,10 @@ struct MessageRow: View {
     /// already deleted (the receive-side author gate is the real
     /// enforcement — this is just the affordance).
     private var canEditOrDelete: Bool {
-        actionsAvailable
+        if let channelPost {
+            return actionsAvailable && channelPost == .publisher && message.messageId > 0 && !message.deleted
+        }
+        return actionsAvailable
             && message.direction == .outgoing
             && message.messageId > 0
             && !message.deleted
@@ -2192,7 +2210,7 @@ struct MessageRow: View {
     /// ADR-0052 / section 3.1 — Reply is offered on any message with an id,
     /// which is the same set React is: not a system row, landed, not a
     /// tombstone, and only while this device can still send.
-    private var canReply: Bool { canReact }
+    private var canReply: Bool { canReact && channelPost == nil }
 
     /// ADR-0052 decision 2 / section 5.1 — Forward is offered on any landed
     /// message that is not a tombstone, and only once its send is complete:
@@ -2208,7 +2226,7 @@ struct MessageRow: View {
     /// Section 8 — Select is offered on the rows the mode can select, which is
     /// the Forward gate (landed, not a tombstone, send complete).
     private var canSelect: Bool {
-        MessageSelection.canSelect(
+        channelPost == nil && MessageSelection.canSelect(
             actionsAvailable: actionsAvailable,
             isSystemRow: message.direction == .system,
             hasId: message.messageId > 0,
@@ -2530,6 +2548,9 @@ struct MessageRow: View {
                         onEdit()
                     case .delete:
                         onDelete()
+                    case .ban:
+                        // Channel comments only.
+                        break
                     }
                 }
             )
@@ -2606,7 +2627,14 @@ struct MessageRow: View {
                             onQuoteTap(reply.target)
                         }
                     }
-                    if let invite = CallInviteLink.callInviteOf(
+                    if let channel = message.channelInvite(conversationIdHex: conversationIdHex) {
+                        // ADR-0087 section 14 — a channel invitation: the card,
+                        // with `Subscribe` (or `Open`), not its link.
+                        ChannelInvitationCard(facts: channel, outgoing: isOutgoing)
+                    } else if let publisher = message.coPublisherInvite(conversationIdHex: conversationIdHex) {
+                        // Section 15.2 — an invitation to publish.
+                        CoPublisherInvitationCard(facts: publisher, outgoing: isOutgoing)
+                    } else if let invite = CallInviteLink.callInviteOf(
                         message.text, ownOrigin: CallInviteUrl.defaultOrigin) {
                         // `docs/ux/call-links.md` section 3 — a message whose
                         // whole text is one call link of this deployment is an
@@ -3257,6 +3285,8 @@ struct GroupInfoScreen: View {
     @State private var reactionsOpen = false
     /// UX 4.1 — the `Group type` screen.
     @State private var groupTypeOpen = false
+    /// UX section 14.2 — the invite-link screen.
+    @State private var inviteLinksOpen = false
     /// UX section 8 — the `Reject all requests?` confirmation.
     @State private var rejectAllConfirm = false
     /// ADR-0087 section 11 — the `Delete this group?` confirmation.
@@ -3488,28 +3518,25 @@ struct GroupInfoScreen: View {
                         }
                     }
                 }
-                // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
-                // Mints a /g/<slug> link conveying this group's id; a non-member
-                // opens it to request to join, approved via the pending list.
+                // ADR-0028 (G-3), UX section 14.2 — owner/admin `Invite link`:
+                // the invite-link screen (a new link with a label, expiry and
+                // use limit; the account's live links from any device; Copy
+                // link and Revoke). A non-member opens a link to ask to join,
+                // approved via the pending list.
                 if sections.contains(.inviteLink) {
                     Section {
-                        Button(l10n.t("chat.invite_link.create")) { viewModel.onCreateInviteLink() }
-                            .disabled(viewModel.membershipBusy)
-                        if let link = viewModel.inviteLink {
-                            Text(link)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textSelection(.enabled)
-                            // Copy is the whole of it: a link is never handed
-                            // to the system's share sheet.
-                            Button(l10n.t("chat.invite_link.copy")) { UIPasteboard.general.string = link }
-                            Button(l10n.t("chat.invite_link.revoke"), role: .destructive) {
-                                viewModel.onRevokeInviteLink()
+                        Button { inviteLinksOpen = true } label: {
+                            HStack {
+                                Label(l10n.t("chat.invite_link.label"), systemImage: "link")
+                                    .foregroundStyle(Color.lakkoText)
+                                Spacer()
+                                Image(systemName: "chevron.forward")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(Color.lakkoTextMuted)
                             }
-                            .disabled(viewModel.membershipBusy)
                         }
-                    } header: {
-                        Text(l10n.t("chat.invite_link.label"))
-                            .accessibilityAddTraits(.isHeader)
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.membershipBusy)
                     }
                 }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
@@ -3970,6 +3997,9 @@ struct GroupInfoScreen: View {
             // choice, because splitting it would put the warning and the button
             // on different screens.
             // Reactions-and-emoji spec section 9 / UX 4.1 — pushed screens.
+            .navigationDestination(isPresented: $inviteLinksOpen) {
+                GroupInviteLinksScreen(viewModel: viewModel)
+            }
             .navigationDestination(isPresented: $reactionsOpen) {
                 AllowedReactionsScreen(viewModel: viewModel) { reactionsOpen = false }
             }
@@ -4284,7 +4314,7 @@ private struct ChatTitleView: View {
     var body: some View {
         HStack(spacing: 8) {
             InitialsAvatar(
-                name: title, identity: identity, size: 32, isGroup: isGroup,
+                name: title, identity: personKey?.base64EncodedString() ?? identity, size: 32, isGroup: isGroup,
                 photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil))
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)

@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "pt-BR",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "Sua conta tem novas chaves. Estamos concluindo a mudança.",
@@ -1238,8 +1237,136 @@
       "text": "Não é possível descriptografar a mídia deste participante",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "Os inscritos podem reagir com qualquer emoji.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "Os inscritos não podem reagir às publicações.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "Os inscritos só podem reagir com os emojis que você escolher.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "Ele sai da busca e de Descobrir. As pessoas só podem se inscrever se você as convidar. Todos os inscritos continuam.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "Tornar este canal privado?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "Qualquer pessoa poderá encontrá-lo e lê-lo, e o Lakko pode sugeri-lo em Descobrir. O nome, a foto e a descrição ficam visíveis para todos. As publicações anteriores continuam legíveis só para quem já é inscrito.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "Tornar este canal público?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "O @nome antigo deixa de funcionar agora. Ele fica reservado para este canal por 30 dias.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "Só os inscritos veem isto.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "Qualquer pessoa pode encontrar este canal por este nome.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "Só as pessoas que você convidar podem se inscrever. Ele fica fora da busca.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "Qualquer pessoa pode encontrar este canal e se inscrever. O Lakko pode sugeri-lo em Descobrir.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "Tipo de canal",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "Atualizando inscritos... {done} de {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "Quem pode se inscrever",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "Voltar aos canais",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "Banir dos comentários",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "Ninguém está banido.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "Não foi possível salvar. Tente de novo.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "Banidos",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "Desbanir",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "Alguém",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "Ações do comentário",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "Comentar",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "Não foi possível excluir o comentário. Tente de novo.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "Os comentários não carregaram.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "Ocultar comentários",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "Este comentário é longo demais ou tem caracteres que não podem ser enviados.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "Mostrar mais",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# comentário novo} other {# comentários novos}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {Mostrar mais # comentário} other {Mostrar mais # comentários}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "Mostrar mais comentários",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "Escreva um comentário",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "Copublicadores",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "O canal e suas publicações serão removidos de todos os seus dispositivos e @{name} ficará livre em 30 dias. Não é possível desfazer.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "O canal e suas publicações serão removidos de todos os seus dispositivos. Não é possível desfazer.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "Excluir canal",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "Não foi possível excluir o canal. Tente novamente.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "Excluir este canal?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "Criar um canal",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "Nenhum canal ainda",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "O canal e suas publicações não estão mais nos seus dispositivos.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "Nenhum canal encontrado para {handle}.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "Canal privado",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "Canal público",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "Canal público · {band} inscritos",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "Selecione um canal ou crie um",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "Este canal não tem @name. Escolha um.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "Convidar",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "Convidar pessoas",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "O nome e a descrição, quem lê e quem mais pode publicar.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "Editores",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "Tira o canal da sua lista e remove as publicações dele de todos os seus dispositivos. Você pode se inscrever de novo depois.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "Não foi possível convidar {names}. Tente de novo.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "Este link de convite para copublicador foi criado por uma versão antiga do Lakko e não funciona mais. Peça ao proprietário do canal um novo link de convite.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "Você precisa de uma conta para se inscrever. Crie uma ou entre.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "Entrar em um canal",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "Inscrito. As publicações aparecem quando o dono ou um administrador abrir o Lakko.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "Não foi possível criar o link. Tente novamente.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "Este dispositivo ainda não pode criar links para este canal. Poderá quando o dispositivo do proprietário abrir o Lakko.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "Não foi possível revogar o link. Tente novamente.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "Canal",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "Banir dos comentários",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "Banidos",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "Desbanir",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "Criar",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "Descrição",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "Entre novamente para criar um canal.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "Não foi possível criar este canal. Nada foi criado. Tente de novo.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "Qualquer pessoa pode encontrar o canal e se inscrever por ele.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@meu_canal",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "Nome do canal",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "Os inscritos veem o nome e a descrição.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "Novo canal",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "Você criou muitos canais hoje. Tente de novo amanhã.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "Novo canal ou entrar em um",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "Só o dono pode alterar a foto.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "Os inscritos verão as iniciais no lugar.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "Remover a foto do canal?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "Indisponível",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "Só o dono e os editores podem publicar aqui.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "Esta publicação é mais antiga do que este dispositivo consegue ler.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "Esta publicação não está disponível.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "Não foi possível abrir esta publicação neste dispositivo.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "As publicações anteriores não estão disponíveis.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "Entre de novo para postar neste canal.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "Aceitar",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "Adicionar editor",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "Você foi convidado para publicar em {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} convida você para ser publicador de {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "Remover editor",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "Remover {name} como editor? A pessoa não poderá mais publicar nem convidar.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "Não foi possível remover o publicador. Tente novamente.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {# pedido para publicar} other {# pedidos para publicar}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "Dono",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "Editor",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "Deixar de ser editor",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "Você não vai mais publicar nem convidar neste canal. O dispositivo do dono aplica isso na próxima vez que abrir o Lakko.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "Não foi possível deixar de publicar. Tente novamente.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "Pronto. O dispositivo do dono aplica isso na próxima vez que abrir o Lakko.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "As reações em um canal são anônimas. Ninguém pode ver quem reagiu, nem mesmo o dono do canal.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "As reações em um canal são anônimas. Ninguém pode ver quem reagiu, nem mesmo o dono do canal.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "Não foi possível carregar os inscritos. Tente novamente.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "Por um convite",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "Do link \"{label}\"",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "Não foi possível carregar os inscritos. Tente de novo.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "Mostrar mais",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "Ainda não há inscritos.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {# outro.} other {# outros.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "A pessoa deixa de receber novas publicações.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "Remover este inscrito?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "Tentando novamente...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "Inscritos",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "Inscritos ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "Deixar de seguir",
+      "text": "Cancelar inscrição",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "Deixar de seguir este canal?",
+      "text": "Cancelar a inscrição neste canal?",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "Deixar de seguir {name}?",
+      "text": "Cancelar a inscrição em {name}?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "O grupo e as mensagens dele não estão mais nos seus dispositivos.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {Você não está mais em {name} e em mais #.} other {Você não está mais em {name} e em mais #.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "Nunca",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "Links de grupos e canais",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "Link de canal",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "Link de grupo",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "Link de copublicador",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "Rótulo (opcional)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "Quem pode me encontrar",
       "status": "machine"
     }
-  }
+  },
+  "language": "pt-BR"
 }

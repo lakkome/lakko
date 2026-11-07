@@ -164,35 +164,16 @@ export const paths = {
   joinCall(slug: string): string {
     return `/c/${slug}`;
   },
+  /** New channel (`docs/ux/group-and-channel-privacy.md` section 3.2): opens
+   *  beside the Chats list, from the Chats create menu. */
+  channelNew: "/channel/new",
   /**
-   * Channel list — Phase 4 G4-2. Shows the user's
-   * registered channels with a + entry point that goes to
-   * `paths.channelNew()`.
-   */
-  channels: "/channels",
-  /** New-channel form — Phase 4 G4-2. */
-  channelNew: "/channels/new",
-  /** Join an existing channel as a co-publisher from an owner's link
-   *  (ADR-0028 OQ3); the second entry of the Channels compose menu. */
-  channelJoin: "/channels/join",
-  /**
-   * Channel view — Phase 4 G4-2. `channelIdHex` is the
-   * 32-char lowercase hex form of the 16-byte channel
-   * pseudonym (ADR-0010 §"Wire surfaces"); the
-   * `services/channels` REST routes accept the same form.
+   * A channel, opened where every conversation opens (ADR-0087 section 12):
+   * beside the Chats list. `channelIdHex` is the 32-char lowercase hex form of
+   * the 16-byte channel id, the form the `services/channels` routes take.
    */
   channel(channelIdHex: string): string {
-    return `/channels/${channelIdHex}`;
-  },
-  /**
-   * Subscribe-to-channel view — Phase 4 G4-2 (subscriber
-   * side). Generates a local X25519 keypair on first
-   * visit, registers it via
-   * `POST /v1/channels/:id/subscribers`, polls for a
-   * seed envelope, opens it, and renders decoded posts.
-   */
-  channelSubscribe(channelIdHex: string): string {
-    return `/channels/${channelIdHex}/subscribe`;
+    return `/channel/${channelIdHex}`;
   },
 } as const;
 
@@ -201,6 +182,10 @@ export const paths = {
  * sync with `paths.chat(...)`. Used in the route table.
  */
 export const chatRoutePattern = "/chat/:id" as const;
+
+/** The channel route (relative to the Chats layout) — must stay in sync with
+ *  `paths.channel(...)`. `/channel/new` is matched before it. */
+export const channelRoutePattern = "/channel/:id" as const;
 
 /**
  * The matchable pattern for the Contacts route, with or without a selected
@@ -250,16 +235,3 @@ export const callRoutePattern = "/call/:id" as const;
  */
 export const callJoinRoutePattern = "/c/:slug" as const;
 
-/**
- * The matchable pattern for the dynamic channel view route
- * — must stay in sync with `paths.channel(...)`.
- */
-export const channelRoutePattern = "/channels/:id" as const;
-
-/**
- * The matchable pattern for the dynamic subscribe-to-
- * channel route — must stay in sync with
- * `paths.channelSubscribe(...)`.
- */
-export const channelSubscribeRoutePattern =
-  "/channels/:id/subscribe" as const;

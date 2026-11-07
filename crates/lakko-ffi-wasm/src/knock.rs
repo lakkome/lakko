@@ -19,6 +19,11 @@ use lakko_contacts::admission_seed::{
     decode_admission_seed as rust_decode_admission_seed, AdmissionSeedError,
     ADMISSION_SEED_ENVELOPE_LEN,
 };
+use lakko_contacts::channel_read_key::{
+    compose_channel_read_key as rust_compose_channel_read_key,
+    decode_channel_read_key as rust_decode_channel_read_key, ChannelReadKeyError,
+    CHANNEL_READ_KEY_ENVELOPE_LEN,
+};
 use lakko_contacts::knock::{
     is_knock_row_len as rust_is_knock_row_len, knock_public_key as rust_knock_public_key,
     knock_row_version as rust_knock_row_version, knock_seed as rust_knock_seed,
@@ -444,6 +449,114 @@ pub fn admission_seed_envelope_len() -> u32 {
     len_u32(ADMISSION_SEED_ENVELOPE_LEN)
 }
 
+// ============================================================================
+// Channel read-key envelope (ADR-0087 section 7, phase B)
+// ============================================================================
+
+/// A decoded channel read-key envelope; the read key stays sealed.
+#[wasm_bindgen(js_name = ChannelReadKeyEnvelope)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmChannelReadKeyEnvelope {
+    channel_id: Vec<u8>,
+    member_account_key: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = ChannelReadKeyEnvelope)]
+impl WasmChannelReadKeyEnvelope {
+    /// The 16-byte channel id.
+    #[wasm_bindgen(getter, js_name = channelId)]
+    #[must_use]
+    pub fn channel_id(&self) -> Vec<u8> {
+        self.channel_id.clone()
+    }
+
+    /// The addressee's 32-byte account key.
+    #[wasm_bindgen(getter, js_name = memberAccountKey)]
+    #[must_use]
+    pub fn member_account_key(&self) -> Vec<u8> {
+        self.member_account_key.clone()
+    }
+}
+
+fn channel_read_key_error(e: ChannelReadKeyError) -> String {
+    format!("channelReadKey.{}: {e}", e.code())
+}
+
+/// Compose a channel read-key envelope for one co-publisher, sealed to that
+/// co-publisher's account X25519 key; send it with
+/// `PublisherGroup.createApplicationMessage`.
+///
+/// # Errors
+///
+/// Throws `channelReadKey.<code>: ...`.
+#[wasm_bindgen(js_name = composeChannelReadKeyEnvelope)]
+pub fn compose_channel_read_key_envelope(
+    channel_id: &[u8],
+    member_account_key: &[u8],
+    member_x25519_public_key: &[u8],
+    read_key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let channel = <[u8; 16]>::try_from(channel_id)
+        .map_err(|_| "channelReadKey.badLength: channel id must be 16 bytes".to_string())?;
+    rust_compose_channel_read_key(
+        &channel,
+        &key32("channelReadKey", "member account key", member_account_key)?,
+        &x25519("channelReadKey", member_x25519_public_key)?,
+        &key32("channelReadKey", "read key", read_key)?,
+    )
+    .map_err(channel_read_key_error)
+}
+
+/// Strictly decode a channel read-key envelope.
+///
+/// # Errors
+///
+/// Throws `channelReadKey.<code>: ...`.
+#[wasm_bindgen(js_name = decodeChannelReadKeyEnvelope)]
+pub fn decode_channel_read_key_envelope(
+    plaintext: &[u8],
+) -> Result<WasmChannelReadKeyEnvelope, String> {
+    let env = rust_decode_channel_read_key(plaintext).map_err(channel_read_key_error)?;
+    Ok(WasmChannelReadKeyEnvelope {
+        channel_id: env.channel_id.to_vec(),
+        member_account_key: env.member_account_key.to_vec(),
+    })
+}
+
+/// Open a channel read-key envelope with the ACCOUNT identity it is
+/// addressed to, returning the 32-byte read key. Also check the MLS sender
+/// is the channel's owner.
+///
+/// # Errors
+///
+/// Throws `channelReadKey.<code>: ...`.
+#[wasm_bindgen(js_name = openChannelReadKeyEnvelope)]
+pub fn open_channel_read_key_envelope(
+    plaintext: &[u8],
+    account_identity: &Identity,
+) -> Result<Vec<u8>, String> {
+    let env = rust_decode_channel_read_key(plaintext).map_err(channel_read_key_error)?;
+    let id = account_identity.mls_identity();
+    let own = key32(
+        "channelReadKey",
+        "own account key",
+        id.signature_public_key(),
+    )?;
+    if !env.is_addressed_to(&own) {
+        return Err("channelReadKey.otherAccount: addressed to another account".to_string());
+    }
+    env.open(&X25519SecretKey::from_bytes(id.x25519_secret_bytes()))
+        .map(|k| k.to_vec())
+        .map_err(channel_read_key_error)
+}
+
+/// The one well-formed channel read-key envelope length.
+#[wasm_bindgen(js_name = channelReadKeyEnvelopeLen)]
+#[must_use]
+pub fn channel_read_key_envelope_len() -> u32 {
+    len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +618,28 @@ mod tests {
             admission.to_vec()
         );
         assert_eq!(wire.len(), admission_seed_envelope_len() as usize);
+
+        let read_key = [0x5A_u8; 32];
+        let wire = compose_channel_read_key_envelope(
+            &[0x0C; 16],
+            id.signature_public_key(),
+            &id.x25519_public_key(),
+            &read_key,
+        )
+        .unwrap();
+        assert_eq!(wire.len(), channel_read_key_envelope_len() as usize);
+        assert_eq!(
+            decode_channel_read_key_envelope(&wire)
+                .unwrap()
+                .channel_id(),
+            vec![0x0C; 16]
+        );
+        assert_eq!(
+            open_channel_read_key_envelope(&wire, &admin).unwrap(),
+            read_key.to_vec()
+        );
+        let other = Identity::from_seed(&[0x72; 64]).unwrap();
+        assert!(open_channel_read_key_envelope(&wire, &other)
+            .is_err_and(|e| e.starts_with("channelReadKey.otherAccount")));
     }
 }

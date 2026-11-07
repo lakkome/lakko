@@ -119,7 +119,9 @@ class ReachRulesTest {
             inputs(versions = mapOf(ReachSlot(ReachKind.CONTACT, "") to 3)),
             now,
         )
-        assertEquals(3, keys.single { it.slot.kind == ReachKind.CONTACT }.version)
+        // ADR-0060 section 1 (2026-11-06): nothing registered before, so the
+        // new version alone (a retired version is never registered again).
+        assertEquals(listOf(3), keys.filter { it.slot.kind == ReachKind.CONTACT }.map { it.version })
     }
 
     // -----------------------------------------------------------------
@@ -338,6 +340,8 @@ class ReachVersionRecoveryTest {
             replies = emptyMap(),
         )
         val keys = desiredReachKeys(inputs, nowMs = 0L).map { pk(it.slot, it.version) }
+        // ADR-0060 section 1 (2026-11-06): a key rotated away is never
+        // registered again, even inside the retired window.
         assertEquals(listOf(pk(contact, 1)), keys)
         assertFalse(pk(contact, 0) in keys)
     }

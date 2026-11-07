@@ -27,6 +27,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { channelIdFromHex } from "../channels/composer";
 import { knockKeyFor } from "../contacts/client";
 import { channelsActions, channelsState } from "../state/channels-state";
+import { channelAvatarOf, channelHandleOf } from "../channels/channel-access";
 import { loadWasm } from "../wasm";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
@@ -37,6 +38,7 @@ import { installRotationHandleRekeys } from "../ds/rotation-takeover";
 import type { StoredConversationHandle } from "./group-settings-envelope";
 import {
   claimGroupHandle,
+  rekeyChannelHandle,
   rekeyGroupHandle,
   handleNeedsRenewal,
   HANDLE_RENEWALS_PER_SESSION,
@@ -254,42 +256,99 @@ export function GroupHandleRuntime(): JSX.Element {
         });
         recorded += 1;
       }
+      // The same for every channel this account owns that holds a name.
+      for (const channel of channelsState.channels()) {
+        if (!ownsChannel(channel.id)) continue;
+        const handle = channelHandleOf(channel.id);
+        if (handle === null || handle.length === 0) continue;
+        await recordOwedHandle({
+          kind: "channel",
+          id: channel.id,
+          op: "update",
+          handle,
+          oldHandle: null,
+          isPublic: channelIsPublic(channel.id),
+          sinceMs: Date.now(),
+          reason: "rekey",
+          rekeyFrom: oldAccountKeyB64,
+        });
+        recorded += 1;
+      }
       void tick(acct);
       return recorded;
     }),
   );
 
+  /** A channel's flag as this owner device set it; a channel from before
+   *  phase B (no flag recorded) was public by construction. */
+  function channelIsPublic(idHex: string): boolean {
+    const v = channelsActions.accessOf(idHex).visibility;
+    return v === null ? true : v === "public";
+  }
+
   async function runChannel(owed: OwedHandle): Promise<OwedOutcome> {
     let o = owed;
     if (!ownsChannel(o.id)) return { dropped: "not-owner" };
-    const owner = chats.conversationAccountIdentity();
-    if (owner === null) return "retry";
+    // ADR-0087 section 3 (coordinator rule): the PublisherGroup id from the
+    // lineage identity, the handle key from the CURRENT identity's root.
+    const lineage = chats.conversationAccountIdentity();
+    const current = chats.accountIdentity();
+    if (lineage === null || current === null) return "retry";
     const channel = channelsState.channels().find((c) => c.id === o.id);
     if (channel === undefined) return { dropped: "no-channel" };
-    // A republish (a name or description change) reads the name now: a
-    // channel that holds none has nothing to publish.
-    if (o.reason === "republish" && o.handle.length === 0) {
-      const held = (channel.localHandle || handleWriteFor("channel", o.id)?.handle || "").replace(/^@/, "");
-      if (held.length === 0) return "done";
+    const held = (channelHandleOf(o.id) ?? handleWriteFor("channel", o.id)?.handle ?? "").replace(/^@/, "");
+    const isPublic = channelIsPublic(o.id);
+    // A republish (a name, description or photo change) reads the name now:
+    // a channel that holds none, or is private, has nothing to publish.
+    if (o.reason === "republish") {
+      if (held.length === 0 || !isPublic) return "done";
       o = { ...o, handle: held };
     }
-    const meta = channelsState.metaByChannel().get(o.id);
+    if (o.handle.length === 0) o = { ...o, handle: held };
+    if (o.handle.length === 0) return "done";
     const wasm = await loadWasm();
+    const channelId = channelIdFromHex(o.id);
+    // ADR-0074: after a rotation the name moves to the new current
+    // identity's handle key first.
+    if (owed.rekeyFrom !== undefined) {
+      const old = ownIdentityByKey(owed.rekeyFrom);
+      if (old === null) return { dropped: "no-old-key" };
+      try {
+        await rekeyChannelHandle({
+          wasm,
+          lineageIdentity: lineage,
+          oldIdentity: old,
+          currentIdentity: current,
+          channelId,
+          handle: o.handle,
+          isPublic,
+        });
+      } catch (err) {
+        // Refused for good: the name may already be under the new key (an
+        // answer lost on the way back); the update below tells.
+        if (owedOutcomeOf(err) === "retry") throw err;
+      }
+      await clearOwedRekey("channel", o.id);
+    }
+    const meta = channelsState.metaByChannel().get(o.id);
     const written = await updateChannelHandle({
       wasm,
-      ownerIdentity: owner,
-      channelId: channelIdFromHex(o.id),
+      lineageIdentity: lineage,
+      currentIdentity: current,
+      channelId,
       handle: o.handle,
+      isPublic,
       facts: {
         name: (meta?.name ?? channel.localName).trim(),
         description: (meta?.description ?? channel.localDescription).trim(),
+        avatar: channelAvatarOf(o.id),
       },
     });
     await noteHandleWrite({
       kind: "channel",
       id: o.id,
       handle: written.handle,
-      isPublic: true,
+      isPublic,
       lastWriteMs: Date.now(),
       leaseUntilMs: written.leaseUntilMs,
     });
@@ -345,7 +404,7 @@ export function GroupHandleRuntime(): JSX.Element {
     }
     for (const channel of channelsState.channels()) {
       if (renewed >= HANDLE_RENEWALS_PER_SESSION) return;
-      const handle = channel.localHandle;
+      const handle = channelHandleOf(channel.id) ?? undefined;
       if (handle === undefined || handle.length === 0 || !ownsChannel(channel.id)) continue;
       if (owedHandleFor("channel", channel.id) !== undefined) continue;
       const write = handleWriteFor("channel", channel.id);
@@ -359,7 +418,7 @@ export function GroupHandleRuntime(): JSX.Element {
         op: "update",
         handle,
         oldHandle: null,
-        isPublic: true,
+        isPublic: channelIsPublic(channel.id),
         sinceMs: now,
         reason: "renew",
       });

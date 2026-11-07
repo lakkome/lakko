@@ -23,10 +23,18 @@ public struct SharedChannelMeta: Equatable, Sendable {
     public let topic: UInt8
     public let language: String
     public let listed: Bool
+    /// ADR-0087 metadata v3 — the handle block (the public flag and the
+    /// `@name` with its certificate), the photo and the allowed reactions. A
+    /// re-issue carries them verbatim, as it carries the rest.
+    public let handle: FfiConversationHandle?
+    public let avatar: FfiAvatar?
+    public let reactions: FfiAllowedReactions?
 
     public init(
         name: String, description: String, updatedAtMs: UInt64,
-        topic: UInt8 = 0, language: String = "", listed: Bool = false
+        topic: UInt8 = 0, language: String = "", listed: Bool = false,
+        handle: FfiConversationHandle? = nil, avatar: FfiAvatar? = nil,
+        reactions: FfiAllowedReactions? = nil
     ) {
         self.name = name
         self.description = description
@@ -34,6 +42,32 @@ public struct SharedChannelMeta: Equatable, Sendable {
         self.topic = topic
         self.language = language
         self.listed = listed
+        self.handle = handle
+        self.avatar = avatar
+        self.reactions = reactions
+    }
+
+    /// The core's record for this meta.
+    var ffi: FfiChannelMeta {
+        FfiChannelMeta(
+            name: name, description: description, updatedAtMs: updatedAtMs,
+            topic: topic, language: language, listed: listed,
+            handle: handle, avatar: avatar, reactions: reactions)
+    }
+
+    /// The same record with `change` applied and a new stamp.
+    func with(
+        updatedAtMs: UInt64, name: String? = nil, description: String? = nil,
+        topic: UInt8? = nil, language: String? = nil, listed: Bool? = nil,
+        handle: FfiConversationHandle?? = nil, avatar: FfiAvatar?? = nil,
+        reactions: FfiAllowedReactions?? = nil
+    ) -> SharedChannelMeta {
+        SharedChannelMeta(
+            name: name ?? self.name, description: description ?? self.description,
+            updatedAtMs: updatedAtMs, topic: topic ?? self.topic,
+            language: language ?? self.language, listed: listed ?? self.listed,
+            handle: handle ?? self.handle, avatar: avatar ?? self.avatar,
+            reactions: reactions ?? self.reactions)
     }
 }
 
@@ -42,8 +76,12 @@ public struct SharedChannelMeta: Equatable, Sendable {
 /// and is dropped — never rendered as text, because a plaintext that opens
 /// with the record's domain was meant as a record.
 public enum ChannelPostContent: Equatable {
+    /// ADR-0087 section 13 — the post's chat envelope bytes (text and
+    /// attachments, or an edit or delete op), read by ``ChannelPostBody``.
     case text(String)
     case meta(SharedChannelMeta)
+    /// Section 13a — a publisher-signed comment ban list.
+    case banList(updatedAtMs: UInt64, authors: [Data])
     case malformed
 }
 
@@ -70,13 +108,15 @@ public enum ChannelMetaRecord {
             guard let meta = content.meta else { return .malformed }
             return .meta(SharedChannelMeta(
                 name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs,
-                topic: meta.topic, language: meta.language, listed: meta.listed))
+                topic: meta.topic, language: meta.language, listed: meta.listed,
+                handle: meta.handle, avatar: meta.avatar, reactions: meta.reactions))
         case .malformed:
             return .malformed
         case .banList:
-            // ADR-0087 section 13.3 — a comment ban list. Channel comments are
-            // not built on this client (phase B): never rendered as a post.
-            return .malformed
+            // ADR-0087 section 13.3 — a comment ban list: kept (newest
+            // wins), never rendered as a post.
+            guard let list = content.banList else { return .malformed }
+            return .banList(updatedAtMs: list.updatedAtMs, authors: list.authors)
         }
     }
 
@@ -100,10 +140,7 @@ public enum ChannelMetaRecord {
         guard let keys = state.keysByChannel[channelId] else {
             throw ChannelMetaError.notAPublisher
         }
-        let plaintext = try composeChannelMeta(
-            meta: FfiChannelMeta(
-                name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs,
-                topic: meta.topic, language: meta.language, listed: meta.listed))
+        let plaintext = try composeChannelMeta(meta: meta.ffi)
         let epoch = state.epochByChannel[channelId] ?? 0
         let counter = try state.nextCounter(channelId: channelId)
         let wire = try ChannelsComposer.compose(
@@ -134,7 +171,10 @@ public enum ChannelMetaRecord {
             updatedAtMs: nowMs,
             topic: keeping?.topic ?? 0,
             language: keeping?.language ?? "",
-            listed: keeping?.listed ?? false
+            listed: keeping?.listed ?? false,
+            handle: keeping?.handle,
+            avatar: keeping?.avatar,
+            reactions: keeping?.reactions
         )
     }
 }

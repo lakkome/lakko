@@ -204,11 +204,15 @@ use super::recovery_email::{
 /// conversation-end register (ADR-0087 section 9), `8` since the
 /// own channel-reaction register (ADR-0087 section 13a), `9` since the
 /// own channel-comment register (the same section, a key per write), `10`
-/// since the quick-reaction register (UX `reactions-and-emoji.md` D3). Older
+/// since the quick-reaction register (UX `reactions-and-emoji.md` D3), `11`
+/// since a link record carries group and channel links (ADR-0087 phase B,
+/// 2026-11-05: target, invite seed, admission version, capability), `12`
+/// since an own reaction may name a comment (ADR-0087 phase B, 2026-11-06:
+/// target and comment cursor). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 10;
+const STATE_VERSION: u8 = 12;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -977,25 +981,81 @@ impl SyncedState {
         reacted: bool,
         post_at_ms: u64,
     ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
-        let value = ChannelReactionEntry {
-            channel_id,
-            post_cursor,
-            emoji: emoji.to_string(),
-            reacted,
-            post_at_ms,
-        };
+        self.set_own_reaction(
+            hlc,
+            ChannelReactionEntry {
+                channel_id,
+                post_cursor,
+                comment_cursor: None,
+                emoji: emoji.to_string(),
+                reacted,
+                post_at_ms,
+            },
+        )
+    }
+
+    /// The same as [`Self::set_channel_reaction`] for a reaction on the
+    /// comment `comment_cursor` under the post at `post_cursor` (ADR-0087
+    /// phase B). `post_at_ms` is still the POST's server time: a comment
+    /// lives as long as its post. At most [`CHANNEL_REACTIONS_PER_POST_MAX`]
+    /// reactions stand on one comment.
+    ///
+    /// # Errors
+    ///
+    /// [`super::entry::BoundsError::ChannelReactionEmoji`], or
+    /// [`super::entry::BoundsError::TooManyCommentReactions`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_comment_reaction(
+        &mut self,
+        hlc: u64,
+        channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
+        self.set_own_reaction(
+            hlc,
+            ChannelReactionEntry {
+                channel_id,
+                post_cursor,
+                comment_cursor: Some(comment_cursor),
+                emoji: emoji.to_string(),
+                reacted,
+                post_at_ms,
+            },
+        )
+    }
+
+    fn set_own_reaction(
+        &mut self,
+        hlc: u64,
+        value: ChannelReactionEntry,
+    ) -> Result<Option<Vec<u8>>, super::entry::BoundsError> {
         value.validate()?;
-        let held = self.channel_reaction_register(&channel_id, post_cursor, emoji);
-        if reacted
+        let held = self.channel_reaction_register(
+            &value.channel_id,
+            value.post_cursor,
+            value.comment_cursor,
+            &value.emoji,
+        );
+        if value.reacted
             && !held.as_ref().is_some_and(|h| h.value.reacted)
-            && self.channel_reactions_on(&channel_id, post_cursor).len()
+            && self
+                .own_reactions_on(&value.channel_id, value.post_cursor, value.comment_cursor)
+                .len()
                 >= CHANNEL_REACTIONS_PER_POST_MAX
         {
-            return Err(super::entry::BoundsError::TooManyChannelReactions);
+            return Err(if value.comment_cursor.is_some() {
+                super::entry::BoundsError::TooManyCommentReactions
+            } else {
+                super::entry::BoundsError::TooManyChannelReactions
+            });
         }
         match &held {
-            Some(h) if h.value.reacted == reacted => return Ok(None),
-            None if !reacted => return Ok(None),
+            Some(h) if h.value.reacted == value.reacted => return Ok(None),
+            None if !value.reacted => return Ok(None),
             None if self.channel_reaction_count() >= CHANNEL_REACTIONS_MAX_CLIENT => {
                 return Ok(None);
             },
@@ -1011,11 +1071,13 @@ impl SyncedState {
         &self,
         channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
         post_cursor: u64,
+        comment_cursor: Option<u64>,
         emoji: &str,
     ) -> Option<Stamped<ChannelReactionEntry>> {
         match self.registers.get(&RegisterKey::ChannelReaction(
             *channel_id,
             post_cursor,
+            comment_cursor,
             emoji.to_string(),
         )) {
             Some(Held {
@@ -1044,23 +1106,60 @@ impl SyncedState {
         post_cursor: u64,
         emoji: &str,
     ) -> bool {
-        self.channel_reaction_register(channel_id, post_cursor, emoji)
+        self.channel_reaction_register(channel_id, post_cursor, None, emoji)
             .is_some_and(|r| r.value.reacted)
     }
 
-    /// The emoji the account's reactions on the post stand with, in byte
-    /// order of the emoji.
+    /// Whether the account's reaction `emoji` stands on the comment.
+    #[must_use]
+    pub fn has_comment_reaction(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+    ) -> bool {
+        self.channel_reaction_register(channel_id, post_cursor, Some(comment_cursor), emoji)
+            .is_some_and(|r| r.value.reacted)
+    }
+
+    /// The emoji the account's reactions on the post itself stand with (not
+    /// on its comments), in byte order of the emoji.
     #[must_use]
     pub fn channel_reactions_on(
         &self,
         channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
         post_cursor: u64,
     ) -> Vec<String> {
+        self.own_reactions_on(channel_id, post_cursor, None)
+    }
+
+    /// The emoji the account's reactions on the comment stand with, in byte
+    /// order of the emoji.
+    #[must_use]
+    pub fn comment_reactions_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Vec<String> {
+        self.own_reactions_on(channel_id, post_cursor, Some(comment_cursor))
+    }
+
+    fn own_reactions_on(
+        &self,
+        channel_id: &[u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_cursor: Option<u64>,
+    ) -> Vec<String> {
         self.registers
             .values()
             .filter_map(|h| match &h.entry {
                 SyncEntry::ChannelReaction(r)
-                    if r.reacted && r.channel_id == *channel_id && r.post_cursor == post_cursor =>
+                    if r.reacted
+                        && r.channel_id == *channel_id
+                        && r.post_cursor == post_cursor
+                        && r.comment_cursor == comment_cursor =>
                 {
                     Some(r.emoji.clone())
                 },
@@ -2046,6 +2145,10 @@ mod tests {
             minted_at_ms: 0,
             label: "x".repeat(usize::from(label)),
             answered: vec![],
+            target_id: vec![],
+            invite_seed: vec![],
+            admission_version: 0,
+            capability: vec![],
         })
     }
 
@@ -2429,15 +2532,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 10);
-        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9] {
+        assert_eq!(old[0], 12);
+        for version in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![10, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![12, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2722,10 +2825,72 @@ mod tests {
         SyncEntry::ChannelReaction(ChannelReactionEntry {
             channel_id: [c; 16],
             post_cursor: cursor,
+            comment_cursor: None,
             emoji: emoji.to_string(),
             reacted,
             post_at_ms: 1_000_u64.saturating_add(cursor),
         })
+    }
+
+    /// ADR-0087 phase B: reactions on a comment are their own registers,
+    /// three a comment, apart from the post's, carried to another device,
+    /// persisted, and pruned with the post.
+    #[test]
+    fn comment_reactions_sync_count_apart_and_prune_with_the_post() {
+        use super::super::channel_reaction::CHANNEL_REACTION_RETENTION_MS;
+        use super::super::entry::BoundsError;
+        let ch = [7u8; 16];
+        let mut a = SyncedState::new();
+        let sent = a
+            .set_comment_reaction(1, ch, 7, 3, "a", true, 500)
+            .unwrap()
+            .unwrap();
+        assert!(a.has_comment_reaction(&ch, 7, 3, "a"));
+        assert!(!a.has_comment_reaction(&ch, 7, 4, "a"));
+        assert!(!a.has_channel_reaction(&ch, 7, "a"));
+        assert!(a.channel_reactions_on(&ch, 7).is_empty());
+        assert_eq!(a.comment_reactions_on(&ch, 7, 3), vec!["a".to_string()]);
+        for (i, e) in ["b", "c"].iter().enumerate() {
+            a.set_comment_reaction(2 + i as u64, ch, 7, 3, e, true, 500)
+                .unwrap();
+        }
+        assert_eq!(
+            a.set_comment_reaction(9, ch, 7, 3, "d", true, 500),
+            Err(BoundsError::TooManyCommentReactions)
+        );
+        // The post and another comment are counted apart.
+        assert!(a
+            .set_channel_reaction(10, ch, 7, "d", true, 500)
+            .unwrap()
+            .is_some());
+        assert!(a
+            .set_comment_reaction(11, ch, 7, 4, "d", true, 500)
+            .unwrap()
+            .is_some());
+        let mut b = SyncedState::new();
+        assert_eq!(b.apply_channel_reaction_envelope(&sent), Ok(true));
+        assert!(b.has_comment_reaction(&ch, 7, 3, "a"));
+        let off = a
+            .set_comment_reaction(12, ch, 7, 3, "a", false, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.apply_channel_reaction_envelope(&off), Ok(true));
+        assert!(!b.has_comment_reaction(&ch, 7, 3, "a"));
+        let restored = SyncedState::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(
+            restored.comment_reactions_on(&ch, 7, 3),
+            a.comment_reactions_on(&ch, 7, 3)
+        );
+        let mut c = SyncedState::new();
+        for e in a.channel_reaction_envelopes() {
+            c.apply_channel_reaction_envelope(&e).unwrap();
+        }
+        assert_eq!(c.comment_reactions_on(&ch, 7, 4), vec!["d".to_string()]);
+        assert_eq!(
+            c.prune_channel_activity(500 + CHANNEL_REACTION_RETENTION_MS + 1),
+            5
+        );
+        assert!(c.is_empty());
     }
 
     fn channel_comment(c: u8, cursor: u64, nonce: u8, deleted: bool) -> SyncEntry {

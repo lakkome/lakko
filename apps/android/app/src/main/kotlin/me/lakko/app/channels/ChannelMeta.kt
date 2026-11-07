@@ -37,8 +37,13 @@ public data class SharedChannelMeta(
     val topic: Int = 0,
     /** ADR-0059 metadata v2: ISO 639 language, "" when not set. */
     val language: String = "",
-    /** ADR-0059 metadata v2: the owner listed the channel in Discover. */
+    /** ADR-0059 metadata v2: the owner listed the channel in Discover.
+     *  ADR-0087 section 16: since metadata v3 this is the PUBLIC flag. */
     val listed: Boolean = false,
+    /** ADR-0087 section 18.2 — the record's own plaintext (base64), which a
+     *  re-issue after a rotation re-posts verbatim with its @name, photo and
+     *  reactions setting; "" when only the fields above are known. */
+    val recordB64: String = "",
 )
 
 /** UX copy (docs/ux/group-and-channel-names.md section 5). */
@@ -68,6 +73,10 @@ public sealed interface ClassifiedPost {
 
     /** A domain match that failed a bound: drop, never render as text. */
     public data object Malformed : ClassifiedPost
+
+    /** ADR-0087 section 13a — a publisher-signed ban list: hides the comments
+     *  of the keys it names, never rendered. */
+    public data class BanList(val list: uniffi.lakko_ffi_uniffi.FfiBanList) : ClassifiedPost
 }
 
 /** Map the FFI classification onto [ClassifiedPost]; pure over the record. */
@@ -92,14 +101,37 @@ public fun classifiedPostOf(content: FfiChannelPostContent): ClassifiedPost = wh
         }
     }
     FfiChannelPostKind.MALFORMED -> ClassifiedPost.Malformed
-    // ADR-0087 phase B — a ban list is moderation state for comments, which
-    // this client does not build yet. Never rendered as text.
-    FfiChannelPostKind.BAN_LIST -> ClassifiedPost.Malformed
+    // ADR-0087 section 13a — moderation state for comments, never a post.
+    FfiChannelPostKind.BAN_LIST -> content.banList?.let { ClassifiedPost.BanList(it) } ?: ClassifiedPost.Malformed
 }
 
-/** The FFI classification of a decrypted post plaintext. Never fails. */
+/** The FFI classification of a decrypted post plaintext. Never fails. A
+ *  metadata record keeps its own plaintext ([SharedChannelMeta.recordB64]). */
 public fun classifyChannelPlaintext(plaintext: ByteArray): ClassifiedPost =
-    classifiedPostOf(classifyChannelPostPlaintext(plaintext))
+    when (val c = classifiedPostOf(classifyChannelPostPlaintext(plaintext))) {
+        is ClassifiedPost.Meta -> ClassifiedPost.Meta(
+            c.meta.copy(recordB64 = java.util.Base64.getEncoder().encodeToString(plaintext)),
+        )
+        else -> c
+    }
+
+/** ADR-0087 section 18.2 — the full v3 record a [SharedChannelMeta] carries,
+ *  decoded again from its stored plaintext; `null` when none is stored or it
+ *  no longer decodes. */
+public fun SharedChannelMeta.fullRecord(): FfiChannelMeta? {
+    if (recordB64.isEmpty()) return null
+    val bytes = try {
+        java.util.Base64.getDecoder().decode(recordB64)
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    return try {
+        val c = classifyChannelPostPlaintext(bytes)
+        if (c.kind == FfiChannelPostKind.META) c.meta else null
+    } catch (_: Throwable) {
+        null
+    }
+}
 
 /** The canonical order, defined once in Rust. */
 public fun channelMetaNewer(incomingMs: ULong, storedMs: ULong): Boolean =
@@ -132,10 +164,16 @@ public object ChannelMetaPublisher {
         topic: Int? = null,
         language: String? = null,
         listed: Boolean? = null,
+        /** ADR-0087 section 3 — the signed @name; `null` keeps the held one. */
+        handle: uniffi.lakko_ffi_uniffi.FfiConversationHandle? = null,
+        /** Section 18.2 — the photo; `null` keeps the held one. */
+        avatar: uniffi.lakko_ffi_uniffi.FfiAvatar? = null,
+        clearAvatar: Boolean = false,
+        /** Section 13a — the allowed reactions; `null` keeps the held one. */
+        reactions: uniffi.lakko_ffi_uniffi.FfiAllowedReactions? = null,
     ) {
-        val keys = state.keysByChannel.value[channelId]
-            ?: throw IllegalStateException("no publisher keys for this channel on this device")
         val held = state.channels.value.firstOrNull { it.id == channelId }
+        val heldRecord = held?.sharedMeta()?.fullRecord()
         val record = FfiChannelMeta(
             name = name.trim(),
             description = description.trim(),
@@ -143,8 +181,26 @@ public object ChannelMetaPublisher {
             topic = (topic ?: held?.sharedTopic ?: 0).coerceIn(0, 255).toUByte(),
             language = language ?: held?.sharedLanguage ?: "",
             listed = listed ?: held?.sharedListed ?: false,
+            handle = handle ?: heldRecord?.handle,
+            avatar = if (clearAvatar) null else avatar ?: heldRecord?.avatar,
+            reactions = when (reactions) {
+                null -> heldRecord?.reactions
+                is uniffi.lakko_ffi_uniffi.FfiAllowedReactions.All -> null
+                else -> reactions
+            },
         )
-        val plaintext = composeChannelMeta(record)
+        postRecord(state, client, channelId, composeChannelMeta(record))
+    }
+
+    /** Seal and publish one composed record plaintext, then file it. */
+    internal suspend fun postRecord(
+        state: ChannelsUiState,
+        client: ChannelsClient,
+        channelId: String,
+        plaintext: ByteArray,
+    ) {
+        val keys = state.keysByChannel.value[channelId]
+            ?: throw IllegalStateException("no publisher keys for this channel on this device")
         val epoch = state.epochByChannel.value[channelId]
             ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
         val counter = state.nextCounter(channelId)
@@ -160,17 +216,10 @@ public object ChannelMetaPublisher {
         // ADR-0059 section 9: the record is a post, signed with this
         // account's publisher role for the channel.
         ChannelPublisherSigners.derive(publisher, channelId).use { client.publishPost(channelId, wire, it) }
-        state.adoptSharedMeta(
-            channelId,
-            SharedChannelMeta(
-                name = record.name,
-                description = record.description,
-                updatedAtMs = record.updatedAtMs,
-                topic = record.topic.toInt(),
-                language = record.language,
-                listed = record.listed,
-            ),
-        )
+        when (val c = classifyChannelPlaintext(plaintext)) {
+            is ClassifiedPost.Meta -> state.adoptSharedMeta(channelId, c.meta)
+            else -> Unit
+        }
     }
 
     /**
@@ -187,8 +236,20 @@ public object ChannelMetaPublisher {
         if (name.isEmpty()) return false
         val description = shared?.description ?: channel.localDescription.trim()
         val stamp = shared?.updatedAtMs ?: System.currentTimeMillis().toULong()
+        val stored = shared?.recordB64?.takeIf { it.isNotEmpty() }?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
         return try {
-            post(state, client, channelId, name, description, stamp)
+            // ADR-0087 section 18.2 — the stored record verbatim, photo included.
+            if (stored != null) {
+                postRecord(state, client, channelId, stored)
+            } else {
+                post(state, client, channelId, name, description, stamp)
+            }
             true
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
@@ -210,5 +271,6 @@ public fun ChannelHandle.sharedMeta(): SharedChannelMeta? {
         topic = sharedTopic,
         language = sharedLanguage,
         listed = sharedListed,
+        recordB64 = sharedRecordB64,
     )
 }

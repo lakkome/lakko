@@ -45,6 +45,31 @@
 //! fall one short and the link can serve one more request than its limit.
 //! ADR-0079 accepts that: the limit is a courtesy.
 //!
+//! ## Group and channel links (ADR-0087 phase B, 2026-11-05)
+//!
+//! A `/g/` link of a group, a channel subscriber invitation or a channel
+//! publisher invitation is kept here too, so every device of the account
+//! lists and revokes it (ADR-0087 section 7, the admission-key paragraph).
+//! Such a link has no 16-byte link id of its own; its register key is
+//! `lakko_contacts::group_invite::group_link_record_id(ledger_id)`, a
+//! BLAKE3 derive-key of the ledger id, and [`LinkRecordEntry::validate`]
+//! refuses any other. Its entry carries:
+//!
+//! * `target_id`: the group id (32 bytes) of a group link, the channel id
+//!   (16 bytes) of a channel subscriber or publisher link; empty for `/i/`
+//!   and `/c/`;
+//! * `invite_seed`: a private channel subscriber link's 32-byte invite seed
+//!   (SECRET: whoever holds it can subscribe), else empty;
+//! * `admission_version`: the admission-key version that link names (0 for
+//!   every other link);
+//! * `capability`: the sealed `/g/` blob the ledger holds (what an invitation
+//!   card carries, `lakko_contacts::group_invite::ChannelInviteCard`), at most
+//!   `lakko_contacts::group_invite::MAX_SEALED_LEN` bytes; empty for `/i/`
+//!   and `/c/`.
+//!
+//! A `/g/` link never accepts a contact request: [`LinkRecordEntry::verdict`]
+//! answers [`LinkAnswerVerdict::Dead`] for any kind but a contact link.
+//!
 //! ## Wire
 //!
 //! Like the lineage register it rides the DeviceGroup's opaque
@@ -53,7 +78,7 @@
 //!
 //! ```text
 //! domain(26) "lakko/sync/link-record/v1\0"
-//! version(1) = 0x03
+//! version(1) = 0x04
 //! count(2, BE)              1..=LINK_RECORD_ENVELOPE_MAX_ENTRIES
 //! count × {
 //!     hlc(8, BE)            the register's ORIGINAL stamp
@@ -84,10 +109,11 @@ pub const LINK_RECORD_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/sync/link-record/v1\0"
 
 /// The version byte this build writes and accepts. `0x02` since the record
 /// carried the ledger row's revocation seed, `0x03` since it carries the
-/// `shared` flag (2026-10-26); older versions are refused (no dual format,
-/// nothing is deployed). The constant keeps its name: it is the version of
-/// the `v1` domain.
-pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x03;
+/// `shared` flag (2026-10-26), `0x04` since it carries group and channel
+/// links (2026-11-05); older versions are refused (no dual format, nothing
+/// is deployed). The constant keeps its name: it is the version of the `v1`
+/// domain.
+pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x04;
 
 /// The most registers one envelope carries. A state holding more is sent as
 /// several envelopes.
@@ -117,6 +143,18 @@ pub const LINK_RECORD_ANSWERED_MAX: usize = 16;
 /// Length of a requester key (an Ed25519 account key).
 pub const LINK_RECORD_REQUESTER_KEY_LEN: usize = 32;
 
+/// Length of a group id a group link targets.
+pub const LINK_RECORD_GROUP_ID_LEN: usize = 32;
+
+/// Length of a channel id a channel link targets.
+pub const LINK_RECORD_CHANNEL_ID_LEN: usize = 16;
+
+/// Length of a private channel subscriber link's invite seed.
+pub const LINK_RECORD_INVITE_SEED_LEN: usize = 32;
+
+/// Longest sealed `/g/` blob a group or channel link carries.
+pub const LINK_RECORD_CAPABILITY_MAX_LEN: usize = lakko_contacts::group_invite::MAX_SEALED_LEN;
+
 /// `max_uses` value meaning "no limit" (the `/i/` capability's sentinel).
 pub const LINK_RECORD_UNLIMITED: u32 = u32::MAX;
 
@@ -136,7 +174,14 @@ pub const LINK_RECORD_BODY_MAX_LEN: usize = LINK_RECORD_ID_LEN
     + 1
     + LINK_RECORD_LABEL_MAX_BYTES
     + 1
-    + LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN;
+    + LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN
+    + 1
+    + LINK_RECORD_GROUP_ID_LEN
+    + 1
+    + LINK_RECORD_INVITE_SEED_LEN
+    + 2
+    + 2
+    + LINK_RECORD_CAPABILITY_MAX_LEN;
 
 /// Shortest valid envelope: the header and one entry with no ledger id, no
 /// revocation seed, no label and no requester.
@@ -145,7 +190,10 @@ pub const LINK_RECORD_ENVELOPE_MIN_LEN: usize =
         - LINK_RECORD_LEDGER_ID_LEN
         - LINK_RECORD_REVOCATION_SEED_LEN
         - LINK_RECORD_LABEL_MAX_BYTES
-        - LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN;
+        - LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN
+        - LINK_RECORD_GROUP_ID_LEN
+        - LINK_RECORD_INVITE_SEED_LEN
+        - LINK_RECORD_CAPABILITY_MAX_LEN;
 
 /// Longest valid envelope. Below the DeviceGroup service-envelope cap.
 pub const LINK_RECORD_ENVELOPE_MAX_LEN: usize = LINK_RECORD_ENVELOPE_DOMAIN_V1.len()
@@ -160,15 +208,31 @@ pub enum LinkRecordKind {
     Contact,
     /// A call invite link (`/c/`).
     Call,
+    /// A group invite link (`/g/`, preview kind 1; ADR-0087 phase B).
+    Group,
+    /// A channel subscriber invitation (`/g/`, preview kind 3).
+    Channel,
+    /// A channel publisher invitation (`/g/`, preview kind 2).
+    Publisher,
 }
 
 impl LinkRecordKind {
+    /// `true` for a `/g/` link: a group, channel subscriber or publisher
+    /// invitation.
+    #[must_use]
+    pub const fn is_group_link(self) -> bool {
+        matches!(self, Self::Group | Self::Channel | Self::Publisher)
+    }
+
     /// The byte on the wire and in the canonical encoding. Frozen.
     #[must_use]
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::Contact => 1,
             Self::Call => 2,
+            Self::Group => 3,
+            Self::Channel => 4,
+            Self::Publisher => 5,
         }
     }
 
@@ -181,6 +245,9 @@ impl LinkRecordKind {
         match b {
             1 => Ok(Self::Contact),
             2 => Ok(Self::Call),
+            3 => Ok(Self::Group),
+            4 => Ok(Self::Channel),
+            5 => Ok(Self::Publisher),
             _ => Err(BoundsError::LinkRecordKind),
         }
     }
@@ -258,12 +325,27 @@ pub struct LinkRecordEntry {
     /// The account keys of the requesters accepted through the link, oldest
     /// first, each once, at most [`LINK_RECORD_ANSWERED_MAX`].
     pub answered: Vec<[u8; LINK_RECORD_REQUESTER_KEY_LEN]>,
+    /// What a `/g/` link targets: the group id (32 bytes) of a group link,
+    /// the channel id (16 bytes) of a channel or publisher link; empty for an
+    /// `/i/` or `/c/` link.
+    pub target_id: Vec<u8>,
+    /// A private channel subscriber link's invite seed (32 bytes), else
+    /// empty. SECRET.
+    pub invite_seed: Vec<u8>,
+    /// The admission-key version a private channel subscriber link names;
+    /// 0 for every other link.
+    pub admission_version: u16,
+    /// The sealed `/g/` blob the ledger holds; empty for an `/i/` or `/c/`
+    /// link. Opens under `link_secret`.
+    pub capability: Vec<u8>,
 }
 
 impl core::fmt::Debug for LinkRecordEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // The link id, the secret and the revocation seed are left out:
-        // the first two open the link, the third deletes its ledger row.
+        // The link id, the secret, the revocation seed, the invite seed and
+        // the capability bytes are left out: the first two open the link, the
+        // third deletes its ledger row, the fourth subscribes, the fifth is
+        // the link.
         f.debug_struct("LinkRecordEntry")
             .field("kind", &self.kind)
             .field("expiry_ms", &self.expiry_ms)
@@ -273,6 +355,10 @@ impl core::fmt::Debug for LinkRecordEntry {
             .field("shared", &self.shared)
             .field("has_revocation_seed", &!self.revocation_seed.is_empty())
             .field("answered", &self.answered.len())
+            .field("target_id_len", &self.target_id.len())
+            .field("has_invite_seed", &!self.invite_seed.is_empty())
+            .field("admission_version", &self.admission_version)
+            .field("capability_len", &self.capability.len())
             .finish_non_exhaustive()
     }
 }
@@ -303,7 +389,52 @@ impl LinkRecordEntry {
         if sorted.windows(2).any(|w| w[0] == w[1]) {
             return Err(BoundsError::LinkRecordAnswered);
         }
-        Ok(())
+        self.validate_target()
+    }
+
+    /// The per-kind rule for the `/g/` fields (ADR-0087 phase B).
+    fn validate_target(&self) -> Result<(), BoundsError> {
+        let bad = Err(BoundsError::LinkRecordTarget);
+        if !self.kind.is_group_link() {
+            let empty = self.target_id.is_empty()
+                && self.invite_seed.is_empty()
+                && self.admission_version == 0
+                && self.capability.is_empty();
+            return if empty { Ok(()) } else { bad };
+        }
+        if self.capability.is_empty() || self.capability.len() > LINK_RECORD_CAPABILITY_MAX_LEN {
+            return bad;
+        }
+        let Ok(ledger) = <[u8; LINK_RECORD_LEDGER_ID_LEN]>::try_from(self.ledger_id.as_slice())
+        else {
+            return bad;
+        };
+        if self.link_id != lakko_contacts::group_invite::group_link_record_id(&ledger) {
+            return bad;
+        }
+        let ok = match self.kind {
+            LinkRecordKind::Group => {
+                self.target_id.len() == LINK_RECORD_GROUP_ID_LEN
+                    && self.invite_seed.is_empty()
+                    && self.admission_version == 0
+            },
+            LinkRecordKind::Channel => {
+                self.target_id.len() == LINK_RECORD_CHANNEL_ID_LEN
+                    && (self.invite_seed.len() == LINK_RECORD_INVITE_SEED_LEN
+                        || (self.invite_seed.is_empty() && self.admission_version == 0))
+            },
+            LinkRecordKind::Publisher => {
+                self.target_id.len() == LINK_RECORD_CHANNEL_ID_LEN
+                    && self.invite_seed.is_empty()
+                    && self.admission_version == 0
+            },
+            LinkRecordKind::Contact | LinkRecordKind::Call => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            bad
+        }
     }
 
     /// How many requests the link may serve; `None` for no limit.
@@ -427,6 +558,19 @@ impl LinkRecordEntry {
         for k in &self.answered {
             out.extend_from_slice(k);
         }
+        // Validated: a target of 0, 16 or 32, a seed of 0 or 32, a
+        // capability of at most LINK_RECORD_CAPABILITY_MAX_LEN.
+        out.push(u8::try_from(self.target_id.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(&self.target_id);
+        out.push(u8::try_from(self.invite_seed.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(&self.invite_seed);
+        out.extend_from_slice(&self.admission_version.to_be_bytes());
+        out.extend_from_slice(
+            &u16::try_from(self.capability.len())
+                .unwrap_or(u16::MAX)
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(&self.capability);
     }
 
     /// Read a body back, every length checked against its bound before the
@@ -477,6 +621,24 @@ impl LinkRecordEntry {
             k.copy_from_slice(take_n(cur, LINK_RECORD_REQUESTER_KEY_LEN)?);
             answered.push(k);
         }
+        let target_len = usize::from(take_u8(cur)?);
+        if target_len > LINK_RECORD_GROUP_ID_LEN {
+            return Err(BoundsError::LinkRecordTarget.into());
+        }
+        let target_id = take_n(cur, target_len)?.to_vec();
+        let seed_len = usize::from(take_u8(cur)?);
+        if seed_len > LINK_RECORD_INVITE_SEED_LEN {
+            return Err(BoundsError::LinkRecordTarget.into());
+        }
+        let invite_seed = take_n(cur, seed_len)?.to_vec();
+        let version = take_n(cur, 2)?;
+        let admission_version = u16::from_be_bytes([version[0], version[1]]);
+        let cap_len = take_n(cur, 2)?;
+        let cap_len = usize::from(u16::from_be_bytes([cap_len[0], cap_len[1]]));
+        if cap_len > LINK_RECORD_CAPABILITY_MAX_LEN {
+            return Err(BoundsError::LinkRecordTarget.into());
+        }
+        let capability = take_n(cur, cap_len)?.to_vec();
         let entry = Self {
             link_id,
             link_secret,
@@ -491,6 +653,10 @@ impl LinkRecordEntry {
             minted_at_ms,
             label,
             answered,
+            target_id,
+            invite_seed,
+            admission_version,
+            capability,
         };
         entry.validate()?;
         Ok(entry)
@@ -646,7 +812,111 @@ mod tests {
             minted_at_ms: 10,
             label: "home".into(),
             answered: vec![],
+            target_id: vec![],
+            invite_seed: vec![],
+            admission_version: 0,
+            capability: vec![],
         }
+    }
+
+    /// A private channel subscriber link, keyed as the register keys a `/g/`
+    /// link.
+    pub(crate) fn channel_record(ledger: u8) -> LinkRecordEntry {
+        let ledger_id = [ledger; LINK_RECORD_LEDGER_ID_LEN];
+        LinkRecordEntry {
+            link_id: lakko_contacts::group_invite::group_link_record_id(&ledger_id),
+            kind: LinkRecordKind::Channel,
+            ledger_id: ledger_id.to_vec(),
+            target_id: vec![0xC7; LINK_RECORD_CHANNEL_ID_LEN],
+            invite_seed: vec![0xE1; LINK_RECORD_INVITE_SEED_LEN],
+            admission_version: 3,
+            capability: vec![0xAB; 300],
+            ..record(0)
+        }
+    }
+
+    /// 2026-11-05: group, channel and publisher links ride the register with
+    /// their target, invite seed, admission version and capability; the
+    /// per-kind rule is enforced on compose and decode alike; a `/g/` link
+    /// never accepts a contact request; secrets stay out of `Debug`.
+    #[test]
+    fn group_and_channel_links_round_trip_and_follow_the_kind_rule() {
+        let channel = channel_record(1);
+        let mut public_channel = channel_record(2);
+        public_channel.invite_seed.clear();
+        public_channel.admission_version = 0;
+        let mut group = channel_record(3);
+        group.kind = LinkRecordKind::Group;
+        group.target_id = vec![0x5A; LINK_RECORD_GROUP_ID_LEN];
+        group.invite_seed.clear();
+        group.admission_version = 0;
+        let mut publisher = channel_record(4);
+        publisher.kind = LinkRecordKind::Publisher;
+        publisher.invite_seed.clear();
+        publisher.admission_version = 0;
+        let mut maximal = channel_record(5);
+        maximal.capability = vec![1; LINK_RECORD_CAPABILITY_MAX_LEN];
+        let entries: Vec<_> = [
+            channel.clone(),
+            public_channel,
+            group,
+            publisher,
+            maximal,
+            record(9),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| st(i as u64 + 1, v))
+        .collect();
+        let wire = compose_link_record_envelope(&entries).unwrap();
+        let mut back = decode_link_record_envelope(&wire).unwrap();
+        back.sort_by_key(|e| e.hlc);
+        assert_eq!(back, entries);
+
+        // The kind rule.
+        let mut wrong_id = channel.clone();
+        wrong_id.link_id = [1; LINK_RECORD_ID_LEN];
+        let mut no_cap = channel.clone();
+        no_cap.capability.clear();
+        let mut short_target = channel.clone();
+        short_target.target_id.truncate(8);
+        let mut seed_on_publisher = channel.clone();
+        seed_on_publisher.kind = LinkRecordKind::Publisher;
+        let mut version_without_seed = channel.clone();
+        version_without_seed.invite_seed.clear();
+        let mut target_on_contact = record(1);
+        target_on_contact.target_id = vec![1; 16];
+        let mut cap_on_call = record(1);
+        cap_on_call.kind = LinkRecordKind::Call;
+        cap_on_call.capability = vec![1];
+        for bad in [
+            wrong_id,
+            no_cap,
+            short_target,
+            seed_on_publisher,
+            version_without_seed,
+            target_on_contact,
+            cap_on_call,
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+            assert_eq!(
+                compose_link_record_envelope(&[st(1, bad)]),
+                Err(LinkRecordEnvelopeError::Entry)
+            );
+        }
+
+        // Never a contact-request acceptance.
+        assert_eq!(
+            channel.verdict(&channel.link_secret, &[3; 32], 0),
+            LinkAnswerVerdict::Dead
+        );
+        let debug = format!("{channel:?}");
+        assert!(
+            !debug.contains("225"),
+            "the invite seed byte 0xE1 must not print"
+        );
+        assert!(debug.contains("has_invite_seed: true"));
+        assert!(debug.contains("capability_len: 300"));
     }
 
     fn st(hlc: u64, v: LinkRecordEntry) -> Stamped<LinkRecordEntry> {
@@ -909,9 +1179,33 @@ mod tests {
                         minted_at_ms: 0,
                         label: String::new(),
                         answered: answered.into_iter().collect(),
+                        target_id: vec![],
+                        invite_seed: vec![],
+                        admission_version: 0,
+                        capability: vec![],
                     }
                 },
             )
+            // Half of them a private channel link (ADR-0087 phase B), keyed
+            // and filled as the kind rule requires.
+            .prop_flat_map(|r| {
+                (Just(r), any::<bool>(), any::<[u8; LINK_RECORD_LEDGER_ID_LEN]>(), 1usize..64)
+            })
+            .prop_map(|(r, channel, ledger, cap)| {
+                if !channel {
+                    return r;
+                }
+                LinkRecordEntry {
+                    link_id: lakko_contacts::group_invite::group_link_record_id(&ledger),
+                    kind: LinkRecordKind::Channel,
+                    ledger_id: ledger.to_vec(),
+                    target_id: vec![0xC7; LINK_RECORD_CHANNEL_ID_LEN],
+                    invite_seed: vec![0xE1; LINK_RECORD_INVITE_SEED_LEN],
+                    admission_version: 2,
+                    capability: vec![0xAB; cap],
+                    ..r
+                }
+            })
     }
 
     proptest! {

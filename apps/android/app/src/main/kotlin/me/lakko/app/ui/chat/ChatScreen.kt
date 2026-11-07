@@ -1917,12 +1917,12 @@ private fun CallHistoryRow(
 private data class PickerRequest(val mode: PickerMode, val messageId: Long?)
 
 /** ADR-0023 — the per-message action menu's emoji picker set. */
-private val REACTION_EMOJIS: List<String> =
+internal val REACTION_EMOJIS: List<String> =
     listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
 /** UX 5.2 — the centred day pill between two days of the timeline. */
 @Composable
-private fun DateSeparatorPill(label: String) {
+internal fun DateSeparatorPill(label: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2079,6 +2079,10 @@ internal fun Bubble(
     savedMessage: Boolean = false,
     /** Saved section 2 — Save / Remove from saved was chosen. */
     onToggleSaved: () -> Unit = {},
+    /** ADR-0087 section 12 — a channel post: no Reply, Pin or Select; Edit
+     *  and Delete for the owner and publishers whoever wrote it. `null` in a
+     *  chat. */
+    channelPost: ChannelPostActions? = null,
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -2314,6 +2318,17 @@ internal fun Bubble(
                                 linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
                                 onLongPress = openMenu,
                             )
+                            // ADR-0087 section 14.1 — a channel invitation:
+                            // the link drawn as a card with Subscribe / Open.
+                            if (channelPost == null) {
+                                me.lakko.app.ui.channels.ChannelInviteBubbleCard(
+                                    msg.text,
+                                    msg.channelInvite,
+                                    msg.messageId,
+                                    bubbleColor = background,
+                                    contentColor = contentColor,
+                                )
+                            }
                             tr.captionLine?.let { line ->
                                 me.lakko.app.ui.translation.TranslateQuietLine(
                                     line = line,
@@ -2446,7 +2461,21 @@ internal fun Bubble(
                         ).copy(
                             canTranslate = menuAvailable && tr.menuOffered,
                             translateLabel = tr.menuLabel,
-                        )
+                        ).let { base ->
+                            if (channelPost == null) {
+                                base
+                            } else {
+                                base.copy(
+                                    canReply = false,
+                                    canPin = false,
+                                    canSelect = false,
+                                    canForward = menuAvailable && channelPost.canForward && !msg.deleted,
+                                    canSave = channelPost.canSave && !msg.deleted,
+                                    canEdit = menuAvailable && channelPost.publisher && !msg.deleted,
+                                    canDelete = menuAvailable && channelPost.publisher && !msg.deleted,
+                                )
+                            }
+                        }
                     },
                     reactions = if (msg.isHistory) emptyList() else reactionCtx?.rowFor(msg.reactions) ?: REACTION_EMOJIS,
                     ownReactions = ownEmoji,
@@ -2548,6 +2577,16 @@ internal fun Bubble(
     }
     }
 }
+
+/** ADR-0087 section 12 — what a channel post's menu offers beyond React and
+ *  Copy. */
+internal data class ChannelPostActions(
+    val publisher: Boolean,
+    /** UX 12 — the post menu's Forward (re-encrypted into a conversation). */
+    val canForward: Boolean = false,
+    /** UX 12 — the post menu's Save (the saved register, kind channel). */
+    val canSave: Boolean = false,
+)
 
 /** The edit dialog's text field, for the UI tests. */
 internal const val EDIT_FIELD_TAG: String = "edit-message-field"

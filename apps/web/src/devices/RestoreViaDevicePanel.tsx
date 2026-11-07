@@ -24,7 +24,7 @@ import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
-import QRCode from "qrcode";
+import { BrandedQr } from "../ui/BrandedQr";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { AuthClient, AuthHttpError } from "../auth/client";
 import { loadWasm } from "../wasm";
@@ -108,9 +108,6 @@ export default function RestoreViaDevicePanel(props: {
      *  Start again posts a new one. */
     | { kind: "link-ended"; message: LinkText };
   const [state, setState] = createSignal<State>({ kind: "idle" });
-  const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
-    null,
-  );
   // ADR-0049 section 2 — the camera-less route (the device link).
   const [link, setLink] = createSignal<DeviceLinkInitiatorFlow | null>(null);
   const [linkView, setLinkView] = createSignal<InitiatorView | null>(null);
@@ -269,9 +266,8 @@ export default function RestoreViaDevicePanel(props: {
       return;
     }
     try {
-      // Flip to `waiting` FIRST so the canvas mounts (Solid renders
-      // the matching branch synchronously), THEN paint the QR into
-      // it.
+      // `waiting` shows the QR: `BrandedQr` draws it from the flow's
+      // payload.
       const abort = new AbortController();
       const attempt = ++attemptSeq;
       const current = (): boolean => attempt === attemptSeq;
@@ -285,15 +281,6 @@ export default function RestoreViaDevicePanel(props: {
       setRequestNote(null);
       setState({ kind: "waiting", flow, abort });
       void publishRequest(flow, attempt);
-      const b64 = base64UrlEncodeNoPad(flow.qrPayload);
-      const canvas = canvasRef();
-      if (canvas !== null) {
-        await QRCode.toCanvas(canvas, b64, {
-          errorCorrectionLevel: "M",
-          width: 256,
-          margin: 1,
-        });
-      }
       void (async (): Promise<void> => {
         try {
           // A confirmation on another device can take minutes (the request
@@ -462,8 +449,14 @@ export default function RestoreViaDevicePanel(props: {
             <Show when={requestNote() !== null}>
               <p class="form-error">{requestNote()}</p>
             </Show>
-            <canvas ref={(el) => setCanvasRef(el)} hidden={linkRequired() && !showQr()} />
             <Show when={!linkRequired() || showQr()}>
+              <BrandedQr
+                text={(() => {
+                  const s = state();
+                  return s.kind === "waiting" ? base64UrlEncodeNoPad(s.flow.qrPayload) : "";
+                })()}
+                size={288}
+              />
               <p class="lk-muted">{t("device_link.qr.scan_hint")}</p>
             </Show>
             <button type="button" onClick={cancel}>

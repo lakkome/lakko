@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+#
+# Every path may be fetched. Without this file /robots.txt was answered with
+# the app's HTML. Link previews (scripts/link-previews.mjs) need the fetchers
+# of other apps to be allowed.
+User-agent: *
+Allow: /

@@ -92,6 +92,31 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
     }
 
+    /// ADR-0087 phase B — a removal commits, revokes the appointment, then
+    /// reseals to the seed the removed person cannot derive; a failed
+    /// revocation does not hold the entry.
+    func testARemovalCommitsRevokesTheAppointmentAndReseals() async throws {
+        let removal = PublisherCommitEntry(
+            id: String(repeating: "0c", count: 16), kind: .removal,
+            channelIdHex: approve.channelIdHex, groupIdHex: approve.groupIdHex,
+            targetEpoch: 5, serverTargetEpoch: 8,
+            commitB64: Data("removal".utf8).base64EncodedString(),
+            joinerKeyB64: Data(repeating: 0x6B, count: 32).base64EncodedString())
+        XCTAssertTrue(removal.isWellFormed)
+        let r = Recorder()
+        var p = ports(r)
+        var revoked: [Data] = []
+        p.unappoint = { key in
+            revoked.append(key)
+            throw Failure()
+        }
+        try await PublisherCommitRunner.run(removal, ports: p)
+        XCTAssertEqual(r.calls, ["commit:removal", "server-epoch", "reseal:8"])
+        XCTAssertEqual(revoked, [Data(repeating: 0x6B, count: 32)])
+        XCTAssertEqual(r.saved.last?.done, [.journal, .unappoint, .reseal])
+        XCTAssertEqual(r.finished?.id, removal.id)
+    }
+
     func testAFailedStepLeavesWhatLandedAndTheNextRunResumesThere() async throws {
         let first = Recorder()
         do {

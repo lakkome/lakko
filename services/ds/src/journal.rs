@@ -193,6 +193,20 @@ pub(crate) async fn publish(
     owner_id: &[u8; PSEUDONYM_LEN],
     bytes: &[u8],
 ) -> Result<Json<PublishResponse>, (StatusCode, String)> {
+    publish_admitted(pool, notifiers, queue, owner_id, bytes, None).await
+}
+
+/// [`publish`], recording on a mailbox row the reach key that admitted it
+/// (ADR-0060 section 2, amended 2026-11-06). `reach_pk` must be `None` for
+/// any other queue.
+pub(crate) async fn publish_admitted(
+    pool: &MySqlPool,
+    notifiers: &Notifiers,
+    queue: Queue,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    bytes: &[u8],
+    reach_pk: Option<&[u8; 32]>,
+) -> Result<Json<PublishResponse>, (StatusCode, String)> {
     // The body arrives collected: the DefaultBodyLimit layer already
     // enforces MAX_MESSAGE_BYTES, so a client trying to sneak a 4 MB blob
     // in gets 413 before reaching this code, and the ADR-0053 gate has to
@@ -201,24 +215,34 @@ pub(crate) async fn publish(
     // Build SQL with the table + column literally substituted —
     // these are compile-time `&'static str`, never user input, so no
     // injection vector.
-    let sql = format!(
-        "INSERT INTO {} ({}, payload) VALUES (?, ?)",
-        queue.table(),
-        queue.owner_col(),
-    );
-
-    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+    let result = if let (Queue::Mailbox, Some(pk)) = (queue, reach_pk) {
+        sqlx::query(
+            "INSERT INTO ds_mailbox_messages (device_id, payload, reach_pk) VALUES (?, ?, ?)",
+        )
         .bind(&owner_id[..])
         .bind(bytes)
+        .bind(&pk[..])
         .execute(pool)
         .await
-        .map_err(|e| {
-            tracing::error!(queue = ?queue, error = %e, "insert message");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal db error".to_string(),
-            )
-        })?;
+    } else {
+        let sql = format!(
+            "INSERT INTO {} ({}, payload) VALUES (?, ?)",
+            queue.table(),
+            queue.owner_col(),
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&owner_id[..])
+            .bind(bytes)
+            .execute(pool)
+            .await
+    };
+    let result = result.map_err(|e| {
+        tracing::error!(queue = ?queue, error = %e, "insert message");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
     let id = result.last_insert_id();
 
     // Fetch created_at — cheap, lets the client display "delivered at".
@@ -355,6 +379,13 @@ pub(crate) struct FetchedMessage {
     /// length-prefixed binary format for hot fan-out.
     pub(crate) payload_b64: String,
     pub(crate) created_at: DateTime<Utc>,
+    /// Mailbox rows only: standard base64 of the reach key that admitted the
+    /// row (the key a direct proof named, or a delegation's issuer), so the
+    /// owner can tell a row under a retired `contact` key (ADR-0060 section
+    /// 2, amended 2026-11-06). Absent for a proofless write and for every
+    /// other queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reach_pk_b64: Option<String>,
 }
 
 async fn fetch(
@@ -371,37 +402,48 @@ async fn fetch(
     // more rows past this page. We don't return the extra row.
     let probe_limit = u64::from(limit) + 1;
 
+    // The admitting key is a mailbox column; other queues select NULL so the
+    // row shape is one.
+    let reach_col = if queue == Queue::Mailbox {
+        "reach_pk"
+    } else {
+        "NULL"
+    };
     let sql = format!(
-        "SELECT id, payload, created_at FROM {} \
+        "SELECT id, payload, created_at, {} FROM {} \
          WHERE {} = ? AND id > ? \
          ORDER BY id ASC \
          LIMIT ?",
+        reach_col,
         queue.table(),
         queue.owner_col(),
     );
 
-    let rows: Vec<(u64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(&owner_id[..])
-        .bind(after)
-        .bind(probe_limit)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(queue = ?queue, error = %e, "fetch messages");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal db error".to_string(),
-            )
-        })?;
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(u64, Vec<u8>, DateTime<Utc>, Option<Vec<u8>>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(&owner_id[..])
+            .bind(after)
+            .bind(probe_limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(queue = ?queue, error = %e, "fetch messages");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
 
     let has_more = rows.len() as u64 > u64::from(limit);
     let messages = rows
         .into_iter()
         .take(limit as usize)
-        .map(|(id, payload, created_at)| FetchedMessage {
+        .map(|(id, payload, created_at, reach_pk)| FetchedMessage {
             id,
             payload_b64: B64.encode(&payload),
             created_at,
+            reach_pk_b64: reach_pk.map(|pk| B64.encode(pk)),
         })
         .collect();
 
@@ -601,8 +643,16 @@ pub(crate) async fn post_mailbox(
         match crate::reach::gate_mailbox_write(&state, &owner, &method, &uri, &headers, &body)
             .await?
         {
-            crate::reach::MailboxWrite::Store => {
-                publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?
+            crate::reach::MailboxWrite::Store { reach_pk } => {
+                publish_admitted(
+                    &state.db,
+                    &state.notifiers,
+                    Queue::Mailbox,
+                    &owner,
+                    &body,
+                    Some(&reach_pk),
+                )
+                .await?
             },
             decision @ (crate::reach::MailboxWrite::StoreAfterToken
             | crate::reach::MailboxWrite::DropAfterToken) => {

@@ -72,6 +72,10 @@ public enum class AnonTokenContext(public val wire: String) {
     MAILBOX_WRITE("mailbox-write"),
     CALL_JOIN("call-join"),
     CIRCLE_CLAIM("circle-claim"),
+    /** ADR-0087 section 13a: one per reaction added on a channel post. */
+    CHANNEL_REACT("channel-react"),
+    /** ADR-0087 section 13a: one per comment under a channel post. */
+    CHANNEL_COMMENT("channel-comment"),
 }
 
 /**
@@ -96,6 +100,9 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
     // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
     // one-to-one call. Chosen, not measured.
     AnonTokenContext.CALL_JOIN -> 4
+    // ADR-0087 section 13a. Chosen, not measured.
+    AnonTokenContext.CHANNEL_REACT -> 16
+    AnonTokenContext.CHANNEL_COMMENT -> 8
 }
 
 /** The first scheduled refill of a newly bound session runs at a random

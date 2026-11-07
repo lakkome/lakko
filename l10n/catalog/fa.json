@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "fa",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "حساب شما کلیدهای جدید دارد. در حال تکمیل تغییر هستیم.",
@@ -1238,8 +1237,136 @@
       "text": "رمزگشایی صدا و تصویر این شرکت‌کننده ممکن نیست",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "مشترکان می‌توانند با هر ایموجی واکنش نشان دهند.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "مشترکان نمی‌توانند به پست‌ها واکنش نشان دهند.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "مشترکان فقط با ایموجی‌هایی که انتخاب می‌کنید می‌توانند واکنش نشان دهند.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "از جستجو و کاوش خارج می‌شود. افراد فقط با دعوت شما می‌توانند مشترک شوند. همهٔ مشترکان می‌مانند.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "این کانال خصوصی شود؟",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "هر کسی می‌تواند آن را پیدا کند و بخواند و Lakko ممکن است آن را در کاوش پیشنهاد دهد. نام، عکس و توضیحاتش برای همه قابل مشاهده می‌شود. پست‌های قبلی فقط برای مشترکان فعلی قابل خواندن می‌مانند.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "این کانال عمومی شود؟",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "@نام قدیمی از همین حالا کار نمی‌کند. تا ۳۰ روز برای این کانال رزرو می‌ماند.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "فقط مشترکان این را می‌بینند.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "هر کسی می‌تواند این کانال را با این نام پیدا کند.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "فقط کسانی که دعوت می‌کنید می‌توانند مشترک شوند. در جستجو نمایش داده نمی‌شود.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "هر کسی می‌تواند این کانال را پیدا کند و مشترک شود. Lakko ممکن است آن را در کاوش پیشنهاد دهد.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "نوع کانال",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "در حال به‌روزرسانی مشترکان... {done} از {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "چه کسی می‌تواند مشترک شود",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "بازگشت به کانال‌ها",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "مسدود کردن از نظرها",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "هیچ‌کس مسدود نیست.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "ذخیره نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "مسدودشده‌ها",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "رفع مسدودی",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "کسی",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "کارهای نظر",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "نظر",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "حذف نظر ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "نظرها بارگیری نشدند.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "پنهان کردن نظرها",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "این نظر خیلی طولانی است یا نویسه‌هایی دارد که نمی‌توان فرستاد.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "نمایش بیشتر",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# نظر جدید} other {# نظر جدید}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {نمایش # نظر دیگر} other {نمایش # نظر دیگر}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "نمایش نظرهای بیشتر",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "نظری بنویسید",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "ناشران همکار",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "کانال و پست‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند و @{name} پس از ۳۰ روز آزاد می‌شود. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "کانال و پست‌هایش از همهٔ دستگاه‌هایتان حذف می‌شوند. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "حذف کانال",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "حذف کانال ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "این کانال حذف شود؟",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "ساخت کانال",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "هنوز کانالی نیست",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "کانال و پست‌هایش دیگر روی دستگاه‌هایتان نیستند.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "کانالی با {handle} پیدا نشد.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "کانال خصوصی",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "کانال عمومی",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "کانال عمومی · {band} مشترک",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "یک کانال انتخاب کنید یا کانالی بسازید",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "این کانال @name ندارد. یکی انتخاب کنید.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "دعوت",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "دعوت افراد",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "نام و توضیحات آن، چه کسانی آن را می‌خوانند و چه کس دیگری می‌تواند در آن پست بگذارد.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "ناشران",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "کانال را از فهرست شما برمی‌دارد و پست‌هایش را از همهٔ دستگاه‌هایتان حذف می‌کند. بعداً می‌توانید دوباره مشترک شوید.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "دعوت {names} ممکن نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "این پیوند دعوت ناشر همکار با نسخه قدیمی‌تری از Lakko ساخته شده و دیگر کار نمی‌کند. از مالک کانال بخواهید پیوند دعوت جدیدی برایتان بفرستد.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "برای اشتراک به حساب نیاز دارید. یکی بسازید یا وارد شوید.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "پیوستن به کانال",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "مشترک شدید. پست‌ها وقتی نمایش داده می‌شوند که مالک یا یک مدیر دوباره Lakko را باز کند.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "ساختن پیوند ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "این دستگاه هنوز نمی‌تواند برای این کانال پیوند بسازد. وقتی دستگاه مالک Lakko را باز کند می‌تواند.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "لغو پیوند ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "کانال",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "مسدود کردن از نظرها",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "مسدودشده‌ها",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "رفع مسدودیت",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "ساختن",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "توضیحات",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "برای ساخت کانال دوباره وارد شوید.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "ساخت این کانال ممکن نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "دیگران با آن می‌توانند کانال را پیدا کنند و مشترکش شوند.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "نام کانال",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "مشترکان نام و توضیحات را می‌بینند.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "کانال جدید",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "امروز کانال‌های زیادی ساخته‌اید. فردا دوباره امتحان کنید.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "کانال جدید یا پیوستن به یک کانال",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "فقط مالک می‌تواند عکس را تغییر دهد.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "مشترکان به‌جای آن حروف اول را می‌بینند.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "عکس کانال حذف شود؟",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "در دسترس نیست",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "فقط مالک و ناشران می‌توانند اینجا پست بگذارند.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "این پست قدیمی‌تر از آن است که این دستگاه بتواند بخواند.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "این پست در دسترس نیست.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "این پست در این دستگاه باز نشد.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "پست‌های قبلی در دسترس نیستند.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "برای انتشار در این کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "پذیرفتن",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "افزودن ناشر",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "از شما دعوت شده که ناشر {channel} باشید.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} شما را دعوت می‌کند تا ناشر {channel} باشید.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "حذف ناشر",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "{name} از ناشران حذف شود؟ دیگر نمی‌تواند پست بگذارد یا دعوت کند.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "حذف ناشر ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {# درخواست انتشار} other {# درخواست انتشار}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "مالک",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "ناشر",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "کناره‌گیری",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "دیگر در این کانال پست نمی‌گذارید و دعوت نمی‌کنید. دستگاه مالک دفعه‌ی بعد که Lakko را باز کند آن را اعمال می‌کند.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "کناره‌گیری ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "انجام شد. دستگاه مالک دفعه‌ی بعد که Lakko را باز کند آن را اعمال می‌کند.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "واکنش‌ها در کانال ناشناس هستند. هیچ‌کس نمی‌تواند ببیند چه کسی واکنش نشان داده، حتی مالک کانال.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "واکنش‌ها در کانال ناشناس هستند. هیچ‌کس نمی‌تواند ببیند چه کسی واکنش نشان داده، حتی مالک کانال.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "بارگیری مشترکان ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "از طریق دعوت",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "از پیوند «{label}»",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "بارگیری مشترکان ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "نمایش بیشتر",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "هنوز مشترکی نیست.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {# نفر دیگر.} other {# نفر دیگر.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "دیگر پست‌های جدید دریافت نمی‌کند.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "این مشترک حذف شود؟",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "در حال تلاش دوباره...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "مشترکان",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "مشترکان ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "لغو دنبال کردن",
+      "text": "لغو اشتراک",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "دنبال کردن این کانال لغو شود؟",
+      "text": "اشتراک این کانال لغو شود؟",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "دنبال کردن {name} لغو شود؟",
+      "text": "اشتراک {name} لغو شود؟",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "گروه و پیام‌هایش از دستگاه‌های شما حذف شده‌اند.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {دیگر در {name} و # مورد دیگر نیستید.} other {دیگر در {name} و # مورد دیگر نیستید.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "هرگز",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "پیوندهای گروه و کانال",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "پیوند کانال",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "پیوند گروه",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "پیوند ناشر همکار",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "برچسب (اختیاری)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "چه کسی می‌تواند مرا پیدا کند",
       "status": "machine"
     }
-  }
+  },
+  "language": "fa"
 }

@@ -318,6 +318,35 @@ fn pending_external_joins_row_key(group_id: &[u8]) -> Vec<u8> {
 /// label nor its version (`lib.rs:859-862`), so it clears the list and misses
 /// every row. They are public bytes, but they say who was added and removed,
 /// and a chat this device was removed from should not keep that.
+/// Who sent a Welcome, read without joining ([`Group::peek_welcome_founder`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WelcomeFounder {
+    /// The group the Welcome is for.
+    pub group_id: Vec<u8>,
+    /// The ADR-0050 account key of the member that sent the Welcome, from
+    /// its verified device binding.
+    pub founder_account_key: [u8; 32],
+}
+
+/// Decode and stage a Welcome for `identity`, writing nothing (the shared
+/// first step of a join and of a peek). `replace_old_group` only turns off
+/// OpenMLS's refusal of a stored group of that id while staging; the join
+/// decides about a stored group itself.
+fn stage_welcome(welcome_bytes: &[u8], identity: &Identity) -> Result<StagedWelcome> {
+    let mls_in = decode_message(welcome_bytes)?;
+    let MlsMessageBodyIn::Welcome(welcome) = mls_in.extract() else {
+        return Err(Error::Unsupported("expected Welcome message"));
+    };
+    let cfg = MlsGroupJoinConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .build();
+    StagedWelcome::build_from_welcome(&identity.provider, &cfg, welcome)
+        .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?
+        .replace_old_group()
+        .build()
+        .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))
+}
+
 fn delete_stored_group(identity: &Identity, stored: &mut MlsGroup) -> Result<()> {
     let storage = identity.provider.storage();
     let group_id = stored.group_id().as_slice().to_vec();
@@ -880,19 +909,7 @@ impl Group {
         admission: WelcomeAdmission,
         expected_group_id: Option<&[u8]>,
     ) -> Result<Self> {
-        let mls_in = decode_message(welcome_bytes)?;
-        let MlsMessageBodyIn::Welcome(welcome) = mls_in.extract() else {
-            return Err(Error::Unsupported("expected Welcome message"));
-        };
-
-        let cfg = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-        let staged = StagedWelcome::build_from_welcome(&identity.provider, &cfg, welcome)
-            .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?
-            .replace_old_group()
-            .build()
-            .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?;
+        let staged = stage_welcome(welcome_bytes, identity)?;
         // ADR-0062 + ADR-0081 amendment: an ordinary group is a conversation,
         // so it carries the role table and its kind, readably, or it is not
         // joined; a device or publisher group carries no role table. A device
@@ -947,6 +964,51 @@ impl Group {
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
         Ok(Self::from_mls_group(inner))
+    }
+
+    /// Read who sent a Welcome WITHOUT joining (2026-11-07): stage it as
+    /// [`Group::join_from_welcome`] does, read the sender leaf (the member
+    /// that added this device: the founder of a new one-to-one) and resolve
+    /// it to its ADR-0050 account key, then drop the staged Welcome.
+    ///
+    /// Nothing is written: staging writes nothing, and every KeyPackage Lakko
+    /// mints is a last-resort one, so the package that opened the Welcome
+    /// stays usable and a later [`Group::join_from_welcome`] of the same bytes
+    /// works. This is how a device judges a Welcome that arrived under a
+    /// retired `contact` key (ADR-0060 section 1, amended 2026-11-06) before
+    /// joining it: an active group cannot be dropped silently afterwards.
+    ///
+    /// No admission check runs here (role table, kind, roster bindings, a
+    /// stored group): the join runs them all; this only names the founder.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] / [`Error::Unsupported`] for bytes that are not a
+    /// Welcome, [`Error::Group`] when it does not open for this identity, and
+    /// the typed `DeviceBindingInvalid` refusal when the sender leaf's
+    /// credential resolves to no account.
+    pub fn peek_welcome_founder(
+        welcome_bytes: &[u8],
+        identity: &Identity,
+    ) -> Result<WelcomeFounder> {
+        let staged = stage_welcome(welcome_bytes, identity)?;
+        let sender = staged
+            .welcome_sender()
+            .map_err(|e| Error::Group(format!("welcome sender: {e:?}")))?;
+        let founder_account_key = crate::device_binding::account_key_of_credential(
+            sender.credential().serialized_content(),
+            sender.signature_key().as_slice(),
+        )
+        .ok_or_else(|| {
+            Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "welcome refused: the sender's device binding does not verify",
+            )
+        })?;
+        Ok(WelcomeFounder {
+            group_id: staged.group_context().group_id().as_slice().to_vec(),
+            founder_account_key,
+        })
     }
 
     /// Delete this group's state from `identity`'s storage: every row OpenMLS
@@ -1531,6 +1593,45 @@ impl Group {
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
         self.remove_member_finishing(identity, leaf, DirectFinish::Merge)
+    }
+
+    /// Remove every leaf in `leaves` in ONE commit, merged eagerly: the
+    /// PublisherGroup publisher removal ([ADR-0087] section 15, note of
+    /// 2026-11-05), where one person may hold several leaves. Only a group
+    /// with **no role table** takes it (a `PublisherGroup`): a role-table
+    /// group changes membership through proposals (ADR-0045), and a direct
+    /// commit there would be refused by every peer. The caller decides who
+    /// may remove whom; this checks only the group's state.
+    ///
+    /// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] for an empty list, a group carrying a role table, a
+    /// staged commit or pending proposals, or an OpenMLS failure (a leaf not
+    /// in the group, the committer's own leaf: `CannotRemoveSelf`).
+    pub(crate) fn remove_leaves_directly(
+        &mut self,
+        identity: &Identity,
+        leaves: &[LeafNodeIndex],
+    ) -> Result<Vec<u8>> {
+        if leaves.is_empty() {
+            return Err(Error::Group("remove_leaves: no leaf named".into()));
+        }
+        if self.group_roles().is_some() {
+            return Err(Error::Group(
+                "remove_leaves: a group with a role table changes membership through proposals"
+                    .into(),
+            ));
+        }
+        self.refuse_if_commit_staged("remove_leaves")?;
+        self.refuse_if_proposals_pending("remove_leaves")?;
+        let (commit, _welcome, _group_info) = self
+            .inner
+            .remove_members(&identity.provider, &identity.signature_keys, leaves)
+            .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
+        self.finish_direct(identity, DirectFinish::Merge)?;
+        encode_message(&commit)
     }
 
     /// [`Self::remove_member`], staged ([ADR-0081]; see

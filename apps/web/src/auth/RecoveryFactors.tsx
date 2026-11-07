@@ -10,8 +10,7 @@
  * Devices route (docs/ux/client-redesign.md section 5.5); only the copy
  * changed.
  */
-import { createEffect, createSignal, Match, Show, Switch, type JSX } from "solid-js";
-import QRCode from "qrcode";
+import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "./AuthContext";
 import { AuthClient, AuthHttpError } from "./client";
@@ -19,6 +18,7 @@ import { normalizeTotpCode } from "./totp-code";
 import { authLimitMessage, isOffline } from "./auth-error-copy";
 import { t } from "../l10n";
 import { tRich } from "../l10n/rich";
+import { BrandedQr } from "../ui/BrandedQr";
 
 /**
  * The text a failed enrolment shows (ADR-0061 section 6: from the kind of
@@ -49,31 +49,6 @@ export function TotpEnrollView(): JSX.Element {
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [code, setCode] = createSignal("");
   const [confirmError, setConfirmError] = createSignal<string | null>(null);
-  const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
-    null,
-  );
-
-  // Render the otpauth:// provisioning URI as a QR whenever the
-  // confirm card is up. canvasRef is a signal, so this effect
-  // re-runs once the <canvas> mounts after the state flip — no
-  // draw-before-mount race.
-  createEffect(() => {
-    const s = state();
-    const canvas = canvasRef();
-    const uri =
-      s.kind === "confirm" || s.kind === "finishing" ? s.otpauthUri : null;
-    if (uri !== null && canvas !== null) {
-      void QRCode.toCanvas(canvas, uri, {
-        errorCorrectionLevel: "M",
-        width: 224,
-        margin: 1,
-      }).catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("totp provisioning QR render failed", err);
-      });
-    }
-  });
-
   const sessionToken = (): string | null =>
     auth.identitySecrets()?.sessionToken ?? null;
 
@@ -182,11 +157,15 @@ export function TotpEnrollView(): JSX.Element {
               s.kind === "confirm" || s.kind === "finishing"
                 ? s.secretB32
                 : "";
+            const otpauthUri =
+              s.kind === "confirm" || s.kind === "finishing"
+                ? s.otpauthUri
+                : "";
             const busy = s.kind === "finishing";
             return (
               <div>
                 <p>{t("settings.recovery.totp.scan")}</p>
-                <canvas class="lk-qr" ref={(el) => setCanvasRef(el)} />
+                <BrandedQr text={otpauthUri} />
                 <p class="lk-meta">
                   {tRich("settings.recovery.totp.key", {
                     key: <code style={{ "user-select": "all" }}>{secretB32}</code>,

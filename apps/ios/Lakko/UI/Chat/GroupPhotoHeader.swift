@@ -9,8 +9,45 @@ import SwiftUI
 /// header: the 96 pt photo (or initials), and for whoever may set it the
 /// profile photo's edit button, menu, crop and camera screens. There is no
 /// Save: `Use` on the crop screen sends it.
-struct GroupPhotoHeader: View {
-    @ObservedObject var viewModel: ChatViewModel
+/// ADR-0087 section 18 / UX 4.5.2 — what the photo header of an info screen
+/// needs, for a group (``ChatViewModel``) and a channel
+/// (``ChannelPhotoModel``) alike.
+@MainActor
+protocol ConversationPhotoModel: ObservableObject {
+    var photoTitle: String { get }
+    var photoIdHex: String { get }
+    var photoIsGroup: Bool { get }
+    var canSetPhoto: Bool { get }
+    var currentPhoto: ProfileAvatar? { get }
+    var photoStatus: ChatViewModel.GroupPhotoStatus { get set }
+    var photoRemoveTitleKey: String { get }
+    var photoRemoveBodyKey: String { get }
+    var photoNotAllowedKey: String { get }
+    func usePhoto(_ media: PendingAvatarMedia)
+    func retryPhoto()
+    func removePhoto()
+}
+
+extension ChatViewModel: ConversationPhotoModel {
+    var photoTitle: String { conversationTitle }
+    var photoIdHex: String { groupIdHex }
+    var photoIsGroup: Bool { true }
+    var canSetPhoto: Bool { canSetGroupPhoto }
+    var currentPhoto: ProfileAvatar? { groupPhoto }
+    var photoStatus: GroupPhotoStatus {
+        get { groupPhotoStatus }
+        set { groupPhotoStatus = newValue }
+    }
+    var photoRemoveTitleKey: String { "group_photo.remove.title" }
+    var photoRemoveBodyKey: String { "group_photo.remove.body" }
+    var photoNotAllowedKey: String { "group_photo.error.not_allowed" }
+    func usePhoto(_ media: PendingAvatarMedia) { useGroupPhoto(media) }
+    func retryPhoto() { retryGroupPhoto() }
+    func removePhoto() { removeGroupPhoto() }
+}
+
+struct GroupPhotoHeader<Model: ConversationPhotoModel>: View {
+    @ObservedObject var viewModel: Model
     @ObservedObject private var l10n = Localization.shared
     @ObservedObject private var images = AvatarImages.shared
 
@@ -21,21 +58,21 @@ struct GroupPhotoHeader: View {
     @State private var cameraOpen = false
     @State private var removeConfirm = false
 
-    private static let size: CGFloat = 96
+    private static var size: CGFloat { 96 }
 
     var body: some View {
         VStack(spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
                 picture
                     .overlay {
-                        if viewModel.groupPhotoStatus == .uploading {
+                        if viewModel.photoStatus == .uploading {
                             Circle()
                                 .stroke(Color.lakkoAccent, style: StrokeStyle(lineWidth: 3, dash: [6, 4]))
                                 .frame(width: Self.size + 6, height: Self.size + 6)
                         }
                     }
-                    .onTapGesture { if viewModel.canSetGroupPhoto { menuOpen = true } }
-                if viewModel.canSetGroupPhoto {
+                    .onTapGesture { if viewModel.canSetPhoto { menuOpen = true } }
+                if viewModel.canSetPhoto {
                     Button { menuOpen = true } label: {
                         Image(systemName: "pencil")
                             .font(.system(size: 14, weight: .semibold))
@@ -45,7 +82,7 @@ struct GroupPhotoHeader: View {
                             .overlay(Circle().stroke(Color.lakkoBackground, lineWidth: 2))
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.groupPhotoStatus == .uploading)
+                    .disabled(viewModel.photoStatus == .uploading)
                     .accessibilityLabel(l10n.t("profile.avatar.change"))
                 }
             }
@@ -66,7 +103,7 @@ struct GroupPhotoHeader: View {
                 input: input,
                 onUse: { media in
                     cropInput = nil
-                    viewModel.useGroupPhoto(media)
+                    viewModel.usePhoto(media)
                 },
                 onCancel: { cropInput = nil })
         }
@@ -80,33 +117,34 @@ struct GroupPhotoHeader: View {
         }
         .lakkoDialog(
             isPresented: $removeConfirm,
-            title: l10n.t("group_photo.remove.title"),
-            message: l10n.t("group_photo.remove.body")
+            title: l10n.t(viewModel.photoRemoveTitleKey),
+            message: l10n.t(viewModel.photoRemoveBodyKey)
         ) {
-            [.danger(l10n.t("group_photo.remove.confirm")) { viewModel.removeGroupPhoto() }, .cancel()]
+            [.danger(l10n.t("group_photo.remove.confirm")) { viewModel.removePhoto() }, .cancel()]
         }
     }
 
     private var picture: some View {
         InitialsAvatar(
-            name: viewModel.conversationTitle, identity: viewModel.groupIdHex, size: Self.size,
-            isGroup: true, photo: .group(viewModel.groupIdHex), playsVideo: true)
+            name: viewModel.photoTitle, identity: viewModel.photoIdHex, size: Self.size,
+            isGroup: viewModel.photoIsGroup, placeholderSymbol: viewModel.photoIsGroup ? nil : "megaphone.fill",
+            photo: .group(viewModel.photoIdHex), playsVideo: true)
     }
 
     @ViewBuilder
     private var statusLine: some View {
-        switch viewModel.groupPhotoStatus {
+        switch viewModel.photoStatus {
         case .idle, .uploading:
             // UX 4.5.2 — the photo in effect is gone (expired or deleted):
             // initials for everyone, and this line for whoever may set it.
-            if viewModel.canSetGroupPhoto, let photo = viewModel.groupPhoto,
+            if viewModel.canSetPhoto, let photo = viewModel.currentPhoto,
                AvatarImages.shared.isGone(photo) {
                 line(l10n.t("group_photo.gone"))
             }
         case .failed:
             VStack(spacing: 4) {
                 line(l10n.t("group_photo.error.upload"))
-                Button(l10n.t("common.try_again")) { viewModel.retryGroupPhoto() }
+                Button(l10n.t("common.try_again")) { viewModel.retryPhoto() }
                     .foregroundStyle(Color.lakkoAccent)
             }
         case .limited:
@@ -114,7 +152,7 @@ struct GroupPhotoHeader: View {
         case .owed:
             line(l10n.t("group_photo.owed"))
         case .notAllowed:
-            line(l10n.t("group_photo.error.not_allowed"))
+            line(l10n.t(viewModel.photoNotAllowedKey))
         }
     }
 
@@ -138,7 +176,7 @@ struct GroupPhotoHeader: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { cameraOpen = true }
                 }
             }
-            if viewModel.groupPhoto != nil {
+            if viewModel.currentPhoto != nil {
                 Divider()
                 menuRow(l10n.t("profile.avatar.menu.remove"), systemImage: "trash", destructive: true) {
                     menuOpen = false
@@ -147,7 +185,7 @@ struct GroupPhotoHeader: View {
             }
         }
         .padding(.vertical, 8)
-        .presentationDetents([.height(viewModel.groupPhoto != nil ? 200 : 140)])
+        .presentationDetents([.height(viewModel.currentPhoto != nil ? 200 : 140)])
         .presentationDragIndicator(.visible)
     }
 
@@ -174,14 +212,14 @@ struct GroupPhotoHeader: View {
         if isVideo {
             guard let movie = try? await item.loadTransferable(type: PickedMovie.self),
                   let source = await AvatarVideoSource.load(movie.url) else {
-                viewModel.groupPhotoStatus = .failed
+                viewModel.photoStatus = .failed
                 return
             }
             cropInput = .video(source)
         } else {
             guard let data = try? await item.loadTransferable(type: Data.self),
                   let image = UIImage(data: data), let cg = AvatarJPEG.upright(image) else {
-                viewModel.groupPhotoStatus = .failed
+                viewModel.photoStatus = .failed
                 return
             }
             cropInput = .photo(cg)
@@ -193,8 +231,18 @@ struct GroupPhotoHeader: View {
 /// info, for the owner and admins: All / Some / None, the chosen grid in
 /// order (a tap removes one; drag to reorder), `Add` opening the picker,
 /// `Save` enabled on a change.
-struct AllowedReactionsScreen: View {
-    @ObservedObject var viewModel: ChatViewModel
+/// What the Reactions screen reads and saves, for a group
+/// (``ChatViewModel``) and a channel (``ChannelReactionsSetting``).
+@MainActor
+protocol AllowedReactionsModel: ObservableObject {
+    var allowedReactions: FfiAllowedReactions { get }
+    func saveAllowedReactions(_ value: FfiAllowedReactions) async -> Bool
+}
+
+extension ChatViewModel: AllowedReactionsModel {}
+
+struct AllowedReactionsScreen<Model: AllowedReactionsModel>: View {
+    @ObservedObject var viewModel: Model
     let onClose: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
@@ -208,7 +256,7 @@ struct AllowedReactionsScreen: View {
 
     enum Choice: Hashable { case all, some, none }
 
-    init(viewModel: ChatViewModel, onClose: @escaping () -> Void) {
+    init(viewModel: Model, onClose: @escaping () -> Void) {
         self.viewModel = viewModel
         self.onClose = onClose
         let current = viewModel.allowedReactions

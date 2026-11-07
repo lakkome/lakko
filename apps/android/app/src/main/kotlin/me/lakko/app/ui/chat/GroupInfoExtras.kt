@@ -431,7 +431,7 @@ private const val ALLOWED_REACTIONS_MAX: Int = 100
  */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun AllowedReactionsScreen(
+internal fun AllowedReactionsScreen(
     initial: AllowedReactions,
     onSave: suspend (AllowedReactions) -> Unit,
     onClose: () -> Unit,

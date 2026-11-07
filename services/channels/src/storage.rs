@@ -37,7 +37,8 @@ use tokio::sync::RwLock;
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
 use crate::feedback::{
-    Label, MemoryFeedback, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN,
+    CommentReactionCounts, Label, MemoryFeedback, PostReactionCounts, StoredComment, WriterKey,
+    WRITE_NONCE_LEN,
 };
 
 /// Prune a per-subscriber `epoch -> envelope` map down to its
@@ -343,6 +344,13 @@ pub enum StorageError {
     /// posting.
     #[error("channel not found")]
     UnknownChannel,
+    /// The post holds no comment at the cursor named (reactions on
+    /// comments).
+    #[error("comment not found under this post")]
+    UnknownComment,
+    /// The owner deleted the channel; its id is never registered again.
+    #[error("channel was deleted")]
+    ChannelDeleted,
     /// Subscriber is not registered for this channel.
     #[error("subscriber not found in this channel")]
     UnknownSubscriber,
@@ -1155,6 +1163,79 @@ pub trait ChannelStore: Send + Sync {
     ///
     /// [`StorageError::Database`].
     async fn prune_write_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
+
+    /// The number of comments under each post in `post_cursors`, in that
+    /// order (0 for a post with none, or none at all). A maintained counter,
+    /// not a count of rows (ADR-0087 phase B, 2026-11-05).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn comment_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<(u64, u64)>, StorageError>;
+
+    /// Store the reaction row `(comment, writer_key, label)` on the comment
+    /// `comment_cursor` under the post. Returns whether it is new.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownComment`] when the post holds no such comment.
+    async fn add_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Remove a reaction row on a comment; returns whether one was there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError>;
+
+    /// The label counts of each comment in `comment_cursors` under the post,
+    /// in that order (a comment that is not there gets an empty list).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn comment_reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursors: &[u64],
+    ) -> Result<Vec<CommentReactionCounts>, StorageError>;
+
+    /// Delete the channel (ADR-0087 phase B, 2026-11-05): every row of it
+    /// goes, and a tombstone stays so its reads answer `410 channel-deleted`
+    /// and nobody registers the id again. Returns whether a channel was
+    /// there. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn delete_channel(&self, channel: ChannelId, now_ms: u64) -> Result<bool, StorageError>;
+
+    /// Whether the owner deleted `channel`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Database`] only.
+    async fn is_deleted(&self, channel: ChannelId) -> Result<bool, StorageError>;
 }
 
 /// One channel's public seeds: epoch → (envelope, superseded at).
@@ -1264,9 +1345,35 @@ struct Inner {
     removed: HashMap<(ChannelId, SubscriberId), u64>,
     /// Comments and reactions (ADR-0087 section 13a).
     feedback: MemoryFeedback,
+    /// Channel id → when its owner deleted it (ADR-0087 phase B).
+    deleted: HashMap<ChannelId, u64>,
 }
 
 impl Inner {
+    /// Drop every trace of `channel`: the SQL store's cascade from
+    /// `channels`. Returns whether the channel was there.
+    fn drop_channel(&mut self, channel: ChannelId) -> bool {
+        let existed = self.posts.remove(&channel).is_some();
+        self.next_cursor.remove(&channel);
+        self.subscribers.remove(&channel);
+        self.envelopes.retain(|(c, _), _| *c != channel);
+        self.current_epoch.remove(&channel);
+        self.staged_envelopes.retain(|(c, _), _| *c != channel);
+        self.member_cards.remove(&channel);
+        self.owners.remove(&channel);
+        self.registered_at.remove(&channel);
+        self.copublishers.remove(&channel);
+        self.listings.remove(&channel);
+        self.private.remove(&channel);
+        self.subscriber_rows.remove(&channel);
+        self.subscriber_meta.retain(|(c, _), _| *c != channel);
+        self.public_seeds.remove(&channel);
+        self.invite_keys.remove(&channel);
+        self.removed.retain(|(c, _), _| *c != channel);
+        self.feedback.retain_posts(|c, _| c != channel);
+        existed
+    }
+
     fn has_post(&self, channel: ChannelId, post_cursor: u64) -> bool {
         self.posts
             .get(&channel)
@@ -1353,6 +1460,9 @@ impl ChannelStore for InMemoryChannelStore {
         private: bool,
     ) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
+        if guard.deleted.contains_key(&channel) {
+            return Err(StorageError::ChannelDeleted);
+        }
         match guard.owners.get(&channel) {
             Some(existing) if *existing != owner_pubkey => return Err(StorageError::OwnerMismatch),
             Some(_) => {},
@@ -2334,6 +2444,85 @@ impl ChannelStore for InMemoryChannelStore {
             .await
             .feedback
             .prune_nonces_older_than(cutoff_ms))
+    }
+
+    async fn comment_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<(u64, u64)>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .feedback
+            .comment_counts(channel, post_cursors))
+    }
+
+    async fn add_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        _now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard
+            .feedback
+            .has_comment(channel, post_cursor, comment_cursor)
+        {
+            return Err(StorageError::UnknownComment);
+        }
+        Ok(guard.feedback.add_comment_reaction(
+            channel,
+            post_cursor,
+            comment_cursor,
+            writer_key,
+            label,
+        ))
+    }
+
+    async fn delete_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.write().await.feedback.delete_comment_reaction(
+            channel,
+            post_cursor,
+            comment_cursor,
+            writer_key,
+            label,
+        ))
+    }
+
+    async fn comment_reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursors: &[u64],
+    ) -> Result<Vec<CommentReactionCounts>, StorageError> {
+        Ok(self.inner.read().await.feedback.comment_reaction_counts(
+            channel,
+            post_cursor,
+            comment_cursors,
+        ))
+    }
+
+    async fn delete_channel(&self, channel: ChannelId, now_ms: u64) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        let existed = guard.drop_channel(channel);
+        guard.deleted.entry(channel).or_insert(now_ms);
+        Ok(existed)
+    }
+
+    async fn is_deleted(&self, channel: ChannelId) -> Result<bool, StorageError> {
+        Ok(self.inner.read().await.deleted.contains_key(&channel))
     }
 
     async fn list_member_cards(

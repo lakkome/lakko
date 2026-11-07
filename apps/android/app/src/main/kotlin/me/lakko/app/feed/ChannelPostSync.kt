@@ -201,14 +201,31 @@ public class ChannelPostSync(
             }
         }
         return when (val c = classifyChannelPlaintext(plaintext)) {
-            is ClassifiedPost.Text -> PostOutcome.Text(c.text)
+            // ADR-0087 section 13 — a post's plaintext is the chat envelope:
+            // the feed files its text; an edit, a delete or anything else
+            // that is no post is skipped.
+            is ClassifiedPost.Text -> {
+                val body = try {
+                    uniffi.lakko_ffi_uniffi.parseBodyEnvelope(c.text.toByteArray(Charsets.UTF_8))
+                } catch (_: Throwable) {
+                    null
+                }
+                if (body == null) {
+                    // Without the core (a host test) the text is the post.
+                    PostOutcome.Text(c.text)
+                } else if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT && body.text.isNotEmpty()) {
+                    PostOutcome.Text(body.text)
+                } else {
+                    PostOutcome.Skip
+                }
+            }
             is ClassifiedPost.Meta -> {
                 // A metadata record read here names the channel in the feed
                 // and the list without opening it (ADR-0051).
                 channels.adoptSharedMeta(channel.idHex, c.meta)
                 PostOutcome.Skip
             }
-            ClassifiedPost.Malformed -> PostOutcome.Skip
+            ClassifiedPost.Malformed, is ClassifiedPost.BanList -> PostOutcome.Skip
         }
     }
 

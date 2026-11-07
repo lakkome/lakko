@@ -4,19 +4,24 @@
 /**
  * The Chats destination: the list of one-to-one conversations on the left,
  * the open chat (or the empty hint) on the right. Wraps `/` and `/chat/:id`
- * so the list stays mounted while the user moves between conversations. On a
+ * and `/channel/:id` so the list stays mounted while the user moves between
+ * conversations, channels included. On a
  * narrow screen one pane shows at a time: the list, or the open chat.
  *
  * `GroupsLayout` is the same shell over the group conversations.
  */
 import type { JSX } from "solid-js";
-import { useParams, type RouteSectionProps } from "@solidjs/router";
+import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
 import { ChatList } from "../chat/ChatList";
 
 export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string; hex?: string }>();
   // `hex`: the pending chat of ADR-0079 (`/invited/:hex`).
-  const open = (): boolean => params.id !== undefined || params.hex !== undefined;
+  const location = useLocation();
+  // `/channel/:id` and `/channel/new` (ADR-0087 section 12) open beside the
+  // same list.
+  const open = (): boolean =>
+    params.id !== undefined || params.hex !== undefined || location.pathname.startsWith("/channel/");
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
       <ChatList activeGroupIdB64={params.id ?? null} />

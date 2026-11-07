@@ -279,10 +279,16 @@ public enum DsKnockJoinError: Error, LocalizedError {
 ///
 /// Knocks are polled next to the group journal, and the journal is polled far
 /// more often than a join request arrives (measured live: about twice a second
-/// across the groups one owner holds). The floor matches Android's.
+/// across the groups one owner holds). ``floorSeconds`` (10 s) is the floor
+/// of an event-driven read (the members sheet's join attributions);
+/// ``backgroundFloorSeconds`` (60 s, 2026-11-06) is the floor of the poll an
+/// owner / admin device runs beside its journal reads, so an idle client does
+/// not read knocks every few seconds. Both chosen, not measured; web and
+/// Android use the same two.
 @MainActor
 public final class KnockPollThrottle {
     public nonisolated static let floorSeconds: TimeInterval = 10
+    public nonisolated static let backgroundFloorSeconds: TimeInterval = 60
 
     private let floor: TimeInterval
     private var lastAt: [String: Date] = [:]

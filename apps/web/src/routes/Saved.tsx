@@ -28,6 +28,8 @@ import { groupTitle } from "../chat/group-title";
 import { formatListTime } from "../chat/list-time";
 import { loadMessageLog, type PersistedGroup, type PersistedMessage } from "../chat/message-log-store";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { channelRoleOf } from "../channels/channel-access";
+import { channelFacts } from "../channels/channel-facts";
 import { savedKindLabel, savedOpenRow, savedRowDateMs, savedRows, unsaveEdit, type SavedRow } from "../chat/saved-messages";
 import { useLineage } from "../chat/use-lineage";
 import type { ActiveGroup } from "../chat/ChatContext";
@@ -130,7 +132,7 @@ export default function Saved(): JSX.Element {
       sharedName: groupNames.nameOf(groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => memberNameOf(profiles.resolve(k)),
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "a Saved row title"),
       groupTitle,
     });
   };
@@ -138,13 +140,20 @@ export default function Saved(): JSX.Element {
   const rows = createMemo(() =>
     savedRows(
       sync.saved(),
-      (ref) => titleOf(base64Encode(ref.id)),
-      (ref, id) => heldMessage(groups(), ref.id, id) !== undefined,
+      // ADR-0087 section 12 — a saved post of a channel (ref kind 3) is
+      // titled by the channel and opens it while this account follows it.
+      (ref) => (ref.kind === 3 ? channelFacts(bytesToHex(ref.id)).name : titleOf(base64Encode(ref.id))),
+      (ref, id) =>
+        ref.kind === 3 ? channelRoleOf(bytesToHex(ref.id)) !== null : heldMessage(groups(), ref.id, id) !== undefined,
     ),
   );
 
   function open(row: SavedRow): void {
     if (!row.held) return;
+    if (row.ref.kind === 3) {
+      navigate(paths.channel(bytesToHex(row.ref.id)));
+      return;
+    }
     const segmentIdB64 = base64Encode(row.ref.id);
     const conversation = conversationOf(segmentIdB64);
     if (conversation === null) return;

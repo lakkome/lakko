@@ -4,8 +4,8 @@
 // @vitest-environment jsdom
 
 /**
- * `docs/ux/group-and-channel-privacy.md` section 9.1 — the banner at the top of
- * Chats and the dialog over the conversation.
+ * `docs/ux/group-and-channel-privacy.md` section 9 — the short notice at the
+ * bottom (2026-11-06) and the dialog over the conversation.
  */
 import { createSignal } from "solid-js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -13,16 +13,22 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { all, one, present, renderUi, settle } from "../test/ui";
 
 const dismissed: string[] = [];
-const notices: { value: readonly EndNotice[] } = { value: [] };
+const claimed = new Set<string>();
+const [noticeList, setNoticeList] = createSignal<readonly EndNotice[]>([]);
 
 vi.mock("./MembershipEndContext", () => ({
   useMembershipEnd: () => ({
-    notices: () => notices.value,
-    dismissNotice: (key: string) => dismissed.push(key),
+    notices: noticeList,
+    dismissNotice: (key: string) => {
+      dismissed.push(key);
+      setNoticeList((l) => l.filter((n) => n.key !== key));
+    },
+    claimNotice: (key: string) => claimed.add(key),
+    isNoticeClaimed: (key: string) => claimed.has(key),
   }),
 }));
 
-import { MembershipEndBanners, MembershipEndDialog, noticeTitle } from "./MembershipEndNotices";
+import { MembershipEndDialog, MembershipEndToast, noticeTitle } from "./MembershipEndNotices";
 import type { EndNotice } from "./membership-end";
 
 const NOTICE: EndNotice = {
@@ -44,23 +50,60 @@ beforeAll(() => {
   };
 });
 
-describe("the banner", () => {
-  it("says the name and never who, and closes", () => {
-    notices.value = [NOTICE];
-    dismissed.length = 0;
-    renderUi(() => <MembershipEndBanners activeSlug={null} />);
-    const banner = one(".lk-end-banner");
-    expect(banner.textContent).toContain("You are no longer in Book club.");
-    one<HTMLButtonElement>("button", banner).click();
-    expect(dismissed).toEqual(["2:aa"]);
+describe("the short notice at the bottom", () => {
+  it("names the conversation, has no close icon, and goes by itself after 4 s", async () => {
+    vi.useFakeTimers();
+    try {
+      dismissed.length = 0;
+      claimed.clear();
+      setNoticeList([]);
+      renderUi(() => <MembershipEndToast />);
+      setNoticeList([NOTICE]);
+      await vi.advanceTimersByTimeAsync(400);
+      const toast = one(".lk-end-toast");
+      expect(toast.textContent).toContain("You are no longer in Book club.");
+      expect(toast.querySelector("button")).toBeNull();
+      // Told and forgotten: nothing is kept for later.
+      expect(dismissed).toEqual(["2:aa"]);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(present(".lk-end-toast")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("is not shown for the conversation open behind its dialog", () => {
-    notices.value = [NOTICE, { ...NOTICE, key: "2:bb", title: "Other", routeIdsB64: ["uw=="] }];
-    renderUi(() => <MembershipEndBanners activeSlug="qg" />);
-    const shown = all(".lk-end-banner");
-    expect(shown).toHaveLength(1);
-    expect(shown[0]?.textContent).toContain("Other");
+  it("removals noticed together, or while one is up, make one notice", async () => {
+    vi.useFakeTimers();
+    try {
+      claimed.clear();
+      setNoticeList([]);
+      renderUi(() => <MembershipEndToast />);
+      setNoticeList([NOTICE, { ...NOTICE, key: "2:bb", title: "Other" }]);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(all(".lk-end-toast")).toHaveLength(1);
+      expect(one(".lk-end-toast").textContent).toContain("You are no longer in Book club and 1 more.");
+      setNoticeList((l) => [...l, { ...NOTICE, key: "2:cc", title: "Third" }]);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(all(".lk-end-toast")).toHaveLength(1);
+      expect(one(".lk-end-toast").textContent).toContain("You are no longer in Book club and 2 more.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a conversation whose dialog was shown gets no notice", async () => {
+    vi.useFakeTimers();
+    try {
+      claimed.clear();
+      setNoticeList([]);
+      renderUi(() => <MembershipEndToast />);
+      claimed.add("2:aa");
+      setNoticeList([NOTICE]);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(present(".lk-end-toast")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a conversation with no name known still reads as a sentence", () => {

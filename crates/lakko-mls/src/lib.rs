@@ -39,15 +39,17 @@ pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE
 pub use error::{group_id_hex, Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
-    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
-    MAX_PENDING_JOIN_REQUESTS,
+    JoinRequest, JoinRequestOutcome, MemberAddition, MemberRecord, ProposalCommit, WelcomeFounder,
+    GROUP_ID_LEN, MAX_PENDING_JOIN_REQUESTS,
 };
 pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
+    compose_publisher_step_down, is_publisher_step_down, is_publisher_step_down_envelope,
     publisher_group_id_for, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
+    PUBLISHER_STEP_DOWN_DOMAIN_V1, PUBLISHER_STEP_DOWN_LEN,
 };
 pub use refusal::{RefusalDisposition, RefusalReason};
 pub use self_removal::{sign_self_removal, SelfRemovalProof, SELF_REMOVAL_PROOF_LEN};

@@ -161,7 +161,8 @@ public enum class EndStage {
     STOPPED,
     WIPED,
 
-    /** Everything is gone; only the notice is still owed. */
+    /** Kept only to read rows an older build wrote: notices are no longer
+     *  stored (UX 9, decided 2026-11-06), so such a row is dropped. */
     NOTICE_ONLY,
 }
 
@@ -384,11 +385,8 @@ internal suspend fun runMembershipEnd(
         }
         if (current.stage == EndStage.WIPED) {
             ports.dropRegistry(current)
-            if (current.noticeOwed) {
-                if (!advance(EndStage.NOTICE_ONLY)) return EndRun.RETRY
-            } else {
-                store.remove(accountIdB64, current.idHex)
-            }
+            // UX 9 — the notice is shown live and never stored: the row goes.
+            store.remove(accountIdB64, current.idHex)
         }
         return EndRun.DONE
     } catch (cancellation: CancellationException) {
@@ -410,25 +408,30 @@ public data class MembershipEndNotice(
     val recordedAtMs: Long = 0L,
 )
 
-/** The notices [rows] owe, oldest first. */
-internal fun endNoticesOf(rows: List<OwedEnd>): List<MembershipEndNotice> =
-    rows.filter { it.noticeOwed }
-        .sortedWith(compareBy<OwedEnd> { it.recordedAtMs }.thenBy { it.idHex })
-        .map { MembershipEndNotice(it.idHex, it.name, it.recordedAtMs) }
-
 /** The conversations that are on their way out: gone from the list at once. */
 internal fun endingIdsOf(rows: List<OwedEnd>): Set<String> =
     rows.filter { it.stage != EndStage.NOTICE_ONLY }.map { it.idHex }.toSet()
 
 /**
- * ADR-0087 UX 9.1 — the Chats banners: one per removal still owed, the newest
- * on top, each with its own close; closing one leaves the others, and a newer
- * removal never hides an older one not yet closed (seen 2026-11-04: only the
- * older group's banner showed and the new removal said nothing).
+ * ADR-0087 UX 9 (decided 2026-11-06) — the one short notice at the bottom of
+ * Chats for the removals noticed now: "You are no longer in {name}." for one,
+ * "You are no longer in {name} and {n} more." for several, naming the newest.
+ * `null` when there is nothing to say.
  */
-internal fun bannerNotices(notices: List<MembershipEndNotice>): List<MembershipEndNotice> =
-    notices.distinctBy { it.idHex }
-        .sortedWith(compareByDescending<MembershipEndNotice> { it.recordedAtMs }.thenBy { it.idHex })
+internal fun endNoticeText(notices: List<MembershipEndNotice>, fallbackName: String): UiText? {
+    val distinct = notices.distinctBy { it.idHex }
+    val newest = distinct.maxWithOrNull(compareBy<MembershipEndNotice> { it.recordedAtMs }.thenBy { it.idHex })
+        ?: return null
+    val name = newest.name.ifBlank { fallbackName }
+    return if (distinct.size == 1) {
+        UiText("chat.ended.notice", texts = mapOf("name" to name))
+    } else {
+        UiText("chat.ended.notice_more", texts = mapOf("name" to name), counts = mapOf("n" to (distinct.size - 1).toULong()))
+    }
+}
+
+/** How long the notice stays up (UX 9). */
+internal const val END_NOTICE_SHOW_MS: Long = 4_000L
 
 /** The notice's sentence. An unnamed group reads by the catalog's own word. */
 internal fun endNoticeLine(name: String, fallbackName: String): UiText =

@@ -1401,8 +1401,10 @@ public final class ContactsClient {
     ) -> PollResult {
         var events: [IncomingMailboxEvent] = []
         var cursor = after
+        var reachKeys: [Int64: Data] = [:]
         for message in rows {
             cursor = message.id
+            if let key = message.reachKey { reachKeys[message.id] = key }
             guard let opened = MailboxRows.open(message.payload, key: mailboxKey) else { continue }
             let body = opened.body
             switch opened.kind {
@@ -1452,7 +1454,7 @@ public final class ContactsClient {
                     opened.request, replyGrant: opened.replyGrant, linkAnswer: opened.linkAnswer))
             }
         }
-        return PollResult(events: events, cursor: cursor, hasMore: hasMore)
+        return PollResult(events: events, cursor: cursor, hasMore: hasMore, reachKeyByMessageId: reachKeys)
     }
 }
 
@@ -1666,11 +1668,17 @@ public struct PollResult: Equatable {
     /// `true` if the DS reported more rows past the last returned
     /// id — caller should poll again with the new cursor.
     public let hasMore: Bool
+    /// ADR-0060 section 1 (2026-11-06) — the reach key that admitted each
+    /// row, by the row's DS message id (rows with none are absent).
+    public let reachKeyByMessageId: [Int64: Data]
 
-    public init(events: [IncomingMailboxEvent], cursor: Int64, hasMore: Bool) {
+    public init(
+        events: [IncomingMailboxEvent], cursor: Int64, hasMore: Bool, reachKeyByMessageId: [Int64: Data] = [:]
+    ) {
         self.events = events
         self.cursor = cursor
         self.hasMore = hasMore
+        self.reachKeyByMessageId = reachKeyByMessageId
     }
 }
 

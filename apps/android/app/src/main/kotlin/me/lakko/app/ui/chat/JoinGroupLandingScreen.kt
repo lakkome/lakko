@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -295,6 +296,15 @@ public fun JoinGroupLandingScreen(
     onDone: () -> Unit,
     /** Opens the joined group's chat. */
     onOpenChat: (groupIdHex: String) -> Unit,
+    /** ADR-0087 section 7.2 — Subscribe on a channel's link page. */
+    onSubscribeChannel: (preview: me.lakko.app.chat.GroupInvitePreviewUi) -> Unit = {},
+    /** Section 15.2 — a co-publisher link opens the join-as-publisher page
+     *  (only when [onAcceptPublisher] is not given). */
+    onJoinAsPublisher: () -> Unit = {},
+    /** Section 15.2 — `Accept` on a publisher link joins right here, with no
+     *  further step: progress lines go to the callback; the channel id, or
+     *  `null` when the owner's device has not approved within the wait. */
+    onAcceptPublisher: (suspend (onStatus: (me.lakko.app.l10n.UiText?) -> Unit) -> String?)? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val card by viewModel.card.collectAsStateWithLifecycle()
@@ -303,7 +313,17 @@ public fun JoinGroupLandingScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(t("group.join.title")) },
+                title = {
+                    // ADR-0087 — a channel's link page says channel.
+                    val preview = card?.preview
+                    Text(
+                        when {
+                            preview?.coPublisher == true -> t("channels.join.title")
+                            preview?.channelId != null -> t("channels.link_page.title")
+                            else -> t("group.join.title")
+                        },
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
@@ -349,10 +369,41 @@ public fun JoinGroupLandingScreen(
                 TextButton(onClick = onDone) { Text(t("common.open_lakko")) }
             }
             is JoinGroupLandingViewModel.State.Ready -> {
-                InviteHeadline(card)
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
-                InviteFoot(card)
+                val preview = card?.preview
+                if (preview?.subscriber != null) {
+                    // Section 7.2 — `Anna invites you to / Berlin news /
+                    // Private channel / [Subscribe]`.
+                    val inviter = preview.inviterName?.trim()?.takeIf { it.isNotEmpty() }
+                    Text(
+                        if (inviter != null) t("invite.group.lead_named", mapOf("name" to inviter)) else t("invite.group.lead_anonymous"),
+                        textAlign = TextAlign.Center,
+                    )
+                    preview.groupName?.let { Text(it, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center) }
+                    Text(
+                        if (preview.subscriber?.access is uniffi.lakko_ffi_uniffi.FfiChannelAccess.Public) {
+                            t("channels.header.public")
+                        } else {
+                            t("channels.header.private")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { onSubscribeChannel(preview) }) { Text(t("channels.subscribe.action")) }
+                } else if (preview?.coPublisher == true) {
+                    InviteHeadline(card)
+                    Spacer(Modifier.height(16.dp))
+                    if (onAcceptPublisher != null) {
+                        PublisherAccept(onAcceptPublisher)
+                    } else {
+                        Button(onClick = onJoinAsPublisher) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
+                    }
+                } else {
+                    InviteHeadline(card)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
+                    InviteFoot(card)
+                }
             }
             is JoinGroupLandingViewModel.State.Requesting -> {
                 InviteHeadline(card)
@@ -458,4 +509,49 @@ private fun InviteFoot(card: GroupInviteCard?) {
         textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+/** Section 15.2 — `Accept` on a publisher link: joins here, the progress and
+ *  any error under the button. */
+@Composable
+private fun PublisherAccept(
+    onAccept: suspend (onStatus: (me.lakko.app.l10n.UiText?) -> Unit) -> String?,
+) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var status by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
+    var error by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
+    Button(
+        enabled = !busy,
+        onClick = {
+            busy = true
+            error = null
+            scope.launch {
+                try {
+                    val joined = onAccept { status = it }
+                    status = null
+                    if (joined == null) error = me.lakko.app.l10n.UiText("channels.join.no_approval")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: me.lakko.app.channels.LegacyChannelException) {
+                    status = null
+                    error = e.text
+                } catch (e: Throwable) {
+                    android.util.Log.w("JoinGroupLanding", "publisher accept failed: ${e.javaClass.simpleName}")
+                    status = null
+                    error = me.lakko.app.chat.joinFailureCopy(e)
+                } finally {
+                    busy = false
+                }
+            }
+        },
+    ) { Text(if (busy) t("channels.join.requesting") else t("channels.publishers.accept")) }
+    status?.let { line: me.lakko.app.l10n.UiText ->
+        Spacer(Modifier.height(8.dp))
+        Text(line.text(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    error?.let { line: me.lakko.app.l10n.UiText ->
+        Spacer(Modifier.height(8.dp))
+        Text(line.text(), color = MaterialTheme.colorScheme.error)
+    }
 }

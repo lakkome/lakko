@@ -123,6 +123,9 @@ use thiserror::Error;
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::channel_read_key::{
+    try_unwrap_channel_read_key, ChannelReadKeyEnvelope, ChannelReadKeyError,
+};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
@@ -414,6 +417,11 @@ pub enum IncomingEnvelope<'a> {
     /// channel's owner resolved at receipt, and opening to a seed that
     /// derives the clear public key.
     AdmissionSeed(AdmissionSeedEnvelope),
+    /// A channel's read key sealed to one co-publisher (ADR-0087 phase B).
+    /// Never a chat bubble. Kept only under the rule in
+    /// [`crate::channel_read_key`]: on the channel's PublisherGroup journal,
+    /// addressed to this account, sent by the channel's owner.
+    ChannelReadKey(ChannelReadKeyEnvelope),
     /// A contact request sealed to one member of the group (ADR-0086 §6, UX
     /// `who-can-find-me.md` 6.4); the envelope names nobody. Never a chat
     /// bubble. Every member runs
@@ -525,6 +533,9 @@ pub enum DispatchError {
     /// The admission-seed domain (ADR-0087) with a malformed payload.
     #[error(transparent)]
     AdmissionSeed(#[from] AdmissionSeedError),
+    /// The channel read-key domain (ADR-0087) with a malformed payload.
+    #[error(transparent)]
+    ChannelReadKey(#[from] ChannelReadKeyError),
     /// The group-contact-request domain (ADR-0086 §6) with a malformed
     /// payload.
     #[error(transparent)]
@@ -645,6 +656,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n. Channel admission seed — ADR-0087 section 7.
     if let Some(seed) = try_unwrap_admission_seed(plaintext)? {
         return Ok(IncomingEnvelope::AdmissionSeed(seed));
+    }
+    // 7n2. Channel read key — ADR-0087 phase B.
+    if let Some(key) = try_unwrap_channel_read_key(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelReadKey(key));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {

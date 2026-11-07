@@ -63,10 +63,13 @@ use lakko_contacts::introduction::{
 };
 use lakko_contacts::profile::ACCOUNT_ID_LEN;
 use lakko_contacts::reach::{
+    classify_contact_key as rust_classify_contact_key,
+    contact_key_row_verdict as rust_contact_key_row_verdict,
+    contact_key_versions as rust_contact_key_versions,
     continuity_reach_seed as rust_continuity_reach_seed, reach_seed as rust_reach_seed,
-    reach_verifying_key as rust_reach_verifying_key, ReachClass, ReachError,
-    ReachGrant as RustReachGrant, CONTINUITY_ACCOUNT_ID_LEN, MAX_REACH_SCOPE_ID_LEN,
-    REACH_GRANT_LEN, REACH_SEED_LEN,
+    reach_verifying_key as rust_reach_verifying_key, ContactKeyRowVerdict, ContactKeyStanding,
+    ReachClass, ReachError, ReachGrant as RustReachGrant, CONTINUITY_ACCOUNT_ID_LEN,
+    MAX_REACH_SCOPE_ID_LEN, REACH_GRANT_LEN, REACH_SEED_LEN, RETIRED_CONTACT_VERSIONS_KEPT,
 };
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
@@ -359,6 +362,137 @@ pub fn derive_reach_grant(
 ) -> Result<FfiReachGrant, FfiError> {
     let account = seed32(&account_seed, "account seed")?;
     Ok(RustReachGrant::derive(&account, class.into(), &scope_id, version)?.into())
+}
+
+// ============================================================================
+// Retired contact keys (ADR-0060 section 1, amended 2026-11-06)
+// ============================================================================
+
+/// What a mailbox row's admitting key is, for the `contact` class. Mirror of
+/// [`lakko_contacts::reach::ContactKeyStanding`].
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiContactKeyStanding {
+    /// The current `contact` key.
+    Current,
+    /// A retired `contact` key still registered.
+    Retired {
+        /// Its version.
+        version: u32,
+    },
+    /// Not a `contact` key of the kept window.
+    NotContactKey,
+}
+
+impl From<ContactKeyStanding> for FfiContactKeyStanding {
+    fn from(s: ContactKeyStanding) -> Self {
+        match s {
+            ContactKeyStanding::Current => Self::Current,
+            ContactKeyStanding::Retired { version } => Self::Retired { version },
+            ContactKeyStanding::NotContactKey => Self::NotContactKey,
+        }
+    }
+}
+
+impl From<FfiContactKeyStanding> for ContactKeyStanding {
+    fn from(s: FfiContactKeyStanding) -> Self {
+        match s {
+            FfiContactKeyStanding::Current => Self::Current,
+            FfiContactKeyStanding::Retired { version } => Self::Retired { version },
+            FfiContactKeyStanding::NotContactKey => Self::NotContactKey,
+        }
+    }
+}
+
+/// What the receiving device does with a mailbox row. Mirror of
+/// [`lakko_contacts::reach::ContactKeyRowVerdict`].
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiContactKeyRowVerdict {
+    /// Process the row as before.
+    Process,
+    /// Process it, and republish the profile (with the current `contact`
+    /// grant) in the one-to-one with its sender, without anything shown.
+    ProcessAndRegrant,
+    /// Drop it without anything shown; log nothing that names anyone.
+    Drop,
+}
+
+impl From<ContactKeyRowVerdict> for FfiContactKeyRowVerdict {
+    fn from(v: ContactKeyRowVerdict) -> Self {
+        match v {
+            ContactKeyRowVerdict::Process => Self::Process,
+            ContactKeyRowVerdict::ProcessAndRegrant => Self::ProcessAndRegrant,
+            ContactKeyRowVerdict::Drop => Self::Drop,
+        }
+    }
+}
+
+/// How many retired `contact` versions are kept registered beside the
+/// current one: 8 (chosen, not measured).
+#[uniffi::export]
+#[must_use]
+pub fn retired_contact_versions_kept() -> u32 {
+    RETIRED_CONTACT_VERSIONS_KEPT
+}
+
+/// The `contact` versions to keep registered at the Delivery Service when
+/// the current one is `current`: `current`, then up to eight retired ones.
+/// Register the public key of each (no expiry), remove any other `contact`
+/// version.
+#[uniffi::export]
+#[must_use]
+pub fn contact_key_versions(current: u32) -> Vec<u32> {
+    rust_contact_key_versions(current)
+}
+
+/// Classify a mailbox row's admitting key (the row's `reach_pk_b64`, 32
+/// bytes) against this account's `contact` keys at `current_version`.
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `seedLength` for a seed or key that is not 32 bytes.
+#[uniffi::export]
+pub fn classify_contact_key(
+    account_seed: Vec<u8>,
+    current_version: u32,
+    proving_key: Vec<u8>,
+) -> Result<FfiContactKeyStanding, FfiError> {
+    let account = seed32(&account_seed, "account seed")?;
+    let key = seed32(&proving_key, "proving key")?;
+    Ok(rust_classify_contact_key(&account, current_version, &key).into())
+}
+
+/// The one rule for a row under a retired `contact` key:
+/// `sender_is_contact` is whether the account the row's verified content
+/// names as its sender is a CURRENT contact.
+#[uniffi::export]
+#[must_use]
+pub fn contact_key_row_verdict(
+    standing: FfiContactKeyStanding,
+    sender_is_contact: bool,
+) -> FfiContactKeyRowVerdict {
+    rust_contact_key_row_verdict(standing.into(), sender_is_contact).into()
+}
+
+/// [`classify_contact_key`] then [`contact_key_row_verdict`] in one call, for
+/// the receive path. `proving_key` is the row's `reach_pk_b64` decoded, or
+/// `None` for a row with no admitting key (a proofless write), which is
+/// always [`FfiContactKeyRowVerdict::Process`].
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `seedLength` for a seed or key that is not 32 bytes.
+#[uniffi::export]
+pub fn mailbox_row_contact_verdict(
+    account_seed: Vec<u8>,
+    current_contact_version: u32,
+    proving_key: Option<Vec<u8>>,
+    sender_is_contact: bool,
+) -> Result<FfiContactKeyRowVerdict, FfiError> {
+    let Some(key) = proving_key else {
+        return Ok(FfiContactKeyRowVerdict::Process);
+    };
+    let standing = classify_contact_key(account_seed, current_contact_version, key)?;
+    Ok(contact_key_row_verdict(standing, sender_is_contact))
 }
 
 /// The 32-byte Ed25519 public key of a reach seed: what the owner registers
@@ -2157,5 +2291,46 @@ mod tests {
             username_cert_code(&UsernameCertError::AccountMismatch),
             "accountMismatch"
         );
+    }
+
+    #[test]
+    fn retired_contact_keys_cross_the_boundary_as_the_core_has_them() {
+        assert_eq!(retired_contact_versions_kept(), 8);
+        assert_eq!(contact_key_versions(2), vec![2, 1, 0]);
+        let pk = |v: u32| {
+            reach_verifying_key(
+                reach_seed(ACCOUNT_SEED.to_vec(), FfiReachClass::Contact, vec![], v).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            classify_contact_key(ACCOUNT_SEED.to_vec(), 9, pk(9)).unwrap(),
+            FfiContactKeyStanding::Current
+        );
+        assert_eq!(
+            classify_contact_key(ACCOUNT_SEED.to_vec(), 9, pk(1)).unwrap(),
+            FfiContactKeyStanding::Retired { version: 1 }
+        );
+        assert_eq!(
+            classify_contact_key(ACCOUNT_SEED.to_vec(), 9, pk(0)).unwrap(),
+            FfiContactKeyStanding::NotContactKey
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict(ACCOUNT_SEED.to_vec(), 9, Some(pk(3)), true).unwrap(),
+            FfiContactKeyRowVerdict::ProcessAndRegrant
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict(ACCOUNT_SEED.to_vec(), 9, Some(pk(3)), false).unwrap(),
+            FfiContactKeyRowVerdict::Drop
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict(ACCOUNT_SEED.to_vec(), 9, Some(pk(9)), false).unwrap(),
+            FfiContactKeyRowVerdict::Process
+        );
+        assert_eq!(
+            mailbox_row_contact_verdict(ACCOUNT_SEED.to_vec(), 9, None, false).unwrap(),
+            FfiContactKeyRowVerdict::Process
+        );
+        assert!(classify_contact_key(ACCOUNT_SEED.to_vec(), 9, vec![1; 31]).is_err());
     }
 }

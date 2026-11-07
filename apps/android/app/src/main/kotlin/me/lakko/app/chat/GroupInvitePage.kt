@@ -192,7 +192,24 @@ public data class GroupInvitePreviewUi(
     val groupName: String?,
     val inviterName: String?,
     val memberCount: Int,
-)
+    /** ADR-0087 sections 7 and 15 — a channel's link: its 16-byte id. */
+    val channelId: ByteArray? = null,
+    /** Section 7.2 — a subscriber invitation (preview kind 3): the
+     *  channel's description and its access keys; `null` for a group link
+     *  and for a co-publisher link. */
+    val subscriber: uniffi.lakko_ffi_uniffi.FfiSubscriberInvite? = null,
+) {
+    /** A co-publisher link (preview kind 2). */
+    val coPublisher: Boolean get() = channelId != null && subscriber == null
+
+    override fun equals(other: Any?): Boolean =
+        other is GroupInvitePreviewUi && groupName == other.groupName && inviterName == other.inviterName &&
+            memberCount == other.memberCount &&
+            (channelId?.contentEquals(other.channelId) ?: (other.channelId == null)) &&
+            subscriber == other.subscriber
+
+    override fun hashCode(): Int = (groupName?.hashCode() ?: 0) * 31 + memberCount
+}
 
 /**
  * The card's text, spec section 3. [headline] is always present; [groupLine]

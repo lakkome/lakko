@@ -85,63 +85,132 @@ public object ChannelDiscovery {
      *   handle (the server's 404 not-found path).
      */
     /**
-     * ADR-0087 section 1 — claim a channel's `@handle` on the handle
-     * mechanism (the separate channel-name routes are gone): the write key
-     * from the channel's PublisherGroup journal root, one `discovery-lookup`
-     * and one `discovery-register` token. Throws
-     * [me.lakko.app.discovery.HandleWriteError] (`name-taken`) or a network
-     * error.
+     * ADR-0087 section 6 — the 32-byte read key of a channel this account
+     * owns, from the LINEAGE (conversation) identity [identity]. Public by
+     * the owner's choice: the public record and the subscriber links carry it.
      */
-    public suspend fun claimChannelHandle(
+    public fun readKey(identity: uniffi.lakko_ffi_uniffi.Identity, channelIdHex: String): ByteArray =
+        uniffi.lakko_ffi_uniffi.channelReadKey(identity, ChannelsComposer.channelIdFromHex(channelIdHex))
+
+    /**
+     * ADR-0087 sections 1 to 4 — write a channel's @name on the handle
+     * mechanism. One rule on all three clients (section 3 + ADR-0074): the
+     * journal id is the PublisherGroup id the LINEAGE identity [identity]
+     * derives for the channel; the handle key is derived from the journal root
+     * of the CURRENT account seed over that id. [route] CLAIM spends one
+     * `discovery-register` token, REPLACE ([oldHandle] set) one more, UPDATE
+     * none. Throws [me.lakko.app.discovery.HandleWriteError] (`name-taken`)
+     * or a network error.
+     */
+    public suspend fun writeHandle(
         identity: uniffi.lakko_ffi_uniffi.Identity,
-        handle: String,
         channelIdHex: String,
+        handle: String,
+        public: Boolean,
         name: String,
         description: String,
-    ) {
+        route: me.lakko.app.discovery.HandleRoute,
+        oldHandle: String? = null,
+        sizeBand: Int = 0,
+        avatar: uniffi.lakko_ffi_uniffi.FfiAvatar? = null,
+    ): me.lakko.app.chat.SignedGroupHandle {
         val channelId = ChannelsComposer.channelIdFromHex(channelIdHex)
-        val journalId = CoPublisher.openPublisherGroup(identity, channelIdHex).use { it.groupId() }
-        DiscoveryClient().use { client ->
-            me.lakko.app.chat.claimChannelHandle(
-                discovery = client,
-                accountSeed = identity.ed25519Seed(),
-                journalId = journalId,
-                channelId = channelId,
-                handle = handle,
-                name = name,
-                description = description,
-            )
+        val journalId = uniffi.lakko_ffi_uniffi.publisherGroupIdFor(identity, channelId)
+        val currentSeed = ChannelOwnerSuccession.withOwnerIdentity(identity) { it.ed25519Seed() }
+        val readKey = if (public) readKey(identity, channelIdHex) else ByteArray(32)
+        val facts = me.lakko.app.chat.ChannelHandleFacts(public, name, description, readKey, sizeBand, avatar)
+        try {
+            return DiscoveryClient().use { client ->
+                when (route) {
+                    me.lakko.app.discovery.HandleRoute.REPLACE -> me.lakko.app.chat.replaceChannelHandle(
+                        client, currentSeed, journalId, channelId, oldHandle ?: handle, handle, facts,
+                    )
+                    me.lakko.app.discovery.HandleRoute.UPDATE -> me.lakko.app.chat.updateChannelHandle(
+                        client, currentSeed, journalId, channelId, handle, facts,
+                    )
+                    else -> me.lakko.app.chat.claimChannelHandle(
+                        client, currentSeed, journalId, channelId, handle, facts,
+                    )
+                }
+            }
+        } finally {
+            currentSeed.fill(0)
         }
     }
 
-    /** group-and-channel-privacy.md 4.5.4 — republish the channel's public
-     *  record (its name and description) under its @name. The owner only. */
-    public suspend fun updateChannelHandle(
-        identity: uniffi.lakko_ffi_uniffi.Identity,
-        handle: String,
-        channelIdHex: String,
-        name: String,
-        description: String,
-    ) {
-        val channelId = ChannelsComposer.channelIdFromHex(channelIdHex)
-        val journalId = CoPublisher.openPublisherGroup(identity, channelIdHex).use { it.groupId() }
-        DiscoveryClient().use { client ->
-            me.lakko.app.chat.updateChannelHandle(
-                discovery = client,
-                accountSeed = identity.ed25519Seed(),
-                journalId = journalId,
-                channelId = channelId,
-                handle = handle,
-                name = name,
-                description = description,
+    /** The in-record form of a signed channel @name (metadata v3). */
+    public fun conversationHandleOf(signed: me.lakko.app.chat.SignedGroupHandle): uniffi.lakko_ffi_uniffi.FfiConversationHandle =
+        uniffi.lakko_ffi_uniffi.FfiConversationHandle(
+            updatedAtMs = signed.stored.updatedAtMs,
+            public = signed.stored.public,
+            handle = signed.stored.handle,
+            certificate = signed.stored.certificate,
+            signature = signed.stored.signature,
+        )
+
+    /**
+     * Section 3 + ADR-0074 — the owed `rekey` after this account's key
+     * rotation, signed with the OLD handle key (kept at rotation by
+     * `KeyRotationChannels`), moving the name to the current seed's key; then
+     * the channel record is re-posted with the newly signed @name. `true` when
+     * nothing is owed any more.
+     */
+    public suspend fun sendOwedRekeyIfAny(
+        context: android.content.Context,
+        state: ChannelsUiState,
+        client: ChannelsClient,
+        accountIdB64: String,
+        channel: ChannelHandle,
+    ): Boolean {
+        val store = me.lakko.app.chat.GroupSettingsStore
+        val oldSeed = store.owedRekeySeed(context, accountIdB64, channel.id) ?: return true
+        try {
+            val held = channel.sharedMeta()?.fullRecord()?.handle
+            if (held == null) {
+                store.saveOwedRekeySeed(context, accountIdB64, channel.id, null)
+                return true
+            }
+            val publisher = state.publisher ?: return false
+            val signed = publisher.withIdentity(persist = false) { identity ->
+                val channelId = ChannelsComposer.channelIdFromHex(channel.id)
+                val journalId = uniffi.lakko_ffi_uniffi.publisherGroupIdFor(identity, channelId)
+                ChannelOwnerSuccession.withOwnerIdentity(identity) { it.ed25519Seed() }
+                    .let { cur -> journalId to cur }
+            }.let { (journalId, currentSeed) ->
+                try {
+                    DiscoveryClient().use { d ->
+                        me.lakko.app.chat.rekeyGroupHandle(d, oldSeed, currentSeed, journalId, held.handle, held.public)
+                    }
+                } finally {
+                    currentSeed.fill(0)
+                }
+            }
+            val shared = channel.sharedMeta()
+            ChannelMetaPublisher.post(
+                state = state,
+                client = client,
+                channelId = channel.id,
+                name = shared?.name ?: channel.localName,
+                description = shared?.description ?: channel.localDescription,
+                updatedAtMs = System.currentTimeMillis().toULong(),
+                handle = conversationHandleOf(signed),
             )
+            store.saveOwedRekeySeed(context, accountIdB64, channel.id, null)
+            return true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            android.util.Log.i("ChannelDiscovery", "ADR-0087 owed channel handle rekey not sent yet")
+            return false
+        } finally {
+            oldSeed.fill(0)
         }
     }
 
     /**
-     * 4.5.4 — the owed republish of [channelIdHex]'s record, when one is
+     * 4.5.4 — the owed republish of [channel]'s public record, when one is
      * recorded: sent, and cleared once it lands. A failure keeps it owed for
-     * the next try (the channel's heartbeat, the next edit). Returns whether
+     * the next try (the publisher loop, the next edit). Returns whether
      * nothing is owed any more.
      */
     public suspend fun sendOwedRecordIfAny(
@@ -152,19 +221,23 @@ public object ChannelDiscovery {
     ): Boolean {
         val store = me.lakko.app.chat.GroupSettingsStore
         if (!store.owedChannelRecord(context, accountIdB64, channel.id)) return true
-        val handle = channel.handle.trim().removePrefix("@")
+        val record = channel.sharedMeta()?.fullRecord()
+        val handle = record?.handle?.handle ?: channel.handle.trim().removePrefix("@")
         if (handle.isEmpty()) {
             store.saveOwedChannelRecord(context, accountIdB64, channel.id, false)
             return true
         }
         return try {
-            publisher.withIdentity { identity ->
-                updateChannelHandle(
+            publisher.withIdentity(persist = false) { identity ->
+                writeHandle(
                     identity = identity,
-                    handle = handle,
                     channelIdHex = channel.id,
+                    handle = handle,
+                    public = record?.listed ?: channel.sharedListed,
                     name = channel.sharedName.ifEmpty { channel.localName },
                     description = channel.sharedDescription.ifEmpty { channel.localDescription },
+                    route = me.lakko.app.discovery.HandleRoute.UPDATE,
+                    avatar = record?.avatar,
                 )
             }
             store.saveOwedChannelRecord(context, accountIdB64, channel.id, false)

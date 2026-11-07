@@ -80,6 +80,9 @@ public enum AttachmentBridge {
         /// plain file.
         media: MediaAttachmentMeta? = nil,
         storage: StorageClient = StorageClient(),
+        /// ADR-0087 section 13 — the idle life of a channel file (45 days);
+        /// `nil` keeps the service's default.
+        idleDays: UInt8? = nil,
         /// Polish 1.x — coarse-grained stage callback the
         /// composer surface drives off to render
         /// "Encrypting…" → "Uploading…" captions instead of a
@@ -115,6 +118,7 @@ public enum AttachmentBridge {
             try await storage.putBlob(
                 blobId: enc.blobId,
                 ciphertext: enc.ciphertext,
+                idleDays: idleDays,
                 progress: onProgress
             )
         } catch StorageClientError.limited {
@@ -153,6 +157,7 @@ public enum AttachmentBridge {
         name: String?,
         media: MediaAttachmentMeta?,
         storage: StorageClient = StorageClient(),
+        idleDays: UInt8? = nil,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> AttachmentRef {
         let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
@@ -166,6 +171,7 @@ public enum AttachmentBridge {
             name: name,
             media: media,
             storage: storage,
+            idleDays: idleDays,
             onProgress: onProgress
         )
     }

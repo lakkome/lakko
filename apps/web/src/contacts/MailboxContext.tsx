@@ -107,9 +107,13 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import {
   accountKeysOf,
+  contactByAnyKey,
+  isRemovedContact,
   loadAccepted,
+  loadKeyAliases,
   readPin,
 } from "./local-store";
+import { contactRowAction, isCurrentContactKey, type ContactRowAction } from "../reach/contact-row";
 import {
   contactSignedBy,
   establishedContactOfAccount,
@@ -1121,6 +1125,41 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       if (!current()) throw new Error("mailbox dispatch: the session it was polled for ended");
     };
     requireCurrent();
+    // ADR-0060 section 1 (amended 2026-11-06) - each row by the key that
+    // admitted it: a retired `contact` key from a current contact is
+    // processed and the contact handed the current grant; from anyone else
+    // it is dropped, silently.
+    const rowSession = reachSession();
+    const { peekWelcomeFounder } = await loadWasm();
+    const contactRows = loadAccepted();
+    const contactAliases = loadKeyAliases();
+    const isContact = (keyB64: string): boolean =>
+      isCurrentContactKey(keyB64, (k) => contactByAnyKey(k, contactRows, contactAliases), (k) => isRemovedContact(k));
+    const rowAction = (reachPk: Uint8Array | undefined, senders: () => readonly string[]): ContactRowAction =>
+      rowSession === null
+        ? "process"
+        : contactRowAction({
+            reachPk,
+            verdict: (pk, c) => rowSession.contactRowVerdict(pk, c),
+            senderIsContact: () => senders().some(isContact),
+          });
+    /** Hand a contact the current grant: republish the profile in the
+     *  one-to-one with them, nothing shown. */
+    const regrant = (senderB64: string): void => {
+      const own = ownPersonKeyB64(chats.identity());
+      const conv = chats
+        .groups()
+        .find(
+          (g) =>
+            conversationKindOf(g.group) === "chat" &&
+            personKeysOf(g.group).some((k) => k !== own && (k === senderB64 || contactByAnyKey(k, contactRows, contactAliases)?.signaturePubkeyB64 === contactByAnyKey(senderB64, contactRows, contactAliases)?.signaturePubkeyB64)),
+        );
+      if (conv !== undefined) profiles.requested(conv.groupIdB64);
+    };
+    const dropped = (): void => {
+      // eslint-disable-next-line no-console
+      console.info("[reach] a mailbox row under a retired contact key was dropped");
+    };
     const fresh: FetchedRequest[] = [];
     await retryWaitingKnownRequests();
     let welcomeAttempted = false;
@@ -1130,6 +1169,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     try {
       for (const ev of events) {
         if (ev.kind === "contact-request") {
+          const senderB64 = base64Encode(ev.request.fromPubkey);
+          const action = rowAction(ev.reachPk, () => [senderB64]);
+          if (action === "drop") {
+            dropped();
+            continue;
+          }
+          if (action === "regrant") regrant(senderB64);
           // ADR-0048 — the sender's profile, filed under the key the request
           // signature authenticates. Filed even for a request already listed:
           // the store keeps only a strictly newer one.
@@ -1169,6 +1215,30 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           welcomeAttempted = true;
           // An end under way goes first: the Welcome may replace its group.
           await membershipEnd.settle();
+          // ADR-0060 section 1 (2026-11-06) - a Welcome admitted by a retired
+          // contact key: its founder is read WITHOUT joining
+          // (`peekWelcomeFounder`), and a Welcome from someone who is not a
+          // contact is discarded unjoined. A peek that fails leaves no sender:
+          // dropped too. From a contact, the join publishes the profile with
+          // the current grant (`settleJoins`): the regrant.
+          const welcomeAction = rowAction(ev.reachPk, () => {
+            const identity = chats.identity();
+            if (identity === null) return [];
+            try {
+              const founder = peekWelcomeFounder(ev.welcome.welcomeBytes, identity);
+              try {
+                return [base64Encode(founder.founderAccountKey)];
+              } finally {
+                founder.free();
+              }
+            } catch {
+              return [];
+            }
+          });
+          if (welcomeAction === "drop") {
+            dropped();
+            continue;
+          }
           const opened = await openWelcome(ev.welcome.welcomeBytes, ev.welcome.messageId, current);
           if (opened.kind === "joined") {
             joinedEntries.push(opened.entry);
@@ -1205,6 +1275,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           await dropCarriedCopies(accountIdB64, refused.accountIdHex);
           void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
+          // A retired contact key from someone who is not a contact: dropped.
+          const ackSenderB64 = base64Encode(ev.ack.accepterPubkey);
+          const ackAction = rowAction(ev.reachPk, () => [ackSenderB64]);
+          if (ackAction === "drop") {
+            dropped();
+            continue;
+          }
+          if (ackAction === "regrant") regrant(ackSenderB64);
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
           // Accept.
           applyContactAck(ev.ack, accountIdB64, {

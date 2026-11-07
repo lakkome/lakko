@@ -44,6 +44,21 @@ import Foundation
 /// group call a commit delayed by one leaves media sealed under a key the
 /// newest members no longer derive.
 ///
+/// ## Cadence (2026-11-06)
+///
+/// A round robin every few seconds over every group is what the web client
+/// was measured doing on 2026-11-05 (about 2.5 requests a second idle with six
+/// groups), which does not scale. The pause is short (``Config/intervalMs``)
+/// only while something is known to be arriving: a push wake reached the app
+/// in the foreground (a window of ``Config/wakeWindowMs``), or a call is up.
+/// Otherwise it is ``Config/idlePushIntervalMs`` when this device holds an
+/// APNs token (the push is what brings a message in; the sweep is a safety
+/// net) and ``Config/idleNoPushIntervalMs`` when it holds none. A push wake
+/// and the return to the foreground end a long pause at once (``nudge()``),
+/// so the long pause costs no latency on those paths. The open chat long-polls
+/// itself and is not in the round robin. All three intervals chosen, not
+/// measured; the web client uses the same three.
+///
 /// ## Pausing
 ///
 /// Backgrounding pauses the loop between polls; it does not cancel a poll in
@@ -84,11 +99,20 @@ final class ForegroundReceiveScheduler {
         /// this (``FeedRefreshCenter``). The call loop's long poll does not
         /// report.
         var onSweepDone: @MainActor (_ tally: FeedCheckTally) -> Void = { _ in }
+        /// Whether a push wake can reach this device (an APNs token is held).
+        /// `nil` keeps the short interval always (the tests' default).
+        var pushReachable: (@MainActor () -> Bool)? = nil
     }
 
     struct Config: Equatable {
         var intervalMs: Int64 = 4_000
         var jitterMs: Int64 = 1_000
+        /// Idle, with an APNs token held.
+        var idlePushIntervalMs: Int64 = 120_000
+        /// Idle, with no APNs token.
+        var idleNoPushIntervalMs: Int64 = 30_000
+        /// How long a foreground push wake keeps the short interval.
+        var wakeWindowMs: Int64 = 30_000
         var concurrency: Int = 2
         var maxImmediateRepolls: Int = 4
         /// The dedicated call-group long poll's window.
@@ -108,6 +132,8 @@ final class ForegroundReceiveScheduler {
     private var callLoop: Task<Void, Never>?
     private var foregroundWaiters: [CheckedContinuation<Void, Never>] = []
     private let backoff = GroupBackoff()
+    private var nudged = false
+    private var wakeWindowUntilMs: Int64 = 0
 
     init(ports: Ports, config: Config = Config()) {
         self.ports = ports
@@ -118,7 +144,11 @@ final class ForegroundReceiveScheduler {
 
     /// Start the loops (idempotent). They run until ``stop()``, parking while
     /// the app is not in the foreground.
+    /// The running scheduler, for the push delegate's ``nudge()``.
+    static weak var active: ForegroundReceiveScheduler?
+
     func start() {
+        Self.active = self
         if sweepLoop == nil {
             sweepLoop = Task { @MainActor [weak self] in await self?.runSweepLoop() }
         }
@@ -130,6 +160,7 @@ final class ForegroundReceiveScheduler {
     /// Stop for good (logout). Cancels the loops; a poll in flight finishes or
     /// throws on its own.
     func stop() {
+        if Self.active === self { Self.active = nil }
         sweepLoop?.cancel()
         callLoop?.cancel()
         sweepLoop = nil
@@ -141,7 +172,24 @@ final class ForegroundReceiveScheduler {
     /// The scene became active (`true`) or left the foreground (`false`).
     func setForeground(_ foreground: Bool) {
         isForeground = foreground
-        if foreground { resumeWaiters() }
+        if foreground {
+            nudged = true
+            resumeWaiters()
+        }
+    }
+
+    /// A push wake reached the app in the foreground: sweep now, and keep the
+    /// short interval for ``Config/wakeWindowMs``.
+    func nudge() {
+        wakeWindowUntilMs = ports.nowMs() &+ config.wakeWindowMs
+        nudged = true
+    }
+
+    /// The pause before the next sweep, for this moment.
+    func currentIntervalMs() -> Int64 {
+        guard let pushReachable = ports.pushReachable else { return config.intervalMs }
+        if ports.callGroup() != nil || ports.nowMs() < wakeWindowUntilMs { return config.intervalMs }
+        return pushReachable() ? config.idlePushIntervalMs : config.idleNoPushIntervalMs
     }
 
     // MARK: - Loops
@@ -152,9 +200,29 @@ final class ForegroundReceiveScheduler {
                 await waitUntilForeground()
                 continue
             }
+            nudged = false
             await runSweep()
             if Task.isCancelled { return }
-            await ports.sleepMs(Self.pauseMs(config: config, random: ports.random()))
+            await pause()
+        }
+    }
+
+    /// Sleep for the current interval, in slices of at most a second, so a
+    /// ``nudge()`` or the return to the foreground ends it early. The slices
+    /// count the time they asked for, not a clock.
+    private func pause() async {
+        let interval = currentIntervalMs()
+        let jitter = interval == config.intervalMs ? config.jitterMs : interval / 4
+        var remaining = Self.pauseMs(
+            config: Config(intervalMs: interval, jitterMs: jitter), random: ports.random())
+        if ports.pushReachable == nil {
+            await ports.sleepMs(remaining)
+            return
+        }
+        while remaining > 0, !Task.isCancelled, !nudged {
+            let slice = min(remaining, 1_000)
+            await ports.sleepMs(slice)
+            remaining -= slice
         }
     }
 
@@ -324,7 +392,8 @@ extension ForegroundReceiveScheduler {
             nowMs: { ChatRepository.nowMs() },
             onSweepDone: { [weak feedRefresh] tally in
                 feedRefresh?.record(.groups, tally)
-            }
+            },
+            pushReachable: { PushDeviceTokens.shared.alert != nil }
         ))
     }
 }

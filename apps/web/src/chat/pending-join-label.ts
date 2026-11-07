@@ -90,5 +90,5 @@ export function pendingJoinName(
   encodeB64: (bytes: Uint8Array) => string,
   resolve: (keyB64: string) => ResolvedName,
 ): string {
-  return memberNameOf(resolvePendingJoin(group, leafKey, encodeB64, resolve));
+  return memberNameOf(resolvePendingJoin(group, leafKey, encodeB64, resolve), "a pending join request");
 }

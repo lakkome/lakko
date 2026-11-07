@@ -739,7 +739,15 @@ export type ParsedBodyResult =
 export async function parseBodyEnvelope(
   bytes: Uint8Array,
 ): Promise<ParsedBodyResult> {
-  const wasm = await loadWasm();
+  return parseBodyEnvelopeWith(await loadWasm(), bytes);
+}
+
+/** {@link parseBodyEnvelope} for a caller that already holds the loaded wasm
+ *  (a channel post's decode runs synchronously after the open). */
+export function parseBodyEnvelopeWith(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  bytes: Uint8Array,
+): ParsedBodyResult {
   const parsed = wasm.parseBodyEnvelope(bytes);
   try {
     const kind = parsed.kind;

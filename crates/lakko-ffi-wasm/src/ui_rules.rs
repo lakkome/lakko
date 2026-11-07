@@ -44,7 +44,7 @@ use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
-    ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    ChannelInfoCapabilities as RustChannelInfoCapabilities, ChannelRole as RustChannelRole,
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoTarget as RustInfoTarget,
     PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
@@ -571,49 +571,91 @@ impl GroupInfoCapabilities {
     }
 }
 
-/// What the viewer is to a channel.
+/// What the viewer is to a channel (ADR-0087 section 15): one role, never
+/// two. A publisher reads from its publisher keys, so it is not also a
+/// subscriber here.
+#[wasm_bindgen(js_name = ChannelRole)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelRole {
+    /// The channel's owner.
+    Owner = 0,
+    /// A publisher (a co-publisher in the protocol).
+    Publisher = 1,
+    /// Reads the channel.
+    Subscriber = 2,
+}
+
+impl From<ChannelRole> for RustChannelRole {
+    fn from(r: ChannelRole) -> Self {
+        match r {
+            ChannelRole::Owner => Self::Owner,
+            ChannelRole::Publisher => Self::Publisher,
+            ChannelRole::Subscriber => Self::Subscriber,
+        }
+    }
+}
+
+/// What the viewer is to a channel and what its info depends on (UX
+/// `group-and-channel-privacy.md` 12.1). Every field is the client's
+/// reading. Public or private changes no block of this screen, so it is not
+/// an input.
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChannelInfoCapabilities {
-    is_publisher: bool,
-    is_subscriber: bool,
-    subscriber_count_known: bool,
+    role: ChannelRole,
+    has_handle: bool,
+    has_other_publishers: bool,
+    members_of_groups_and_channels_on: bool,
 }
 
 #[wasm_bindgen]
 impl ChannelInfoCapabilities {
-    /// In order: this device holds the publisher keys, this device reads the
-    /// channel as a subscriber, and this device has a subscriber count —
-    /// which only a publisher ever does.
+    /// In order: the viewer's role; the channel holds an `@name` (a lapsed
+    /// one shows no row); a publisher besides the owner remains (the owner
+    /// deletes the channel only when none does); Members of my groups and
+    /// channels is on in "Who can find me", under either form.
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(is_publisher: bool, is_subscriber: bool, subscriber_count_known: bool) -> Self {
+    pub fn new(
+        role: ChannelRole,
+        has_handle: bool,
+        has_other_publishers: bool,
+        members_of_groups_and_channels_on: bool,
+    ) -> Self {
         Self {
-            is_publisher,
-            is_subscriber,
-            subscriber_count_known,
+            role,
+            has_handle,
+            has_other_publishers,
+            members_of_groups_and_channels_on,
         }
     }
 
-    /// This device holds the publisher keys.
-    #[wasm_bindgen(getter, js_name = isPublisher)]
+    /// The viewer's role.
+    #[wasm_bindgen(getter)]
     #[must_use]
-    pub fn is_publisher(&self) -> bool {
-        self.is_publisher
+    pub fn role(&self) -> ChannelRole {
+        self.role
     }
 
-    /// This device reads the channel as a subscriber.
-    #[wasm_bindgen(getter, js_name = isSubscriber)]
+    /// The channel holds an `@name`.
+    #[wasm_bindgen(getter, js_name = hasHandle)]
     #[must_use]
-    pub fn is_subscriber(&self) -> bool {
-        self.is_subscriber
+    pub fn has_handle(&self) -> bool {
+        self.has_handle
     }
 
-    /// This device has a subscriber count.
-    #[wasm_bindgen(getter, js_name = subscriberCountKnown)]
+    /// A publisher besides the owner remains.
+    #[wasm_bindgen(getter, js_name = hasOtherPublishers)]
     #[must_use]
-    pub fn subscriber_count_known(&self) -> bool {
-        self.subscriber_count_known
+    pub fn has_other_publishers(&self) -> bool {
+        self.has_other_publishers
+    }
+
+    /// Members of my groups and channels is on in "Who can find me".
+    #[wasm_bindgen(getter, js_name = membersOfGroupsAndChannelsOn)]
+    #[must_use]
+    pub fn members_of_groups_and_channels_on(&self) -> bool {
+        self.members_of_groups_and_channels_on
     }
 }
 
@@ -648,8 +690,9 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
 /// What a group's or channel's info holds under ADR-0087 (UX
 /// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15), as
 /// kebab-case section names. `kind` is `"group"` or `"channel"`, `role`
-/// `"owner"`, `"admin"` or `"member"`. Replaces `groupInfoSections` and
-/// `channelInfoSections` once the clients move to it.
+/// `"owner"`, `"admin"` or `"member"`. Replaces `groupInfoSections` once the
+/// clients move to it; a channel is answered by `channelInfoSections`,
+/// without the "Who can find me" switch this call does not carry.
 ///
 /// # Errors
 ///
@@ -732,14 +775,17 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<String> {
     .collect()
 }
 
-/// What a channel's info holds — section 2.3.
+/// What a channel's info holds — UX `group-and-channel-privacy.md` 12.1:
+/// header, actions and detail, exit block, in a group's order, as
+/// kebab-case section names.
 #[wasm_bindgen(js_name = channelInfoSections)]
 #[must_use]
 pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<String> {
     rust_channel_info_sections(RustChannelInfoCapabilities {
-        is_publisher: caps.is_publisher,
-        is_subscriber: caps.is_subscriber,
-        subscriber_count_known: caps.subscriber_count_known,
+        role: caps.role.into(),
+        has_handle: caps.has_handle,
+        has_other_publishers: caps.has_other_publishers,
+        members_of_groups_and_channels_on: caps.members_of_groups_and_channels_on,
     })
     .into_iter()
     .map(|s| s.name().to_string())
@@ -2313,14 +2359,59 @@ mod tests {
         );
         assert!(removed.contains(&"add-contact".to_string()));
         assert!(!removed.contains(&"remove-contact".to_string()));
-        assert!(
-            channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
-                .contains(&"unsubscribe".to_string())
+        assert_eq!(
+            channel_info_sections(ChannelInfoCapabilities::new(
+                ChannelRole::Subscriber,
+                true,
+                false,
+                true
+            )),
+            [
+                "handle",
+                "channel-description",
+                "subscribers",
+                "members-can-find-me",
+                "unsubscribe"
+            ]
         );
-        assert!(
-            channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
-                .contains(&"channel-members".to_string())
+        assert_eq!(
+            channel_info_sections(ChannelInfoCapabilities::new(
+                ChannelRole::Owner,
+                true,
+                false,
+                true
+            )),
+            [
+                "handle",
+                "channel-description",
+                "rename-group",
+                "invite-people",
+                "invite-link",
+                "subscribers",
+                "admins",
+                "reactions",
+                "group-type",
+                "members-can-find-me",
+                "delete-group"
+            ]
         );
+        let publisher = channel_info_sections(ChannelInfoCapabilities::new(
+            ChannelRole::Publisher,
+            false,
+            true,
+            false,
+        ));
+        assert_eq!(
+            publisher,
+            [
+                "channel-description",
+                "invite-people",
+                "invite-link",
+                "subscribers",
+                "admins"
+            ]
+        );
+        assert!(!publisher.iter().any(|s| s == "manage-channel"));
         assert_eq!(info_target(ConversationKind::Group), InfoTarget::Group);
     }
 

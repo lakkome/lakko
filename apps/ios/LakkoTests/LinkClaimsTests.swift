@@ -112,7 +112,8 @@ final class LinkClaimsTests: XCTestCase {
         let bob = Data(repeating: 0xB0, count: 32)
         let record = LinkRecord(
             hlc: 5, linkId: id, linkSecret: secret, kind: .contact, ledgerId: Data(repeating: 6, count: 6), revocationSeed: Data(repeating: 0x11, count: 32),
-            expiryMs: 1_000, maxUses: 5, uses: 0, revoked: false, mintedAtMs: 1, label: "", answered: [])
+            expiryMs: 1_000, maxUses: 5, uses: 0, revoked: false, mintedAtMs: 1, label: "", answered: [],
+            targetId: Data(), inviteSeed: Data(), capability: Data())
         XCTAssertTrue(try s.setLinkRecord(hlc: 5, record: record))
         XCTAssertEqual(try s.linkAnswerVerdict(linkId: id, linkSecret: secret, requesterKey: bob, pressedAtMs: 999), .accept)
         XCTAssertEqual(try s.linkAnswerVerdict(linkId: id, linkSecret: secret, requesterKey: bob, pressedAtMs: 1_000), .dead)

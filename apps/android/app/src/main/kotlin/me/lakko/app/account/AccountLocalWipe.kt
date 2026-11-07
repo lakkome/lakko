@@ -295,6 +295,11 @@ public object AccountLocalWipe {
         },
         Step("reach") { ctx, acct -> me.lakko.app.reach.EncryptedReachDocStore(ctx).delete(acct) },
         Step("channel-handle-claims") { ctx, acct -> me.lakko.app.channels.ChannelHandleClaims.forgetAccount(ctx, acct) },
+        Step("channel-read-keys") { ctx, acct -> me.lakko.app.channels.ChannelReadKeys.forgetAccount(ctx, acct) },
+        Step("channel-own-feedback") { ctx, acct -> me.lakko.app.channels.OwnChannelFeedbackStore.forgetAccount(ctx, acct) },
+        Step("channel-feedback-outbox") { ctx, acct -> me.lakko.app.channels.ChannelFeedbackOutbox.forgetAccount(ctx, acct) },
+        Step("channel-copublishers") { ctx, acct -> me.lakko.app.channels.ChannelAdmissionSeedShare.forgetAccount(ctx, acct) },
+        Step("channel-copublisher-bindings") { ctx, acct -> me.lakko.app.channels.CoPublisherBindingStore.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },

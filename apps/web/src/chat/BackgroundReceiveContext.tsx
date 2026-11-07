@@ -89,6 +89,7 @@ import { markUnseenReaction } from "./unseen-reactions";
 import {
   BACKGROUND_CONCURRENCY,
   BACKGROUND_SWEEP_INTERVAL_MS,
+  backgroundSweepIntervalMs,
   BACKGROUND_SWEEP_JITTER_MS,
   GroupBackoff,
   MAX_IMMEDIATE_REPOLLS,
@@ -2315,10 +2316,28 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       ...sweepDeps,
       isActive,
       waitUntilActive: (signal) => resume.wait(signal),
-      sleep: sleepCancellable,
+      // The pause ends early on anything that means something arrived: a push
+      // wake, the tab becoming visible, a call starting (all wake the latch).
+      sleep: async (ms, signal) => {
+        const early = new AbortController();
+        const onAbort = (): void => early.abort();
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          await Promise.race([sleepCancellable(ms, early.signal), resume.wait(early.signal)]);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+          early.abort();
+        }
+      },
       random: Math.random,
       intervalMs: BACKGROUND_SWEEP_INTERVAL_MS,
       jitterMs: BACKGROUND_SWEEP_JITTER_MS,
+      intervalFor: () =>
+        backgroundSweepIntervalMs({
+          wakeWindowOpen: Date.now() < wakeUntilMs,
+          callInProgress: callHost.anyCallInProgress(),
+          pushWake: pushWakeReach.read(),
+        }),
     });
   }
 

@@ -556,7 +556,8 @@ public final class ChatClient {
             createdAt: createdAt,
             processed: processed,
             resolveSender: { AuthorIdentity.resolve(group: group, leafIndex: $0) },
-            resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) }
+            resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) },
+            conversationIdHex: (try? group.groupId()).map(DsClient.pseudonymHex)
         )
     }
 
@@ -581,7 +582,8 @@ public final class ChatClient {
         createdAt: String,
         processed: ProcessedMessage,
         resolveSender: (UInt32) -> MemberIdentity?,
-        resolveDevice: (UInt32) -> MemberIdentity? = { _ in nil }
+        resolveDevice: (UInt32) -> MemberIdentity? = { _ in nil },
+        conversationIdHex: String? = nil
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let data, let senderLeaf, _):
@@ -818,12 +820,23 @@ public final class ChatClient {
             let parsed = AttachmentBridge.parseBodyEnvelopeBytes(data)
             switch parsed.kind {
             case .chat:
+                // ADR-0087 section 14 — a channel invitation: the text is its
+                // link; a sender that put no text gets the link written from
+                // the card, which the link page opens.
+                let text = parsed.text.isEmpty
+                    ? (parsed.channelInvite.flatMap(ChannelInviteText.link(card:)) ?? parsed.text)
+                    : parsed.text
+                if let card = parsed.channelInvite, let conversationIdHex {
+                    ChannelInviteCardStore.shared.put(
+                        card: card, conversationIdHex: conversationIdHex, messageId: messageId,
+                        accountIdB64: AcceptedContactsStore.boundAccountIdB64)
+                }
                 // ADR-0052 — a reply is a chat body that also names a target;
                 // the parser sets `replyTo` only on `.chat`, and the snapshot
                 // fields ride beside it as the replier wrote them.
                 return .application(
                     messageId: messageId,
-                    text: parsed.text,
+                    text: text,
                     attachments: parsed.attachments,
                     senderKey: senderKey,
                     createdAt: createdAt,
@@ -1747,4 +1760,15 @@ extension ChatError: LocalizedError {
     public static let membershipChangesPendingCopy =
         "Other membership changes are waiting to apply, so this request cannot be approved yet. "
         + "They are applied by the group owner or an admin, and this will work once they have."
+}
+
+/// ADR-0087 section 14 — the `/g/` link a channel invitation card names.
+enum ChannelInviteText {
+    static func link(card: Data) -> String? {
+        guard let opened = try? openChannelInviteCard(card: card),
+              let base = try? GroupInviteUrl.composePointerGroupInviteUrl(
+                blobId: opened.ledgerId, origin: ApiEndpoints.webOrigin)
+        else { return nil }
+        return InviteLinkSecret.link(base: base, secret: opened.linkSecret)
+    }
 }

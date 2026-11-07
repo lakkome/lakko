@@ -76,7 +76,7 @@ export function Avatar(props: {
   return (
     <span
       class={`lk-avatar ${props.size ?? ""} ${props.class ?? ""}`}
-      data-tone={toneOf(props.id ?? props.label)}
+      data-tone={toneOf(props.personKey ?? props.id ?? props.label)}
       data-photo={video() !== null || still() !== null ? "true" : undefined}
       aria-hidden="true"
     >

@@ -81,6 +81,61 @@ to transfer but version counters (section 7):
 A **shared** key per class, never one per contact: a per-contact key would
 tell the server how many contacts a person has.
 
+**Removing a contact, and contacts who were offline (amended 2026-11-06,
+maintainer decision).** Found live: a desktop account still held a phone's
+`contact` grant after the phone had removed it; the Delivery Service accepted
+the desktop's Welcome, the phone dropped it, and the sender saw one tick for
+ever. The `contact` key stays one shared key per account; a per-contact key was
+built and withdrawn the same day, because it tells the server the contact
+count. Instead (flag day, no back-compat):
+
+- **Remove contact rotates the `contact` key:** version + 1, the new key
+  registered, and the profile carrying the new grant republished in every
+  remaining contact's one-to-one, with nothing shown to anyone.
+- **Retired versions stay registered:** the owner keeps the current version and
+  up to `RETIRED_CONTACT_VERSIONS_KEPT` = 8 retired ones
+  (`lakko_contacts::reach::contact_key_versions`; chosen, not measured), so a
+  contact offline across up to eight rotations still writes. An older version
+  is removed, and a write under it gets the uniform `401`: the sender sees a
+  failure instead of a write accepted and ignored. The Delivery Service does
+  not know classes; the bound is the set of keys the owner registers.
+- **A mailbox row names the key that admitted it.** The DS stores, per mailbox
+  row, the reach key a direct proof named or a delegation's issuer (DS
+  migration `0016`, column `reach_pk`) and returns it to the owner's signed
+  read as `reach_pk_b64` (absent for a proofless write).
+- **The receiving device decides by one shared rule**
+  (`classify_contact_key` + `contact_key_row_verdict`, one call
+  `mailboxRowContactVerdict` on both FFI surfaces and the NSE surface): a row
+  under the current key, or under any other class, is processed as before; a
+  row under a retired `contact` key whose sender (resolved from the row's
+  verified content: the contact request's from-key, the Welcome's founder
+  binding, and so on) is a current contact is processed and answered by
+  republishing the profile, with the current grant, in that one-to-one; from
+  anyone else it is dropped, showing nothing and logging nothing that names
+  anyone.
+- **A Welcome is judged before it is joined (2026-11-07).** The main case is a
+  removed contact founding a one-to-one: the row is a Welcome, and once
+  joined an active group cannot be dropped silently. `Group::peek_welcome_founder`
+  (`peekWelcomeFounder(welcome, identity)` on both FFI surfaces) stages the
+  Welcome as a join does, returns the group id and the founder's account key
+  from the sender leaf's verified ADR-0050 binding, and writes nothing; the
+  KeyPackage stays usable, so the client joins afterwards only when the
+  verdict says so.
+- **No resend is asked of the sender.** The maintainer had proposed asking the
+  sender to send again under the new key; the DS already accepted and stored
+  the retired-key row, so the receiver holds it and simply processes it. Same
+  outcome, one round trip fewer.
+- **What the server learns that it did not:** nothing new about the writer (it
+  verified the key before), but a copy of the database now shows, per mailbox
+  row, the reach key that admitted it. All contacts share one `contact` key per
+  version, so this tells a contact's row from a link's or a reply's and which
+  `contact` version was used, not which contact wrote.
+- **Residual:** a Welcome delivered by an ADR-0045 committer under a delegation
+  signed with a retired `contact` grant (the proposer was offline across a
+  rotation) names the committer as its sender. If the committer is not the
+  owner's contact, the row is dropped and the add is not delivered until the
+  proposer holds the current grant and delegates again.
+
 `member` exists because co-members must be able to deliver a Welcome for the
 owner's new device (ADR-0050 re-admission) in groups the owner hides from;
 the Residuals section records what it costs.
@@ -611,7 +666,13 @@ UniFFI spelling, wasm uses the same names.
 signed by the identity proof; keep the version counters in the ReachState
 envelope on the DeviceGroup)
 - `contact` (no scope, no expiry, rotated by version when a contact is
-  removed): sent in the 1:1 profile beside `member`.
+  removed): sent in the 1:1 profile beside `member`. Since 2026-11-06 the
+  owner keeps `contactKeyVersions(current)` registered (the current version
+  and up to eight retired ones) and removes every other `contact` version;
+  Remove contact bumps the version, registers the new key and republishes the
+  profile in every remaining contact's one-to-one; every mailbox row is judged
+  by `mailboxRowContactVerdict(accountSeed, currentContactVersion,
+  row.reach_pk_b64, senderIsContact)` (section 1).
 - `member` per group, `group` per group, `channel` per channel (versioned by
   epoch): sent in the profile in that scope when the setting allows it; the
   channel grant goes in the member card.

@@ -87,7 +87,7 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { Portal } from "solid-js/web";
 
 import { messageMenuLayout, SURFACE_GAP_PX, type MessageMenuLayout } from "./message-menu-placement";
-import { Icon } from "../ui/icons";
+import { Icon, type IconName } from "../ui/icons";
 
 /** The part of a DOM rect the anchor carries. Viewport coordinates. */
 export interface MenuAnchorRect {
@@ -143,6 +143,9 @@ export interface MessageMenuProps {
   capReached: boolean;
   /** ADR-0052 — arm the composer's reply strip for this message. */
   onReply: () => void;
+  /** ADR-0087 section 12 — `false` in a channel, where a post takes no reply
+   *  (a subscriber writes a comment instead). Absent: offered. */
+  canReply?: boolean;
   /** ADR-0052 decision 2 — whether Forward is offered: the message has an id
    *  and its send is complete. */
   canForward: boolean;
@@ -175,6 +178,15 @@ export interface MessageMenuProps {
   onEdit: () => void;
   onDelete: () => void;
   onClose: () => void;
+  /** `false` hides Edit while Delete stays (a channel comment cannot be
+   *  edited). Absent: Edit goes with Delete. */
+  canEdit?: boolean;
+  /** Further destructive actions after Delete (a channel comment's `Ban`). */
+  extraDestructive?: readonly {
+    readonly label: string;
+    readonly icon: IconName;
+    readonly onClick: () => void;
+  }[];
   /** ADR-0073 R.5 — a row of an OLDER segment of the conversation: the menu
    *  is the pin row alone (`pin-bar.ts` `historyRowOffersUnpin`). No
    *  reaction row and no other action: nothing else can name that row. */
@@ -363,7 +375,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
           style={offset((l) => (!hasRow() ? l.row : l.card))}
         >
-            <Show when={props.pinOnly !== true}>
+            <Show when={props.pinOnly !== true && props.canReply !== false}>
             <button
               ref={(el) => {
                 if (!hasRow()) firstItem = el;
@@ -444,10 +456,12 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               )}
             </Show>
             <Show when={props.pinOnly !== true && props.canEditDelete}>
-              <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
-                <Icon name="pencil" size={16} />
-                <span>{t("chat.message.edit")}</span>
-              </button>
+              <Show when={props.canEdit !== false}>
+                <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
+                  <Icon name="pencil" size={16} />
+                  <span>{t("chat.message.edit")}</span>
+                </button>
+              </Show>
               <div class="lk-msg-menu-destructive">
                 <button
                   type="button"
@@ -458,6 +472,18 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   <Icon name="trash" size={16} />
                   <span>{t("common.delete")}</span>
                 </button>
+              </div>
+            </Show>
+            <Show when={props.pinOnly !== true && (props.extraDestructive?.length ?? 0) > 0}>
+              <div class="lk-msg-menu-destructive">
+                <For each={props.extraDestructive ?? []}>
+                  {(a) => (
+                    <button type="button" role="menuitem" class="danger" onClick={() => run(() => a.onClick())}>
+                      <Icon name={a.icon} size={16} />
+                      <span>{a.label}</span>
+                    </button>
+                  )}
+                </For>
               </div>
             </Show>
         </div>

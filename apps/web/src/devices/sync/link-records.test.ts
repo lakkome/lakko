@@ -5,8 +5,17 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import init, { LinkRecord, LinkRecordKind, SyncedState } from "../../../wasm/lakko_ffi_wasm";
-import { effectiveLimit, isLinkLive, listedContactLinks, readLinkRecords, type LinkRecordModel } from "./link-records";
+import init, { groupLinkRecordId, LinkRecord, LinkRecordKind, SyncedState } from "../../../wasm/lakko_ffi_wasm";
+import {
+  effectiveLimit,
+  isLinkLive,
+  kindOfNumber,
+  listedContactLinks,
+  listedTargetLinks,
+  numberOfKind,
+  readLinkRecords,
+  type LinkRecordModel,
+} from "./link-records";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -29,6 +38,10 @@ function model(over: Partial<LinkRecordModel>): LinkRecordModel {
     editable: true,
     mintedAtMs: 10,
     label: "",
+    targetId: new Uint8Array(),
+    inviteSeed: new Uint8Array(),
+    admissionVersion: 0,
+    capability: new Uint8Array(),
     ...over,
   };
 }
@@ -95,7 +108,7 @@ describe("link records (ADR-0079 section 4)", () => {
     const bob = new Uint8Array(32).fill(0xb0);
     expect(s.linkAnswerVerdict(id, new Uint8Array(12).fill(8), bob, 0n)).toBe("accept");
     // UX section 9: editable until copied or used, and a copy is final.
-    expect(readLinkRecords(s, LinkRecordKind.Contact)[0]?.editable).toBe(true);
+    expect(readLinkRecords(s, LinkRecordKind)[0]?.editable).toBe(true);
     // A secret that differs in one byte never accepts.
     const wrong = new Uint8Array(12).fill(8);
     wrong[11] = 0;
@@ -103,7 +116,7 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(s.recordLinkUse(6n, id, bob)).toBe(true);
     expect(s.linkAnswerVerdict(id, new Uint8Array(12).fill(8), bob, 0n)).toBe("answered");
     expect(s.linkAnswerVerdict(id, new Uint8Array(12).fill(8), new Uint8Array(32).fill(1), 0n)).toBe("dead");
-    const read = readLinkRecords(s, LinkRecordKind.Contact);
+    const read = readLinkRecords(s, LinkRecordKind);
     expect(read).toHaveLength(1);
     expect(read[0]?.uses).toBe(1);
     expect(read[0]?.label).toBe("home");
@@ -111,7 +124,7 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(read[0]?.shared).toBe(false);
     expect(s.markLinkShared(7n, id)).toBe(true);
     expect(s.markLinkShared(8n, id)).toBe(false);
-    expect(readLinkRecords(s, LinkRecordKind.Contact)[0]?.shared).toBe(true);
+    expect(readLinkRecords(s, LinkRecordKind)[0]?.shared).toBe(true);
     // A revocation is final: a later live write from another device loses.
     const other = new SyncedState();
     const envelope = s.linkRecordEnvelopeFor(id) as Uint8Array;
@@ -119,12 +132,66 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(other.revokeLinkRecord(7n, id)).toBe(true);
     expect(s.recordLinkUse(100n, id, new Uint8Array(32).fill(2))).toBe(true);
     expect(other.applyLinkRecordEnvelope(s.linkRecordEnvelopeFor(id) as Uint8Array)).toBe(false);
-    expect(readLinkRecords(other, LinkRecordKind.Contact)[0]?.revoked).toBe(true);
+    expect(readLinkRecords(other, LinkRecordKind)[0]?.revoked).toBe(true);
     // The device that revoked it holds the seed that deletes the ledger row
     // (reworked 2026-10-17): the record carried it there.
-    expect(readLinkRecords(other, LinkRecordKind.Contact)[0]?.revocationSeed).toEqual(new Uint8Array(32).fill(0x42));
+    expect(readLinkRecords(other, LinkRecordKind)[0]?.revocationSeed).toEqual(new Uint8Array(32).fill(0x42));
     record.free();
     s.free();
     other.free();
+  });
+
+  it("maps every kind both ways", () => {
+    for (const kind of ["contact", "call", "group", "channel", "publisher"] as const) {
+      expect(kindOfNumber(numberOfKind(kind, LinkRecordKind), LinkRecordKind)).toBe(kind);
+    }
+    expect(kindOfNumber(99, LinkRecordKind)).toBeNull();
+  });
+
+  it("keeps a channel link's target, invite seed and capability through the register (ADR-0087 phase B)", () => {
+    const ledgerId = new Uint8Array(6).fill(7);
+    const channelId = new Uint8Array(16).fill(9);
+    const record = new LinkRecord(
+      groupLinkRecordId(ledgerId),
+      new Uint8Array(12).fill(2),
+      LinkRecordKind.Channel,
+      ledgerId,
+      new Uint8Array(32).fill(0x11),
+      0n,
+      0xffffffff,
+      5n,
+      "Site",
+      channelId,
+      new Uint8Array(32).fill(0x22),
+      3,
+      new Uint8Array(40).fill(0x33),
+    );
+    const s = new SyncedState();
+    s.setLinkRecord(1n, record);
+    const [read] = readLinkRecords(s, LinkRecordKind);
+    expect(read?.kind).toBe("channel");
+    expect(read?.targetId).toEqual(channelId);
+    expect(read?.inviteSeed).toEqual(new Uint8Array(32).fill(0x22));
+    expect(read?.admissionVersion).toBe(3);
+    expect(read?.capability).toEqual(new Uint8Array(40).fill(0x33));
+    expect(read?.label).toBe("Site");
+    expect(listedTargetLinks(read === undefined ? [] : [read], "channel", "09".repeat(16), 10).length).toBe(1);
+    expect(listedTargetLinks(read === undefined ? [] : [read], "group", "09".repeat(16), 10).length).toBe(0);
+  });
+
+  it("lists only live links of one target", () => {
+    const target = new Uint8Array(32).fill(5);
+    const out = listedTargetLinks(
+      [
+        model({ linkIdHex: "a", kind: "group", targetId: target, mintedAtMs: 1 }),
+        model({ linkIdHex: "b", kind: "group", targetId: target, mintedAtMs: 2, maxUses: 0xffffffff }),
+        model({ linkIdHex: "c", kind: "group", targetId: target, revoked: true }),
+        model({ linkIdHex: "d", kind: "group", targetId: new Uint8Array(32).fill(6) }),
+      ],
+      "group",
+      "05".repeat(32),
+      100,
+    );
+    expect(out.map((r) => r.linkIdHex)).toEqual(["b", "a"]);
   });
 });

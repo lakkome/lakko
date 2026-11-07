@@ -32,15 +32,20 @@ public final class ChatMediaController: ObservableObject {
         /// armed then and a later retry re-sends the same reply. `nil` when
         /// nothing is armed.
         public let takeArmedReply: () -> ReplyRef?
+        /// ADR-0087 section 13 — the idle life of the uploads (a channel's
+        /// 45 days); `nil` for a chat.
+        public let idleDays: UInt8?
 
         public init(
             sendAttachment: @escaping (AttachmentRef, ReplyRef?) async throws -> Void,
             sessionToken: @escaping () -> String?,
-            takeArmedReply: @escaping () -> ReplyRef? = { nil }
+            takeArmedReply: @escaping () -> ReplyRef? = { nil },
+            idleDays: UInt8? = nil
         ) {
             self.sendAttachment = sendAttachment
             self.sessionToken = sessionToken
             self.takeArmedReply = takeArmedReply
+            self.idleDays = idleDays
         }
     }
 
@@ -729,6 +734,7 @@ public final class ChatMediaController: ObservableObject {
                     mime: job.mime,
                     name: job.name,
                     media: meta,
+                    idleDays: port.idleDays,
                     onProgress: { fraction in
                         Task { @MainActor [weak self] in
                             self?.updatePending(id) { $0.progress = fraction }

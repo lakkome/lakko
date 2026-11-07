@@ -3248,6 +3248,67 @@ impl PublisherGroup {
         Ok(group::encode_message(&msg)?)
     }
 
+    /// ADR-0087 phase B — the publishers at the current epoch, one row per
+    /// leaf with the leaf's account key, the list the channel info's
+    /// Publishers block renders. Same shape as [`Group::members`].
+    pub fn members(&self) -> Result<Vec<GroupMember>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.members()
+            .into_iter()
+            .map(|m| GroupMember {
+                leaf_index: m.leaf_index,
+                signature_public_key: m.signature_public_key,
+                account_key: m.account_key,
+            })
+            .collect())
+    }
+
+    /// Whether `identity` is the channel's owner: the account whose seed this
+    /// PublisherGroup's id derives from (ADR-0078 phase 6).
+    pub fn is_owned_by(&self, identity: &Identity) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.is_owned_by(&identity.inner))
+    }
+
+    /// `false` once a commit removed this device's own leaf (the owner
+    /// removed this publisher). Mirror of [`Group::is_active`].
+    pub fn is_active(&self) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.is_active())
+    }
+
+    /// ADR-0087 section 15 (phase B) — the owner removes a publisher: every
+    /// leaf of `account_key` in ONE commit, merged here. Returns the encoded
+    /// commit. Take the epoch-N access signer (`dsAccessSeed`) BEFORE the
+    /// call, publish the commit through the ADR-0081 commit route, then
+    /// rotate and reseal: the removed person cannot derive the next seed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when `identity` is not the owner, `account_key` is the
+    /// owner's own, no leaf belongs to it, or the commit fails.
+    pub fn remove_publisher(
+        &self,
+        identity: &Identity,
+        account_key: Vec<u8>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.remove_publisher(&identity.inner, &account_key)?)
+    }
+
+    /// ADR-0087 section 15 (phase B) — a co-publisher steps down: an
+    /// encrypted application message (`lakko/publisher-step-down/v1`) the
+    /// owner's device applies as `removePublisher` of the sender's account.
+    /// Returns the encoded message to publish to the PublisherGroup journal.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError`] when `identity` is the owner, or MLS refuses to encrypt.
+    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.step_down(&identity.inner)?)
+    }
+
     /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
     /// the Commit + the joiner's Welcome, as it always has.
     ///
@@ -6143,9 +6204,78 @@ pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
     lakko_mls::epoch_after_message(&bytes)
 }
 
+/// ADR-0087 section 15 (phase B) — whether a decrypted PublisherGroup
+/// application message is a step-down for `channel_id`. The owner's device
+/// then removes the sender's account (`PublisherGroup.removePublisher`) after
+/// resolving the MLS sender at receipt (C-68).
+#[uniffi::export]
+#[must_use]
+pub fn is_publisher_step_down(plaintext: Vec<u8>, channel_id: Vec<u8>) -> bool {
+    MlsChannelId::try_from_slice(&channel_id)
+        .is_ok_and(|cid| lakko_mls::is_publisher_step_down(&plaintext, &cid))
+}
+
+/// Whether a decrypted plaintext is a step-down envelope of any channel, so
+/// a timeline or notification path can drop it.
+#[uniffi::export]
+#[must_use]
+pub fn is_publisher_step_down_envelope(plaintext: Vec<u8>) -> bool {
+    lakko_mls::is_publisher_step_down_envelope(&plaintext)
+}
+
+/// The one well-formed step-down envelope length.
+#[uniffi::export]
+#[must_use]
+pub fn publisher_step_down_len() -> u32 {
+    u32::try_from(lakko_mls::PUBLISHER_STEP_DOWN_LEN).unwrap_or(u32::MAX)
+}
+
+/// Who sent a Welcome, read without joining. See [`peek_welcome_founder`].
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiWelcomeFounder {
+    /// The group the Welcome is for.
+    pub group_id: Vec<u8>,
+    /// The 32-byte account key of the member that sent the Welcome (the
+    /// founder of a new one-to-one), from its verified ADR-0050 device
+    /// binding.
+    pub founder_account_key: Vec<u8>,
+}
+
+/// Read who founded a Welcome WITHOUT joining it (2026-11-07): stage it for
+/// `identity`, resolve the sender leaf to its account key, drop the staging.
+/// Writes nothing and keeps the KeyPackage usable, so `Group.joinFromWelcome`
+/// of the same bytes still works. Use it on a Welcome that arrived under a
+/// retired `contact` reach key: feed `founderAccountKey` (is it a current
+/// contact?) to `mailboxRowContactVerdict` before joining.
+///
+/// # Errors
+///
+/// [`FfiError`] for bytes that are not a Welcome for this identity, or the
+/// typed `DeviceBindingInvalid` refusal when the sender's binding does not
+/// verify.
+#[uniffi::export]
+pub fn peek_welcome_founder(
+    welcome: Vec<u8>,
+    identity: &Identity,
+) -> Result<FfiWelcomeFounder, FfiError> {
+    let f = MlsGroup::peek_welcome_founder(&welcome, &identity.inner)?;
+    Ok(FfiWelcomeFounder {
+        group_id: f.group_id,
+        founder_account_key: f.founder_account_key.to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-11-07: a peek of bytes that are not a Welcome is an error.
+    #[test]
+    fn a_peek_of_garbage_is_an_error() {
+        let id = Identity::from_seed(vec![0x31; 64]).unwrap();
+        assert!(peek_welcome_founder(vec![0xAB; 64], &id).is_err());
+        assert!(peek_welcome_founder(vec![], &id).is_err());
+    }
 
     /// ADR-0062: the kind the creator passes is the kind every joiner reads,
     /// and a one-to-one refuses a third person with the typed variant.

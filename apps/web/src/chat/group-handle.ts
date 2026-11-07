@@ -341,31 +341,53 @@ export function handleWellFormed(wasm: Wasm, typed: string): boolean {
 }
 
 
-// ---- channels (ADR-0087 sections 1 to 4; the rest of phase B is not built)
+// ---- channels (ADR-0087 sections 1 to 4, 7, 8; phase B)
 
 /** What a channel's public record says. */
 export interface PublicChannelFacts {
   readonly name: string;
   readonly description: string;
+  /** The channel's photo (section 18.3); absent = none. */
+  readonly avatar?: AvatarData | null;
 }
 
-/** The handle write seed of a channel this account owns: from the journal
- *  root of its PublisherGroup. The caller wipes it. */
-export function channelHandleSeed(wasm: Wasm, ownerIdentity: WasmIdentity, channelId: Uint8Array): Uint8Array {
-  const journal = wasm.publisherGroupIdFor(ownerIdentity, channelId);
-  return groupHandleSeed(wasm, ownerIdentity, journal);
+/**
+ * The handle write seed of a channel this account owns. The caller wipes it.
+ *
+ * The one rule on every client (coordinator decision, ADR-0087 section 3 and
+ * ADR-0074): the PublisherGroup id comes from the LINEAGE (oldest) account
+ * identity, `publisherGroupIdFor(lineage, channelId)`, and the handle key
+ * from the CURRENT account identity's journal root over that id,
+ * `handleWriteSeed(dsJournalRootSeed(current.ed25519Seed, journalId))`. An
+ * ADR-0074 rotation moves the name with one `rekey` signed by the previous
+ * current identity's key.
+ */
+export function channelHandleSeed(
+  wasm: Wasm,
+  lineageIdentity: WasmIdentity,
+  currentIdentity: WasmIdentity,
+  channelId: Uint8Array,
+): Uint8Array {
+  const journal = wasm.publisherGroupIdFor(lineageIdentity, channelId);
+  return groupHandleSeed(wasm, currentIdentity, journal);
 }
 
-function channelSubject(wasm: Wasm, ownerIdentity: WasmIdentity, channelId: Uint8Array, facts: PublicChannelFacts): RecordSubject {
+function channelSubject(
+  wasm: Wasm,
+  lineageIdentity: WasmIdentity,
+  channelId: Uint8Array,
+  facts: PublicChannelFacts,
+): RecordSubject {
   return {
     kind: "channel",
     id: channelId,
-    key: wasm.channelReadKey(ownerIdentity, channelId),
+    // Section 6: the read key a public record carries, from the lineage seed.
+    key: wasm.channelReadKey(lineageIdentity, channelId),
     name: facts.name,
     description: facts.description,
     // A channel's band is counted by the channels service (unused here).
     sizeBand: 0,
-    avatar: null,
+    avatar: facts.avatar ?? null,
     knockVersion: 0,
   };
 }
@@ -373,56 +395,165 @@ function channelSubject(wasm: Wasm, ownerIdentity: WasmIdentity, channelId: Uint
 /** What a channel handle write answers. */
 export interface ChannelHandleWrite {
   readonly handle: string;
+  readonly isPublic: boolean;
   readonly leaseUntilMs: number;
+  /** The handle certificate the server signed, or `null` when it answered
+   *  none (a retire, a 204). */
+  readonly certificate: Uint8Array | null;
 }
 
-/** Take `handle` for a channel this account owns, public: its record is what
- *  a search by `@name` and by name finds. */
-export async function claimChannelHandle(args: {
+/** The arguments every channel handle write takes. */
+export interface ChannelHandleArgs {
   readonly wasm: Wasm;
-  readonly ownerIdentity: WasmIdentity;
+  /** The identity the channel's PublisherGroup id derives from. */
+  readonly lineageIdentity: WasmIdentity;
+  /** The current account identity: its journal root signs the handle. */
+  readonly currentIdentity: WasmIdentity;
   readonly channelId: Uint8Array;
   readonly handle: string;
+  /** Section 7: a private channel's name answers no lookup and has no record. */
+  readonly isPublic: boolean;
   readonly facts: PublicChannelFacts;
-}): Promise<ChannelHandleWrite> {
+}
+
+/** Take `handle` for a channel this account owns (private or public). */
+export async function claimChannelHandle(args: ChannelHandleArgs): Promise<ChannelHandleWrite> {
   return channelWrite("claim", args);
 }
 
-/** Republish a channel's record and renew its lease. */
-export async function updateChannelHandle(args: {
-  readonly wasm: Wasm;
-  readonly ownerIdentity: WasmIdentity;
-  readonly channelId: Uint8Array;
-  readonly handle: string;
-  readonly facts: PublicChannelFacts;
-}): Promise<ChannelHandleWrite> {
+/** Flip public / private, republish the record, renew the lease. */
+export async function updateChannelHandle(args: ChannelHandleArgs): Promise<ChannelHandleWrite> {
   return channelWrite("update", args);
 }
 
-async function channelWrite(
-  route: "claim" | "update",
-  args: {
-    readonly wasm: Wasm;
-    readonly ownerIdentity: WasmIdentity;
-    readonly channelId: Uint8Array;
-    readonly handle: string;
-    readonly facts: PublicChannelFacts;
-  },
+/** Move a channel to a new name; the old one is retired (held 30 days). */
+export async function replaceChannelHandle(
+  args: ChannelHandleArgs & { readonly oldHandle: string },
 ): Promise<ChannelHandleWrite> {
   const { wasm } = args;
-  const pair = await namePair(args.handle);
-  const seed = channelHandleSeed(wasm, args.ownerIdentity, args.channelId);
+  const old = await namePair(args.oldHandle);
+  const next = await namePair(args.handle);
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
   try {
-    const subject = channelSubject(wasm, args.ownerIdentity, args.channelId, args.facts);
-    const { record, terms } = await recordContent(wasm, subject, pair.normalized, pair.output, pair.lookupKey);
-    const hash = wasm.handleContentHash(record, concat(terms));
+    let record: Uint8Array | null = null;
+    let terms: Uint8Array[] = [];
+    if (args.isPublic) {
+      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts);
+      ({ record, terms } = await recordContent(wasm, subject, next.normalized, next.output, next.lookupKey));
+    }
+    const hash = wasm.handleContentHash(record ?? undefined, concat(terms));
+    const statement = wasm.signHandleReplace(seed, old.lookupKey, next.lookupKey, args.isPublic, hash);
+    const result = await handleWrite("replace", statement, record, terms);
+    noteHandleHeld(next.normalized);
+    return {
+      handle: next.normalized,
+      isPublic: args.isPublic,
+      leaseUntilMs: result?.leaseUntilMs ?? 0,
+      certificate: result?.certificate ?? null,
+    };
+  } finally {
+    seed.fill(0);
+  }
+}
+
+/** ADR-0074 — after a rotation, move the channel's name from the previous
+ *  current identity's handle key to the new one's (`rekey`, signed by the
+ *  old). */
+export async function rekeyChannelHandle(args: {
+  readonly wasm: Wasm;
+  readonly lineageIdentity: WasmIdentity;
+  readonly oldIdentity: WasmIdentity;
+  readonly currentIdentity: WasmIdentity;
+  readonly channelId: Uint8Array;
+  readonly handle: string;
+  readonly isPublic: boolean;
+}): Promise<ChannelHandleWrite> {
+  const { wasm } = args;
+  const pair = await namePair(args.handle);
+  const oldSeed = channelHandleSeed(wasm, args.lineageIdentity, args.oldIdentity, args.channelId);
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
+  try {
+    const statement = wasm.signHandleRekey(oldSeed, pair.lookupKey, wasm.handleWritePublicKey(seed));
+    const result = await handleWrite("rekey", statement);
+    return {
+      handle: pair.normalized,
+      isPublic: args.isPublic,
+      leaseUntilMs: result?.leaseUntilMs ?? 0,
+      certificate: result?.certificate ?? null,
+    };
+  } finally {
+    oldSeed.fill(0);
+    seed.fill(0);
+  }
+}
+
+/** Retire a channel's name. */
+export async function retireChannelHandle(args: {
+  readonly wasm: Wasm;
+  readonly lineageIdentity: WasmIdentity;
+  readonly currentIdentity: WasmIdentity;
+  readonly channelId: Uint8Array;
+  readonly handle: string;
+}): Promise<void> {
+  const { wasm } = args;
+  const pair = await namePair(args.handle);
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
+  try {
+    await handleWrite("retire", wasm.signHandleRetire(seed, pair.lookupKey));
+  } finally {
+    seed.fill(0);
+  }
+}
+
+/**
+ * The signed `ConversationHandle` a channel's metadata record v3 carries
+ * (section 11): signed by the handle key over the PublisherGroup id, binding
+ * the name to the certificate the server answered.
+ */
+export function signChannelHandle(args: {
+  readonly wasm: Wasm;
+  readonly lineageIdentity: WasmIdentity;
+  readonly currentIdentity: WasmIdentity;
+  readonly channelId: Uint8Array;
+  readonly handle: string;
+  readonly isPublic: boolean;
+  readonly certificate: Uint8Array;
+  readonly stampMs: bigint;
+}): Wasm["ConversationHandle"]["prototype"] {
+  const { wasm } = args;
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
+  try {
+    const journal = wasm.publisherGroupIdFor(args.lineageIdentity, args.channelId);
+    return wasm.ConversationHandle.sign(seed, journal, args.stampMs, args.isPublic, args.handle, args.certificate);
+  } finally {
+    seed.fill(0);
+  }
+}
+
+async function channelWrite(route: "claim" | "update", args: ChannelHandleArgs): Promise<ChannelHandleWrite> {
+  const { wasm } = args;
+  const pair = await namePair(args.handle);
+  const seed = channelHandleSeed(wasm, args.lineageIdentity, args.currentIdentity, args.channelId);
+  try {
+    let record: Uint8Array | null = null;
+    let terms: Uint8Array[] = [];
+    if (args.isPublic) {
+      const subject = channelSubject(wasm, args.lineageIdentity, args.channelId, args.facts);
+      ({ record, terms } = await recordContent(wasm, subject, pair.normalized, pair.output, pair.lookupKey));
+    }
+    const hash = wasm.handleContentHash(record ?? undefined, concat(terms));
     const statement =
       route === "claim"
-        ? wasm.signHandleClaim(seed, pair.lookupKey, true, hash)
-        : wasm.signHandleUpdate(seed, pair.lookupKey, true, hash);
+        ? wasm.signHandleClaim(seed, pair.lookupKey, args.isPublic, hash)
+        : wasm.signHandleUpdate(seed, pair.lookupKey, args.isPublic, hash);
     const result = await handleWrite(route, statement, record, terms);
     noteHandleHeld(pair.normalized);
-    return { handle: pair.normalized, leaseUntilMs: result?.leaseUntilMs ?? 0 };
+    return {
+      handle: pair.normalized,
+      isPublic: args.isPublic,
+      leaseUntilMs: result?.leaseUntilMs ?? 0,
+      certificate: result?.certificate ?? null,
+    };
   } finally {
     seed.fill(0);
   }

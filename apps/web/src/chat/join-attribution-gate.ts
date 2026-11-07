@@ -16,7 +16,11 @@
  *
  * Pure: the clock is handed in.
  */
-import { KNOCK_READ_MIN_INTERVAL_MS } from "./knock-cursor";
+/** The floor between two attribution reads of one group. This read happens
+ *  only when the pending set changes (a person asked, or was answered), not on
+ *  a timer, so it keeps the 10 s it had when it shared the knock poll's floor;
+ *  the periodic knock poll is now slower (`KNOCK_READ_MIN_INTERVAL_MS`). */
+export const ATTRIBUTION_READ_MIN_INTERVAL_MS = 10_000;
 
 /** What the caller does now. */
 export type AttributionDecision =
@@ -38,7 +42,7 @@ export class JoinAttributionGate {
   private readonly fetchedFor = new Map<string, string>();
   private readonly lastFetchMs = new Map<string, number>();
 
-  constructor(private readonly minIntervalMs: number = KNOCK_READ_MIN_INTERVAL_MS) {}
+  constructor(private readonly minIntervalMs: number = ATTRIBUTION_READ_MIN_INTERVAL_MS) {}
 
   /** Decide for `groupIdB64` given the pending joiner keys now. A `fetch`
    *  decision records the read as taken. */

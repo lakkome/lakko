@@ -60,6 +60,7 @@ import { base64Encode } from "../auth/account-id";
 import { registerAccountMemory } from "../auth/account-memory";
 import { loadWasm } from "../wasm";
 import type { PublisherCommitEntry } from "../channels/publisher-commit-outbox";
+import { emptyAccessRecord, type ChannelAccessRecord } from "../channels/channel-access-record";
 
 interface ChannelsStateInternal {
   /** User's local channel list, ordered by `addedAtMs`
@@ -142,6 +143,10 @@ interface ChannelsStateInternal {
    *  `awaitChannelsHydration()` so they do not race a
    *  reload's restore. */
   readonly hydrated: Accessor<boolean>;
+  /** ADR-0087 phase B — per-channel access record (visibility, @name,
+   *  photo, read key, waiting, admission seeds, links, publishers).
+   *  Persisted in the encrypted channel log. */
+  readonly accessByChannel: Accessor<ReadonlyMap<string, ChannelAccessRecord>>;
 }
 
 /** Plaintext `localStorage` key the subscriber keypairs used to live
@@ -174,6 +179,7 @@ const [metaByChannel, setMetaByChannel] = createSignal<
   ReadonlyMap<string, ChannelSharedMeta>
 >(new Map());
 const [hydrated, setHydrated] = createSignal(false);
+const [accessByChannel, setAccessByChannel] = createSignal<ReadonlyMap<string, ChannelAccessRecord>>(new Map());
 /** ADR-0078 section 6 — co-published channel id -> PublisherGroup id hex. */
 const [coPublisherGroupIds, setCoPublisherGroupIds] = createSignal<ReadonlyMap<string, string>>(new Map());
 /** G-50 — the PublisherGroup commits whose steps are still owed. */
@@ -199,6 +205,7 @@ export const channelsState: ChannelsStateInternal = {
   subscribedSeedsByChannel,
   metaByChannel,
   hydrated,
+  accessByChannel,
 };
 
 // ---------------------------------------------------------
@@ -253,6 +260,7 @@ function currentSnapshot(
     publisherLeafKeyB64: lastProviderSnapshot === null ? null : lastProviderLeafKeyB64,
     coPublisherGroupIds: coPublisherGroupIds(),
     publisherCommits: publisherCommits(),
+    channelAccess: accessByChannel(),
   };
 }
 
@@ -484,6 +492,7 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     return next;
   });
   setCoPublisherGroupIds((map) => new Map([...stored.coPublisherGroupIds, ...map]));
+  setAccessByChannel((map) => new Map([...(stored.channelAccess ?? new Map()), ...map]));
   // G-50 — the stored entries belong to the restored provider; one already
   // in memory (recorded before this settled) wins on its id.
   setPublisherCommits((mem) => {
@@ -610,6 +619,7 @@ function dropChannelsMemory(): void {
   setMetaByChannel(new Map());
   setCoPublisherGroupIds(new Map());
   setPublisherCommits([]);
+  setAccessByChannel(new Map());
   poisoned = false;
   setOrphanedByKeyReset(new Set<string>());
   setHydrated(false);
@@ -704,6 +714,11 @@ export const channelsActions = {
       return next;
     });
     setMetaByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+    setAccessByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
       return next;
@@ -832,6 +847,26 @@ export const channelsActions = {
     });
     schedulePersist();
   },
+  /** ADR-0087 section 15 (UX 15.2) — this account stopped being a publisher
+   *  of `channelId` (removed, or stepped down) but stays subscribed: drop
+   *  the publisher keys and the co-published group id, keep the channel, its
+   *  posts, the subscriber key and every recovered seed, so the channel
+   *  falls back to the subscriber view. */
+  dropPublisherRole(channelId: string): void {
+    setKeysByChannel((map) => {
+      if (!map.has(channelId)) return map;
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+    setCoPublisherGroupIds((map) => {
+      if (!map.has(channelId)) return map;
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+    schedulePersist();
+  },
   /** Forget the subscriber-side keypair for `channelId` —
    *  used on un-follow. Clears the recovered seeds too,
    *  since they were only useful while the device had the
@@ -911,6 +946,25 @@ export const channelsActions = {
    *  when this account owns it (or does not publish to it). */
   coPublisherGroupIdOf(channelIdHex: string): string | undefined {
     return coPublisherGroupIds().get(channelIdHex);
+  },
+  /** ADR-0087 phase B — the access record of a channel (empty when none). */
+  accessOf(channelId: string): ChannelAccessRecord {
+    return accessByChannel().get(channelId) ?? emptyAccessRecord();
+  },
+  /** ADR-0087 phase B — change a channel's access record; persisted with the
+   *  next flush. */
+  updateAccess(channelId: string, f: (r: ChannelAccessRecord) => ChannelAccessRecord): void {
+    setAccessByChannel((map) => new Map(map).set(channelId, f(map.get(channelId) ?? emptyAccessRecord())));
+    schedulePersist();
+  },
+  /** ADR-0087 phase B — {@link updateAccess}, written durably now (a
+   *  secret a later publish depends on: an admission seed, an invite seed). */
+  async updateAccessDurable(
+    channelId: string,
+    f: (r: ChannelAccessRecord) => ChannelAccessRecord,
+  ): Promise<void> {
+    setAccessByChannel((map) => new Map(map).set(channelId, f(map.get(channelId) ?? emptyAccessRecord())));
+    await flushDurable();
   },
   /** G-50 — the owed PublisherGroup commits, oldest first. */
   pendingPublisherCommits(): readonly PublisherCommitEntry[] {

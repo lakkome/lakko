@@ -137,7 +137,8 @@ pub mod fuzz_api {
             && persisted_state_holds(bytes)
     }
 
-    /// The own channel-reaction envelope (ADR-0087 section 13a): canonical,
+    /// The own channel-reaction envelope (ADR-0087 section 13a; a reaction on
+    /// a post or, since phase B, on one of its comments): canonical,
     /// within its bounds, folds to exactly its registers, is carried back by
     /// `channel_reaction_envelopes`, does not apply twice, and a prune far
     /// past every post leaves none of it.
@@ -154,8 +155,14 @@ pub mod fuzz_api {
             && state.channel_reaction_envelopes() == vec![bytes.to_vec()]
             && state.apply_channel_reaction_envelope(bytes) == Ok(false)
             && entries.iter().all(|e| {
-                state.has_channel_reaction(&e.value.channel_id, e.value.post_cursor, &e.value.emoji)
-                    == e.value.reacted
+                let v = &e.value;
+                let stands = match v.comment_cursor {
+                    None => state.has_channel_reaction(&v.channel_id, v.post_cursor, &v.emoji),
+                    Some(c) => {
+                        state.has_comment_reaction(&v.channel_id, v.post_cursor, c, &v.emoji)
+                    },
+                };
+                stands == v.reacted
             });
         held && {
             let n = state.len();
@@ -222,6 +229,13 @@ pub mod fuzz_api {
                     || state
                         .link_record(&e.value.link_id)
                         .is_some_and(|r| r.value.revoked)
+            })
+            // A group or channel link (ADR-0087 phase B) never accepts a
+            // contact request, even under its own secret.
+            && entries.iter().all(|e| {
+                !e.value.kind.is_group_link()
+                    || e.value.verdict(&e.value.link_secret, &[0; 32], 0)
+                        != crate::synced::LinkAnswerVerdict::Accept
             })
     }
 
@@ -562,6 +576,10 @@ mod fuzz_api_tests {
                     minted_at_ms: 1,
                     label: "home".into(),
                     answered: vec![[7; 32]],
+                    target_id: vec![],
+                    invite_seed: vec![],
+                    admission_version: 0,
+                    capability: vec![],
                 },
             )
             .unwrap();

@@ -14,13 +14,13 @@ import { createEffect, createMemo, createSignal, onCleanup, onMount } from "soli
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
-import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
+import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
-import { channelRowModel } from "../channels/channel-row";
+import { channelRowModel, channelRowPreview } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
-import { createChannelUnread } from "../feed/channel-unread";
+import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
@@ -76,6 +76,23 @@ export function createConversationRows() {
     });
     onCleanup(unsubscribe);
   });
+  // ADR-0048 section 2 trigger 4, from the list too: a conversation in Chats
+  // with a person this device cannot name asks its people to introduce
+  // themselves, as opening it does. The core's rule decides (only with an
+  // unnamed person, at most once a day per group); asked once per group per
+  // session here. Before this the ask ran only when a group was opened, so a
+  // person in a group never opened on this device stayed unnamed in its row
+  // (seen live 2026-11-05).
+  const askedForProfiles = new Set<string>();
+  createEffect(() => {
+    if (accountId() === null) return;
+    for (const g of chats.groups()) {
+      if (askedForProfiles.has(g.groupIdB64) || readIsActive(g.group) === false) continue;
+      askedForProfiles.add(g.groupIdB64);
+      void profiles.requestProfilesOnOpen(g.groupIdB64, personKeysOf(g.group)).catch(() => undefined);
+    }
+  });
+
   // docs/ux section 3 — the kind the conversation carries (ADR-0062). It is
   // fixed at creation, so reading it from the group is all there is.
   const kindOf = (g: ActiveGroup): ConversationKind => conversationKindOf(g.group);
@@ -106,7 +123,7 @@ export function createConversationRows() {
       contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
       contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted(), aliases())
         ?.displayName,
-      nameOf: (k) => memberNameOf(profiles.resolve(k)),
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "a Chats row title"),
       groupTitle,
       handle: groupNames.handleOf(g.groupIdB64)?.handle ?? null,
     });
@@ -228,15 +245,13 @@ export function createConversationRows() {
       preview: s.preview,
       isOwn: s.previewIsOwn,
       senderName:
-        s.lastAuthorKeyB64 === null ? null : memberNameOf(profiles.resolve(s.lastAuthorKeyB64)),
+        s.lastAuthorKeyB64 === null ? null : memberNameOf(profiles.resolve(s.lastAuthorKeyB64), "a Chats row last sender"),
       isGroup: kindOf(g) === "group",
     });
     if (line.length > 0) return line;
-    // Nothing said yet: a 1x1 shows the person's username, a group its size.
-    // A member count on a 1x1 says nothing.
-    const peer = kindOf(g) === "chat" ? peerKeyOf(g) : null;
-    if (peer !== null) return profiles.resolve(peer).username ?? "";
-    return t("chats.row.people", { count: peopleCountOf(g.group) });
+    // Nothing said yet (as Android shows): never the @name, which read as a
+    // contact rather than a conversation.
+    return t("chats.row.no_messages");
   };
 
   /**
@@ -252,13 +267,18 @@ export function createConversationRows() {
    *  second line and time come from `channelRowModel`, which the Channels
    *  screen already uses - one vocabulary, not a second one. */
   // docs/ux/feed.md section 5 — each channel row's count of new posts.
-  const channelUnread = createChannelUnread();
+  const channelFeed = createChannelRowFeed();
+  const channelUnread = channelFeed.unread;
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
     const posts = channelsState.postsByChannel();
     const held = channelsState.channels().filter((c) => !membershipEnd.isChannelEnding(c.id));
+    const lastRead = channelFeed.lastPost();
     return held.map((c) => {
-      const lastPostMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
+      const readable = lastRead(c.id);
+      const heldMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
+      const lastPostMs =
+        heldMs === null ? (readable?.serverTsMs ?? null) : Math.max(heldMs, readable?.serverTsMs ?? 0);
       const model = channelRowModel(
         {
           id: c.id,
@@ -275,7 +295,10 @@ export function createConversationRows() {
         id: c.id,
         kind: "channel" as const,
         title: model.title,
-        preview: model.subtitle,
+        // UX navigation 2.1: the second line is the last post this device can
+        // read; a channel has no sender to name. The @name (the model's
+        // subtitle) only when there is no readable post.
+        preview: channelRowPreview(readable?.text ?? null, model.subtitle),
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,

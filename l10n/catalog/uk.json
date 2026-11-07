@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "uk",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "Обліковий запис має нові ключі. Завершуємо зміну.",
@@ -1238,8 +1237,136 @@
       "text": "Не вдається розшифрувати звук і відео цього учасника",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "Підписники можуть реагувати будь-яким емодзі.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "Підписники не можуть реагувати на дописи.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "Підписники можуть реагувати лише вибраними вами емодзі.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "Канал зникне з пошуку та огляду. Підписатися зможуть лише запрошені вами. Усі підписники залишаться.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "Зробити канал закритим?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "Будь-хто зможе знайти й читати канал, а Lakko може пропонувати його в огляді. Назва, фото й опис стануть видимими всім. Попередні публікації залишаться доступними лише тим, хто вже підписаний.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "Зробити канал відкритим?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "Старе @ім'я перестане працювати зараз. Воно буде зарезервоване за цим каналом 30 днів.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "Це бачать лише підписники.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "Будь-хто може знайти канал за цим іменем.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "Підписатися можуть лише запрошені вами. Канал не видно в пошуку.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "Будь-хто може знайти канал і підписатися. Lakko може пропонувати його в огляді.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "Тип каналу",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "Оновлюємо підписників... {done} з {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "Хто може підписатися",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "Назад до каналів",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "Заборонити коментувати",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "Заблокованих немає.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "Не вдалося зберегти. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "Заблоковані",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "Розблокувати",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "Хтось",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "Дії з коментарем",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "Коментувати",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "Не вдалося видалити коментар. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "Коментарі не завантажилися.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "Сховати коментарі",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "Коментар задовгий або містить символи, які не можна надіслати.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "Показати ще",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# новий коментар} few {# нові коментарі} many {# нових коментарів} other {# нового коментаря}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {Ще # коментар} few {Ще # коментарі} many {Ще # коментарів} other {Ще # коментаря}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "Показати ще коментарі",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "Напишіть коментар",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "Співвидавці",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "Канал і його дописи буде видалено з усіх ваших пристроїв, а @{name} звільниться через 30 днів. Це не можна скасувати.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "Канал і його дописи буде видалено з усіх ваших пристроїв. Це не можна скасувати.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "Видалити канал",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "Не вдалося видалити канал. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "Видалити цей канал?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "Створити канал",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "Каналів поки немає",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "Канал і його дописи видалено з ваших пристроїв.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "Канал {handle} не знайдено.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "Закритий канал",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "Відкритий канал",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "Відкритий канал · {band} підписників",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "Виберіть канал або створіть новий",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "У цього каналу немає @name. Виберіть його.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "Запросити",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "Запросити людей",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "Назва й опис, хто його читає і хто ще може публікувати.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "Публікатори",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "Канал буде прибрано з вашого списку, а його дописи видалено з усіх ваших пристроїв. Пізніше можна підписатися знову.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "Не вдалося запросити: {names}. Спробуйте ще раз.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "Це посилання-запрошення для співвидавця створено старою версією Lakko, і воно більше не працює. Попросіть власника каналу надіслати нове посилання-запрошення.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "Щоб підписатися, потрібен акаунт. Створіть його або увійдіть.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "Приєднатися до каналу",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "Ви підписані. Публікації з'являться, коли власник або адміністратор наступного разу відкриє Lakko.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "Не вдалося створити посилання. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "З цього пристрою поки не можна створювати посилання для цього каналу. Це стане можливим, коли пристрій власника відкриє Lakko.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "Не вдалося відкликати посилання. Спробуйте ще раз.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "Канал",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "Заборонити коментувати",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "Заблоковані",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "Розблокувати",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "Створити",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "Опис",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "Увійдіть знову, щоб створити канал.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "Не вдалося створити канал. Нічого не створено. Спробуйте ще раз.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "За нею будь-хто може знайти канал і підписатися.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "Назва каналу",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "Підписники бачать назву й опис.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "Новий канал",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "Сьогодні ви створили багато каналів. Спробуйте завтра.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "Новий канал або приєднатися",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "Змінити фото може лише власник.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "Підписники бачитимуть замість нього ініціали.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "Видалити фото каналу?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "Недоступно",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "Публікувати тут можуть лише власник і публікатори.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "Цей допис старший за те, що може прочитати цей пристрій.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "Ця публікація недоступна.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "Цей допис не вдалося відкрити на цьому пристрої.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "Попередні публікації недоступні.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "Увійдіть знову, щоб публікувати в цьому каналі.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "Прийняти",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "Додати публікатора",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "Вас запрошують стати публікатором каналу {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} запрошує вас стати публікатором каналу {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "Видалити публікатора",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "Прибрати {name} з публікаторів? Публікувати й запрошувати буде не можна.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "Не вдалося прибрати публікатора. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {# запит на публікацію} few {# запити на публікацію} many {# запитів на публікацію} other {# запиту на публікацію}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "Власник",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "Публікатор",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "Скласти повноваження",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "Ви більше не публікуватимете й не запрошуватимете в цьому каналі. Пристрій власника застосує це, коли наступного разу відкриє Lakko.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "Не вдалося скласти повноваження. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "Готово. Пристрій власника застосує це, коли наступного разу відкриє Lakko.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "Реакції в каналі анонімні. Ніхто не бачить, хто відреагував, навіть власник каналу.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "Реакції в каналі анонімні. Ніхто не бачить, хто відреагував, навіть власник каналу.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "Не вдалося завантажити підписників. Спробуйте ще раз.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "За запрошенням",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "За посиланням «{label}»",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "Не вдалося завантажити підписників. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "Показати ще",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "Підписників поки немає.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {Ще #.} few {Ще #.} many {Ще #.} other {Ще #.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "Нові публікації перестануть надходити.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "Видалити цього підписника?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "Повторна спроба...",
       "status": "machine"
@@ -1770,6 +2125,10 @@
       "text": "Підписники",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "Підписники ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
       "text": "Відписатися",
       "status": "machine"
@@ -1783,7 +2142,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "Відписатися від каналу «{name}»?",
+      "text": "Відписатися від {name}?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "Групу та її повідомлення видалено з ваших пристроїв.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {Ви більше не перебуваєте в {name} і ще в #.} few {Ви більше не перебуваєте в {name} і ще в #.} many {Ви більше не перебуваєте в {name} і ще в #.} other {Ви більше не перебуваєте в {name} і ще в #.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "Ніколи",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "Посилання на групи й канали",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "Посилання на канал",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "Посилання на групу",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "Посилання для співавтора",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "Мітка (необов’язково)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "Хто може мене знайти",
       "status": "machine"
     }
-  }
+  },
+  "language": "uk"
 }

@@ -1097,6 +1097,7 @@ internal fun toEvent(
                         ),
                         // ADR-0073 — the re-send marker, only as a whole pair.
                         resendOrigin = resendOriginFrom(body.resendOriginGroupB64, body.resendOriginMessageId),
+                        channelInvite = body.channelInvite?.takeIf { it.isNotEmpty() },
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
                         messageId = messageId,
@@ -1266,6 +1267,9 @@ public sealed interface IncomingChatEvent {
          *  ordinary message. A sender's claim: believed only against a row
          *  this device already holds ([resendVerdict]). Never drawn. */
         val resendOrigin: ResendOrigin? = null,
+        /** ADR-0087 section 14 — a channel invitation card riding beside the
+         *  text; `null` for every other message. */
+        val channelInvite: ByteArray? = null,
         /** Zero or more attachment refs from the envelope. */
         val attachments: List<AttachmentRef>,
         /** Alias of [text] — kept for the few call sites that

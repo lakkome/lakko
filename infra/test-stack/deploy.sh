@@ -70,7 +70,11 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # signed-in device), so sign-in tests do not run out of answers, and refills
   # an empty token bucket on demand, so a walk never stops on the pool. Limits
   # have their own tests.
+  # VITE_LAKKO_PUBLIC_ORIGIN: the absolute origin of the link preview picture
+  # (apps/web/scripts/link-previews.mjs); without it the tags would point at
+  # lakko.me.
   (cd "$REPO/apps/web" && VITE_LAKKO_SFU_URL="wss://$DOMAIN/sfu" \
+    VITE_LAKKO_PUBLIC_ORIGIN="https://$DOMAIN" \
     VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
     VITE_LAKKO_ANON_TOKEN_REFILL=on-demand \
     VITE_LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL="$vapid_public" npm run build)

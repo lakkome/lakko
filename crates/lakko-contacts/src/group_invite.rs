@@ -251,11 +251,11 @@ const MAX_PREVIEW_PLAINTEXT_LEN: usize =
         MAX_GROUP_PREVIEW_PLAINTEXT_LEN
     };
 
-// A co-publisher preview (kind, channel id, one name, a photo) fits inside
-// the group preview's bound.
+// A co-publisher preview (kind, channel id, the channel and inviter names, a
+// photo) fits inside the largest preview's bound.
 const _: () = assert!(
-    1 + PREVIEW_CHANNEL_ID_LEN + 1 + MAX_PREVIEW_NAME_BYTES + AVATAR_FIELD_MAX_LEN
-        <= MAX_GROUP_PREVIEW_PLAINTEXT_LEN
+    1 + PREVIEW_CHANNEL_ID_LEN + 2 * (1 + MAX_PREVIEW_NAME_BYTES) + AVATAR_FIELD_MAX_LEN
+        <= MAX_PREVIEW_PLAINTEXT_LEN
 );
 
 /// Longest sealed preview on the wire (nonce + ciphertext + tag). A link that
@@ -384,9 +384,16 @@ impl GroupInvitePreview {
                 ContactError::InvalidArgument(format!("group-invite preview photo: {}", e.code()))
             })?;
         }
-        if self.channel_id.is_some() && (self.inviter_name.is_some() || self.member_count != 0) {
+        if self.channel_id.is_some() && self.member_count != 0 {
             return Err(ContactError::InvalidArgument(
-                "a channel group-invite preview carries no inviter name and no member count".into(),
+                "a channel group-invite preview carries no member count".into(),
+            ));
+        }
+        // A subscriber invitation names no inviter (the card rides the
+        // inviter's one-to-one); a co-publisher invitation may (2026-11-05).
+        if self.subscriber.is_some() && self.inviter_name.is_some() {
+            return Err(ContactError::InvalidArgument(
+                "a subscriber invitation carries no inviter name".into(),
             ));
         }
         if let Some(sub) = &self.subscriber {
@@ -461,10 +468,12 @@ impl GroupInvitePreview {
         if let Some(channel_id) = &self.channel_id {
             out.push(PREVIEW_KIND_CHANNEL);
             out.extend_from_slice(channel_id);
-            let bytes = self.group_name.as_deref().map_or(&[][..], str::as_bytes);
-            let len = u8::try_from(bytes.len()).unwrap_or(u8::MAX);
-            out.push(len);
-            out.extend_from_slice(&bytes[..usize::from(len)]);
+            for name in [&self.group_name, &self.inviter_name] {
+                let bytes = name.as_deref().map_or(&[][..], str::as_bytes);
+                let len = u8::try_from(bytes.len()).unwrap_or(u8::MAX);
+                out.push(len);
+                out.extend_from_slice(&bytes[..usize::from(len)]);
+            }
             encode_avatar_field(self.avatar.as_ref(), &mut out);
             return out;
         }
@@ -534,10 +543,14 @@ impl GroupInvitePreview {
         let raw_id = take_n(&mut cur, PREVIEW_CHANNEL_ID_LEN)?;
         let mut channel_id = [0u8; PREVIEW_CHANNEL_ID_LEN];
         channel_id.copy_from_slice(raw_id);
-        let len = usize::from(take_u8(&mut cur)?);
-        let group_name = if len == 0 {
-            None
-        } else {
+        // The channel name, then the inviter's name (2026-11-05), each
+        // length-prefixed and empty for none.
+        let mut names: [Option<String>; 2] = [None, None];
+        for slot in &mut names {
+            let len = usize::from(take_u8(&mut cur)?);
+            if len == 0 {
+                continue;
+            }
             let raw = take_n(&mut cur, len)?;
             let text = core::str::from_utf8(raw).map_err(|_| {
                 ContactError::InvalidEncoding("group-invite preview name is not UTF-8".into())
@@ -545,8 +558,9 @@ impl GroupInvitePreview {
             check_display_name(text).map_err(|e| {
                 ContactError::InvalidEncoding(format!("group-invite preview name refused: {e}"))
             })?;
-            Some(text.to_string())
-        };
+            *slot = Some(text.to_string());
+        }
+        let [group_name, inviter_name] = names;
         let avatar = take_avatar(&mut cur)?;
         if !cur.is_empty() {
             return Err(ContactError::InvalidEncoding(format!(
@@ -556,7 +570,7 @@ impl GroupInvitePreview {
         }
         Ok(Self {
             group_name,
-            inviter_name: None,
+            inviter_name,
             member_count: 0,
             channel_id: Some(channel_id),
             subscriber: None,
@@ -671,6 +685,30 @@ pub const MAX_WIRE_LEN: usize = 1
 
 /// Longest sealed `/g/` link blob (what the discovery ledger stores).
 pub const MAX_SEALED_LEN: usize = crate::link_seal::sealed_len(MAX_WIRE_LEN);
+
+/// BLAKE3 derive-key context of the register id of a `/g/` link
+/// ([`group_link_record_id`]). Frozen.
+pub const GROUP_LINK_RECORD_ID_DOMAIN: &str = "lakko/sync/group-link-id/v1";
+
+/// Length of a link-register id (the ADR-0079 `/i/` link id width).
+pub const GROUP_LINK_RECORD_ID_LEN: usize = 16;
+
+/// The id under which a `/g/` link (a group, channel subscriber or publisher
+/// invitation) is kept in the account's synced link register
+/// (`lakko_sync::synced::link_record`, ADR-0087 phase B, 2026-11-05). A `/g/`
+/// capability carries no 16-byte link id of its own (an `/i/` one does), so
+/// the register keys it on `BLAKE3-derive-key(GROUP_LINK_RECORD_ID_DOMAIN,
+/// ledger_id)[..16]`: every device of the account computes the same id from
+/// the server-minted ledger id the link already names, and it never collides
+/// with an `/i/` link's random id except by chance (2^-128 per pair).
+#[must_use]
+pub fn group_link_record_id(ledger_id: &[u8; BLOB_ID_LEN]) -> [u8; GROUP_LINK_RECORD_ID_LEN] {
+    let full =
+        lakko_crypto::hash::blake3_derive_key_from_material(GROUP_LINK_RECORD_ID_DOMAIN, ledger_id);
+    let mut out = [0u8; GROUP_LINK_RECORD_ID_LEN];
+    out.copy_from_slice(&full[..GROUP_LINK_RECORD_ID_LEN]);
+    out
+}
 
 /// Seal a composed capability wire for a `/g/` link under `link_secret` —
 /// the same secret the preview (if any) was sealed under.
@@ -805,19 +843,21 @@ impl ChannelInviteCard {
     }
 
     /// Open the card's link: [`open_link`] under its own secret, then the
-    /// preview, which must be a subscriber invitation.
+    /// preview, which must be a channel's: a subscriber invitation (preview
+    /// kind 3) or, since 2026-11-05, a publisher invitation (kind 2, UX
+    /// 15.2), which may name its inviter. A group's link is refused.
     ///
     /// # Errors
     ///
     /// [`ContactError::LinkDamaged`] when the link does not open, and
-    /// [`ContactError::InvalidEncoding`] when it carries no subscriber
+    /// [`ContactError::InvalidEncoding`] when it carries no channel
     /// invitation.
     pub fn open(&self) -> Result<(GroupInviteCapability, GroupInvitePreview)> {
         let (capability, _) = open_link(&self.link_secret, &self.sealed)?;
         match capability.open_preview(&self.link_secret)? {
-            Some(preview) if preview.subscriber.is_some() => Ok((capability, preview)),
+            Some(preview) if preview.channel_id.is_some() => Ok((capability, preview)),
             _ => Err(ContactError::InvalidEncoding(
-                "channel invitation card carries no subscriber invitation".into(),
+                "channel invitation card carries no channel invitation".into(),
             )),
         }
     }
@@ -1397,8 +1437,8 @@ mod tests {
             avatar: None,
         };
         let plain = preview.encode();
-        // kind, channel id, name length, photo length.
-        assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1 + 1);
+        // kind, channel id, name length, inviter length, photo length.
+        assert_eq!(plain.len(), 1 + PREVIEW_CHANNEL_ID_LEN + 1 + 1 + 1);
         assert_eq!(GroupInvitePreview::decode(&plain).unwrap(), preview);
         assert_eq!(
             crate::fuzz_api::group_invite_preview_plaintext(&plain),
@@ -1407,8 +1447,10 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_preview_refuses_an_inviter_or_a_count() {
-        for (inviter, count) in [(Some("Ann".to_string()), 0u16), (None, 3)] {
+    fn a_channel_preview_refuses_a_count() {
+        // Since 2026-11-05 a co-publisher preview may name its inviter
+        // (`a_publisher_invitation_names_its_inviter`); a count is refused.
+        for (inviter, count) in [(Some("Ann".to_string()), 3u16), (None, 3)] {
             let preview = GroupInvitePreview {
                 group_name: Some("Daily notes".into()),
                 inviter_name: inviter,
@@ -2202,6 +2244,65 @@ mod tests {
         assert!(GroupInvitePreview::decode(&bad_access).is_err());
     }
 
+    /// 2026-11-05: a co-publisher preview carries the inviter's name, under
+    /// the display-name rule; a subscriber invitation still carries none, and
+    /// a channel preview carries no member count.
+    #[test]
+    fn the_group_link_record_id_is_pinned_and_per_ledger_id() {
+        let a = group_link_record_id(&[1; BLOB_ID_LEN]);
+        let full = lakko_crypto::hash::blake3_derive_key_from_material(
+            "lakko/sync/group-link-id/v1",
+            &[1; BLOB_ID_LEN],
+        );
+        assert_eq!(a[..], full[..16]);
+        assert_ne!(a, group_link_record_id(&[2; BLOB_ID_LEN]));
+    }
+
+    #[test]
+    fn a_publisher_invitation_names_its_inviter() {
+        let preview = GroupInvitePreview {
+            group_name: Some("Berlin news".into()),
+            inviter_name: Some("Anna".into()),
+            member_count: 0,
+            channel_id: Some([0xC7; PREVIEW_CHANNEL_ID_LEN]),
+            subscriber: None,
+            avatar: Some(test_photo()),
+        };
+        assert!(preview.validate().is_ok());
+        let plain = preview.encode();
+        assert_eq!(GroupInvitePreview::decode(&plain).unwrap(), preview);
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&plain),
+            Some(true)
+        );
+        let none = GroupInvitePreview {
+            inviter_name: None,
+            ..preview.clone()
+        };
+        assert_eq!(GroupInvitePreview::decode(&none.encode()).unwrap(), none);
+        let bad = GroupInvitePreview {
+            inviter_name: Some("a\nb".into()),
+            ..preview.clone()
+        };
+        assert!(bad.validate().is_err());
+        let counted = GroupInvitePreview {
+            member_count: 3,
+            ..preview.clone()
+        };
+        assert!(counted.validate().is_err());
+        let mut subscriber = subscriber_preview(private_access());
+        subscriber.inviter_name = Some("Anna".into());
+        assert!(subscriber.validate().is_err());
+        // A maximal publisher invitation stays within the preview bound.
+        let maximal = GroupInvitePreview {
+            group_name: Some("\u{1F600}".repeat(63)),
+            inviter_name: Some("\u{1F600}".repeat(63)),
+            ..preview
+        };
+        assert!(maximal.validate().is_ok());
+        assert!(maximal.encode().len() <= MAX_PREVIEW_PLAINTEXT_LEN);
+    }
+
     #[test]
     fn maximal_lengths_are_the_documented_construction() {
         assert_eq!(MAX_PREVIEW_PLAINTEXT_LEN, 1537);
@@ -2247,7 +2348,38 @@ mod tests {
         assert_eq!(opened, preview);
         assert!(!format!("{card:?}").contains(&format!("{secret:?}")));
 
-        // A group link in a card is not a subscriber invitation.
+        // A publisher invitation (kind 2) opens too, with its inviter name.
+        let publisher = GroupInvitePreview {
+            group_name: Some("Berlin news".into()),
+            inviter_name: Some("Anna".into()),
+            member_count: 0,
+            channel_id: Some(channel),
+            subscriber: None,
+            avatar: None,
+        };
+        let publisher_wire = compose_with_preview(
+            &fixture_signing(),
+            &fixture_group_id(),
+            0,
+            Some(&knock()),
+            &publisher,
+            &secret,
+        )
+        .unwrap();
+        let publisher_card = ChannelInviteCard {
+            sealed: seal_link(&secret, &publisher_wire).unwrap(),
+            ..card.clone()
+        };
+        let publisher_bytes = publisher_card.encode().unwrap();
+        assert_eq!(fuzz_channel_invite_card(&publisher_bytes), Some(true));
+        let (_, opened) = ChannelInviteCard::decode(&publisher_bytes)
+            .unwrap()
+            .open()
+            .unwrap();
+        assert_eq!(opened, publisher);
+        assert_eq!(opened.inviter_name.as_deref(), Some("Anna"));
+
+        // A group link in a card is not a channel invitation.
         let group_wire = compose_with_preview(
             &fixture_signing(),
             &fixture_group_id(),

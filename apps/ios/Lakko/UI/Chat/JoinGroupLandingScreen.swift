@@ -80,6 +80,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// capability verifies and never cleared while the card is up, so it stays
     /// on the card through the wait.
     @Published public private(set) var preview: GroupInviteFacts?
+    /// ADR-0087 section 7.2 — the link is a channel subscriber invitation
+    /// (preview kind 3): the page is a channel's link page.
+    @Published public private(set) var channel: ChannelLinkFacts?
 
     private let slug: String
     private let linkKeyFragment: String?
@@ -171,6 +174,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             preview = nil
         case .opened(let facts):
             preview = facts
+        case .channel(let facts, let channel):
+            preview = facts
+            self.channel = channel
         case .damaged:
             state = .damaged
             return
@@ -188,6 +194,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         case none
         /// The preview opened under the link secret.
         case opened(GroupInviteFacts)
+        /// A channel subscriber invitation (ADR-0087 section 7, kind 3).
+        case channel(GroupInviteFacts, ChannelLinkFacts)
         /// The capability carries a preview that does not open under the
         /// secret the blob opened with.
         case damaged
@@ -199,6 +207,16 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     ) -> PreviewOutcome {
         guard cap.hasPreview() else { return .none }
         guard let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
+        if let subscriber = opened.subscriber, let channelId = opened.channelId, channelId.count == 16 {
+            return .channel(
+                GroupInviteFacts(
+                    groupName: opened.groupName, inviterName: opened.inviterName,
+                    memberCount: opened.memberCount),
+                ChannelLinkFacts(
+                    channelIdHex: AttachmentBridge.hex(channelId), name: opened.groupName ?? "",
+                    description: subscriber.description, access: subscriber.access,
+                    avatar: ProfileAvatar(opened.avatar)))
+        }
         return .opened(GroupInviteFacts(
             groupName: opened.groupName,
             inviterName: opened.inviterName,
@@ -295,17 +313,21 @@ public struct JoinGroupLandingScreen: View {
     private let onDone: () -> Void
     /// Open the joined group (replaces this screen with the chat).
     private let onOpenChat: (String) -> Void
+    /// ADR-0087 section 7.2 — `Subscribe` on a channel's link page.
+    private let onSubscribeChannel: (ChannelLinkFacts) -> Void
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: JoinGroupLandingViewModel,
         onDone: @escaping () -> Void,
-        onOpenChat: @escaping (String) -> Void
+        onOpenChat: @escaping (String) -> Void,
+        onSubscribeChannel: @escaping (ChannelLinkFacts) -> Void = { _ in }
     ) {
         self._viewModel = StateObject(wrappedValue: viewModel)
         self.onDone = onDone
         self.onOpenChat = onOpenChat
+        self.onSubscribeChannel = onSubscribeChannel
     }
 
     public var body: some View {
@@ -314,7 +336,10 @@ public struct JoinGroupLandingScreen: View {
                 .padding(16)
         }
         .background(Color.lakkoBackground.ignoresSafeArea())
-        .navigationTitle(l10n.t("group.join.title"))
+        // A channel's link page is titled with the channel (as on web), never
+        // "Join a group".
+        .navigationTitle(viewModel.channel.map { $0.name.isEmpty ? l10n.t("channels.meta.title") : $0.name }
+            ?? l10n.t("group.join.title"))
         .task { await viewModel.run() }
     }
 
@@ -377,6 +402,16 @@ public struct JoinGroupLandingScreen: View {
                 }
                 .tint(.lakkoAccent)
                 footer
+            case .ready where viewModel.channel != nil:
+                if let channel = viewModel.channel {
+                    channelBlock(channel)
+                    Button(l10n.t("channels.subscribe.action")) {
+                        viewModel.dismiss()
+                        onSubscribeChannel(channel)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.lakkoAccent)
+                }
             case .ready:
                 headlineBlock
                 Button(l10n.t("group.join.request")) {
@@ -454,6 +489,32 @@ public struct JoinGroupLandingScreen: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Section 7.2 — "Anna invites you to / Berlin news / Private channel".
+    private func channelBlock(_ channel: ChannelLinkFacts) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            InitialsAvatar(
+                name: channel.name, identity: channel.channelIdHex, size: 64,
+                placeholderSymbol: "megaphone.fill", photo: channel.avatar.map(AvatarPhoto.avatar),
+                playsVideo: true)
+            Text(viewModel.headline.lead)
+                .font(.title3)
+                .foregroundStyle(Color.lakkoText)
+            Text(channel.name)
+                .font(.title2).bold()
+                .foregroundStyle(Color.lakkoText)
+            Text(l10n.t(channel.isPublic ? "channels.header.public" : "channels.header.private"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoTextMuted)
+            if !channel.description.isEmpty {
+                Text(channel.description)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     /// `Invited by <name>`, from the sealed preview: small, muted, one line.
     /// With no name the line is gone: digits never appear here.
     @ViewBuilder
@@ -465,5 +526,19 @@ public struct JoinGroupLandingScreen: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
         }
+    }
+}
+
+/// ADR-0087 section 7 — what a channel subscriber invitation link carries.
+public struct ChannelLinkFacts: Equatable {
+    public let channelIdHex: String
+    public let name: String
+    public let description: String
+    public let access: FfiChannelAccess
+    public let avatar: ProfileAvatar?
+
+    public var isPublic: Bool {
+        if case .public = access { return true }
+        return false
     }
 }

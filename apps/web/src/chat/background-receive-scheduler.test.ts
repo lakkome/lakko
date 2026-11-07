@@ -4,6 +4,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BACKGROUND_IDLE_NO_PUSH_MS,
+  BACKGROUND_IDLE_PUSH_MS,
+  BACKGROUND_SWEEP_INTERVAL_MS,
+  backgroundSweepIntervalMs,
   GroupBackoff,
   runBackgroundReceiveLoop,
   runSweep,
@@ -292,5 +296,26 @@ describe("sweepPauseMs", () => {
     expect(sweepPauseMs(4_000, 1_000, 0.5)).toBe(4_000);
     expect(sweepPauseMs(4_000, 1_000, 1)).toBe(5_000);
     expect(sweepPauseMs(100, 1_000, 0)).toBe(0);
+  });
+});
+
+describe("backgroundSweepIntervalMs (an idle client polls no group every few seconds)", () => {
+  it("is short only while something is arriving", () => {
+    expect(backgroundSweepIntervalMs({ wakeWindowOpen: true, callInProgress: false, pushWake: "reachable" })).toBe(
+      BACKGROUND_SWEEP_INTERVAL_MS,
+    );
+    expect(backgroundSweepIntervalMs({ wakeWindowOpen: false, callInProgress: true, pushWake: "unknown" })).toBe(
+      BACKGROUND_SWEEP_INTERVAL_MS,
+    );
+  });
+
+  it("is long when idle, longest when a push wake reaches the tab", () => {
+    expect(backgroundSweepIntervalMs({ wakeWindowOpen: false, callInProgress: false, pushWake: "reachable" })).toBe(
+      BACKGROUND_IDLE_PUSH_MS,
+    );
+    expect(backgroundSweepIntervalMs({ wakeWindowOpen: false, callInProgress: false, pushWake: "unreachable" })).toBe(
+      BACKGROUND_IDLE_NO_PUSH_MS,
+    );
+    expect(BACKGROUND_IDLE_NO_PUSH_MS).toBeGreaterThanOrEqual(30_000);
   });
 });

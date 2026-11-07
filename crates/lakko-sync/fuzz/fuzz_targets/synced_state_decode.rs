@@ -26,14 +26,21 @@
 //!   the persisted state is version 4). Domain, version, a bounded count,
 //!   every length checked against its bound before any copy, strictly
 //!   ascending link ids, no trailing bytes; a revoked record it carries must
-//!   be held revoked after the fold.
+//!   be held revoked after the fold. Version `0x04` since 2026-11-05 (ADR-0087
+//!   phase B): a group, channel or publisher link carries its target id, a
+//!   private channel link's invite seed and admission version, and the sealed
+//!   `/g/` blob, each length checked before the copy; a `/g/` link is keyed by
+//!   the derived id of its ledger id and never accepts a contact request (the
+//!   persisted state is version 12).
 //! * `decode_device_ack_envelope` (identity-recovery 17.5): the devices
 //!   whose added-device warning was seen, sent the same way. Domain,
 //!   version, a bounded count, fixed-size entries, strictly ascending keys,
 //!   no trailing bytes; an accepted envelope folds to exactly its keys.
 //! * `decode_channel_reaction_envelope` (ADR-0087 section 13a): the
-//!   account's own reactions under channel posts, sent the same way. Domain,
-//!   version, a bounded count, a one-byte emoji length checked against its
+//!   account's own reactions under channel posts and, since phase B
+//!   (version `0x02`), on their comments, sent the same way. Domain,
+//!   version, a bounded count, a target byte (a post target must carry a
+//!   zero comment cursor), a one-byte emoji length checked against its
 //!   bound before any copy, UTF-8, a state byte, strictly ascending keys, no
 //!   trailing bytes; an accepted envelope folds to exactly its registers,
 //!   does not apply twice, and a prune past every post removes it all.

@@ -7008,13 +7008,25 @@ public class AuthRepository(
         // Called only after the new keys were adopted, when a predecessor
         // always exists: none readable is a failure, not "nothing to do".
         val (oldSeed, newSeed) = rotationSeedPair() ?: return false
+        val lineage = try {
+            ownPredecessorStore.conversationSeed(accountIdB64)
+        } catch (_: Throwable) {
+            null
+        }
         return try {
             withContext(Dispatchers.IO) {
-                me.lakko.app.channels.KeyRotationChannels.handOverAll(applicationContext, accountIdB64, oldSeed, newSeed)
+                me.lakko.app.channels.KeyRotationChannels.handOverAll(
+                    applicationContext,
+                    accountIdB64,
+                    oldSeed,
+                    newSeed,
+                    lineage,
+                )
             }
         } finally {
             oldSeed.fill(0)
             newSeed.fill(0)
+            lineage?.fill(0)
         }
     }
 

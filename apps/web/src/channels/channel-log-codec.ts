@@ -60,6 +60,8 @@
 import type { ChannelHandle } from "./api";
 import type { ChannelSubscriberKeys } from "./composer";
 import { parsePublisherCommitEntry, type PublisherCommitEntry } from "./publisher-commit-outbox";
+import { decodeAccessRecord, type ChannelAccessRecord } from "./channel-access-record";
+import { avatarFromJson, type AvatarData } from "../profile/avatar-model";
 
 /** Payload schema version this client writes. */
 export const CHANNEL_LOG_VERSION = 1;
@@ -111,8 +113,20 @@ export interface ChannelSharedMeta {
   /** ADR-0059 metadata v2: the ISO 639 language; absent or empty = not set. */
   readonly language?: string;
   /** ADR-0059 metadata v2: the owner listed the channel in Discover. What
-   *  lets a member share only listed channels in a group (section 6). */
+   *  lets a member share only listed channels in a group (section 6). Since
+   *  metadata v3 (ADR-0087 section 16) it is the channel's PUBLIC flag. */
   readonly listed?: boolean;
+  /** ADR-0087 metadata v3: the signed `@name` (the decoded handle, public
+   *  flag, stamp, and the envelope bytes in standard base64). */
+  readonly handle?: {
+    readonly handle: string;
+    readonly isPublic: boolean;
+    readonly envelopeB64: string;
+  };
+  /** ADR-0087 section 18.2: the channel's photo. */
+  readonly avatar?: AvatarData;
+  /** ADR-0087 section 13a: which reactions posts take. */
+  readonly reactions?: { readonly mode: "all" | "off" | "only"; readonly emoji: readonly string[] };
 }
 
 export interface PersistedChannelMeta {
@@ -125,6 +139,10 @@ export interface PersistedChannelMeta {
   readonly topic?: number;
   readonly language?: string;
   readonly listed?: boolean;
+  /** ADR-0087 metadata v3 fields; absent in a row written before them. */
+  readonly handle?: { readonly handle: string; readonly isPublic: boolean; readonly envelopeB64: string };
+  readonly avatar?: unknown;
+  readonly reactions?: { readonly mode: string; readonly emoji: readonly string[] };
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
@@ -149,6 +167,8 @@ export interface ChannelLogPayload {
   readonly coPublisherGroupIds?: readonly { readonly channelId: string; readonly groupIdHex: string }[];
   /** G-50 — the PublisherGroup commits whose steps are still owed. */
   readonly publisherCommits?: readonly PublisherCommitEntry[];
+  /** ADR-0087 phase B — per-channel access record (`channel-access-record.ts`). */
+  readonly channelAccess?: readonly { readonly channelId: string; readonly record: unknown }[];
 }
 
 // ----- Decoded shape ---------------------------------------------------
@@ -167,6 +187,9 @@ export interface ChannelLogSnapshot {
   readonly coPublisherGroupIds: ReadonlyMap<string, string>;
   /** G-50 — owed PublisherGroup commits. */
   readonly publisherCommits: readonly PublisherCommitEntry[];
+  /** ADR-0087 phase B — channel id -> access record. Optional so a writer
+   *  that does not know it (tests) still builds a snapshot. */
+  readonly channelAccess?: ReadonlyMap<string, ChannelAccessRecord>;
 }
 
 /** An empty snapshot — what a fresh account starts from. */
@@ -181,6 +204,7 @@ export function emptyChannelLogSnapshot(): ChannelLogSnapshot {
     publisherLeafKeyB64: null,
     coPublisherGroupIds: new Map(),
     publisherCommits: [],
+    channelAccess: new Map(),
   };
 }
 
@@ -267,6 +291,9 @@ export function encodeChannelLog(snapshot: ChannelLogSnapshot): ChannelLogPayloa
       ...(m.topic === undefined ? {} : { topic: m.topic }),
       ...(m.language === undefined ? {} : { language: m.language }),
       ...(m.listed === undefined ? {} : { listed: m.listed }),
+      ...(m.handle === undefined ? {} : { handle: m.handle }),
+      ...(m.avatar === undefined ? {} : { avatar: m.avatar }),
+      ...(m.reactions === undefined ? {} : { reactions: m.reactions }),
     });
   }
   return {
@@ -286,6 +313,10 @@ export function encodeChannelLog(snapshot: ChannelLogSnapshot): ChannelLogPayloa
       groupIdHex,
     })),
     publisherCommits: [...snapshot.publisherCommits],
+    channelAccess: [...(snapshot.channelAccess ?? new Map())].map(([channelId, record]) => ({
+      channelId,
+      record,
+    })),
   };
 }
 
@@ -373,6 +404,7 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
         ? { language: m.language }
         : {}),
       ...(typeof m.listed === "boolean" ? { listed: m.listed } : {}),
+      ...decodeMetaV3(m),
     });
   }
 
@@ -389,6 +421,15 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
   for (const raw of asArray(p.publisherCommits)) {
     const entry = parsePublisherCommitEntry(raw);
     if (entry !== null && !publisherCommits.some((e) => e.id === entry.id)) publisherCommits.push(entry);
+  }
+
+  const channelAccess = new Map<string, ChannelAccessRecord>();
+  for (const raw of asArray(p.channelAccess)) {
+    const a = raw as Record<string, unknown>;
+    if (typeof a !== "object" || a === null) continue;
+    if (!isChannelIdHex(a.channelId) || channelAccess.has(a.channelId)) continue;
+    const record = decodeAccessRecord(a.record);
+    if (record !== null) channelAccess.set(a.channelId, record);
   }
 
   const snapshotB64 = p.publisherProviderSnapshotB64;
@@ -408,7 +449,38 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
     publisherLeafKeyB64: publisherProviderSnapshot === null ? null : publisherLeafKeyB64,
     coPublisherGroupIds,
     publisherCommits,
+    channelAccess,
   };
+}
+
+/** The ADR-0087 v3 fields of a persisted meta row, each dropped alone when
+ *  malformed. */
+function decodeMetaV3(m: Record<string, unknown>): Pick<ChannelSharedMeta, "handle" | "avatar" | "reactions"> {
+  const out: { handle?: NonNullable<ChannelSharedMeta["handle"]>; avatar?: AvatarData; reactions?: NonNullable<ChannelSharedMeta["reactions"]> } = {};
+  const h = m.handle as Record<string, unknown> | undefined;
+  if (
+    typeof h === "object" &&
+    h !== null &&
+    typeof h.handle === "string" &&
+    /^[a-z0-9_]{3,32}$/.test(h.handle) &&
+    typeof h.isPublic === "boolean" &&
+    typeof h.envelopeB64 === "string"
+  ) {
+    out.handle = { handle: h.handle, isPublic: h.isPublic, envelopeB64: h.envelopeB64 };
+  }
+  const avatar = avatarFromJson(m.avatar);
+  if (avatar !== null) out.avatar = avatar;
+  const r = m.reactions as Record<string, unknown> | undefined;
+  if (
+    typeof r === "object" &&
+    r !== null &&
+    (r.mode === "all" || r.mode === "off" || r.mode === "only") &&
+    Array.isArray(r.emoji) &&
+    r.emoji.every((e) => typeof e === "string")
+  ) {
+    out.reactions = { mode: r.mode, emoji: r.emoji as string[] };
+  }
+  return out;
 }
 
 function asArray(v: unknown): readonly unknown[] {

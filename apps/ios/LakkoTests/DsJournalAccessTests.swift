@@ -504,6 +504,15 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertEqual(reads.count, 5)
     }
 
+    /// The background poll's floor: twice a second for 130 s is three reads.
+    func testTheBackgroundKnockPollIsAtMostOncePerMinute() {
+        XCTAssertEqual(KnockPollThrottle.backgroundFloorSeconds, 60)
+        let throttle = KnockPollThrottle(floorSeconds: KnockPollThrottle.backgroundFloorSeconds)
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let reads = (0..<260).filter { throttle.take("g", now: t0.addingTimeInterval(Double($0) * 0.5)) }
+        XCTAssertEqual(reads.count, 3)
+    }
+
     /// A clock that went backwards must not silence the knocks.
     func testABackwardsClockCountsAsDue() {
         let throttle = KnockPollThrottle()

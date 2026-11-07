@@ -43,6 +43,7 @@ import { reloadWhenRosterChanges } from "../devices/roster-reload";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { removalRowState } from "../devices/removal";
 import { REMOVE_DEVICE_COPY, ROTATE_COPY, revokeFailureLine } from "../devices/removal-copy";
+import { BrandedQr } from "../ui/BrandedQr";
 import { ModalLayer } from "../ui/ModalLayer";
 import { getDeviceKey } from "../auth/key-store";
 import {
@@ -64,7 +65,6 @@ import { ownPairingHandle, parsePairingQrPayload } from "../devices/pairing";
 import { pairingConfirmTitle } from "../devices/pairing-copy";
 import { afterScanLinked } from "../devices/scan-linked";
 import { recoveryHalfFor } from "../devices/recovery-sender";
-import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { paths } from "./paths";
 import { currentLanguage, t } from "../l10n";
@@ -1162,7 +1162,6 @@ function PairView(props: {
     | { kind: "error"; message: () => string };
   const auth = useAuth();
   const [state, setState] = createSignal<State>({ kind: "idle" });
-  const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(null);
   /** Set by `onCleanup`. `start` spans several awaits before there is a
    *  session for the cleanup to abort; it checks this after each, so leaving
    *  the panel meanwhile creates no session and starts no long poll. */
@@ -1196,24 +1195,6 @@ function PairView(props: {
       if (disposed) {
         sess.dispose();
         return;
-      }
-      // Encode the wire bytes as a base64url string and feed
-      // into `qrcode`. The library accepts arbitrary strings;
-      // base64url keeps the QR within Byte mode without
-      // ever crossing into binary-frame surprises that some
-      // scanners reject.
-      const b64 = base64UrlEncodeNoPad(sess.qrPayload);
-      const canvas = canvasRef();
-      if (canvas !== null) {
-        await QRCode.toCanvas(canvas, b64, {
-          errorCorrectionLevel: "M",
-          width: 256,
-          margin: 1,
-        });
-        if (disposed) {
-          sess.dispose();
-          return;
-        }
       }
       const abort = new AbortController();
       setState({ kind: "waiting", session: sess, abort });
@@ -1288,7 +1269,15 @@ function PairView(props: {
         </Match>
         <Match when={state().kind === "waiting"}>
           <div class="lk-center">
-            <canvas class="lk-qr" ref={(el) => setCanvasRef(el)} />
+            {/* The wire bytes as base64url text: byte mode, which every
+                scanner reads, with no binary-frame surprises. */}
+            <BrandedQr
+              text={(() => {
+                const s = state();
+                return s.kind === "waiting" ? base64UrlEncodeNoPad(s.session.qrPayload) : "";
+              })()}
+              size={288}
+            />
             <p class="lk-muted">{t("device_link.qr.waiting")}</p>
             <button type="button" onClick={cancel}>
               {t("common.cancel")}

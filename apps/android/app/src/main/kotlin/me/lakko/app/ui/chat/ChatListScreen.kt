@@ -71,6 +71,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.alpha
@@ -204,6 +205,7 @@ public fun ChatListScreen(
     // The groups and channels this device is in, read as snapshot state so a
     // card or a result row says Open as soon as a join lands.
     val memberIds = remember { mutableStateOf<Set<String>>(emptySet()) }
+    val readKeyContext = LocalContext.current.applicationContext
     val conversationSearch = remember(repository) {
         object : ConversationSearchPort {
             override suspend fun search(query: String) = repository.searchPublicConversations(query)
@@ -221,6 +223,12 @@ public fun ChatListScreen(
             }
             override fun subscribe(found: me.lakko.app.chat.FoundConversation) {
                 val hex = found.id.joinToString("") { "%02x".format(it) }
+                // ADR-0087 section 6 — a public channel's record carries its
+                // read key: kept, so the posts open at once under its public
+                // seeds with no publisher involved.
+                channels?.boundAccount?.let { acct ->
+                    me.lakko.app.channels.ChannelReadKeys.put(readKeyContext, acct, hex, found.knockOrReadKey)
+                }
                 onSubscribeChannelPressed(hex, found.handle, found.name)
             }
         }
@@ -382,6 +390,7 @@ public fun ChatListScreen(
             )
         },
     ) { padding ->
+        Box(Modifier.fillMaxSize()) {
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
@@ -405,17 +414,6 @@ public fun ChatListScreen(
                     query = query,
                     onQueryChange = { query = it },
                 )
-                // ADR-0087 UX 9.1 — "You are no longer in {name}.", once per
-                // device and per removal: a banner each, newest on top, each
-                // closed on its own. They wait here across a restart.
-                for (notice in me.lakko.app.chat.bannerNotices(state.endNotices)) {
-                    androidx.compose.runtime.key(notice.idHex) {
-                        MembershipEndBanner(
-                            notice = notice,
-                            onClose = { repository.dismissEndNotice(notice.idHex) },
-                        )
-                    }
-                }
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
                 if (synchronizing) {
@@ -574,6 +572,21 @@ public fun ChatListScreen(
                 }
             }
         }
+        // ADR-0087 UX 9 (decided 2026-11-06) — one short notice at the
+        // bottom for the removals noticed now: no close icon, gone by itself
+        // after 4 s; a new removal while it is up replaces it with the
+        // combined text. A channel whose dialog was answered gets none.
+        EndNoticeHost(
+            notices = state.endNotices.filterNot {
+                me.lakko.app.channels.ChannelRemovalWatch.wasAnswered(it.idHex)
+            },
+            onShown = { ids -> repository.dismissEndNotices(ids) },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(padding)
+                .padding(16.dp),
+        )
+        }
     }
 
     deletingFolder?.let { folder ->
@@ -649,8 +662,8 @@ internal fun rememberConversationRows(
     // the feed. Counted over the channel-post log the feed keeps.
     val listAccount = repository.currentAccountIdB64()
     val channelPostsVersion by me.lakko.app.feed.FeedSealedStore.channelPostsChanged.collectAsStateWithLifecycle()
-    val channelPostCursors by androidx.compose.runtime.produceState(
-        initialValue = emptyMap<String, List<Long>>(),
+    val channelPostLog by androidx.compose.runtime.produceState(
+        initialValue = emptyMap<String, me.lakko.app.feed.ChannelPostSlot>(),
         listAccount,
         channelPostsVersion,
     ) {
@@ -660,9 +673,11 @@ internal fun rememberConversationRows(
         } else {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 me.lakko.app.feed.FeedSealedStore.loadChannelPostLog(context, acct).channels
-                    .mapValues { (_, slot) -> slot.posts.map { it.cursor } }
             }
         }
+    }
+    val channelPostCursors = remember(channelPostLog) {
+        channelPostLog.mapValues { (_, slot) -> slot.posts.map { it.cursor } }
     }
     val readingFlow = remember(listAccount) {
         listAccount?.let { me.lakko.app.feed.FeedReadingStore.flow(context, it) }
@@ -672,7 +687,7 @@ internal fun rememberConversationRows(
     // ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
     // device carry their own secondary line.
     val orphanedChannels = channels?.orphaned?.collectAsStateWithLifecycle()?.value ?: emptySet()
-    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostCursors, reading.channelRead, strings, orphanedChannels) {
+    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostLog, reading.channelRead, strings, orphanedChannels) {
         val now = System.currentTimeMillis()
         channelHandles.map { channel ->
             val model = channelRowModel(
@@ -686,6 +701,11 @@ internal fun rememberConversationRows(
                 locale = locale,
                 strings = strings,
             )
+            // docs/ux/navigation.md section 2 — the second line is the
+            // newest post this device can read, the time its time; the
+            // @name (the model's subtitle) only when there is none.
+            val newest = channelLastPost(channelPostLog[channel.id])
+            val newestMs = maxOf(newest?.serverTsMs ?: 0L, model.sortMs)
             ConversationListRow(
                 id = channel.id,
                 kind = ConversationRowKind.CHANNEL,
@@ -693,10 +713,14 @@ internal fun rememberConversationRows(
                 preview = if (me.lakko.app.channels.channelIsOrphaned(channel.id, orphanedChannels)) {
                     strings["channels.keys_reset.row_sub"]
                 } else {
-                    model.subtitle
+                    newest?.text ?: model.subtitle
                 },
-                time = model.time,
-                lastActivityMs = model.sortMs,
+                time = if (newest != null && newest.serverTsMs >= model.sortMs) {
+                    formatListTime(newest.serverTsMs, now, zone, use24h, locale)
+                } else {
+                    model.time
+                },
+                lastActivityMs = newestMs,
                 // Pinned, muted and archived are keyed on a conversation id a
                 // channel does not carry, so a channel row shows none of them
                 // (section 6.1). Its count is the feed's channel read state.
@@ -731,32 +755,32 @@ internal class RowHandlers(
 
 /** One tab's rows. [folder] is the tab (`null` = All chats). */
 @Composable
-private fun MembershipEndBanner(
-    notice: me.lakko.app.chat.MembershipEndNotice,
-    onClose: () -> Unit,
+private fun EndNoticeHost(
+    notices: List<me.lakko.app.chat.MembershipEndNotice>,
+    onShown: (Collection<String>) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val fallback = t("chat.group.fallback_name")
+    val text = me.lakko.app.chat.endNoticeText(notices, fallback) ?: return
+    val ids = notices.map { it.idHex }.toSet()
+    // Restarted by a new removal (the set changes): the combined text gets
+    // its own 4 seconds.
+    LaunchedEffect(ids) {
+        kotlinx.coroutines.delay(me.lakko.app.chat.END_NOTICE_SHOW_MS)
+        onShown(ids)
+    }
     androidx.compose.material3.Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.inverseSurface,
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+        shadowElevation = 4.dp,
+        modifier = modifier.semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-        ) {
-            Text(
-                text = me.lakko.app.chat.endNoticeLine(notice.name, fallback).text(),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onClose) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = t("common.close"),
-                )
-            }
-        }
+        Text(
+            text = text.text(),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        )
     }
 }
 
@@ -1627,3 +1651,11 @@ private fun NoMatchPanel() {
 /** A plain spoken label on a decorative glyph. */
 private fun Modifier.semanticsLabel(label: String): Modifier =
     this.semantics { contentDescription = label }
+
+/** The newest post of a channel's log that has text to show, as one line;
+ *  `null` when the device holds none (docs/ux/navigation.md section 2). */
+internal fun channelLastPost(slot: me.lakko.app.feed.ChannelPostSlot?): me.lakko.app.feed.PersistedChannelPost? {
+    val newest = slot?.posts?.maxByOrNull { it.cursor } ?: return null
+    val line = newest.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
+    return newest.copy(text = line)
+}

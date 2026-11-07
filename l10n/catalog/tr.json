@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "tr",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "Hesabınızın yeni anahtarları var. Değişikliği tamamlıyoruz.",
@@ -1238,8 +1237,136 @@
       "text": "Bu katılımcının medyası çözülemiyor",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "Aboneler herhangi bir emoji ile tepki verebilir.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "Aboneler gönderilere tepki veremez.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "Aboneler yalnızca seçtiğiniz emojilerle tepki verebilir.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "Aramadan ve Keşfet'ten çıkar. İnsanlar yalnızca siz davet ederseniz abone olabilir. Tüm aboneler kalır.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "Bu kanal özel yapılsın mı?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "Herkes onu bulup okuyabilir ve Lakko onu Keşfet'te önerebilir. Adı, fotoğrafı ve açıklaması herkese görünür olur. Önceki gönderileri yalnızca zaten abone olanlar okuyabilir.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "Bu kanal herkese açık yapılsın mı?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "Eski @ad şimdi çalışmayı bırakır. 30 gün boyunca bu kanal için ayrılmış kalır.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "Bunu yalnızca aboneler görür.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "Herkes bu kanalı bu adla bulabilir.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "Yalnızca davet ettiğiniz kişiler abone olabilir. Aramada görünmez.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "Herkes bu kanalı bulup abone olabilir. Lakko onu Keşfet'te önerebilir.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "Kanal türü",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "Aboneler güncelleniyor... {done} / {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "Kimler abone olabilir",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "Kanallara dön",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "Yorumlardan engelle",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "Engellenen kimse yok.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "Kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "Engellenenler",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "Engeli kaldır",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "Biri",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "Yorum işlemleri",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "Yorum yap",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "Yorum silinemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "Yorumlar yüklenmedi.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "Yorumları gizle",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "Bu yorum çok uzun veya gönderilemeyen karakterler içeriyor.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "Daha fazla göster",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# yeni yorum} other {# yeni yorum}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {# yorum daha göster} other {# yorum daha göster}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "Daha fazla yorum göster",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "Yorum yaz",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "Ortak yayıncılar",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "Kanal ve gönderileri tüm cihazlarınızdan kaldırılır ve @{name} 30 gün sonra serbest kalır. Bu geri alınamaz.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "Kanal ve gönderileri tüm cihazlarınızdan kaldırılır. Bu geri alınamaz.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "Kanalı sil",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "Kanal silinemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "Bu kanal silinsin mi?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "Kanal oluştur",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "Henüz kanal yok",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "Kanal ve gönderileri artık cihazlarınızda değil.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "Kanal bulunamadı: {handle}.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "Özel kanal",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "Herkese açık kanal",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "Herkese açık kanal · {band} abone",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "Bir kanal seçin veya oluşturun",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "Bu kanalın @name'i yok. Bir tane seçin.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "Davet et",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "Kişileri davet et",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "Adı ve açıklaması, kimin okuduğu ve başka kimin paylaşabileceği.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "Yayıncılar",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "Kanalı listenizden kaldırır ve gönderilerini tüm cihazlarınızdan siler. Daha sonra yeniden abone olabilirsiniz.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "{names} davet edilemedi. Tekrar deneyin.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "Bu ortak yayıncı davet bağlantısı Lakko'nun eski bir sürümüyle oluşturuldu ve artık çalışmıyor. Kanal sahibinden yeni bir davet bağlantısı isteyin.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "Abone olmak için bir hesabınız olmalı. Hesap oluşturun veya giriş yapın.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "Bir kanala katıl",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "Abone olundu. Gönderiler, sahip veya bir yönetici Lakko'yu bir sonraki açışında görünür.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "Bağlantı oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "Bu cihaz henüz bu kanal için bağlantı oluşturamaz. Sahibin cihazı Lakko'yu açtığında oluşturabilecek.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "Bağlantı iptal edilemedi. Tekrar deneyin.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "Kanal",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "Yorumlardan yasakla",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "Yasaklılar",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "Yasağı kaldır",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "Oluştur",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "Açıklama",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "Kanal oluşturmak için tekrar giriş yapın.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "Bu kanal oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "Başkaları kanalı bununla bulabilir ve abone olabilir.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@kanalim",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "Kanal adı",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "Aboneler adı ve açıklamayı görür.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "Yeni kanal",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "Bugün çok fazla kanal oluşturdunuz. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "Yeni kanal veya bir kanala katıl",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "Fotoğrafı yalnızca sahip değiştirebilir.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "Aboneler bunun yerine baş harflerini görür.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "Kanal fotoğrafı kaldırılsın mı?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "Kullanılamıyor",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "Buraya yalnızca sahip ve yayıncılar gönderi paylaşabilir.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "Bu gönderi, bu cihazın okuyabileceğinden daha eski.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "Bu gönderi kullanılamıyor.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "Bu gönderi bu cihazda açılamadı.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "Önceki gönderiler kullanılamıyor.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "Bu kanala gönderi yapmak için yeniden oturum açın.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "Kabul et",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "Yayıncı ekle",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "{channel} kanalında yayıncı olmaya davet edildiniz.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} sizi {channel} kanalında yayıncı olmaya davet ediyor.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "Yayıncıyı kaldır",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "{name} yayıncılıktan kaldırılsın mı? Artık gönderi paylaşamaz veya davet edemez.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "Yayıncı kaldırılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {Yayıncılık için # istek} other {Yayıncılık için # istek}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "Sahip",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "Yayıncı",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "Görevi bırak",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "Bu kanalda artık paylaşım yapmayacak ve davet etmeyeceksiniz. Sahibin cihazı Lakko'yu bir sonraki açışında bunu uygular.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "Görev bırakılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "Tamam. Sahibin cihazı Lakko'yu bir sonraki açışında bunu uygular.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "Kanaldaki tepkiler anonimdir. Kimin tepki verdiğini kimse göremez, kanalın sahibi bile.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "Kanaldaki tepkiler anonimdir. Kimin tepki verdiğini kimse göremez, kanalın sahibi bile.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "Aboneler yüklenemedi. Tekrar deneyin.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "Bir davetle",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "\"{label}\" bağlantısından",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "Aboneler yüklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "Daha fazla göster",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "Henüz abone yok.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {# kişi daha.} other {# kişi daha.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "Yeni gönderileri almayı bırakır.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "Bu abone kaldırılsın mı?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "Tekrar deneniyor...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "Aboneler",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "Aboneler ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "Takibi bırak",
+      "text": "Abonelikten çık",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "Bu kanalın takibi bırakılsın mı?",
+      "text": "Bu kanalın aboneliğinden çıkılsın mı?",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "Takip bırakılsın mı: {name}?",
+      "text": "{name} aboneliğinden çıkılsın mı?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "Grup ve mesajları cihazlarınızdan silindi.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {Artık {name} ve # diğer sohbet içinde değilsiniz.} other {Artık {name} ve # diğer sohbet içinde değilsiniz.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "Asla",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "Grup ve kanal bağlantıları",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "Kanal bağlantısı",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "Grup bağlantısı",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "Ortak yayıncı bağlantısı",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "Etiket (isteğe bağlı)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "Beni kimler bulabilir",
       "status": "machine"
     }
-  }
+  },
+  "language": "tr"
 }

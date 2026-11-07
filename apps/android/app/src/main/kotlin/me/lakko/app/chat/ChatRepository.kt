@@ -139,7 +139,9 @@ private const val OWN_ROSTER_WAITS: Int = 10
 private const val OWN_ROSTER_WAIT_MS: Long = 500L
 
 /** ADR-0053 — at most one knock-queue read per group in this window. */
-private const val KNOCK_POLL_MIN_INTERVAL_MS: Long = 10_000L
+// Raised from 10 s on 2026-11-05 to bring idle request volume down (chosen,
+// not measured): a join request waits up to a minute for an admin's device.
+private const val KNOCK_POLL_MIN_INTERVAL_MS: Long = 60_000L
 
 /** ADR-0053 — the [DsSignerRegistry] owner tag of the journals this repository
  *  installs, so a session wipe drops exactly those. */
@@ -414,6 +416,10 @@ public class ChatRepository(
         val work = SessionWork(sessionBinding.capture())
         return launchBound(sessionBinding) { withContext(work, block) }
     }
+
+    /** UX 9 — the removals noticed in this session that no one has seen yet:
+     *  in memory only, gone with the process. */
+    private val liveEndNotices = LinkedHashMap<String, MembershipEndNotice>()
 
     init {
         // ADR-0073 R.5 — a lineage register that arrives (this device's own
@@ -1189,6 +1195,8 @@ public class ChatRepository(
             }
             // ADR-0087 section 9 — an end owed from before: its row is gone
             // from the list from the first frame, and nothing polls it.
+            // UX 9 — notices belong to the session of one account.
+            synchronized(liveEndNotices) { liveEndNotices.clear() }
             loadOwedEndsBestEffort(newAccountIdB64)
             mutableState.update { it.copy(bootstrapped = true) }
             // ADR-0073 R.7 case 1 — the messages held when the process died.
@@ -2476,6 +2484,20 @@ public class ChatRepository(
             // here, after the join, so it is served by a KeyPackage minted
             // after it.
             if (!forAnotherDevice) requestKeyPackageRepublish()
+        }
+    }
+
+    /**
+     * ADR-0060 section 1 (2026-11-06) — the founder's account key a Welcome
+     * names, read without joining (`peekWelcomeFounder`), so a row admitted by
+     * a retired contact key can be dropped before anything is joined. Throws
+     * when the Welcome cannot be read.
+     */
+    public suspend fun welcomeFounderAccountKey(welcomeBytes: ByteArray): ByteArray = forSession {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+        providerLock.sessionLock {
+            uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcomeBytes, identity).founderAccountKey
         }
     }
 
@@ -4266,6 +4288,20 @@ public class ChatRepository(
                 ),
             )
         }
+        // ADR-0087 phase B — filed in the account's link register too, so
+        // every device of the account lists and revokes it.
+        me.lakko.app.channels.GroupLinkRegister.record(
+            entry = me.lakko.app.channels.LinkRegisterEntry(
+                kind = uniffi.lakko_ffi_uniffi.LinkRecordKind.GROUP,
+                targetId = groupId,
+                label = groupName.orEmpty(),
+            ),
+            ledgerId = blobId,
+            linkSecret = mint.linkSecret,
+            revocationSeed = revocationSeed,
+            capability = mint.sealed,
+            maxUses = 0xFFFFFFFFL,
+        )
         revocationSeed.fill(0)
         return me.lakko.app.discovery.composeSealedInviteUrl(
             origin = GROUP_INVITE_DEFAULT_ORIGIN,
@@ -4399,6 +4435,8 @@ public class ChatRepository(
                         groupName = it.groupName,
                         inviterName = it.inviterName,
                         memberCount = it.memberCount.toInt(),
+                        channelId = it.channelId,
+                        subscriber = it.subscriber,
                     )
                 }
             }
@@ -4665,6 +4703,9 @@ public class ChatRepository(
         /** The message's row is in the conversation (it reads "Sending...",
          *  then "Not sent" with a Retry when the publish fails). */
         onRowShown: () -> Unit = {},
+        /** ADR-0087 section 14 — a channel invitation card beside the text
+         *  (the text is the link, so a reader without cards still has it). */
+        channelInvite: ByteArray? = null,
     ): Unit =
         forSession {
             sendMessageOnMlsThread(
@@ -4674,6 +4715,7 @@ public class ChatRepository(
                 reply = reply,
                 forward = forward,
                 onRowShown = onRowShown,
+                channelInvite = channelInvite,
             )
         }
 
@@ -4684,6 +4726,7 @@ public class ChatRepository(
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
         onRowShown: () -> Unit = {},
+        channelInvite: ByteArray? = null,
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -4718,6 +4761,7 @@ public class ChatRepository(
             authorKey = null,
             reply = reply,
             forward = forward,
+            channelInvite = channelInvite,
         )
         publishThreadList()
         onRowShown()
@@ -4731,6 +4775,7 @@ public class ChatRepository(
                 attachments = attachments,
                 reply = reply,
                 forward = forward,
+                channelInvite = channelInvite,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -4792,6 +4837,7 @@ public class ChatRepository(
                 // place either was ever kept. The forward attribution too.
                 reply = row.reply,
                 forward = row.forward,
+                channelInvite = row.channelInvite,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -4810,6 +4856,7 @@ public class ChatRepository(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
         reply: ReplyRef? = null,
         forward: ForwardRef? = null,
+        channelInvite: ByteArray? = null,
     ) {
         flushOwedProfileBeforeSend(groupIdHex)
         groupLock(groupIdHex).sessionLock {
@@ -4829,7 +4876,10 @@ public class ChatRepository(
             // crosses as STANDARD base64 of the raw id, while the app keys
             // groups on hex, so the conversion happens here, once.
             val envelopeBytes = try {
-                if (forward != null) {
+                if (channelInvite != null) {
+                    // ADR-0087 section 14 — the card rides beside the text.
+                    uniffi.lakko_ffi_uniffi.composeChannelInviteEnvelope(plaintext, channelInvite)
+                } else if (forward != null) {
                     uniffi.lakko_ffi_uniffi.composeForwardEnvelope(
                         text = plaintext,
                         attachments = attachments,
@@ -5388,6 +5438,11 @@ public class ChatRepository(
         return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.displayName
     }
 
+    /** ADR-0060 section 1 (2026-11-06) — whether the person holding a key was
+     *  removed from the contacts (installed by the contacts repository). */
+    @Volatile
+    internal var contactGrantWithheldFor: ((peerKey: ByteArray) -> Boolean)? = null
+
     /** This account's own profile in wire form for [groupIdHex], or `null`
      *  when none is stored yet (nothing to publish). */
     private fun ownProfileForWire(groupIdHex: String, group: Group): uniffi.lakko_ffi_uniffi.FfiProfile? {
@@ -5396,7 +5451,19 @@ public class ChatRepository(
         // username; a group carries `member` always, and `group` + the username
         // only where the setting lets its members find this person.
         val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-        val grants = reach.profileGrants(groupIdHex, oneToOne = isOneToOne(group))
+        val oneToOne = isOneToOne(group)
+        val offered = reach.profileGrants(groupIdHex, oneToOne = oneToOne)
+        // ADR-0060 section 1 — after Remove contact the removed person's own
+        // one-to-one gets no contact grant, or the rotation hands them the new
+        // key.
+        val withheld = oneToOne && contactGrantWithheldFor?.let { removed ->
+            val own = ownAccountKeysB64()
+            runCatching { group.members() }.getOrNull().orEmpty()
+                .map { it.accountKey }
+                .filter { it.size == 32 && outboxB64(it) !in own }
+                .any(removed)
+        } == true
+        val grants = offered.copy(grants = withoutContactGrant(offered.grants, withheld))
         // ADR-0048 v2 — the profile states this account's id, so a member who
         // is not a contact can still name this device's call tile (ADR-0021).
         return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.toFfi(
@@ -5529,6 +5596,18 @@ public class ChatRepository(
                 android.util.Log.i("ChatRepository", "ADR-0076: username certificate not fetched: ${cause.javaClass.simpleName}")
             }
         }
+    }
+
+    /**
+     * ADR-0060 section 1 (2026-11-06) — a current contact wrote with a retired
+     * `contact` key: the profile, carrying the current contact grant, goes
+     * into the one-to-one with them. Nothing is shown. `false` when this
+     * device holds no one-to-one with [peerKey].
+     */
+    public fun regrantContact(peerKey: ByteArray): Boolean {
+        val hex = chatGroupIdHexFor(null, peerKey) ?: return false
+        profileRepublish.publishNowToAll(listOf(hex))
+        return true
     }
 
     /**
@@ -13722,6 +13801,7 @@ public class ChatRepository(
         // would read "Waiting to leave." on a later membership.
         val hex = groupIdHex.lowercase()
         val landed = membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }
+        dismissEndNotices(listOf(hex))
         if (landed != null) {
             if (landed.stage == EndStage.NOTICE_ONLY) {
                 membershipEnds.remove(accountIdB64, hex)
@@ -13910,6 +13990,7 @@ public class ChatRepository(
         )
         // Not saved: nothing ran, and the launch sweep sees this state again.
         if (!membershipEnds.save(accountIdB64, row)) return
+        noteLiveEndNotice(row)
         endingGroups += hex
         android.util.Log.i("ChatRepository", "ADR-0087: this account is out of a group")
     }
@@ -13917,15 +13998,41 @@ public class ChatRepository(
     /** Whether an end of this group is recorded and not yet carried out. */
     public fun isEndOwed(groupIdHex: String): Boolean = groupIdHex.lowercase() in endingGroups
 
-    /** Fill [endingGroups] and the state from the durable rows. */
+    /** Fill [endingGroups] and the state from the durable rows. A notice is
+     *  never stored (UX 9): a row an older build kept only for its notice is
+     *  dropped, and no notice is shown at a start. */
     private fun loadOwedEndsBestEffort(accountIdB64: String) {
         val rows = try {
             membershipEnds.load(accountIdB64)
         } catch (_: Throwable) {
             emptyList()
         }
+        for (row in rows) if (row.stage == EndStage.NOTICE_ONLY) membershipEnds.remove(accountIdB64, row.idHex)
         endingGroups += endingIdsOf(rows)
-        mutableState.update { it.copy(endNotices = endNoticesOf(rows), endingIds = endingGroups.toSet()) }
+        val live = synchronized(liveEndNotices) { liveEndNotices.values.toList() }
+        mutableState.update { it.copy(endNotices = live, endingIds = endingGroups.toSet()) }
+    }
+
+    private fun noteLiveEndNotice(row: OwedEnd) {
+        if (!row.noticeOwed) return
+        synchronized(liveEndNotices) {
+            liveEndNotices[row.idHex] = MembershipEndNotice(row.idHex, row.name, row.recordedAtMs)
+        }
+        publishLiveEndNotices()
+    }
+
+    private fun publishLiveEndNotices() {
+        val list = synchronized(liveEndNotices) { liveEndNotices.values.toList() }
+        mutableState.update { it.copy(endNotices = list) }
+    }
+
+    /** UX 9 — the bottom notice was shown for [ids] (or the dialog in the
+     *  conversation was answered): they are not shown again. */
+    public fun dismissEndNotices(ids: Collection<String>) {
+        val changed = synchronized(liveEndNotices) {
+            ids.map { liveEndNotices.remove(it.lowercase()) != null }.any { it }
+        }
+        if (changed) publishLiveEndNotices()
     }
 
     /** Publish what the durable rows say, and the list without what is ending. */
@@ -13971,7 +14078,9 @@ public class ChatRepository(
                 }
                 HeardEndVerdict.ACT -> {
                     val name = GroupNameStore.name(applicationContext, accountIdB64, end.idHex).orEmpty()
-                    if (membershipEnds.save(accountIdB64, heardEnd(end.idHex, name, end.epoch))) {
+                    val row = heardEnd(end.idHex, name, end.epoch)
+                    if (membershipEnds.save(accountIdB64, row)) {
+                        noteLiveEndNotice(row)
                         endingGroups += end.idHex
                     }
                 }
@@ -13990,7 +14099,10 @@ public class ChatRepository(
         publishEndState()
         membershipEndRun.sessionLock {
             for (row in membershipEnds.load(accountIdB64)) {
-                if (row.stage == EndStage.NOTICE_ONLY) continue
+                if (row.stage == EndStage.NOTICE_ONLY) {
+                    membershipEnds.remove(accountIdB64, row.idHex)
+                    continue
+                }
                 // Recorded, and then the snapshot that holds the commit did not
                 // land: the commit comes round again, and the seam with it.
                 val record = groups[row.idHex]
@@ -14281,27 +14393,16 @@ public class ChatRepository(
         }
     }
 
-    /** The notice was closed: the name goes with it. */
+    /** The notice was closed (the dialog's OK): the name goes with it. */
     public fun dismissEndNotice(idHex: String) {
-        val accountIdB64 = currentAccountIdB64.get() ?: return
-        val hex = idHex.lowercase()
-        if (membershipEnds.load(accountIdB64).any { it.idHex == hex && it.stage == EndStage.NOTICE_ONLY }) {
-            membershipEnds.remove(accountIdB64, hex)
-        } else {
-            // Still running: the steps finish without saying anything.
-            membershipEnds.load(accountIdB64).firstOrNull { it.idHex == hex }?.let {
-                membershipEnds.save(accountIdB64, it.copy(noticeClosed = true))
-            }
-        }
-        publishEndState()
+        dismissEndNotices(listOf(idHex))
     }
 
-    /** A channel went on another device (ADR-0087 section 9.5): the channel
-     *  layer dropped it, and the person is told like for a group. */
+    /** A channel went (ADR-0087 section 9.5): the channel layer dropped it,
+     *  and the person is told like for a group, live and never stored. */
     public fun noteChannelEndHeard(channelIdHex: String, name: String) {
-        val accountIdB64 = currentAccountIdB64.get() ?: return
-        val row = heardEnd(channelIdHex, name, 0u).copy(stage = EndStage.NOTICE_ONLY)
-        if (membershipEnds.save(accountIdB64, row)) publishEndState()
+        if (currentAccountIdB64.get() == null) return
+        noteLiveEndNotice(heardEnd(channelIdHex, name, 0u))
     }
 
     /**
@@ -16171,6 +16272,11 @@ public data class ChatMessage(
      */
     val unsupportedVersion: Long? = null,
     /**
+     * ADR-0087 section 14 — the channel invitation card the message carries
+     * beside its text (`openChannelInviteCard`), `null` for every other row.
+     */
+    val channelInvite: ByteArray? = null,
+    /**
      * ADR-0073 R.5 — set on a row of an OLDER segment of the conversation, as
      * the folded timeline shows it ([foldConversations]): the hex id of the
      * group the row is stored in. Such a row is read-only history; its
@@ -16453,6 +16559,8 @@ private class GroupRecord(
         /** ADR-0052 decision 2 — carried on the row so the sender sees its
          *  own "Forwarded from" line, and so a retry sends it again. */
         forward: ForwardRef? = null,
+        /** ADR-0087 section 14 — a channel invitation card, likewise. */
+        channelInvite: ByteArray? = null,
     ) {
         messages.add(
             ChatMessage(
@@ -16466,6 +16574,7 @@ private class GroupRecord(
                 localId = localId,
                 reply = reply,
                 forward = forward,
+                channelInvite = channelInvite,
             ),
         )
     }
@@ -16673,6 +16782,8 @@ private class GroupRecord(
                         // ADR-0061 section 6 — a newer-version row, rendered
                         // from the catalog.
                         unsupportedVersion = event.unsupportedVersion,
+                        // ADR-0087 section 14 — a channel invitation card.
+                        channelInvite = event.channelInvite,
                     ),
                 )
                 is IncomingChatEvent.Op -> applyOpInternal(
@@ -17260,3 +17371,11 @@ public class GroupPhotoOwed : IllegalStateException("group photo owed")
 
 /** ADR-0087 section 3 — wait before checking an unverified @name again. */
 private const val HANDLE_VERIFY_RETRY_MS: Long = 60_000L
+
+/** ADR-0060 section 1 (2026-11-06) — [grants] without the `contact` grant
+ *  when [withhold] (a removed person's one-to-one), else unchanged. */
+internal fun withoutContactGrant(
+    grants: List<uniffi.lakko_ffi_uniffi.FfiReachGrant>,
+    withhold: Boolean,
+): List<uniffi.lakko_ffi_uniffi.FfiReachGrant> =
+    if (withhold) grants.filterNot { it.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.CONTACT } else grants

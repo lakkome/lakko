@@ -502,7 +502,10 @@ public final class ReachCenter: ObservableObject {
             record.fofRotatedAtMs = now
             rotateClasses([.fof], sync: false)
         }
-        let specs = desiredSpecs()
+        let registeredNow = Set(record.registeredB64.compactMap { Data(base64Encoded: $0) })
+        let specs = ReachRules.keepingRegisteredContactVersions(
+            desiredSpecs(), state: reachState, registered: registeredNow,
+            publicKey: { try? Self.publicKey(accountSeed: seed, spec: $0) })
         var desired: [(publicKey: Data, expiresAtMs: UInt64?)] = []
         for spec in specs {
             guard let pk = try? Self.publicKey(accountSeed: seed, spec: spec) else { continue }
@@ -893,6 +896,19 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Rotation
 
+    /// ADR-0060 section 1 (amended 2026-11-06) — what to do with a mailbox
+    /// row admitted by `provingKey` (the reach key the DS names on the row):
+    /// a retired `contact` key from a current contact is processed and the
+    /// contact gets the current grant; from anyone else it is dropped. A row
+    /// with no key, or no active account here, is processed as before.
+    public func mailboxRowVerdict(provingKey: Data?, senderIsContact: Bool) -> FfiContactKeyRowVerdict {
+        guard let provingKey, let seed = accountSeed else { return .process }
+        let current = ReachRules.version(of: .contact, scope: Data(), in: reachState)
+        return (try? mailboxRowContactVerdict(
+            accountSeed: seed, currentContactVersion: current, provingKey: provingKey,
+            senderIsContact: senderIsContact)) ?? .process
+    }
+
     /// Rotate one class — a new version, the old key unregistered on the next
     /// sync. Called when a contact is removed (`contact`, `fof`).
     public func rotate(_ reachClass: FfiReachClass) {
@@ -953,11 +969,14 @@ public final class ReachCenter: ObservableObject {
     /// The grants a profile in `groupId` carries (ADR-0060 section 3 / 6): in a
     /// one-to-one conversation `contact` + `member`; in a group `member`, plus
     /// `group` when the setting lets that group's members find the owner.
-    public func profileGrants(groupId: Data, oneToOne: Bool) -> [FfiReachGrant] {
+    /// `contactGrant` false: a one-to-one with a person this account removed
+    /// from its contacts carries no `contact` grant (ADR-0060 section 1, the
+    /// 2026-11-06 amendment: removing them rotated the key they held).
+    public func profileGrants(groupId: Data, oneToOne: Bool, contactGrant: Bool = true) -> [FfiReachGrant] {
         guard !groupId.isEmpty, groupId.count <= 64 else { return [] }
         var out: [FfiReachGrant] = []
         if oneToOne {
-            if let contact = grant(.contact, scope: Data()) { out.append(contact) }
+            if contactGrant, let contact = grant(.contact, scope: Data()) { out.append(contact) }
         } else if allowsScope(setting: setting, scope: ReachRules.groupScope(groupId)),
                   let group = grant(.group, scope: groupId) {
             out.append(group)

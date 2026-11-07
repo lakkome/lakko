@@ -29,12 +29,12 @@
  * through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
-import QRCode from "qrcode";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
+import { BrandedQr } from "../ui/BrandedQr";
 import { Icon } from "../ui/icons";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { LakkoPicker } from "../ui/LakkoPicker";
@@ -672,19 +672,12 @@ export function InviteLinksPanel(): JSX.Element {
 }
 
 /** The link as a QR code in a modal `<dialog>` (focus trap and Escape come
- *  with `showModal`). The code is drawn dark on a white tile in both themes:
+ *  with `showModal`). `BrandedQr` draws its own white card in both themes:
  *  a light-on-dark code does not scan on every camera. */
 function InviteQrDialog(props: { readonly row: LinkRow; readonly onClose: () => void }): JSX.Element {
   let dialog: HTMLDialogElement | undefined;
-  let canvas: HTMLCanvasElement | undefined;
   onMount(() => {
     dialog?.showModal();
-    const url = props.row.url;
-    if (url !== null && canvas !== undefined) {
-      void QRCode.toCanvas(canvas, url, { errorCorrectionLevel: "M", width: 256, margin: 2 }).catch(
-        (err: unknown) => console.warn("[contacts] invite QR render failed", err instanceof Error ? err.name : ""),
-      );
-    }
   });
   return (
     <dialog
@@ -698,9 +691,7 @@ function InviteQrDialog(props: { readonly row: LinkRow; readonly onClose: () => 
     >
       <div class="lk-qr-dialog-body">
         <Show when={props.row.label}>{(label) => <strong>{label()}</strong>}</Show>
-        <div class="lk-qr-tile">
-          <canvas ref={canvas} role="img" aria-label={t("common.qr_code")} />
-        </div>
+        <BrandedQr text={props.row.url ?? ""} size={264} />
         <span class="lk-meta">{props.row.meta()}</span>
         <p class="lk-muted">{t("invite.links.qr_hint")}</p>
         <div class="lk-actions">

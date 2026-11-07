@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The account's own reactions under channel posts, and their envelope
-//! ([ADR-0087] section 13a, "The account's own reactions").
+//! The account's own reactions under channel posts and on their comments,
+//! and their envelope ([ADR-0087] section 13a, "The account's own
+//! reactions").
 //!
 //! A reaction under a channel post is a row at the channel service signed by
 //! a key derived per post, so the service cannot link two of one person's
@@ -14,7 +15,10 @@
 //!
 //! ## The register
 //!
-//! `(channel id, post cursor, emoji) -> reacted | removed, post time`. One
+//! `(channel id, post cursor, comment cursor or none, emoji) -> reacted |
+//! removed, post time`: no comment cursor for a reaction on the post itself,
+//! the comment's cursor for a reaction on one of its comments (phase B,
+//! 2026-11-06). One
 //! register per reaction the account ever gave or took off; folded by the
 //! ordinary rule ([`super::state`]): the greater stamp wins, and on an exact
 //! tie the larger canonical bytes, where the state byte follows the key, so a
@@ -26,25 +30,28 @@
 //! **Bounded to the channel's retained posts.** `post_at_ms` is the server
 //! time of the post. A post leaves the channel service after
 //! [`CHANNEL_REACTION_RETENTION_MS`] (30 days), and it takes its entries with
-//! it: [`super::SyncedState::prune_channel_reactions`] drops every register
-//! whose post is older than that. The client calls it when it loads the
+//! it: [`super::SyncedState::prune_channel_activity`] drops every register
+//! whose post is older than that, a comment's reactions included (a comment
+//! lives as long as its post). The client calls it when it loads the
 //! state and after applying envelopes; an entry for a gone post that a late
 //! envelope brings back is harmless (nothing shows it) and goes at the next
 //! prune. [`CHANNEL_REACTIONS_MAX_CLIENT`] is a client-side limit on the
 //! writer, not a decode bound, as the other registers' limits are, and so is
 //! [`CHANNEL_REACTIONS_PER_POST_MAX`]: one person gives a post at most three
-//! reactions, which the service cannot check.
+//! reactions, and a comment at most three, which the service cannot check.
 //!
 //! ## Wire
 //!
 //! ```text
 //! domain(31) "lakko/sync/channel-reaction/v1\0"
-//! version(1) = 0x01
+//! version(1) = 0x02
 //! count(1)                    1..=32
 //! count x {
 //!     hlc(8, BE)              the register's ORIGINAL stamp
 //!     channel_id(16)
 //!     post_cursor(8, BE)
+//!     target(1)               1 the post, 2 a comment
+//!     comment_cursor(8, BE)   0 for the post; the comment's cursor
 //!     emoji_len(1)            1..=64
 //!     emoji
 //!     state(1)                1 reacted, 2 removed
@@ -52,7 +59,9 @@
 //! }
 //! ```
 //!
-//! Entries are sorted by `(channel_id, post_cursor, emoji bytes)`, strictly
+//! Version `0x01` (no target) is refused: a flag day. Entries are sorted by
+//! `(channel_id, post_cursor, comment or none, emoji bytes)`, the post's own
+//! reactions before its comments', strictly
 //! increasing; nothing may trail; the encoding is canonical and every
 //! violation refuses the whole envelope. It is not in the growth snapshot: a
 //! device re-sends [`super::SyncedState::channel_reaction_envelopes`] on
@@ -100,8 +109,9 @@ pub const CHANNEL_REACTIONS_PER_POST_MAX: usize = 3;
 /// Frozen.
 pub const CHANNEL_REACTION_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/sync/channel-reaction/v1\0";
 
-/// The version byte this build writes and accepts.
-pub const CHANNEL_REACTION_ENVELOPE_VERSION_V1: u8 = 0x01;
+/// The version byte this build writes and accepts: `0x02`, the layout with a
+/// target (phase B, 2026-11-06). `0x01` is refused.
+pub const CHANNEL_REACTION_ENVELOPE_VERSION: u8 = 0x02;
 
 /// Most entries one envelope carries.
 pub const CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES: usize = 32;
@@ -109,9 +119,12 @@ pub const CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES: usize = 32;
 const STATE_REACTED: u8 = 1;
 const STATE_REMOVED: u8 = 2;
 
-/// Fixed part of one envelope entry: hlc, channel id, cursor, emoji length,
-/// state, post time.
-const ENTRY_FIXED_LEN: usize = 8 + CHANNEL_REACTION_CHANNEL_ID_LEN + 8 + 1 + 1 + 8;
+const TARGET_POST: u8 = 1;
+const TARGET_COMMENT: u8 = 2;
+
+/// Fixed part of one envelope entry: hlc, channel id, post cursor, target,
+/// comment cursor, emoji length, state, post time.
+const ENTRY_FIXED_LEN: usize = 8 + CHANNEL_REACTION_CHANNEL_ID_LEN + 8 + 1 + 8 + 1 + 1 + 8;
 
 /// Shortest valid envelope: the header and one entry with a one-byte emoji.
 pub const CHANNEL_REACTION_ENVELOPE_MIN_LEN: usize =
@@ -130,6 +143,9 @@ pub struct ChannelReactionEntry {
     pub channel_id: [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
     /// The post's server cursor.
     pub post_cursor: u64,
+    /// `None` for a reaction on the post; the comment's server cursor for a
+    /// reaction on one of its comments.
+    pub comment_cursor: Option<u64>,
     /// The emoji, as the fixed list spells it.
     pub emoji: String,
     /// `true` while the reaction stands; `false` is the tombstone of one
@@ -154,8 +170,20 @@ impl ChannelReactionEntry {
     }
 
     /// The register key's parts, in the envelope's sort order.
-    pub(crate) fn sort_key(&self) -> ([u8; CHANNEL_REACTION_CHANNEL_ID_LEN], u64, &[u8]) {
-        (self.channel_id, self.post_cursor, self.emoji.as_bytes())
+    pub(crate) fn sort_key(
+        &self,
+    ) -> (
+        [u8; CHANNEL_REACTION_CHANNEL_ID_LEN],
+        u64,
+        Option<u64>,
+        &[u8],
+    ) {
+        (
+            self.channel_id,
+            self.post_cursor,
+            self.comment_cursor,
+            self.emoji.as_bytes(),
+        )
     }
 
     /// Whether the post this register names has left the channel service at
@@ -172,6 +200,16 @@ impl ChannelReactionEntry {
     pub(crate) fn encode_body(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.channel_id);
         out.extend_from_slice(&self.post_cursor.to_be_bytes());
+        match self.comment_cursor {
+            None => {
+                out.push(TARGET_POST);
+                out.extend_from_slice(&0u64.to_be_bytes());
+            },
+            Some(c) => {
+                out.push(TARGET_COMMENT);
+                out.extend_from_slice(&c.to_be_bytes());
+            },
+        }
         // A validated emoji is at most 64 bytes.
         out.push(u8::try_from(self.emoji.len()).unwrap_or(u8::MAX));
         out.extend_from_slice(self.emoji.as_bytes());
@@ -190,6 +228,13 @@ impl ChannelReactionEntry {
         let mut channel_id = [0u8; CHANNEL_REACTION_CHANNEL_ID_LEN];
         channel_id.copy_from_slice(id);
         let post_cursor = take_u64(cur)?;
+        let target = take_u8(cur)?;
+        let cursor = take_u64(cur)?;
+        let comment_cursor = match (target, cursor) {
+            (TARGET_POST, 0) => None,
+            (TARGET_COMMENT, c) => Some(c),
+            _ => return Err(BoundsError::ChannelReactionTarget.into()),
+        };
         let emoji_len = usize::from(take_u8(cur)?);
         if emoji_len == 0 || emoji_len > CHANNEL_REACTION_EMOJI_MAX_BYTES {
             return Err(BoundsError::ChannelReactionEmoji.into());
@@ -206,6 +251,7 @@ impl ChannelReactionEntry {
         Ok(Self {
             channel_id,
             post_cursor,
+            comment_cursor,
             emoji,
             reacted,
             post_at_ms,
@@ -219,14 +265,15 @@ pub enum ChannelReactionEnvelopeError {
     /// The bytes do not open with [`CHANNEL_REACTION_ENVELOPE_DOMAIN_V1`].
     #[error("not a channel-reaction envelope")]
     WrongDomain,
-    /// The version byte is not [`CHANNEL_REACTION_ENVELOPE_VERSION_V1`].
+    /// The version byte is not [`CHANNEL_REACTION_ENVELOPE_VERSION`].
     #[error("unknown channel-reaction envelope version")]
     UnknownVersion,
     /// The count is zero or above [`CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES`].
     #[error("channel-reaction envelope count is out of bounds")]
     Count,
     /// The bytes ended early, or an entry is malformed (an emoji length out
-    /// of bounds, not UTF-8, an unknown state byte).
+    /// of bounds, not UTF-8, an unknown state or target byte, a post target
+    /// with a comment cursor).
     #[error("channel-reaction envelope is truncated or malformed")]
     Truncated,
     /// Entries were not strictly increasing by key.
@@ -287,7 +334,7 @@ pub fn compose_channel_reaction_envelope(
     }
     let mut out = Vec::with_capacity(CHANNEL_REACTION_ENVELOPE_MAX_LEN);
     out.extend_from_slice(CHANNEL_REACTION_ENVELOPE_DOMAIN_V1);
-    out.push(CHANNEL_REACTION_ENVELOPE_VERSION_V1);
+    out.push(CHANNEL_REACTION_ENVELOPE_VERSION);
     out.push(count);
     for e in sorted {
         out.extend_from_slice(&e.hlc.to_be_bytes());
@@ -309,7 +356,7 @@ pub fn decode_channel_reaction_envelope(
         .strip_prefix(CHANNEL_REACTION_ENVELOPE_DOMAIN_V1)
         .ok_or(ChannelReactionEnvelopeError::WrongDomain)?;
     let version = take_u8(&mut cur).map_err(|_| ChannelReactionEnvelopeError::Truncated)?;
-    if version != CHANNEL_REACTION_ENVELOPE_VERSION_V1 {
+    if version != CHANNEL_REACTION_ENVELOPE_VERSION {
         return Err(ChannelReactionEnvelopeError::UnknownVersion);
     }
     let count =
@@ -352,6 +399,7 @@ mod tests {
             value: ChannelReactionEntry {
                 channel_id: [channel; 16],
                 post_cursor: cursor,
+                comment_cursor: None,
                 emoji: emoji.to_string(),
                 reacted,
                 post_at_ms: 1_700_000_000_000 + cursor,
@@ -359,21 +407,40 @@ mod tests {
         }
     }
 
+    fn on_comment(
+        channel: u8,
+        cursor: u64,
+        comment: u64,
+        emoji: &str,
+        reacted: bool,
+        hlc: u64,
+    ) -> Stamped<ChannelReactionEntry> {
+        let mut e = entry(channel, cursor, emoji, reacted, hlc);
+        e.value.comment_cursor = Some(comment);
+        e
+    }
+
     #[test]
     fn the_layout_is_pinned() {
         let wire = compose_channel_reaction_envelope(&[entry(1, 7, "\u{1F44D}", true, 9)])
             .unwrap_or_default();
         assert_eq!(CHANNEL_REACTION_ENVELOPE_DOMAIN_V1.len(), 31);
-        assert_eq!(CHANNEL_REACTION_ENVELOPE_MIN_LEN, 31 + 2 + 42 + 1);
+        assert_eq!(CHANNEL_REACTION_ENVELOPE_MIN_LEN, 31 + 2 + 51 + 1);
         assert_eq!(wire.len(), CHANNEL_REACTION_ENVELOPE_MIN_LEN + 3);
-        assert_eq!(wire[31], 0x01);
+        assert_eq!(wire[31], 0x02);
         assert_eq!(wire[32], 1);
         assert_eq!(&wire[33..41], &9u64.to_be_bytes());
         assert_eq!(&wire[41..57], &[1u8; 16]);
         assert_eq!(&wire[57..65], &7u64.to_be_bytes());
-        assert_eq!(wire[65], 4);
-        assert_eq!(&wire[66..70], "\u{1F44D}".as_bytes());
-        assert_eq!(wire[70], STATE_REACTED);
+        assert_eq!(wire[65], TARGET_POST);
+        assert_eq!(&wire[66..74], &[0u8; 8]);
+        assert_eq!(wire[74], 4);
+        assert_eq!(&wire[75..79], "\u{1F44D}".as_bytes());
+        assert_eq!(wire[79], STATE_REACTED);
+        let on = compose_channel_reaction_envelope(&[on_comment(1, 7, 12, "a", true, 9)])
+            .unwrap_or_default();
+        assert_eq!(on[65], TARGET_COMMENT);
+        assert_eq!(&on[66..74], &12u64.to_be_bytes());
         assert!(is_channel_reaction_envelope(&wire));
         assert!(!is_channel_reaction_envelope(b"lakko/sync/device-ack/v1\0"));
     }
@@ -401,6 +468,22 @@ mod tests {
                 entry(1, 1, "a", false, 2)
             ]),
             Err(ChannelReactionEnvelopeError::NotCanonical)
+        );
+        // A post's own reaction and the same emoji on its comments are three
+        // registers, the post's first.
+        let mixed = compose_channel_reaction_envelope(&[
+            on_comment(1, 1, 5, "a", true, 1),
+            on_comment(1, 1, 0, "a", true, 2),
+            entry(1, 1, "a", true, 3),
+        ])
+        .unwrap_or_default();
+        assert_eq!(
+            decode_channel_reaction_envelope(&mixed),
+            Ok(vec![
+                entry(1, 1, "a", true, 3),
+                on_comment(1, 1, 0, "a", true, 2),
+                on_comment(1, 1, 5, "a", true, 1)
+            ])
         );
         assert_eq!(
             compose_channel_reaction_envelope(&[]),
@@ -435,7 +518,7 @@ mod tests {
             );
         }
         let mut version = wire.clone();
-        version[31] = 2;
+        version[31] = 1;
         assert_eq!(
             decode_channel_reaction_envelope(&version),
             Err(ChannelReactionEnvelopeError::UnknownVersion)
@@ -452,18 +535,31 @@ mod tests {
             decode_channel_reaction_envelope(&trailing),
             Err(ChannelReactionEnvelopeError::Trailing)
         );
-        // The first entry's state byte (header 33, then 8 + 16 + 8 + 1 + 1).
+        // The first entry's state byte (header 33, then 8 + 16 + 8 + 9 + 1 + 1).
         let mut state = wire.clone();
-        state[33 + 34] = 3;
+        state[33 + 43] = 3;
         assert_eq!(
             decode_channel_reaction_envelope(&state),
             Err(ChannelReactionEnvelopeError::Truncated)
         );
         // The first entry's emoji length past the bound.
         let mut emoji = wire.clone();
-        emoji[33 + 32] = 65;
+        emoji[33 + 41] = 65;
         assert_eq!(
             decode_channel_reaction_envelope(&emoji),
+            Err(ChannelReactionEnvelopeError::Truncated)
+        );
+        // An unknown target, and a post target that names a comment.
+        let mut target = wire.clone();
+        target[33 + 32] = 3;
+        assert_eq!(
+            decode_channel_reaction_envelope(&target),
+            Err(ChannelReactionEnvelopeError::Truncated)
+        );
+        let mut stray = wire.clone();
+        stray[33 + 40] = 1;
+        assert_eq!(
+            decode_channel_reaction_envelope(&stray),
             Err(ChannelReactionEnvelopeError::Truncated)
         );
         let entry_len = ENTRY_FIXED_LEN + 1;
@@ -505,7 +601,16 @@ mod tests {
 
         #[test]
         fn round_trip(cursors in proptest::collection::btree_set(any::<u64>(), 1..=32), hlc in any::<u64>()) {
-            let entries: Vec<_> = cursors.iter().map(|c| entry(3, *c, "\u{2764}\u{FE0F}", c % 2 == 0, hlc)).collect();
+            let entries: Vec<_> = cursors
+                .iter()
+                .map(|c| {
+                    if c % 3 == 0 {
+                        on_comment(3, *c, c / 3, "\u{2764}\u{FE0F}", c % 2 == 0, hlc)
+                    } else {
+                        entry(3, *c, "\u{2764}\u{FE0F}", c % 2 == 0, hlc)
+                    }
+                })
+                .collect();
             let wire = compose_channel_reaction_envelope(&entries).unwrap_or_default();
             prop_assert!(wire.len() <= CHANNEL_REACTION_ENVELOPE_MAX_LEN);
             prop_assert_eq!(decode_channel_reaction_envelope(&wire), Ok(entries));

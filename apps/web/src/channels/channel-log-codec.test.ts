@@ -151,6 +151,7 @@ describe("channel log codec", () => {
       publisherLeafKeyB64: null,
       coPublisherGroupIds: [],
       publisherCommits: [],
+      channelAccess: [],
     });
     const back = decodeChannelLog(wire)!;
     expect(back.channels).toEqual([]);

@@ -302,6 +302,9 @@ export interface WantedReachKey {
   readonly scopeHex: string;
   readonly version: number;
   readonly expiresAtMs: number | null;
+  /** A retired `contact` version: kept while it is registered, never added
+   *  (a restored device does not register a key it no longer holds there). */
+  readonly keepOnly?: boolean;
 }
 
 /** What the setting and the account's current scopes allow. */
@@ -319,6 +322,11 @@ export interface ReachInputs {
   /** Everyone. */
   readonly everyone: boolean;
   readonly nowMs: number;
+  /** The `contact` versions kept registered while `current` is the current
+   *  one: `current` and the retired ones the DS still accepts
+   *  (`contactKeyVersions`, ADR-0060 section 1 as amended 2026-11-06).
+   *  Absent: the current one alone. */
+  readonly contactVersions?: (current: number) => readonly number[];
 }
 
 /**
@@ -337,7 +345,17 @@ export interface ReachInputs {
  */
 export function desiredReachKeys(book: ReachBook, inputs: ReachInputs): WantedReachKey[] {
   const out: WantedReachKey[] = [];
-  out.push({ cls: "contact", scopeHex: "", version: versionOf(book, "contact", ""), expiresAtMs: null });
+  // Every contact version in the window stays registered (no expiry): a
+  // contact still holding a retired grant is admitted, and the receiving
+  // device decides (`mailboxRowContactVerdict`). Only a version that left the
+  // window is removed.
+  const currentContact = versionOf(book, "contact", "");
+  const contactVersions = inputs.contactVersions?.(currentContact) ?? [currentContact];
+  out.push({ cls: "contact", scopeHex: "", version: currentContact, expiresAtMs: null });
+  for (const v of new Set(contactVersions)) {
+    if (v === currentContact) continue;
+    out.push({ cls: "contact", scopeHex: "", version: v, expiresAtMs: null, keepOnly: true });
+  }
   if (inputs.groupIdsHex.length > 0) {
     out.push({ cls: "member", scopeHex: "", version: versionOf(book, "member", ""), expiresAtMs: null });
   }

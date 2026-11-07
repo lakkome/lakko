@@ -13,8 +13,8 @@
 use sqlx::{MySqlPool, Row};
 
 use crate::feedback::{
-    top_labels, Label, PostReactionCounts, StoredComment, WriterKey, MAX_LABELS_PER_POST,
-    WRITE_NONCE_LEN,
+    top_labels, CommentReactionCounts, Label, PostReactionCounts, StoredComment, WriterKey,
+    MAX_LABELS_PER_POST, WRITE_NONCE_LEN,
 };
 use crate::storage::{ChannelId, StorageError};
 
@@ -154,6 +154,9 @@ pub(crate) async fn add_comment(
     if !has_post(pool, channel, post_cursor).await? {
         return Err(StorageError::UnknownPost);
     }
+    // The row and the post's maintained count move together (migration
+    // 0012), so the count a reader gets never runs ahead of the rows.
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let res = sqlx::query(
         "INSERT INTO channel_comments \
          (channel_id, post_cursor, writer_key, sealed, created_at_ms) VALUES (?, ?, ?, ?, ?)",
@@ -163,13 +166,28 @@ pub(crate) async fn add_comment(
     .bind(writer_key.as_slice())
     .bind(sealed)
     .bind(now_ms)
-    .execute(pool)
+    .execute(&mut *tx)
     .await;
-    match res {
-        Ok(r) => Ok(r.last_insert_id()),
-        Err(e) if is_fk_violation(&e) => Err(StorageError::UnknownPost),
-        Err(e) => Err(db_err(e)),
+    let id = match res {
+        Ok(r) => r.last_insert_id(),
+        Err(e) if is_fk_violation(&e) => return Err(StorageError::UnknownPost),
+        Err(e) => return Err(db_err(e)),
+    };
+    let counted = sqlx::query(
+        "INSERT INTO channel_comment_counts (channel_id, post_cursor, comments) VALUES (?, ?, 1) \
+         ON DUPLICATE KEY UPDATE comments = comments + 1",
+    )
+    .bind(channel.as_bytes().as_slice())
+    .bind(post_cursor)
+    .execute(&mut *tx)
+    .await;
+    match counted {
+        Ok(_) => {},
+        Err(e) if is_fk_violation(&e) => return Err(StorageError::UnknownPost),
+        Err(e) => return Err(db_err(e)),
     }
+    tx.commit().await.map_err(db_err)?;
+    Ok(id)
 }
 
 pub(crate) async fn comment_writer(
@@ -197,16 +215,157 @@ pub(crate) async fn delete_comment(
     post_cursor: u64,
     comment_cursor: u64,
 ) -> Result<bool, StorageError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let res = sqlx::query(
         "DELETE FROM channel_comments WHERE id = ? AND channel_id = ? AND post_cursor = ?",
     )
     .bind(comment_cursor)
     .bind(channel.as_bytes().as_slice())
     .bind(post_cursor)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let removed = res.rows_affected() > 0;
+    if removed {
+        sqlx::query(
+            "UPDATE channel_comment_counts SET comments = comments - 1 \
+             WHERE channel_id = ? AND post_cursor = ? AND comments > 0",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(post_cursor)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    Ok(removed)
+}
+
+pub(crate) async fn comment_counts(
+    pool: &MySqlPool,
+    channel: ChannelId,
+    post_cursors: &[u64],
+) -> Result<Vec<(u64, u64)>, StorageError> {
+    let mut out = Vec::with_capacity(post_cursors.len());
+    for &post_cursor in post_cursors {
+        // One primary-key lookup per post; the caller bounds how many.
+        let row: Option<(u64,)> = sqlx::query_as(
+            "SELECT comments FROM channel_comment_counts WHERE channel_id = ? AND post_cursor = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(post_cursor)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err)?;
+        out.push((post_cursor, row.map_or(0, |(n,)| n)));
+    }
+    Ok(out)
+}
+
+pub(crate) async fn add_comment_reaction(
+    pool: &MySqlPool,
+    channel: ChannelId,
+    post_cursor: u64,
+    comment_cursor: u64,
+    writer_key: WriterKey,
+    label: Label,
+    now_ms: u64,
+) -> Result<bool, StorageError> {
+    if comment_writer(pool, channel, post_cursor, comment_cursor)
+        .await?
+        .is_none()
+    {
+        return Err(StorageError::UnknownComment);
+    }
+    let res = sqlx::query(
+        "INSERT IGNORE INTO channel_comment_reactions \
+         (comment_id, writer_key, label, created_at_ms) VALUES (?, ?, ?, ?)",
+    )
+    .bind(comment_cursor)
+    .bind(writer_key.as_slice())
+    .bind(label.as_slice())
+    .bind(now_ms)
+    .execute(pool)
+    .await;
+    match res {
+        Ok(r) if r.rows_affected() == 1 => Ok(true),
+        // As for a post: INSERT IGNORE turns a missing parent into a warning.
+        Ok(_) => {
+            if comment_writer(pool, channel, post_cursor, comment_cursor)
+                .await?
+                .is_some()
+            {
+                Ok(false)
+            } else {
+                Err(StorageError::UnknownComment)
+            }
+        },
+        Err(e) if is_fk_violation(&e) => Err(StorageError::UnknownComment),
+        Err(e) => Err(db_err(e)),
+    }
+}
+
+pub(crate) async fn delete_comment_reaction(
+    pool: &MySqlPool,
+    channel: ChannelId,
+    post_cursor: u64,
+    comment_cursor: u64,
+    writer_key: WriterKey,
+    label: Label,
+) -> Result<bool, StorageError> {
+    // The comment id is global; the join keeps a request naming another
+    // channel's comment from touching its rows.
+    let res = sqlx::query(
+        "DELETE r FROM channel_comment_reactions r \
+         JOIN channel_comments c ON c.id = r.comment_id \
+         WHERE r.comment_id = ? AND r.writer_key = ? AND r.label = ? \
+           AND c.channel_id = ? AND c.post_cursor = ?",
+    )
+    .bind(comment_cursor)
+    .bind(writer_key.as_slice())
+    .bind(label.as_slice())
+    .bind(channel.as_bytes().as_slice())
+    .bind(post_cursor)
     .execute(pool)
     .await
     .map_err(db_err)?;
     Ok(res.rows_affected() > 0)
+}
+
+pub(crate) async fn comment_reaction_counts(
+    pool: &MySqlPool,
+    channel: ChannelId,
+    post_cursor: u64,
+    comment_cursors: &[u64],
+) -> Result<Vec<CommentReactionCounts>, StorageError> {
+    let mut out = Vec::with_capacity(comment_cursors.len());
+    let limit = i64::try_from(MAX_LABELS_PER_POST).unwrap_or(64);
+    for &comment_cursor in comment_cursors {
+        let rows = sqlx::query(
+            "SELECT r.label, COUNT(*) AS n FROM channel_comment_reactions r \
+             JOIN channel_comments c ON c.id = r.comment_id \
+             WHERE r.comment_id = ? AND c.channel_id = ? AND c.post_cursor = ? \
+             GROUP BY r.label ORDER BY n DESC, r.label ASC LIMIT ?",
+        )
+        .bind(comment_cursor)
+        .bind(channel.as_bytes().as_slice())
+        .bind(post_cursor)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+        let mut labels = Vec::with_capacity(rows.len());
+        for r in rows {
+            let label: Vec<u8> = r.get("label");
+            let n: i64 = r.get("n");
+            labels.push((fixed(&label)?, u64::try_from(n).unwrap_or(0)));
+        }
+        out.push(CommentReactionCounts {
+            comment_cursor,
+            labels: top_labels(labels),
+        });
+    }
+    Ok(out)
 }
 
 pub(crate) async fn list_comments(

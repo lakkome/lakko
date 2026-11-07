@@ -111,6 +111,7 @@ public enum AntiCensorshipTransport {
         session: URLSession,
         config: AntiCensorshipConfig
     ) async throws -> (Data, URLResponse) {
+        RequestTap.note(request)
         guard config.armed else {
             return try await session.data(for: request)
         }
@@ -163,5 +164,32 @@ public enum AntiCensorshipTransport {
             throw AntiCensorshipError.badResponse
         }
         return (resp.body, httpResponse)
+    }
+}
+
+/// A debug-only count of outgoing requests by route, for measuring the idle
+/// request volume (`LAKKO_REQUEST_TAP=1` in the launch environment). Logs the
+/// method and the path with every id-shaped segment replaced by `:id`, never
+/// a query, a body or a header.
+enum RequestTap {
+    #if DEBUG
+    static let enabled = ProcessInfo.processInfo.environment["LAKKO_REQUEST_TAP"] == "1"
+    #else
+    static let enabled = false
+    #endif
+
+    static func note(_ request: URLRequest) {
+        guard enabled, let url = request.url else { return }
+        NSLog("[reqtap] %@ %@", request.httpMethod ?? "GET", template(url.path))
+    }
+
+    /// `/ds/group/<64 hex>/messages` -> `/ds/group/:id/messages`.
+    static func template(_ path: String) -> String {
+        path.split(separator: "/", omittingEmptySubsequences: false).map { segment -> String in
+            let s = String(segment)
+            let idLike = s.count >= 12 && s.allSatisfy { $0.isHexDigit || $0 == "-" || $0 == "_" || $0.isLetter || $0.isNumber }
+                && s.contains(where: \.isNumber)
+            return idLike ? ":id" : s
+        }.joined(separator: "/")
     }
 }

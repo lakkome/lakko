@@ -60,7 +60,7 @@ export function InviteContactsPicker(props: {
   const rows = createMemo((): InviteContactRow[] =>
     inviteContactRows(
       contacts(),
-      (c) => memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
+      (c) => memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the call invite picker"),
       (c) => profiles.resolve(c.signaturePubkeyB64).username,
     ),
   );

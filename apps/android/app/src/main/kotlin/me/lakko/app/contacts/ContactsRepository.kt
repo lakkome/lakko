@@ -1480,6 +1480,10 @@ public class ContactsRepository(
             receiveGroupContactRequest(groupIdHex, senderKey, envelope, messageId, createdAt)
         }
         chatRepo?.groupContactRequestsFlush = { flushGroupRequestsOrThrow() }
+        // ADR-0060 section 1 (2026-11-06) — a removed person's one-to-one never
+        // gets the contact grant again in a profile: the rotation would be
+        // pointless.
+        chatRepo?.contactGrantWithheldFor = { peer -> keyHex(peer) in removedContactKeys }
         // ADR-0074 (a device paired after a rotation) - a pairing state
         // bundle that moved the conversation key rebuilds a chat layer that
         // was already loaded under the current key.
@@ -1959,8 +1963,19 @@ public class ContactsRepository(
                     // `docs/ux/who-can-find-me.md` 6.4 — requests that came
                     // inside a shared group run through the same steps.
                     val (groupRequests, groupRequestIds) = groupRequestsForPass(accountB64, sender.x25519Secret)
-                    val fetchedRequests = result.events.filterIsInstance<
-                        IncomingMailboxEvent.ContactRequest>(
+                    // ADR-0060 section 1 (2026-11-06) — each mailbox row
+                    // names the reach key that admitted it: a retired contact
+                    // key from a current contact is processed and answered
+                    // with the current grant, from anyone else dropped.
+                    val regrantTo = ArrayList<ByteArray>()
+                    val reachNow = reach()
+                    fun rowVerdict(reachPk: ByteArray?, sender: ByteArray): uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict =
+                        reachNow?.mailboxRowVerdict(reachPk, isCurrentContact(sender))
+                            ?: uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS
+                    val fetchedRequests = applyContactKeyVerdicts(
+                        rows = result.events.filterIsInstance<IncomingMailboxEvent.ContactRequest>(),
+                        verdictOf = { rowVerdict(it.reachPk, it.request.fromPubkey) },
+                        onRegrant = { regrantTo += it.request.fromPubkey },
                     ).map { it.request } + groupRequests
                     // ADR-0048 §3 — a request's profile is bound to its
                     // signature-verified `from_pubkey`; store it (strictly newer
@@ -1999,8 +2014,10 @@ public class ContactsRepository(
                     val welcomes = result.events.filterIsInstance<
                         IncomingMailboxEvent.Welcome>(
                     )
-                    val acks = result.events.filterIsInstance<
-                        IncomingMailboxEvent.ContactAck>(
+                    val acks = applyContactKeyVerdicts(
+                        rows = result.events.filterIsInstance<IncomingMailboxEvent.ContactAck>(),
+                        verdictOf = { rowVerdict(it.reachPk, it.ack.accepterPubkey) },
+                        onRegrant = { regrantTo += it.ack.accepterPubkey },
                     ).map { it.ack }
                     // ADR-0079 amendment of 2026-10-19 — refusals of this
                     // account's link requests: the pending contact goes,
@@ -2041,6 +2058,31 @@ public class ContactsRepository(
                     for (welcome in welcomes) {
                         if (!bound.isCurrent) return@useClientWith
                         if (chatRepo != null) {
+                            // ADR-0060 section 1 (2026-11-06) — a Welcome admitted
+                            // by a retired contact key: its founder is read
+                            // without joining, and it is joined only when the
+                            // verdict lets it in. A Welcome that cannot be read
+                            // is not joined; nothing is shown or named.
+                            if (reachNow?.isRetiredContactKey(welcome.reachPk) == true) {
+                                val founder = try {
+                                    chatRepo.welcomeFounderAccountKey(welcome.welcomeBytes)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (_: Throwable) {
+                                    null
+                                }
+                                if (!retiredKeyWelcomeJoins(founder) { f -> rowVerdict(welcome.reachPk, f) }) {
+                                    Log.i(TAG, "inbox: a Welcome was not joined")
+                                    continue
+                                }
+                                // A current contact who wrote with the retired
+                                // key gets the current grant once joined.
+                                if (founder != null && rowVerdict(welcome.reachPk, founder) ==
+                                    uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS_AND_REGRANT
+                                ) {
+                                    regrantTo += founder
+                                }
+                            }
                             try {
                                 val joinedHex = chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
                                 Log.i(TAG, "inbox: Welcome ${me.lakko.app.chat.WelcomeOutcome.JOINED}")
@@ -2197,6 +2239,14 @@ public class ContactsRepository(
                     // An answered request leaves the durable Sent list.
                     if (acks.isNotEmpty() || answeredBy.isNotEmpty()) persistSent()
                     persistInboxCursor()
+                    // ADR-0060 section 1 — after the rows were processed: the
+                    // current contact grant to each contact who wrote with a
+                    // retired key, in the one-to-one, nothing shown.
+                    for (peer in regrantTo.distinctBy { base64Encode(it) }) {
+                        if (chatRepo?.regrantContact(peer) != true) {
+                            Log.i(TAG, "inbox: a regrant waits for a one-to-one")
+                        }
+                    }
                 }
                 // ADR-0079 — a pending contact whose one-to-one exists already,
                 // a link revoked on another device of the account, and the
@@ -2527,6 +2577,10 @@ public class ContactsRepository(
             }
         }
     }
+
+    /** Whether [key] is a current contact's signature key. */
+    private fun isCurrentContact(key: ByteArray): Boolean =
+        mutableState.value.accepted.any { it.request.fromPubkey.contentEquals(key) }
 
     /** ADR-0060 — background work that must outlive the calling screen. */
     private val reachScope = kotlinx.coroutines.CoroutineScope(
@@ -3613,6 +3667,9 @@ public class ContactsRepository(
                     answered = emptyList(),
                     shared = false,
                     editable = false,
+                    targetId = ByteArray(0),
+                    inviteSeed = ByteArray(0),
+                    capability = ByteArray(0),
                 ),
             ) ?: false
             if (!recorded) {
@@ -4310,3 +4367,33 @@ internal fun isMailboxRefusal(cause: Throwable): Boolean = when (cause) {
  * other devices' links from.
  */
 internal fun spentLinkSlugs(recorded: List<String>): List<String> = recorded.distinct()
+
+/**
+ * ADR-0060 section 1 (2026-11-06) — the mailbox rows of one pass that are
+ * processed: a `DROP` verdict leaves the row out, silently; a
+ * `PROCESS_AND_REGRANT` keeps it and names its sender to [onRegrant].
+ */
+internal fun <T> applyContactKeyVerdicts(
+    rows: List<T>,
+    verdictOf: (T) -> uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict,
+    onRegrant: (T) -> Unit,
+): List<T> = rows.filter { row ->
+    when (verdictOf(row)) {
+        uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.DROP -> false
+        uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS_AND_REGRANT -> {
+            onRegrant(row)
+            true
+        }
+        uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.PROCESS -> true
+    }
+}
+
+/**
+ * ADR-0060 section 1 (2026-11-06) — whether a Welcome admitted by a retired
+ * contact key is joined: only when its founder could be read ([founder] not
+ * `null`) and the row's verdict for that founder is not `DROP`.
+ */
+internal fun retiredKeyWelcomeJoins(
+    founder: ByteArray?,
+    verdictFor: (ByteArray) -> uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict,
+): Boolean = founder != null && verdictFor(founder) != uniffi.lakko_ffi_uniffi.FfiContactKeyRowVerdict.DROP

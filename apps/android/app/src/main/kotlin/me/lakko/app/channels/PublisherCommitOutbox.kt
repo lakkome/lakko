@@ -84,11 +84,27 @@ public data class PublisherCommitEntry(
 ) {
     /** Which commit an entry records. */
     @Serializable
-    public enum class Kind { APPROVE, ROTATION }
+    public enum class Kind {
+        APPROVE,
+        ROTATION,
+
+        /** ADR-0087 section 15 (phase B) — the owner removed a publisher
+         *  ([joinerKeyB64] = its account key): every leaf of it in one
+         *  commit, which also changes the content seed. */
+        REMOVE,
+    }
 
     /** The steps of an entry, in the order they run. */
     @Serializable
-    public enum class Step { JOURNAL, WELCOME, RESEAL, APPOINT }
+    public enum class Step {
+        JOURNAL,
+        WELCOME,
+        RESEAL,
+        APPOINT,
+
+        /** The removed publisher's appointment is withdrawn at the service. */
+        UNAPPOINT,
+    }
 
     /** The steps still to run, in order. */
     public val remainingSteps: List<Step> get() = stepsOf(kind).filterNot { it in done }
@@ -109,6 +125,7 @@ public data class PublisherCommitEntry(
             if (!isHex(id, 32) || !isHex(channelIdHex, 32) || !isHex(groupIdHex, 64)) return false
             if (targetEpoch < 0 || serverTargetEpoch < 0) return false
             if (kind == Kind.APPROVE && (commitB64 == null || welcomeB64 == null || joinerKeyB64 == null)) return false
+            if (kind == Kind.REMOVE && (commitB64 == null || joinerKeyB64 == null)) return false
             return true
         }
 
@@ -117,6 +134,7 @@ public data class PublisherCommitEntry(
         public fun stepsOf(kind: Kind): List<Step> = when (kind) {
             Kind.APPROVE -> listOf(Step.JOURNAL, Step.WELCOME, Step.RESEAL, Step.APPOINT)
             Kind.ROTATION -> listOf(Step.JOURNAL, Step.RESEAL)
+            Kind.REMOVE -> listOf(Step.JOURNAL, Step.RESEAL, Step.UNAPPOINT)
         }
 
         /** A fresh random 16-byte hex id. */
@@ -173,6 +191,10 @@ public interface PublisherCommitPorts {
 
     /** Appoint the joiner's co-publisher key. Never fails the entry. */
     public suspend fun appoint(joinerKey: ByteArray)
+
+    /** Withdraw the appointment of a removed publisher (its account key).
+     *  Never fails the entry. */
+    public suspend fun unappoint(accountKey: ByteArray) {}
 
     /** Durably record [entry] (a step landed). */
     public fun save(entry: PublisherCommitEntry)
@@ -250,6 +272,16 @@ public suspend fun runPublisherCommit(
                         // An appointment is retried by the next co-publisher
                         // open; it never holds the entry.
                         warn("ADR-0059: appointment after an approve failed", e)
+                    }
+                }
+            PublisherCommitEntry.Step.UNAPPOINT ->
+                current.joinerKeyB64?.takeIf { !current.journalLost }?.let { removed ->
+                    try {
+                        ports.unappoint(b64(removed))
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        warn("ADR-0087: withdrawing a removed publisher's appointment failed", e)
                     }
                 }
         }

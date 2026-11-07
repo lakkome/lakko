@@ -299,6 +299,9 @@ final class FeedReadingModel: ObservableObject {
     @Published private(set) var reading: FeedReading
     /// Per channel id, its count of new posts (the row badge).
     @Published private(set) var channelUnread: [String: Int] = [:]
+    /// Per channel id, its newest post with readable text: the Chats row's
+    /// second line (UX navigation section 2).
+    @Published private(set) var channelLastPost: [String: PersistedChannelPost] = [:]
 
     private let accountIdB64: String
     private let store: FeedReadingStore
@@ -352,6 +355,15 @@ final class FeedReadingModel: ObservableObject {
                 if n > 0 { counts[c.id] = n }
             }
             if counts != self.channelUnread { self.channelUnread = counts }
+            var last: [String: PersistedChannelPost] = [:]
+            for c in channels.channels {
+                if let post = log.channels[c.id]?.posts.last(where: {
+                    !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }) {
+                    last[c.id] = post
+                }
+            }
+            if last != self.channelLastPost { self.channelLastPost = last }
         }
         .store(in: &cancellables)
     }

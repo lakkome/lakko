@@ -16,11 +16,12 @@ ADR-0087 section 13a stores reactions at the channel service as `(post, writer_k
 - `ReactionKey::derive(epoch_seed, channel_id, epoch)` — HKDF-SHA-256, IKM the seed of the post's epoch, salt `channel_id ‖ epoch_be`, info `lakko/channel/reaction-key/v1`. Zeroed on drop; `Debug` prints nothing of it.
 - `ReactionKey::label(post_cursor, emoji)` — `BLAKE3-keyed(reaction_key, post_cursor_be ‖ emoji)[..16]`; the emoji must pass the chat rule `lakko_attachments::is_reaction_emoji` (the one definition, not a second check), else `ChannelError::InvalidReactionEmoji`.
 - `ReactionKey::labels_for_post(post_cursor, candidates)` → `ReactionLabels`: the labels of a candidate list the caller supplies (the client's bundled emoji set plus its recent emoji); a candidate failing the chat rule or repeating an earlier one is skipped, the order kept.
+- `CommentReactionKey::derive(epoch_seed, channel_id, epoch)` (2026-11-05, UX 13.1: a reaction on a comment) — the same HKDF with info `lakko/channel/comment-reaction-key/v1`, so its labels are unrelated to post labels. `label(post_cursor, comment_cursor, emoji)` = `BLAKE3-keyed(key, post_cursor_be ‖ comment_cursor_be ‖ emoji)[..16]`, the chat rule applied; `labels_for_comment(post_cursor, comment_cursor, candidates)` → `ReactionLabels` by the same keep-and-skip rule.
 - `ReactionLabels::resolve(label)` → the emoji or `None`; `resolve_counts(&[(label, count)])` → `(emoji, count)` in candidate order, unknown labels dropped, repeats summed saturating, zeros left out.
 
 ## Invariants upheld
 
-- One emoji has a different label under every post, epoch seed and channel (`labels_differ_between_posts_seeds_and_channels`).
+- One emoji has a different label under every post, epoch seed and channel (`labels_differ_between_posts_seeds_and_channels`), and on every comment, never equal to a post's (`a_comment_label_is_the_documented_derivation_and_never_a_post_label`).
 - A label resolves only against a list that holds its emoji; a label from someone without the seed, or an emoji the client does not know, shows nothing (`a_label_resolves_only_against_a_candidate_list_that_holds_its_emoji`).
 - Invariant #2: the service holds labels and counts, no emoji.
 

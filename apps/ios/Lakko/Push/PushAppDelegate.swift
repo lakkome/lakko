@@ -104,6 +104,9 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         // shade. The extension's call alert is the fallback for a device whose
         // app is NOT running; presenting it over a running app would double up
         // with the in-app incoming-call surface that is already showing.
+        // A wake reached the running app: receive now instead of at the
+        // next idle sweep (ForegroundReceiveScheduler, cadence).
+        Task { @MainActor in ForegroundReceiveScheduler.active?.nudge() }
         let content = notification.request.content
         if content.categoryIdentifier == LakkoCallNotification.callCategoryIdentifier {
             completionHandler([])

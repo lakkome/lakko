@@ -38,7 +38,7 @@ export function reportUnnamedPerson(marker: string, surface: string): void {
 
 /** One-string surfaces (sender lines, typing, reactions, notices): the real
  *  name, else the placeholder word, reported ({@link reportUnnamedPerson}). */
-export function memberNameOf(resolved: ResolvedName, surface = "a label"): string {
+export function memberNameOf(resolved: ResolvedName, surface: string): string {
   if (resolved.source !== "fingerprint") return resolved.name;
   reportUnnamedPerson(resolved.name, surface);
   return UNNAMED_MEMBER();

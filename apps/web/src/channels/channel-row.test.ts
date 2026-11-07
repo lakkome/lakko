@@ -94,3 +94,12 @@ describe("channelRowMatches", () => {
     expect(channelRowMatches(m, "   ")).toBe(true);
   });
 });
+
+describe("channelRowPreview", () => {
+  it("shows the last readable post, one line, else the fallback", async () => {
+    const { channelRowPreview } = await import("./channel-row");
+    expect(channelRowPreview("Hello\n  world", "@news")).toBe("Hello world");
+    expect(channelRowPreview(null, "@news")).toBe("@news");
+    expect(channelRowPreview("   ", "@news")).toBe("@news");
+  });
+});

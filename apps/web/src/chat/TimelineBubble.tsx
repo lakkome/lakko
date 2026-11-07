@@ -26,6 +26,7 @@ import { Portal } from "solid-js/web";
 import { A } from "@solidjs/router";
 
 import { callInviteOf } from "../calls/call-invite-link";
+import { ChannelInviteCard, groupLinkOf } from "./ChannelInviteCard";
 
 import type { MemberIdentity } from "./author-identity";
 import {
@@ -526,6 +527,19 @@ function ChatBubbleBody(
     }
     return callInviteOf(displayText(), origin);
   };
+  /** ADR-0087 section 14 — a message that is one `/g/` link of this
+   *  deployment may be a channel invitation; the card opens the link and, if
+   *  it is a channel's, takes the text's place. */
+  const groupLink = (): ReturnType<typeof groupLinkOf> => {
+    let origin: string;
+    try {
+      origin = publicOrigin();
+    } catch {
+      return null;
+    }
+    return groupLinkOf(displayText(), origin);
+  };
+  const [isChannelCard, setIsChannelCard] = createSignal(false);
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
 
@@ -1061,7 +1075,10 @@ function ChatBubbleBody(
                     </div>
                   )}
                 </Show>
-                <Show when={displayText().length > 0 && callInvite() === null}>
+                <Show when={callInvite() === null ? groupLink() : null}>
+                  {(link) => <ChannelInviteCard link={link()} onResolved={setIsChannelCard} />}
+                </Show>
+                <Show when={displayText().length > 0 && callInvite() === null && !isChannelCard()}>
                   <div class="lk-bubble-text" dir="auto">
                     <MessageText text={shownText()} />
                     <Show when={isEdited()}>

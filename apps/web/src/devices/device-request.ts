@@ -9,7 +9,7 @@
 
 /** How often the signed-in device asks for pending requests while a
  *  session is open. */
-export const DEVICE_REQUEST_POLL_MS = 8_000;
+export const DEVICE_REQUEST_POLL_MS = 20_000;
 
 /** How often the fresh device checks where its request stands. */
 export const DEVICE_REQUEST_STATUS_POLL_MS = 3_000;

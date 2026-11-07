@@ -69,6 +69,8 @@ import {
   persistedFromForwardRef,
 } from "../chat/forward";
 import { ForwardPicker } from "../chat/ForwardPicker";
+import { registeredGroupLinks, type RegisteredGroupLink } from "../devices/sync/link-register";
+import { hexOf as hexOfLinkBytes } from "../devices/sync/link-records";
 import type { ForwardPickerRow } from "../chat/forward-picker";
 import {
   bulkDeleteConfirmation,
@@ -1597,7 +1599,7 @@ function ChatView(props: {
       // ADR-0051 §5 — the shared name first, then the member-derived title.
       label: groupTitle(
         groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label,
-        others.map((k) => memberNameOf(profiles.resolve(k))),
+        others.map((k) => memberNameOf(profiles.resolve(k), "the typing line")),
       ),
       // The conversation kind (ADR-0062) decides, not the size: a two-person group is
       // titled as a group, the same way the list files it.
@@ -1985,6 +1987,18 @@ function ChatView(props: {
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
   // "create invite link" affordance), or `null` before it is generated.
   const [inviteLink, setInviteLink] = createSignal<string | null>(null);
+  /** ADR-0087 phase B — the group's live links in the account's register,
+   *  minus the one shown above. */
+  const accountGroupLinks = (): RegisteredGroupLink[] => {
+    let hex = "";
+    try {
+      hex = hexOfLinkBytes(base64Decode(props.entry.groupIdB64));
+    } catch {
+      return [];
+    }
+    const shown = inviteLink();
+    return registeredGroupLinks("group", hex).filter((l) => l.url !== shown);
+  };
   /** The group-of-one `Copy invite link` outcome (ADR-0087 section 10). */
   const [soloCopy, setSoloCopy] = createSignal<"idle" | "copied" | "failed">("idle");
   // `memberCount` mirrors `peopleCountOf(props.entry.group)` into
@@ -6334,7 +6348,7 @@ function ChatView(props: {
       return {
         keyB64: c.signaturePubkeyB64,
         accountIdHex: c.accountIdHex,
-        name: memberNameOf(resolved),
+        name: memberNameOf(resolved, "a chat member row"),
         username: resolved.username,
       };
     });
@@ -6637,15 +6651,15 @@ function ChatView(props: {
   // ADR-0028 revoke — kill the currently-shown group invite link: the ledger
   // row is deleted with this device's revocation seed; without a kept seed
   // the field is only cleared.
-  async function onRevokeInviteLink(): Promise<void> {
-    const link = inviteLink();
+  async function onRevokeInviteLink(which?: string): Promise<void> {
+    const link = which ?? inviteLink();
     if (!link) return;
     setError(null);
     showNotice(null);
     setBusy(true);
     try {
       const revoked = await contacts.revokeGroupInviteLink(props.requireIdentity(), link);
-      setInviteLink(null);
+      if (link === inviteLink()) setInviteLink(null);
       showNotice(() =>
         revoked ? t("chat.invite_link.revoked") : t("chat.invite_link.cleared"),
       );
@@ -8957,6 +8971,17 @@ function ChatView(props: {
                     />
                   )}
                 </Show>
+                {/* ADR-0087 phase B — the group's links made on any device of
+                    the account (the link register), each revocable here. */}
+                <For each={accountGroupLinks()}>
+                  {(link) => (
+                    <ShareLinkRow
+                      url={link.url}
+                      onRevoke={() => void onRevokeInviteLink(link.url)}
+                      busy={busy()}
+                    />
+                  )}
+                </For>
               </div>
             </Show>
             {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin

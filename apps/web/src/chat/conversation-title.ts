@@ -77,9 +77,13 @@ export function conversationTitle(input: ConversationTitleInput): string {
   // A member this device cannot name is left out of a group title rather
   // than shown as "Member" (docs/ux/client-redesign.md section 5.1, the iOS
   // rule): "Anna, Ivan" reads as a group, "Anna, Member, Member" does not.
+  const label = input.sharedName ?? input.fallbackLabel;
+  // A named group is titled by its name: its members' names are not asked
+  // for (asking reported every member this device cannot name yet, for a
+  // title that never showed them; seen live 2026-11-05).
+  if (!isOneToOne && !isUnnamedGroupLabel(label)) return input.groupTitle(label, []);
   const unnamed = UNNAMED_MEMBER();
   const names = peers.map(input.nameOf).filter((n) => n.length > 0 && n !== unnamed);
-  const label = input.sharedName ?? input.fallbackLabel;
   // UX 4.3 — name, then the member-derived title, then `@name`.
   if (
     !isOneToOne &&

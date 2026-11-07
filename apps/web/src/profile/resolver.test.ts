@@ -158,7 +158,7 @@ describe("resolvePerson — a pending contact's link statement", () => {
     expect(r.name).toBe("VG2");
     expect(r.source).toBe("profile");
     expect(r.username).toBe("@vg2");
-    expect(memberNameOf(r)).toBe("VG2");
+    expect(memberNameOf(r, "a test label")).toBe("VG2");
     expect(memberListLabelOf(r)).toBe("VG2 · @vg2");
   });
 
@@ -177,7 +177,7 @@ describe("resolvePerson — a pending contact's link statement", () => {
     });
     expect(nameless.source).toBe("fingerprint");
     expect(nameless.usernameNotVerified).toBe(true);
-    expect(memberNameOf(nameless)).toBe(UNNAMED_MEMBER());
+    expect(memberNameOf(nameless, "a test label")).toBe(UNNAMED_MEMBER());
   });
 
   it("a received profile wins over the link", () => {
@@ -215,7 +215,7 @@ describe("resolvePerson — a pending contact's link statement", () => {
   it("once the pending contact is gone the key reads as `Member` again", () => {
     const r = resolvePerson({ signatureKey: KEY, verificationOf: verifiedFor("verified") });
     expect(r.source).toBe("fingerprint");
-    expect(memberNameOf(r)).toBe(UNNAMED_MEMBER());
+    expect(memberNameOf(r, "a test label")).toBe(UNNAMED_MEMBER());
   });
 
   it("a link that states nothing is no profile", () => {

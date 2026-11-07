@@ -47,7 +47,8 @@ const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 describe("toPostDecode — every plaintext is classified before the text path", () => {
   it("a record is `meta`, never text", () => {
     const d = toPostDecode({ epochId: 1, plaintext: enc("M:7:Lakko News"), hadSeed: true }, classify);
-    expect(d).toEqual({ kind: "meta", meta: { name: "Lakko News", description: "about", updatedAtMs: 7n } });
+    // The record's plaintext rides along, for the v3 fold.
+    expect(d).toMatchObject({ kind: "meta", meta: { name: "Lakko News", description: "about", updatedAtMs: 7n } });
     expect(isHiddenPostDecode(d)).toBe(true);
   });
 

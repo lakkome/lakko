@@ -52,6 +52,18 @@ describe("the wanted reach keys", () => {
     expect(classes()).toEqual(["contact::0"]);
   });
 
+  it("keeps every contact version of the window registered, and drops one that left it (2026-11-06)", () => {
+    let book = EMPTY_REACH_BOOK;
+    for (let i = 0; i < 10; i += 1) book = bumpVersion(book, "contact", "");
+    // The core's window: the current version, then up to eight retired ones.
+    const window = (c: number): number[] => Array.from({ length: Math.min(c, 8) + 1 }, (_, i) => c - i);
+    expect(classes(book, { contactVersions: window })).toEqual(
+      [10, 9, 8, 7, 6, 5, 4, 3, 2].map((v) => `contact::${v}`),
+    );
+    // Absent: the current one alone (as before).
+    expect(classes(book)).toEqual(["contact::10"]);
+  });
+
   it("wants ONE member key while in any group, ONE group key while any group is allowed (ADR-0078 section 9)", () => {
     expect(
       classes(EMPTY_REACH_BOOK, { groupIdsHex: ["aa", "bb"], allowsGroup: (g) => g === "bb" }),

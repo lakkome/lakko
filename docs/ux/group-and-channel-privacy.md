@@ -536,16 +536,15 @@ Saying nothing would look like a fault, so the person is told once.
 
 | Where they were | What they see |
 |---|---|
-| Anywhere else | A banner at the top of Chats: "You are no longer in {name}." with a close icon. |
+| Anywhere else | A short notice at the bottom of the screen, "You are no longer in {name}.", that goes away by itself after 4 seconds. No close icon, no banner that stays. |
 | In that conversation | A dialog over it. Title: "You are no longer in {name}." Body: "The group and its messages are gone from your devices." One button, `OK`, then Chats. If the composer held text, the text is shown selectable under the body, with `Copy`. |
 | In a call in that group | The call ends: "You are no longer in this group." Then as above. |
 
 Each device shows it once. It never says who.
 
-Several removals (decided 2026-11-04): each has its own banner, the newest on top, each with its own close icon; closing one leaves the others. A newer removal never hides or replaces an older one the person has not closed.
+Several removals (decided 2026-11-06, maintainer; replaces the banners of 2026-11-04, which piled up and stayed): one notice at a time. Removals noticed together show one notice, "You are no longer in {name} and {count} more."; a removal noticed while a notice is up replaces it with the combined text. A conversation whose dialog was already shown gets no notice. Nothing is kept for later: a notice the person did not see (the app was closed) is not shown at the next start.
 
-The banner's `{name}` is held only for this. When it closes the name is gone too. If
-the person sees nothing because the app was closed, the banner waits for the next start.
+The notice's `{name}` is held in memory only, for those 4 seconds.
 
 ### 9.2 Added again
 

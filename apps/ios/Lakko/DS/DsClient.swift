@@ -481,7 +481,10 @@ public final class DsClient {
             return MailboxMessage(
                 id: msg.id,
                 payload: payload,
-                createdAt: msg.createdAt
+                createdAt: msg.createdAt,
+                // Standard base64 or base64url: the key is 32 bytes either way.
+                reachKey: msg.reachPkB64.flatMap { base64Decode($0) ?? base64UrlDecodeNoPad($0) }
+                    .flatMap { $0.count == 32 ? $0 : nil }
             )
         }
         return FetchResult(
@@ -856,11 +859,13 @@ private struct FetchWireMessage: Decodable {
     let id: Int64
     let payloadB64: String
     let createdAt: String
+    let reachPkB64: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case payloadB64 = "payload_b64"
         case createdAt = "created_at"
+        case reachPkB64 = "reach_pk_b64"
     }
 }
 
@@ -1013,11 +1018,16 @@ public struct MailboxMessage: Equatable {
     /// Raw payload bytes (decoded from the server's `payload_b64`).
     public let payload: Data
     public let createdAt: String
+    /// ADR-0060 section 1 (2026-11-06) — the reach key that admitted this
+    /// row, on the owner's signed mailbox read; `nil` on a proofless row (and
+    /// on group journals).
+    public let reachKey: Data?
 
-    public init(id: Int64, payload: Data, createdAt: String) {
+    public init(id: Int64, payload: Data, createdAt: String, reachKey: Data? = nil) {
         self.id = id
         self.payload = payload
         self.createdAt = createdAt
+        self.reachKey = reachKey
     }
 }
 

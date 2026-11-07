@@ -43,7 +43,8 @@ import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
-import { SubscriberAdmission } from "./channels/SubscriberAdmission";
+import { ChannelPublisherLoops } from "./channels/ChannelPublisherLoops";
+import { ChannelFeedbackRuntime } from "./channels/ChannelFeedbackRuntime";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -67,6 +68,7 @@ import { SharedChannelsProvider } from "./discover/SharedChannelsContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
 import { MembershipEndProvider } from "./chat/MembershipEndContext";
+import { MembershipEndToast } from "./chat/MembershipEndNotices";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
@@ -230,10 +232,16 @@ const App: Component = () => (
            */}
           <ChannelPostSync />
           {/*
-           * ADR-0059 section 4: new subscribers to this device's channels are
-           * let in while the app is open, whatever screen is showing.
+           * ADR-0059 section 4 / ADR-0087 section 12: a channel this device
+           * publishes to works whether or not anyone opens it - rotation,
+           * public seeds, letting subscribers in, co-publisher requests -
+           * while the app is open, whatever screen is showing.
            */}
-          <SubscriberAdmission />
+          <ChannelPublisherLoops />
+          {/* UX section 9: the short notice of an end, anywhere in the app. */}
+          <MembershipEndToast />
+          {/* ADR-0087 section 13a: kept ban lists and waiting reactions. */}
+          <ChannelFeedbackRuntime />
           {/*
            * ADR-0060 — what this account publishes to be found by (the
            * Everyone publication, the contacts-of-contacts record and the

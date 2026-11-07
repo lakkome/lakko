@@ -87,21 +87,27 @@ pub enum InfoSection {
     LeaveGroup,
 
     // A channel (section 2.3).
-    /// The `@handle` a channel is found by.
+    /// The `@handle` a channel is found by. Produced by no rule since the
+    /// ADR-0087 channel info (UX `group-and-channel-privacy.md` 12.1), which
+    /// names a channel's `@name` with [`Self::Handle`] as a group's; kept so
+    /// the uniffi ordinals of later blocks stay put.
     ChannelHandle,
     /// What the channel says it is.
     ChannelDescription,
-    /// How many devices read it. Only a publisher can know.
+    /// How many devices read it. Produced by no rule since the ADR-0087
+    /// channel info: the number is the [`Self::Subscribers`] row's.
     SubscriberCount,
-    /// The publisher's own screen.
+    /// The publisher's own screen. Produced by no rule: the Manage page is
+    /// gone (ADR-0087 section 12), its cards are rows of the info screen.
     ManageChannel,
     /// Stop following a channel.
     Unsubscribe,
     /// The channel's member list, shown to its members like a group's
     /// roster (ADR-0060 section 3, `docs/ux/who-can-find-me.md` section
-    /// 6.3). Its own block rather than [`Self::MemberList`], which is
-    /// group-only: a channel roster has no roles and no add. Appended last so
-    /// the uniffi ordinals of every earlier block stay put.
+    /// 6.3). Produced by no rule since the ADR-0087 channel info: the list
+    /// opens from the [`Self::Subscribers`] row (UX
+    /// `group-and-channel-privacy.md` 15.1). Kept so the uniffi ordinals of
+    /// later blocks stay put.
     ChannelMembers,
     /// Put a person back on this device's contact list: the one-to-one
     /// outlived the contact, because removing a contact leaves the
@@ -141,6 +147,12 @@ pub enum InfoSection {
     /// 13a). Never in a one-to-one, which takes every reaction. Appended last
     /// so earlier uniffi ordinals stay put.
     Reactions,
+    /// `Members can find me`, the per-conversation switch of "Who can find
+    /// me" (`docs/ux/who-can-find-me.md` section 5), on a channel's info (UX
+    /// `group-and-channel-privacy.md` 12.1), shown only while Members of my
+    /// groups and channels is on. Appended last so earlier uniffi ordinals
+    /// stay put.
+    MembersCanFindMe,
 }
 
 impl InfoSection {
@@ -180,6 +192,7 @@ impl InfoSection {
                 | Self::Subscribers
                 | Self::Admins
                 | Self::Reactions
+                | Self::MembersCanFindMe
         )
     }
 
@@ -220,6 +233,7 @@ impl InfoSection {
             Self::Subscribers => "subscribers",
             Self::Admins => "admins",
             Self::Reactions => "reactions",
+            Self::MembersCanFindMe => "members-can-find-me",
         }
     }
 }
@@ -285,15 +299,46 @@ pub struct GroupInfoCapabilities {
     pub membership_ended: bool,
 }
 
-/// What the viewer is to a channel.
+/// What the viewer is to a channel (ADR-0087 section 15). One role, never
+/// two: a publisher reads the channel from its publisher keys, so it is not
+/// also a subscriber here even when it subscribed before it was appointed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelRole {
+    /// The channel's owner.
+    Owner,
+    /// A publisher (a co-publisher in the protocol): posts and moderates as
+    /// the owner does, and does not rename, change the type or appoint.
+    Publisher,
+    /// Reads the channel.
+    Subscriber,
+}
+
+/// What the viewer is to a channel and what the channel info depends on.
+///
+/// Every field is the client's reading, never re-derived here: the role from
+/// the keys this device holds and the appointment, the `@name` from the
+/// channel's record, the publishers from the PublisherGroup, the setting from
+/// "Who can find me".
+///
+/// Whether the channel is public or private changes no block of this screen
+/// (UX `group-and-channel-privacy.md` 12.1, 14.2: a public channel has an
+/// invite link too); it changes the header line and rows inside the
+/// Subscribers screen, which the client draws. So it is not an input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelInfoCapabilities {
-    /// This device holds the publisher keys.
-    pub is_publisher: bool,
-    /// This device reads the channel as a subscriber.
-    pub is_subscriber: bool,
-    /// This device has a subscriber count. Only a publisher ever does.
-    pub subscriber_count_known: bool,
+    /// The viewer's role.
+    pub role: ChannelRole,
+    /// The channel holds an `@name`. A lapsed one shows no row (UX 4.4).
+    pub has_handle: bool,
+    /// A publisher besides the owner remains. The owner deletes a channel
+    /// only when none does (ADR-0087 section 15); a channel's ownership is
+    /// not transferred (UX section 19), so an owner with publishers has no
+    /// exit on this screen.
+    pub has_other_publishers: bool,
+    /// Members of my groups and channels is on in "Who can find me"
+    /// (`docs/ux/who-can-find-me.md` section 5), under either form. The
+    /// client reads it from the setting, so this crate never does.
+    pub members_of_groups_and_channels_on: bool,
 }
 
 /// Which info the header opens for a conversation of this kind.
@@ -404,32 +449,65 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
     sections
 }
 
-/// What a channel's info holds - section 2.3.
+/// What a channel's info holds - UX `group-and-channel-privacy.md` 12.1,
+/// with sections 4, 14 and 15 and ADR-0087 section 15.
 ///
-/// The subscriber count is offered only when this device has one: only a
-/// publisher ever lists subscribers, and a reader inventing a number it
-/// cannot know would be worse than showing none.
+/// The order is a group's: the header (`@name`, description, and the owner's
+/// in-place rename), the actions and detail, then the exit block.
 ///
-/// `Unsubscribe` is for a subscriber and NOT for a publisher, and that is not
-/// symmetry for its own sake: a publisher reads its own channel from its own
-/// publisher keys, so there is no subscription to end and a control offering
-/// to end one would end nothing.
+/// - `Invite people`, `Invite link` and `Publishers` are the owner's and the
+///   publishers' (a publisher's `Publishers` is read-only; the screen says
+///   so, this rule does not).
+/// - `Subscribers` is everyone's: the exact count to the owner and the
+///   publishers, the band and the shared names to a subscriber. Which of the
+///   two is the client's to draw.
+/// - Rename, `Reactions` and `Channel type` are the owner's alone: the
+///   metadata record carries them and only the owner re-issues it.
+/// - `Members can find me` follows the setting, for every role.
+/// - The exit: `Unsubscribe` for a subscriber; `Delete channel` for the owner
+///   when no publisher remains; nothing for a publisher (stepping down is on
+///   its own row of the Publishers list) or for an owner with publishers.
+///
+/// The Manage page is gone (ADR-0087 section 12): no block here opens it.
 #[must_use]
 pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> {
-    let mut sections = vec![InfoSection::ChannelHandle, InfoSection::ChannelDescription];
-    if caps.subscriber_count_known {
-        sections.push(InfoSection::SubscriberCount);
+    let owner = caps.role == ChannelRole::Owner;
+    let publishes = matches!(caps.role, ChannelRole::Owner | ChannelRole::Publisher);
+    let mut sections = Vec::new();
+    // The header.
+    if caps.has_handle {
+        sections.push(InfoSection::Handle);
     }
-    // A channel lists its members to its members (UX 6.3): whoever reads it,
-    // as a publisher or a subscriber, holds the epoch seed the member cards
-    // are sealed under. A viewer who reads neither cannot open a card.
-    if caps.is_publisher || caps.is_subscriber {
-        sections.push(InfoSection::ChannelMembers);
+    sections.push(InfoSection::ChannelDescription);
+    // Rename and the description, edited in place by the owner.
+    if owner {
+        sections.push(InfoSection::RenameGroup);
     }
-    if caps.is_publisher {
-        sections.push(InfoSection::ManageChannel);
-    } else if caps.is_subscriber {
-        sections.push(InfoSection::Unsubscribe);
+    // Actions and detail.
+    if publishes {
+        sections.push(InfoSection::InvitePeople);
+        sections.push(InfoSection::InviteLink);
+    }
+    sections.push(InfoSection::Subscribers);
+    if publishes {
+        sections.push(InfoSection::Admins);
+    }
+    if owner {
+        sections.push(InfoSection::Reactions);
+        sections.push(InfoSection::GroupType);
+    }
+    if caps.members_of_groups_and_channels_on {
+        sections.push(InfoSection::MembersCanFindMe);
+    }
+    // The exit block.
+    match caps.role {
+        ChannelRole::Owner => {
+            if !caps.has_other_publishers {
+                sections.push(InfoSection::DeleteGroup);
+            }
+        },
+        ChannelRole::Publisher => {},
+        ChannelRole::Subscriber => sections.push(InfoSection::Unsubscribe),
     }
     sections
 }
@@ -482,9 +560,10 @@ pub struct ConversationInfoCapabilities {
 /// What a group's or a channel's info holds under ADR-0087
 /// (`docs/ux/group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15).
 ///
-/// Replaces [`group_info_sections`] and [`channel_info_sections`] once the
-/// clients move to it; both stay until then, because the clients call them.
-/// What differs from them, on purpose:
+/// Replaces [`group_info_sections`] once the clients move to it; that stays
+/// until then, because the clients call it. A channel's blocks are
+/// [`channel_info_sections`]'s, which this calls, so the two cannot disagree.
+/// What differs from the old group rule, on purpose:
 ///
 /// - No `DeleteChat` and no ended-membership state: the end of a membership
 ///   wipes the conversation (ADR-0087 section 9), so there is no ended
@@ -494,78 +573,60 @@ pub struct ConversationInfoCapabilities {
 ///   `LeaveGroup` (UX sections 10 and 11).
 /// - A channel shows the group's blocks where they mean the same (rename,
 ///   invite link) and its own (`InvitePeople`, `Subscribers`, `Admins`);
-///   the Manage page is gone (ADR-0087 section 12).
+///   the Manage page is gone (ADR-0087 section 12). This record carries no
+///   "Who can find me" setting, so a channel read through it never gets
+///   [`InfoSection::MembersCanFindMe`]; call [`channel_info_sections`] for
+///   that.
 #[must_use]
 pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<InfoSection> {
+    if caps.kind == ConversationInfoKind::Channel {
+        // One copy of the channel rule: this record is read as a channel's
+        // (admin = publisher, member = subscriber, alone = no publisher left),
+        // without the "Who can find me" setting it does not carry.
+        return channel_info_sections(ChannelInfoCapabilities {
+            role: match caps.role {
+                ConversationRole::Owner => ChannelRole::Owner,
+                ConversationRole::Admin => ChannelRole::Publisher,
+                ConversationRole::Member => ChannelRole::Subscriber,
+            },
+            has_handle: caps.has_handle,
+            has_other_publishers: !caps.alone,
+            members_of_groups_and_channels_on: false,
+        });
+    }
     let owner = caps.role == ConversationRole::Owner;
     let manager = matches!(caps.role, ConversationRole::Owner | ConversationRole::Admin);
     let mut sections = Vec::new();
     if caps.has_handle {
         sections.push(InfoSection::Handle);
     }
-    match caps.kind {
-        ConversationInfoKind::Group => {
-            sections.push(InfoSection::GroupName);
-            sections.push(InfoSection::MemberList);
-            if manager {
-                sections.push(InfoSection::RenameGroup);
-                sections.push(InfoSection::AddMember);
-            }
-            // Owner only: peers refuse an admin's role commit (ADR-0022).
-            if owner {
-                sections.push(InfoSection::Roles);
-            }
-            if manager {
-                sections.push(InfoSection::InviteLink);
-                // Owner and admins choose a group's reactions.
-                sections.push(InfoSection::Reactions);
-            }
-            if owner {
-                sections.push(InfoSection::GroupType);
-            }
-        },
-        ConversationInfoKind::Channel => {
-            sections.push(InfoSection::ChannelDescription);
-            // Rename and the description are the owner's (ADR-0087 section 15).
-            if owner {
-                sections.push(InfoSection::RenameGroup);
-            }
-            if manager {
-                sections.push(InfoSection::InvitePeople);
-                sections.push(InfoSection::InviteLink);
-            }
-            sections.push(InfoSection::Subscribers);
-            if manager {
-                sections.push(InfoSection::Admins);
-            }
-            // The owner's: the setting rides the channel metadata record
-            // (ADR-0087 section 13a), which a publisher does not re-issue.
-            if owner {
-                sections.push(InfoSection::Reactions);
-                sections.push(InfoSection::GroupType);
-            }
-        },
+    sections.push(InfoSection::GroupName);
+    sections.push(InfoSection::MemberList);
+    if manager {
+        sections.push(InfoSection::RenameGroup);
+        sections.push(InfoSection::AddMember);
+    }
+    // Owner only: peers refuse an admin's role commit (ADR-0022).
+    if owner {
+        sections.push(InfoSection::Roles);
+    }
+    if manager {
+        sections.push(InfoSection::InviteLink);
+        // Owner and admins choose a group's reactions.
+        sections.push(InfoSection::Reactions);
+    }
+    if owner {
+        sections.push(InfoSection::GroupType);
     }
     // The exit block.
     if owner {
         if caps.alone {
             sections.push(InfoSection::DeleteGroup);
-        } else if caps.can_transfer && caps.kind == ConversationInfoKind::Group {
+        } else if caps.can_transfer {
             sections.push(InfoSection::TransferOwnership);
         }
-    } else {
-        match caps.kind {
-            ConversationInfoKind::Group => {
-                if caps.can_leave {
-                    sections.push(InfoSection::LeaveGroup);
-                }
-            },
-            ConversationInfoKind::Channel => {
-                if caps.role == ConversationRole::Member {
-                    sections.push(InfoSection::Unsubscribe);
-                }
-            },
-        }
+    } else if caps.can_leave {
+        sections.push(InfoSection::LeaveGroup);
     }
     sections
 }
@@ -836,82 +897,6 @@ mod tests {
         assert!(!sections.contains(&InfoSection::LeaveGroup));
     }
 
-    /// A publisher has no subscription to end, so offering to end one would
-    /// end nothing.
-    #[test]
-    fn only_a_subscriber_is_offered_a_way_to_stop_following() {
-        let subscriber = channel_info_sections(ChannelInfoCapabilities {
-            is_publisher: false,
-            is_subscriber: true,
-            subscriber_count_known: false,
-        });
-        assert!(subscriber.contains(&InfoSection::Unsubscribe));
-        assert!(subscriber.contains(&InfoSection::ChannelMembers));
-        assert!(!subscriber.contains(&InfoSection::ManageChannel));
-        assert!(!subscriber.contains(&InfoSection::SubscriberCount));
-
-        let publisher = channel_info_sections(ChannelInfoCapabilities {
-            is_publisher: true,
-            is_subscriber: true,
-            subscriber_count_known: true,
-        });
-        assert!(!publisher.contains(&InfoSection::Unsubscribe));
-        assert!(publisher.contains(&InfoSection::ChannelMembers));
-        assert!(publisher.contains(&InfoSection::ManageChannel));
-        assert!(publisher.contains(&InfoSection::SubscriberCount));
-    }
-
-    /// A channel lists its members to its members and to nobody else (UX
-    /// 6.3), under every combination; the block sits after what the channel
-    /// is and before the reader's own action.
-    #[test]
-    fn a_channel_shows_its_members_to_its_readers_only() {
-        for &is_publisher in &[false, true] {
-            for &is_subscriber in &[false, true] {
-                for &count in &[false, true] {
-                    let sections = channel_info_sections(ChannelInfoCapabilities {
-                        is_publisher,
-                        is_subscriber,
-                        subscriber_count_known: count,
-                    });
-                    let reads = is_publisher || is_subscriber;
-                    assert_eq!(
-                        sections.contains(&InfoSection::ChannelMembers),
-                        reads,
-                        "publisher={is_publisher} subscriber={is_subscriber}"
-                    );
-                    if let Some(at) = sections
-                        .iter()
-                        .position(|s| *s == InfoSection::ChannelMembers)
-                    {
-                        let description = sections
-                            .iter()
-                            .position(|s| *s == InfoSection::ChannelDescription)
-                            .unwrap();
-                        assert!(at > description);
-                        assert_eq!(at, sections.len() - 2, "{sections:?}");
-                    }
-                }
-            }
-        }
-        assert!(!InfoSection::ChannelMembers.group_only());
-        assert_eq!(InfoSection::ChannelMembers.name(), "channel-members");
-    }
-
-    /// A channel that is neither: found by handle, not yet subscribed to.
-    #[test]
-    fn a_channel_nobody_here_reads_yet_shows_what_it_is_and_no_actions() {
-        let sections = channel_info_sections(ChannelInfoCapabilities {
-            is_publisher: false,
-            is_subscriber: false,
-            subscriber_count_known: false,
-        });
-        assert_eq!(
-            sections,
-            vec![InfoSection::ChannelHandle, InfoSection::ChannelDescription]
-        );
-    }
-
     /// The vacuity guard for [`a_person_never_carries_anything_group_shaped`].
     ///
     /// That property passes trivially if `group_only` ever became all-false,
@@ -931,6 +916,7 @@ mod tests {
             InfoSection::TransferOwnership,
             InfoSection::LeaveGroup,
             InfoSection::Reactions,
+            InfoSection::MembersCanFindMe,
         ];
         for s in marked {
             assert!(s.group_only(), "{s:?} must be classified group-only");
@@ -945,27 +931,6 @@ mod tests {
     fn a_live_conversation_never_offers_to_delete_itself() {
         assert!(!person_info_sections(person(false)).contains(&InfoSection::DeleteChat));
         assert!(!group_info_sections(group(false)).contains(&InfoSection::DeleteChat));
-    }
-
-    /// A channel is not a group either, under every combination rather than
-    /// at one picked example.
-    #[test]
-    fn a_channel_never_carries_anything_group_shaped() {
-        for &is_publisher in &[false, true] {
-            for &is_subscriber in &[false, true] {
-                for &count in &[false, true] {
-                    let sections = channel_info_sections(ChannelInfoCapabilities {
-                        is_publisher,
-                        is_subscriber,
-                        subscriber_count_known: count,
-                    });
-                    assert!(
-                        !sections.iter().any(|s| s.group_only()),
-                        "publisher={is_publisher} subscriber={is_subscriber} -> {sections:?}"
-                    );
-                }
-            }
-        }
     }
 
     /// The names cross the boundary to web verbatim, so a duplicate would
@@ -1002,6 +967,7 @@ mod tests {
             InfoSection::Subscribers,
             InfoSection::Admins,
             InfoSection::Reactions,
+            InfoSection::MembersCanFindMe,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();
@@ -1227,5 +1193,255 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn channel(role: ChannelRole) -> ChannelInfoCapabilities {
+        ChannelInfoCapabilities {
+            role,
+            has_handle: true,
+            has_other_publishers: false,
+            members_of_groups_and_channels_on: true,
+        }
+    }
+
+    const ROLES: [ChannelRole; 3] = [
+        ChannelRole::Owner,
+        ChannelRole::Publisher,
+        ChannelRole::Subscriber,
+    ];
+
+    /// Every combination of the record, for the properties that must hold
+    /// under all of them.
+    fn every_channel_input() -> Vec<ChannelInfoCapabilities> {
+        let mut all = Vec::new();
+        for role in ROLES {
+            for bits in 0..8u8 {
+                all.push(ChannelInfoCapabilities {
+                    role,
+                    has_handle: bits & 1 != 0,
+                    has_other_publishers: bits & 2 != 0,
+                    members_of_groups_and_channels_on: bits & 4 != 0,
+                });
+            }
+        }
+        all
+    }
+
+    /// UX `group-and-channel-privacy.md` 12.1, the owner's screen, in order.
+    #[test]
+    fn the_owner_of_a_channel_sees_the_12_1_screen_in_order() {
+        assert_eq!(
+            channel_info_sections(channel(ChannelRole::Owner)),
+            vec![
+                InfoSection::Handle,
+                InfoSection::ChannelDescription,
+                InfoSection::RenameGroup,
+                InfoSection::InvitePeople,
+                InfoSection::InviteLink,
+                InfoSection::Subscribers,
+                InfoSection::Admins,
+                InfoSection::Reactions,
+                InfoSection::GroupType,
+                InfoSection::MembersCanFindMe,
+                InfoSection::DeleteGroup,
+            ]
+        );
+    }
+
+    /// A publisher invites and sees the publishers, and does not rename,
+    /// change the type or the reactions, or leave from here (section 15).
+    #[test]
+    fn a_publisher_invites_and_does_not_own() {
+        assert_eq!(
+            channel_info_sections(channel(ChannelRole::Publisher)),
+            vec![
+                InfoSection::Handle,
+                InfoSection::ChannelDescription,
+                InfoSection::InvitePeople,
+                InfoSection::InviteLink,
+                InfoSection::Subscribers,
+                InfoSection::Admins,
+                InfoSection::MembersCanFindMe,
+            ]
+        );
+    }
+
+    /// A subscriber reads what the channel is, the subscribers (the band and
+    /// the shared names), the switch, and the way out.
+    #[test]
+    fn a_subscriber_reads_and_unsubscribes() {
+        assert_eq!(
+            channel_info_sections(channel(ChannelRole::Subscriber)),
+            vec![
+                InfoSection::Handle,
+                InfoSection::ChannelDescription,
+                InfoSection::Subscribers,
+                InfoSection::MembersCanFindMe,
+                InfoSection::Unsubscribe,
+            ]
+        );
+    }
+
+    /// The owner deletes only when no publisher remains (ADR-0087 section
+    /// 15), and a channel's ownership is not transferred (UX section 19), so
+    /// an owner with publishers has no exit here.
+    #[test]
+    fn the_owner_deletes_only_when_no_publisher_remains() {
+        let mut caps = channel(ChannelRole::Owner);
+        assert!(channel_info_sections(caps).contains(&InfoSection::DeleteGroup));
+        caps.has_other_publishers = true;
+        let s = channel_info_sections(caps);
+        for gone in [
+            InfoSection::DeleteGroup,
+            InfoSection::TransferOwnership,
+            InfoSection::Unsubscribe,
+            InfoSection::LeaveGroup,
+        ] {
+            assert!(!s.contains(&gone), "{gone:?} in {s:?}");
+        }
+    }
+
+    /// Who sees which block, under every combination of the record.
+    #[test]
+    fn each_block_follows_its_role_under_every_input() {
+        for caps in every_channel_input() {
+            let s = channel_info_sections(caps);
+            let owner = caps.role == ChannelRole::Owner;
+            let publishes = caps.role != ChannelRole::Subscriber;
+            let has = |b| s.contains(&b);
+            assert_eq!(has(InfoSection::Handle), caps.has_handle, "{caps:?}");
+            assert!(has(InfoSection::ChannelDescription), "{caps:?}");
+            assert!(has(InfoSection::Subscribers), "{caps:?}");
+            assert_eq!(has(InfoSection::RenameGroup), owner, "{caps:?}");
+            assert_eq!(has(InfoSection::Reactions), owner, "{caps:?}");
+            assert_eq!(has(InfoSection::GroupType), owner, "{caps:?}");
+            assert_eq!(has(InfoSection::InvitePeople), publishes, "{caps:?}");
+            assert_eq!(has(InfoSection::InviteLink), publishes, "{caps:?}");
+            assert_eq!(has(InfoSection::Admins), publishes, "{caps:?}");
+            assert_eq!(
+                has(InfoSection::MembersCanFindMe),
+                caps.members_of_groups_and_channels_on,
+                "{caps:?}"
+            );
+            assert_eq!(
+                has(InfoSection::Unsubscribe),
+                caps.role == ChannelRole::Subscriber,
+                "{caps:?}"
+            );
+            assert_eq!(
+                has(InfoSection::DeleteGroup),
+                owner && !caps.has_other_publishers,
+                "{caps:?}"
+            );
+        }
+    }
+
+    /// The Manage page is gone (ADR-0087 section 12), and so are the blocks
+    /// the old channel info produced; no person block and no group-only
+    /// roster or exit reaches a channel; nothing is listed twice.
+    #[test]
+    fn a_channel_has_no_manage_page_no_person_blocks_and_no_duplicates() {
+        for caps in every_channel_input() {
+            let s = channel_info_sections(caps);
+            for gone in [
+                InfoSection::ManageChannel,
+                InfoSection::ChannelHandle,
+                InfoSection::SubscriberCount,
+                InfoSection::ChannelMembers,
+                InfoSection::Message,
+                InfoSection::Call,
+                InfoSection::SafetyNumber,
+                InfoSection::RenameContact,
+                InfoSection::RemoveContact,
+                InfoSection::AddContact,
+                InfoSection::TheirContactsCanFindMe,
+                InfoSection::DeleteChat,
+                InfoSection::GroupName,
+                InfoSection::MemberList,
+                InfoSection::AddMember,
+                InfoSection::Roles,
+                InfoSection::TransferOwnership,
+                InfoSection::LeaveGroup,
+            ] {
+                assert!(!s.contains(&gone), "{gone:?} in {s:?} for {caps:?}");
+            }
+            let mut sorted = s.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), s.len(), "{s:?}");
+        }
+    }
+
+    /// Header first, the exit block last, whatever the role.
+    #[test]
+    fn a_channel_keeps_the_group_order() {
+        for caps in every_channel_input() {
+            let s = channel_info_sections(caps);
+            let at = |b| s.iter().position(|x| *x == b);
+            let description = at(InfoSection::ChannelDescription).unwrap();
+            if let Some(handle) = at(InfoSection::Handle) {
+                assert_eq!(handle, 0);
+                assert_eq!(description, 1);
+            } else {
+                assert_eq!(description, 0);
+            }
+            let subscribers = at(InfoSection::Subscribers).unwrap();
+            for header_or_action in [
+                InfoSection::RenameGroup,
+                InfoSection::InvitePeople,
+                InfoSection::InviteLink,
+            ] {
+                if let Some(i) = at(header_or_action) {
+                    assert!(i < subscribers, "{s:?}");
+                }
+            }
+            for exit in [InfoSection::Unsubscribe, InfoSection::DeleteGroup] {
+                if let Some(i) = at(exit) {
+                    assert_eq!(i, s.len() - 1, "{s:?}");
+                }
+            }
+            if let Some(i) = at(InfoSection::MembersCanFindMe) {
+                assert!(i > subscribers, "{s:?}");
+            }
+        }
+    }
+
+    /// `conversation_info_sections` answers a channel with this rule, so the
+    /// two cannot drift.
+    #[test]
+    fn the_conversation_rule_reads_a_channel_through_the_channel_rule() {
+        for (role, channel_role) in [
+            (ConversationRole::Owner, ChannelRole::Owner),
+            (ConversationRole::Admin, ChannelRole::Publisher),
+            (ConversationRole::Member, ChannelRole::Subscriber),
+        ] {
+            for alone in [false, true] {
+                for has_handle in [false, true] {
+                    let via_conversation =
+                        conversation_info_sections(ConversationInfoCapabilities {
+                            kind: ConversationInfoKind::Channel,
+                            role,
+                            alone,
+                            can_transfer: true,
+                            can_leave: true,
+                            has_handle,
+                        });
+                    let direct = channel_info_sections(ChannelInfoCapabilities {
+                        role: channel_role,
+                        has_handle,
+                        has_other_publishers: !alone,
+                        members_of_groups_and_channels_on: false,
+                    });
+                    assert_eq!(via_conversation, direct);
+                }
+            }
+        }
+    }
+
+    /// The new block's name crosses to web as written.
+    #[test]
+    fn the_members_switch_is_conversation_only_and_named() {
+        assert!(InfoSection::MembersCanFindMe.group_only());
+        assert_eq!(InfoSection::MembersCanFindMe.name(), "members-can-find-me");
     }
 }

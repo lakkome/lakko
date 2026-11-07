@@ -23,6 +23,6 @@ export function useFindableContacts(): Accessor<readonly ContactEntry[]> {
   });
   return createMemo(() => {
     changed();
-    return contactEntries(loadAccepted(), (c) => memberNameOf(profiles.resolve(c.signaturePubkeyB64)));
+    return contactEntries(loadAccepted(), (c) => memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the findable contacts setting"));
   });
 }

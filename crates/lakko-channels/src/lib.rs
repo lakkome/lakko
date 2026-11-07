@@ -204,7 +204,8 @@ pub use public_seed::{
     PUBLIC_SEED_ENVELOPE_LEN, READ_KEY_DOMAIN, READ_KEY_LEN,
 };
 pub use reaction::{
-    ReactionKey, ReactionLabel, ReactionLabels, REACTION_KEY_INFO_V1, REACTION_LABEL_LEN,
+    CommentReactionKey, ReactionKey, ReactionLabel, ReactionLabels, COMMENT_REACTION_KEY_INFO_V1,
+    REACTION_KEY_INFO_V1, REACTION_LABEL_LEN,
 };
 pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
@@ -216,9 +217,10 @@ pub use unsubscribe::{
     UNSUBSCRIBE_DOMAIN_V1, UNSUBSCRIBE_SIG_HEADER, UNSUBSCRIBE_SIG_LEN, UNSUBSCRIBE_WINDOW_MS,
 };
 pub use write_key::{
-    comment_write_seed, new_comment_nonce, reaction_write_seed, verify_write_proof,
-    write_proof_canonical_bytes, CommentWriteKey, ReactionWriteKey, SubscriberWrite, WriteProof,
-    WriteProofError, WriteStatement, COMMENT_NONCE_LEN, COMMENT_WRITE_KEY_DOMAIN,
+    comment_reaction_write_seed, comment_write_seed, new_comment_nonce, reaction_write_seed,
+    verify_write_proof, write_proof_canonical_bytes, CommentReactionWriteKey, CommentWriteKey,
+    ReactionWriteKey, SubscriberWrite, WriteProof, WriteProofError, WriteStatement,
+    COMMENT_NONCE_LEN, COMMENT_REACTION_WRITE_KEY_DOMAIN, COMMENT_WRITE_KEY_DOMAIN,
     REACTION_WRITE_KEY_DOMAIN, WRITE_KEY_LEN, WRITE_PROOF_DOMAIN, WRITE_PROOF_HEADER_NAME,
     WRITE_PROOF_WINDOW_MS,
 };

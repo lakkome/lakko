@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "he",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "לחשבון שלכם יש מפתחות חדשים. אנחנו משלימים את השינוי.",
@@ -1238,8 +1237,136 @@
       "text": "לא ניתן לפענח את השמע והווידאו של המשתתף הזה",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "מנויים יכולים להגיב בכל אמוג׳י.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "מנויים לא יכולים להגיב לפוסטים.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "מנויים יכולים להגיב רק באמוג׳י שבחרת.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "הוא יוצא מהחיפוש ומהגילוי. אנשים יוכלו להירשם רק אם תזמין אותם. כל המנויים נשארים.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "להפוך את הערוץ לפרטי?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "כל אחד יוכל למצוא ולקרוא אותו, ו-Lakko עשוי להציע אותו בגילוי. השם, התמונה והתיאור יהיו גלויים לכולם. פוסטים קודמים יישארו קריאים רק למי שכבר מנוי.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "להפוך את הערוץ לציבורי?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "ה-@שם הישן מפסיק לעבוד עכשיו. הוא נשמר עבור הערוץ הזה ל-30 יום.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "רק מנויים רואים את זה.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "כל אחד יכול למצוא את הערוץ בשם הזה.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "רק אנשים שתזמין יכולים להירשם. הוא לא מופיע בחיפוש.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "כל אחד יכול למצוא את הערוץ ולהירשם. Lakko עשוי להציע אותו בגילוי.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "סוג הערוץ",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "מעדכנים מנויים... {done} מתוך {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "מי יכול להירשם",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "חזרה לערוצים",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "חסימה מתגובות",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "אין אף אחד חסום.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "לא ניתן היה לשמור. נסו שוב.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "חסומים",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "ביטול חסימה",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "מישהו",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "פעולות על התגובה",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "תגובה",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "לא ניתן היה למחוק את התגובה. נסו שוב.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "התגובות לא נטענו.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "הסתרת תגובות",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "התגובה ארוכה מדי או שיש בה תווים שאי אפשר לשלוח.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "הצגת עוד",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {תגובה חדשה} two {2 תגובות חדשות} other {# תגובות חדשות}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {הצגת תגובה נוספת} two {הצגת 2 תגובות נוספות} other {הצגת # תגובות נוספות}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "הצגת תגובות נוספות",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "כתוב תגובה",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "מפרסמים שותפים",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "הערוץ והפוסטים שלו יוסרו מכל המכשירים שלך ו‑@{name} ישוחרר בעוד 30 יום. אי אפשר לבטל.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "הערוץ והפוסטים שלו יוסרו מכל המכשירים שלך. אי אפשר לבטל.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "מחיקת ערוץ",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "לא ניתן היה למחוק את הערוץ. נסו שוב.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "למחוק את הערוץ הזה?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "יצירת ערוץ",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "אין עדיין ערוצים",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "הערוץ והפוסטים שלו כבר לא במכשירים שלך.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "לא נמצא ערוץ עבור {handle}.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "ערוץ פרטי",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "ערוץ ציבורי",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "ערוץ ציבורי · {band} מנויים",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "בחרו ערוץ או צרו ערוץ חדש",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "לערוץ הזה אין @name. בחרו אחד.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "הזמנה",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "הזמנת אנשים",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "השם והתיאור שלו, מי קורא אותו ומי עוד יכול לפרסם בו.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "מפרסמים",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "מסיר את הערוץ מהרשימה שלכם ומוחק את הפוסטים שלו מכל המכשירים שלכם. אפשר להירשם שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "לא ניתן להזמין את {names}. נסה שוב.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "קישור ההזמנה הזה למפרסמים שותפים נוצר בגרסה ישנה יותר של Lakko והוא כבר לא עובד. בקשו מהבעלים של הערוץ לשלוח לכם קישור הזמנה חדש.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "כדי להירשם צריך חשבון. אפשר ליצור חשבון או להתחבר.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "הצטרפות לערוץ",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "נרשמת. הפוסטים יופיעו כשהבעלים או מנהל יפתחו את Lakko בפעם הבאה.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "לא הצלחנו ליצור את הקישור. אפשר לנסות שוב.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "המכשיר הזה עדיין לא יכול ליצור קישורים לערוץ הזה. הוא יוכל כשהמכשיר של הבעלים יפתח את Lakko.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "לא הצלחנו לבטל את הקישור. אפשר לנסות שוב.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "ערוץ",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "חסימה מתגובות",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "חסומים",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "ביטול חסימה",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "יצירה",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "תיאור",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "התחברו מחדש כדי ליצור ערוץ.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "לא ניתן ליצור את הערוץ. שום דבר לא נוצר. נסה שוב.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "בעזרתו אחרים יכולים למצוא את הערוץ ולהירשם אליו.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "שם הערוץ",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "המנויים רואים את השם והתיאור.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "ערוץ חדש",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "יצרת הרבה ערוצים היום. נסה שוב מחר.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "ערוץ חדש או הצטרפות לערוץ",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "רק הבעלים יכול לשנות את התמונה.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "המנויים יראו את ראשי התיבות במקומה.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "להסיר את תמונת הערוץ?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "לא זמין",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "רק הבעלים והמפרסמים יכולים לפרסם כאן.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "הפוסט הזה ישן יותר ממה שהמכשיר הזה יכול לקרוא.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "הפוסט הזה לא זמין.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "לא ניתן היה לפתוח את הפוסט הזה במכשיר הזה.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "פוסטים קודמים אינם זמינים.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "התחברו שוב כדי לפרסם בערוץ הזה.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "אישור",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "הוספת מפרסם",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "הוזמנת להיות מפרסם בערוץ {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} מזמין אותך להיות מפרסם ב־{channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "הסרת מפרסם",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "להסיר את {name} כמפרסם? הוא לא יוכל עוד לפרסם או להזמין.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "לא ניתן היה להסיר את המפרסם. נסו שוב.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {בקשה אחת לפרסום} two {שתי בקשות לפרסום} other {# בקשות לפרסום}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "בעלים",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "מפרסם",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "לפרוש",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "לא תפרסמו ולא תזמינו עוד בערוץ הזה. המכשיר של הבעלים יחיל זאת בפעם הבאה שיפתח את Lakko.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "לא ניתן היה לפרוש. נסו שוב.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "בוצע. המכשיר של הבעלים יחיל זאת בפעם הבאה שיפתח את Lakko.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "התגובות בערוץ אנונימיות. אף אחד לא יכול לראות מי הגיב, אפילו לא בעל הערוץ.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "תגובות בערוץ הן אנונימיות. אף אחד לא יכול לראות מי הגיב, אפילו לא בעל הערוץ.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "לא ניתן היה לטעון את המנויים. נסו שוב.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "מהזמנה",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "מהקישור \"{label}\"",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "לא ניתן לטעון מנויים. נסה שוב.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "הצגת עוד",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "אין עדיין מנויים.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {עוד אחד.} two {עוד שניים.} other {עוד #.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "הוא יפסיק לקבל פוסטים חדשים.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "להסיר את המנוי הזה?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "מנסים שוב...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "מנויים",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "מנויים ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "הפסקת מעקב",
+      "text": "ביטול מינוי",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "להפסיק לעקוב אחרי הערוץ הזה?",
+      "text": "לבטל את המינוי לערוץ הזה?",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "להפסיק לעקוב אחרי {name}?",
+      "text": "לבטל את המינוי ל־{name}?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "הקבוצה וההודעות שלה נמחקו מהמכשירים שלכם.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {אתם כבר לא חברים ב-{name} ובעוד אחת.} two {אתם כבר לא חברים ב-{name} ובעוד שתיים.} other {אתם כבר לא חברים ב-{name} ובעוד #.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "אף פעם",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "קישורים לקבוצות ולערוצים",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "קישור לערוץ",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "קישור לקבוצה",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "קישור למפרסם שותף",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "תווית (לא חובה)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "מי יכול למצוא אותי",
       "status": "machine"
     }
-  }
+  },
+  "language": "he"
 }

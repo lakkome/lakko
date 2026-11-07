@@ -48,7 +48,16 @@ import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { mintedLinkFor, rememberMintedLink } from "./minted-links";
-import { newRevocationKey, revokeMintedLink } from "./own-links";
+import { recordGroupLink, registeredLinks, revokeRegisteredLink } from "../devices/sync/link-register";
+
+/** Equal byte strings (lengths and bytes). */
+function bytesEqualCt(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i += 1) d |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return d === 0;
+}
+import { forgetMintedLinkRecord, newRevocationKey, revokeMintedLink } from "./own-links";
 import {
   appendGroupInviteLinkSecret,
   composePointerGroupInviteUrl,
@@ -428,9 +437,12 @@ export type IncomingMailboxEvent =
        *  so a request survives a reload the cursor has already skipped past
        *  (`contacts/inbox-store.ts`). */
       row: MailboxRow;
+      /** The reach key the DS says admitted the row (ADR-0060 section 1,
+       *  amended 2026-11-06); absent for a proofless row. */
+      reachPk?: Uint8Array;
     }
-  | { kind: "welcome"; welcome: IncomingWelcome }
-  | { kind: "contact-ack"; ack: IncomingContactAck }
+  | { kind: "welcome"; welcome: IncomingWelcome; reachPk?: Uint8Array }
+  | { kind: "contact-ack"; ack: IncomingContactAck; reachPk?: Uint8Array }
   /** ADR-0079 amendment of 2026-10-19: a link refusal, NOT yet verified.
    *  The receiver checks it against each pending contact
    *  (`verifyLinkRefusal`) before it removes anything. */
@@ -4771,14 +4783,31 @@ export class ContactsClient {
         maxUses,
       });
       url = composePointerGroupInviteUrl(blobId, widths, origin);
+      // ADR-0087 phase B — a `/g/` link's register key, so the record this
+      // device keeps and the account's synced record name one link.
+      const linkId = wasm.groupLinkRecordId(blobId);
       if (identity !== null) {
         await rememberMintedLink(base64Encode(identity.accountId), "group", base64UrlEncodeNoPad(blobId), {
           linkSecret,
-          linkId: new Uint8Array(),
+          linkId,
           revocationSeed: revocation.seed,
           facts: { label: "", expiryMs: Number(expiryMs), maxUses, bootstrapReferral: false },
         });
       }
+      // Every device of the account lists and revokes it (best effort: a
+      // register that is not running leaves it this device's).
+      await recordGroupLink({
+        kind: "group",
+        linkSecret,
+        ledgerId: blobId,
+        revocationSeed: revocation.seed,
+        expiryMs: Number(expiryMs),
+        maxUses,
+        mintedAtMs: Date.now(),
+        label: "",
+        targetId: group.groupId,
+        capability: sealed,
+      });
     } catch (err) {
       const status = (err as { status?: unknown }).status;
       // eslint-disable-next-line no-console
@@ -4819,6 +4848,22 @@ export class ContactsClient {
     if (identity === null) return false;
     const accountIdB64 = base64Encode(identity.accountId);
     const slug = base64UrlEncodeNoPad(parsed.blobId);
+    // ADR-0087 phase B — a link in the account's register (minted on any of
+    // its devices) is revoked there: every device sees it revoked, and this
+    // one deletes the row with the record's seed.
+    const registered = registeredLinks().find(
+      (r) => r.kind === "group" && !r.revoked && bytesEqualCt(r.ledgerId, parsed.blobId),
+    );
+    if (registered !== undefined) {
+      try {
+        const outcome = await revokeRegisteredLink(registered);
+        const kept = await mintedLinkFor(accountIdB64, "group", slug);
+        if (kept !== null) await forgetMintedLinkRecord(accountIdB64, { ...kept, kind: "group", blobIdSlug: slug, mintedAtMs: null });
+        return outcome !== "no-register";
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+    }
     const kept = await mintedLinkFor(accountIdB64, "group", slug);
     if (kept === null || kept.revocationSeed === null) return false;
     try {
@@ -5176,7 +5221,12 @@ export class ContactsClient {
 export function dispatchMailboxRows(
   wasm: Wasm,
   mailboxKey: import("../../wasm/lakko_ffi_wasm").MailboxKey,
-  messages: readonly { readonly id: number; readonly payload: Uint8Array; readonly createdAt: string }[],
+  messages: readonly {
+    readonly id: number;
+    readonly payload: Uint8Array;
+    readonly createdAt: string;
+    readonly reachPk?: Uint8Array;
+  }[],
   after: number,
   myX25519Secret: Uint8Array,
   options: { readonly welcomesOnly?: boolean } = {},
@@ -5187,6 +5237,7 @@ export function dispatchMailboxRows(
     cursor = message.id;
     const row = openOwnRow(wasm, mailboxKey, message.payload);
     if (row === null) continue;
+    const reach = message.reachPk === undefined ? {} : { reachPk: message.reachPk };
     if (row.kind === "welcome") {
       events.push({
         kind: "welcome",
@@ -5196,6 +5247,7 @@ export function dispatchMailboxRows(
           createdAt: message.createdAt,
           fromAccountMailbox: true,
         },
+        ...reach,
       });
       continue;
     }
@@ -5231,6 +5283,7 @@ export function dispatchMailboxRows(
           acceptedAtMs: ack.acceptedAtMs,
           createdAt: message.createdAt,
         },
+        ...reach,
       });
       continue;
     }
@@ -5243,6 +5296,7 @@ export function dispatchMailboxRows(
       // ADR-0078: the row kept on this device is the OPENED request body
       // (`decodePendingRequestRows` decodes it directly).
       row: { messageId: message.id, payload: row.body, createdAt: message.createdAt },
+      ...reach,
     });
   }
   return { events, cursor };

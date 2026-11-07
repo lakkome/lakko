@@ -78,11 +78,11 @@ extension ChatRepository {
         // of a leave made on another device cannot tell, and shows it.
         let notice = left ? nil : MembershipEndNotice(
             groupIdHex: groupIdHex, name: titleForNotice(groupIdHex: groupIdHex))
-        guard membershipEndStore.record(end, notice: notice, accountIdB64: accountIdB64) else {
+        guard membershipEndStore.record(end, accountIdB64: accountIdB64) else {
             return
         }
         owedEnds[groupIdHex] = end
-        refreshEndNotices()
+        if let notice { membershipEndNotices.post(notice) }
         state = state.with(threads: buildThreadList())
         onMembershipEndRecorded?(groupIdHex, left)
         resumeEnd(groupIdHex: groupIdHex)
@@ -313,8 +313,23 @@ extension ChatRepository {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         let end = OwedMembershipEnd(
             groupIdHex: channelIdHex, endedEpoch: 0, heard: false, oneToOne: false, channel: true)
-        guard membershipEndStore.record(end, notice: nil, accountIdB64: accountIdB64) else { return }
+        guard membershipEndStore.record(end, accountIdB64: accountIdB64) else { return }
         owedEnds[channelIdHex] = end
+        resumeEnd(groupIdHex: channelIdHex)
+    }
+
+    /// UX 9.5 — a publisher removed this device from a private channel: the
+    /// row and its posts went, the other devices are told, and the person is
+    /// told once ("You are no longer in {name}."): a banner in Chats, unless
+    /// the open channel showed it as a dialog (`name` nil).
+    public func noteChannelRemoved(channelIdHex: String, name: String?) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let end = OwedMembershipEnd(
+            groupIdHex: channelIdHex, endedEpoch: 0, heard: false, oneToOne: false, channel: true)
+        let notice = name.map { MembershipEndNotice(groupIdHex: channelIdHex, name: $0) }
+        guard membershipEndStore.record(end, accountIdB64: accountIdB64) else { return }
+        owedEnds[channelIdHex] = end
+        if let notice { membershipEndNotices.post(notice) }
         resumeEnd(groupIdHex: channelIdHex)
     }
 
@@ -327,28 +342,9 @@ extension ChatRepository {
 
     // MARK: - The notice
 
-    func refreshEndNotices() {
-        guard let accountIdB64 = currentAccountIdB64 else {
-            membershipEndNotices.replace([])
-            return
-        }
-        membershipEndNotices.replace(membershipEndStore.notices(accountIdB64: accountIdB64))
-    }
-
-    /// UX 9.1 — the banner's close icon. The name is gone with it.
-    public func closeEndNotice(groupIdHex: String) {
-        guard let accountIdB64 = currentAccountIdB64 else { return }
-        membershipEndStore.removeNotice(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        refreshEndNotices()
-    }
-
     /// UX 9.1 — the open conversation shows it as a dialog instead, once.
     func claimEndNotice(groupIdHex: String) -> MembershipEndNotice? {
-        guard let accountIdB64 = currentAccountIdB64,
-              let notice = membershipEndStore.notices(accountIdB64: accountIdB64)
-                .first(where: { $0.groupIdHex == groupIdHex }) else { return nil }
-        closeEndNotice(groupIdHex: groupIdHex)
-        return notice
+        membershipEndNotices.claim(groupIdHex: groupIdHex)
     }
 
     // MARK: - A Welcome for a group still held as active
@@ -458,7 +454,7 @@ extension ChatRepository {
         }
         // The person is back: "no longer in" would be false now, whether or
         // not the old group was still here.
-        closeEndNotice(groupIdHex: groupIdHex)
+        membershipEndNotices.withdraw(groupIdHex: groupIdHex)
         guard old != nil || owed else { return }
         wipeGroupStores(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
@@ -477,7 +473,6 @@ extension ChatRepository {
     /// The ends a restart left owed, the stored groups this account is no
     /// longer in, the held Welcomes, and whatever the register says.
     func sweepMembershipEnds() {
-        refreshEndNotices()
         for groupIdHex in groups.keys.sorted() { endMembershipIfOut(groupIdHex: groupIdHex) }
         resumeOwedEnds()
         applyHeardEnds()

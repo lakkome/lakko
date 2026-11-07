@@ -63,6 +63,12 @@ use crate::CHANNEL_ID_LEN;
 /// post, member-card and comment labels.
 pub const REACTION_KEY_INFO_V1: &[u8] = b"lakko/channel/reaction-key/v1";
 
+/// HKDF info label of the key for reactions on COMMENTS ([ADR-0087]
+/// section 13a, UX 13.1: "A reaction on a comment works the same way"),
+/// frozen at v1. A separate key, so a comment's labels and a post's are
+/// unrelated even for the same cursor bytes.
+pub const COMMENT_REACTION_KEY_INFO_V1: &[u8] = b"lakko/channel/comment-reaction-key/v1";
+
 /// Length of a reaction label.
 pub const REACTION_LABEL_LEN: usize = 16;
 
@@ -132,21 +138,99 @@ impl ReactionKey {
         post_cursor: u64,
         candidates: &[S],
     ) -> ReactionLabels {
-        let mut emoji: Vec<String> = Vec::with_capacity(candidates.len());
-        let mut by_label: HashMap<ReactionLabel, usize> = HashMap::with_capacity(candidates.len());
-        for c in candidates {
-            let c = c.as_ref();
-            if !is_reaction_emoji(c) {
-                continue;
-            }
-            let label = self.raw_label(post_cursor, c);
-            if by_label.contains_key(&label) {
-                continue;
-            }
-            by_label.insert(label, emoji.len());
-            emoji.push(c.to_string());
+        ReactionLabels::build(candidates, |c| self.raw_label(post_cursor, c))
+    }
+}
+
+/// The key reaction labels on the COMMENTS of one epoch's posts are made
+/// with:
+///
+/// ```text
+/// comment_reaction_key = HKDF-SHA-256(ikm  = the post's epoch seed,
+///                                     salt = channel_id(16) ‖ epoch_id(4, BE),
+///                                     info = "lakko/channel/comment-reaction-key/v1")
+/// label = BLAKE3-keyed(comment_reaction_key,
+///                      post_cursor(8, BE) ‖ comment_cursor(8, BE) ‖ emoji)[..16]
+/// ```
+///
+/// The key differs from [`ReactionKey`]'s, so a label on a comment is never
+/// a label on a post. The label folds in the post and the comment, so the
+/// service cannot compare labels between comments. Zeroed on drop.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CommentReactionKey(SecretBytes<32>);
+
+impl core::fmt::Debug for CommentReactionKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CommentReactionKey(..)")
+    }
+}
+
+impl CommentReactionKey {
+    /// The comment-reaction key of `channel_id` at `epoch`, from the seed of
+    /// the epoch the commented post was sealed in.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelError::KeyDerivation`] (impossible with these lengths).
+    pub fn derive(
+        epoch_seed: &ContentKeySeed,
+        channel_id: &[u8; CHANNEL_ID_LEN],
+        epoch: EpochId,
+    ) -> Result<Self> {
+        let mut salt = [0u8; CHANNEL_ID_LEN + EPOCH_ID_LEN];
+        salt[..CHANNEL_ID_LEN].copy_from_slice(channel_id);
+        salt[CHANNEL_ID_LEN..].copy_from_slice(&epoch.to_be_bytes());
+        let key = hkdf_sha256::<32>(
+            epoch_seed.as_inner_bytes(),
+            &salt,
+            COMMENT_REACTION_KEY_INFO_V1,
+        )
+        .map_err(|_| ChannelError::KeyDerivation)?;
+        Ok(Self(key))
+    }
+
+    fn raw_label(&self, post_cursor: u64, comment_cursor: u64, emoji: &str) -> ReactionLabel {
+        let mut input = Vec::with_capacity(16 + emoji.len());
+        input.extend_from_slice(&post_cursor.to_be_bytes());
+        input.extend_from_slice(&comment_cursor.to_be_bytes());
+        input.extend_from_slice(emoji.as_bytes());
+        let digest = hash::blake3_keyed(self.0.as_bytes(), &input);
+        let mut label = [0u8; REACTION_LABEL_LEN];
+        label.copy_from_slice(&digest[..REACTION_LABEL_LEN]);
+        label
+    }
+
+    /// The label of `emoji` on the comment `comment_cursor` under the post
+    /// `post_cursor`.
+    ///
+    /// # Errors
+    ///
+    /// [`ChannelError::InvalidReactionEmoji`] when `emoji` fails the chat
+    /// reaction rule.
+    pub fn label(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+    ) -> Result<ReactionLabel> {
+        if !is_reaction_emoji(emoji) {
+            return Err(ChannelError::InvalidReactionEmoji);
         }
-        ReactionLabels { emoji, by_label }
+        Ok(self.raw_label(post_cursor, comment_cursor, emoji))
+    }
+
+    /// The labels of `candidates` on one comment, for resolving its counts;
+    /// the rules of [`ReactionKey::labels_for_post`].
+    #[must_use]
+    pub fn labels_for_comment<S: AsRef<str>>(
+        &self,
+        post_cursor: u64,
+        comment_cursor: u64,
+        candidates: &[S],
+    ) -> ReactionLabels {
+        ReactionLabels::build(candidates, |c| {
+            self.raw_label(post_cursor, comment_cursor, c)
+        })
     }
 }
 
@@ -160,6 +244,25 @@ pub struct ReactionLabels {
 }
 
 impl ReactionLabels {
+    /// Keep each candidate that passes the chat rule and whose label is new.
+    fn build<S: AsRef<str>>(candidates: &[S], label_of: impl Fn(&str) -> ReactionLabel) -> Self {
+        let mut emoji: Vec<String> = Vec::with_capacity(candidates.len());
+        let mut by_label: HashMap<ReactionLabel, usize> = HashMap::with_capacity(candidates.len());
+        for c in candidates {
+            let c = c.as_ref();
+            if !is_reaction_emoji(c) {
+                continue;
+            }
+            let label = label_of(c);
+            if by_label.contains_key(&label) {
+                continue;
+            }
+            by_label.insert(label, emoji.len());
+            emoji.push(c.to_string());
+        }
+        Self { emoji, by_label }
+    }
+
     /// The emoji `label` stands for under this post, or `None` for a label no
     /// candidate makes (dropped by the reader).
     #[must_use]
@@ -246,6 +349,34 @@ mod tests {
         .unwrap();
         assert_ne!(a, other.label(9, THUMBS).unwrap());
         assert_eq!(format!("{k:?}"), "ReactionKey(..)");
+    }
+
+    #[test]
+    fn a_comment_label_is_the_documented_derivation_and_never_a_post_label() {
+        let seed = ContentKeySeed::from_bytes_for_test([7; 32]);
+        let mut salt = CHANNEL.to_vec();
+        salt.extend_from_slice(&3u32.to_be_bytes());
+        let raw: SecretBytes<32> =
+            hkdf_sha256(&[7; 32], &salt, b"lakko/channel/comment-reaction-key/v1").unwrap();
+        let mut input = 9u64.to_be_bytes().to_vec();
+        input.extend_from_slice(&4u64.to_be_bytes());
+        input.extend_from_slice(THUMBS.as_bytes());
+        let expected = &hash::blake3_keyed(raw.as_bytes(), &input)[..16];
+        let ck = CommentReactionKey::derive(&seed, &CHANNEL, EpochId::new(3)).unwrap();
+        let label = ck.label(9, 4, THUMBS).unwrap();
+        assert_eq!(&label[..], expected);
+        // Not the post's label, not another comment's, not another post's.
+        assert_ne!(label, key(7, 3).label(9, THUMBS).unwrap());
+        assert_ne!(label, ck.label(9, 5, THUMBS).unwrap());
+        assert_ne!(label, ck.label(10, 4, THUMBS).unwrap());
+        assert!(matches!(
+            ck.label(9, 4, ""),
+            Err(ChannelError::InvalidReactionEmoji)
+        ));
+        let labels = ck.labels_for_comment(9, 4, &[THUMBS, HEART, "", THUMBS]);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels.resolve(&label), Some(THUMBS));
+        assert_eq!(format!("{ck:?}"), "CommentReactionKey(..)");
     }
 
     /// The chat rule: any non-empty emoji text of at most 64 bytes, a ZWJ

@@ -375,7 +375,15 @@ public enum ReachRules {
                 reachClass: reachClass, scopeId: Data(),
                 version: version(of: reachClass, scope: Data(), in: state), expiresAtMs: nil)
         }
-        out.append(accountWide(.contact))
+        // ADR-0060 section 1 (amended 2026-11-06) — the current `contact`
+        // version AND the last retired ones stay registered, so a contact
+        // still holding an older grant reaches the mailbox (the receiving
+        // device regrants them); only a version that left the window goes.
+        let currentContact = version(of: .contact, scope: Data(), in: state)
+        for contactVersion in contactKeyVersions(current: currentContact) {
+            out.append(ReachKeySpec(
+                reachClass: .contact, scopeId: Data(), version: contactVersion, expiresAtMs: nil))
+        }
         let groups = groupIds.filter { !$0.isEmpty && $0.count <= 64 }
         if !groups.isEmpty {
             out.append(accountWide(.member))
@@ -404,6 +412,21 @@ public enum ReachRules {
             out.append(accountWide(.fof))
         }
         return out
+    }
+
+    /// ADR-0060 section 1 (2026-11-06) — a retired `contact` version is kept
+    /// only while it is still registered: the window bounds what is removed,
+    /// it never brings a version back (a restored device at v1 does not
+    /// register v0 again). The current version is always wanted.
+    public static func keepingRegisteredContactVersions(
+        _ specs: [ReachKeySpec], state: FfiReachState, registered: Set<Data>,
+        publicKey: (ReachKeySpec) -> Data?
+    ) -> [ReachKeySpec] {
+        let current = version(of: .contact, scope: Data(), in: state)
+        return specs.filter { spec in
+            guard spec.reachClass == .contact, spec.version != current else { return true }
+            return publicKey(spec).map(registered.contains) ?? false
+        }
     }
 
     /// The registration update that moves the DS from `registered` (the public

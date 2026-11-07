@@ -17,6 +17,11 @@ use lakko_contacts::admission_seed::{
     decode_admission_seed as rust_decode_admission_seed, AdmissionSeedError,
     ADMISSION_SEED_ENVELOPE_LEN,
 };
+use lakko_contacts::channel_read_key::{
+    compose_channel_read_key as rust_compose_channel_read_key,
+    decode_channel_read_key as rust_decode_channel_read_key, ChannelReadKeyError,
+    CHANNEL_READ_KEY_ENVELOPE_LEN,
+};
 use lakko_contacts::knock::{
     is_knock_row_len as rust_is_knock_row_len, knock_public_key as rust_knock_public_key,
     knock_row_version as rust_knock_row_version, knock_seed as rust_knock_seed,
@@ -381,6 +386,103 @@ pub fn admission_seed_envelope_len() -> u32 {
     len_u32(ADMISSION_SEED_ENVELOPE_LEN)
 }
 
+// ============================================================================
+// Channel read-key envelope (channel owner -> co-publisher, ADR-0087
+// section 7 as amended for phase B)
+// ============================================================================
+
+/// A decoded channel read-key envelope; the read key is still sealed.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiChannelReadKeyEnvelope {
+    /// The 16-byte channel id.
+    pub channel_id: Vec<u8>,
+    /// The addressee's 32-byte account key.
+    pub member_account_key: Vec<u8>,
+}
+
+fn channel_read_key_error(e: ChannelReadKeyError) -> FfiError {
+    FfiError::Contacts(format!("channelReadKey.{}: {e}", e.code()))
+}
+
+/// Compose a channel read-key envelope for one co-publisher, sealed to that
+/// co-publisher's account X25519 key; send it with
+/// `PublisherGroup.createApplicationMessage`.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `channelReadKey.<code>` first, or a wrong
+/// length.
+#[uniffi::export]
+pub fn compose_channel_read_key_envelope(
+    channel_id: Vec<u8>,
+    member_account_key: Vec<u8>,
+    member_x25519_public_key: Vec<u8>,
+    read_key: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel = <[u8; 16]>::try_from(channel_id.as_slice()).map_err(|_| {
+        FfiError::Contacts("channelReadKey.badLength: channel id must be 16 bytes".to_string())
+    })?;
+    rust_compose_channel_read_key(
+        &channel,
+        &key32("member account key", &member_account_key)?,
+        &x25519("member X25519 key", &member_x25519_public_key)?,
+        &key32("read key", &read_key)?,
+    )
+    .map_err(channel_read_key_error)
+}
+
+/// Strictly decode a channel read-key envelope.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `channelReadKey.<code>` first.
+#[uniffi::export]
+pub fn decode_channel_read_key_envelope(
+    plaintext: Vec<u8>,
+) -> Result<FfiChannelReadKeyEnvelope, FfiError> {
+    let env = rust_decode_channel_read_key(&plaintext).map_err(channel_read_key_error)?;
+    Ok(FfiChannelReadKeyEnvelope {
+        channel_id: env.channel_id.to_vec(),
+        member_account_key: env.member_account_key.to_vec(),
+    })
+}
+
+/// Open a channel read-key envelope with the ACCOUNT identity it is
+/// addressed to, returning the 32-byte read key. The caller also checks the
+/// MLS sender resolved to the channel's owner.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] when malformed, addressed to another account, or
+/// it does not open.
+#[uniffi::export]
+pub fn open_channel_read_key_envelope(
+    plaintext: Vec<u8>,
+    account_identity: &Identity,
+) -> Result<Vec<u8>, FfiError> {
+    let env = rust_decode_channel_read_key(&plaintext).map_err(channel_read_key_error)?;
+    let own = key32(
+        "own account key",
+        account_identity.inner.signature_public_key(),
+    )?;
+    if !env.is_addressed_to(&own) {
+        return Err(FfiError::Contacts(
+            "channelReadKey.otherAccount: addressed to another account".to_string(),
+        ));
+    }
+    let secret = X25519SecretKey::from_bytes(account_identity.inner.x25519_secret_bytes());
+    env.open(&secret)
+        .map(|k| k.to_vec())
+        .map_err(channel_read_key_error)
+}
+
+/// The one well-formed channel read-key envelope length.
+#[uniffi::export]
+#[must_use]
+pub fn channel_read_key_envelope_len() -> u32 {
+    len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +566,28 @@ mod tests {
             open_admission_seed_envelope(wire, &copublisher).unwrap(),
             seed
         );
+    }
+    #[test]
+    fn a_channel_read_key_reaches_only_its_co_publisher() {
+        let member = account();
+        let member_key = member.inner.signature_public_key().to_vec();
+        let x_pub = member.inner.x25519_public_key().to_vec();
+        let wire = compose_channel_read_key_envelope(
+            vec![0x0C; 16],
+            member_key.clone(),
+            x_pub,
+            vec![0x5A; 32],
+        )
+        .unwrap();
+        assert_eq!(wire.len(), channel_read_key_envelope_len() as usize);
+        let env = decode_channel_read_key_envelope(wire.clone()).unwrap();
+        assert_eq!(env.channel_id, vec![0x0C; 16]);
+        assert_eq!(env.member_account_key, member_key);
+        assert_eq!(
+            open_channel_read_key_envelope(wire.clone(), &member).unwrap(),
+            vec![0x5A; 32]
+        );
+        let other = Identity::from_seed(vec![0x72; 64]).unwrap();
+        assert!(open_channel_read_key_envelope(wire, &other).is_err());
     }
 }

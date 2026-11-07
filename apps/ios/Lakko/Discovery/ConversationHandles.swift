@@ -287,16 +287,23 @@ enum ConversationHandles {
         return open(record: record, oprfOutput: pair.output)
     }
 
-    /// The handle a channel claims: written under its PublisherGroup root,
-    /// published with its read key so a subscriber can find it (section 6).
+    /// The handle a channel claims (ADR-0087 section 3, the rule all three
+    /// clients follow): the journal is the channel's PublisherGroup, whose id
+    /// and the channel's read key come from the account's LINEAGE identity
+    /// (the oldest own predecessor after a rotation, so neither moves with
+    /// one); the write key is then `handleWriteSeed(journal root)` over the
+    /// CURRENT account seed (``seed(accountSeed:journalId:)``), and a
+    /// rotation queues a `rekey` (``HeldHandleStore/markRekeyOwed``).
+    /// Published with the read key so a subscriber can find it (section 6).
     static func channelFacts(
-        ownerIdentity: Identity, channelId: Data, name: String, description: String
+        lineageIdentity: Identity, channelId: Data, name: String, description: String,
+        avatar: FfiAvatar? = nil, size: Int = 0
     ) throws -> (journalId: Data, facts: PublicFacts) {
-        let journal = try publisherGroupIdFor(ownerIdentity: ownerIdentity, channelId: channelId)
-        let readKey = try channelReadKey(ownerAccountIdentity: ownerIdentity, channelId: channelId)
+        let journal = try publisherGroupIdFor(ownerIdentity: lineageIdentity, channelId: channelId)
+        let readKey = try channelReadKey(ownerAccountIdentity: lineageIdentity, channelId: channelId)
         return (journal, PublicFacts(
             kind: .channel, id: channelId, key: readKey, name: name, description: description,
-            size: 0, avatar: nil))
+            size: size, avatar: avatar))
     }
 }
 
@@ -429,7 +436,8 @@ final class HandleLeaseRenewal {
                 if entry.kind == "channel", let channelHex = entry.channelIdHex,
                    let channelId = ChatRepository.hexToBytes(channelHex) {
                     facts = try? ConversationHandles.channelFacts(
-                        ownerIdentity: owner, channelId: channelId, name: entry.name,
+                        lineageIdentity: ChannelLineage.identity(accountIdB64: accountIdB64, currentSeed: nil) ?? owner,
+                        channelId: channelId, name: entry.name,
                         description: entry.description).facts
                 } else if entry.kind == "group" {
                     facts = groupFacts(entry.journalIdHex)
@@ -518,5 +526,26 @@ enum HandleTakenCheck {
         } catch {
             return .unknown
         }
+    }
+}
+
+/// ADR-0087 section 3 / ADR-0078 section 6 — the identity a channel's
+/// PublisherGroup id and read key are derived from: the account's lineage
+/// seed, the same one ``ChannelPublisherIdentity`` runs the channel provider
+/// on.
+enum ChannelLineage {
+    /// `currentSeed` is the account's current phrase seed (what
+    /// `Identity.fromSeed` takes), `nil` to read it from the seed store.
+    static func identity(accountIdB64: String?, currentSeed: Data?) -> Identity? {
+        guard let accountIdB64 else { return currentSeed.flatMap { try? Identity.fromSeed(seed: $0) } }
+        guard let lineage = DeviceGroupLifecycle.lineageSeed(accountIdB64: accountIdB64, currentSeed: currentSeed)
+            ?? currentSeed else { return nil }
+        return try? Identity.fromSeed(seed: lineage)
+    }
+
+    /// The channel's read key, from the lineage identity.
+    static func readKey(accountIdB64: String?, currentSeed: Data?, channelId: Data) -> Data? {
+        guard let lineage = identity(accountIdB64: accountIdB64, currentSeed: currentSeed) else { return nil }
+        return try? channelReadKey(ownerAccountIdentity: lineage, channelId: channelId)
     }
 }

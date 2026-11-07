@@ -136,6 +136,11 @@ import {
 } from "../../auth/protect/address-register";
 import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
 import { installQuickReactionRegister, publishQuickReaction } from "../../chat/quick-reaction-register";
+import {
+  installOwnFeedbackRegister,
+  ownFeedbackChanged,
+  splitNonces,
+} from "../../channels/own-feedback-register";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
@@ -181,11 +186,13 @@ import {
 } from "./growth";
 import { onRestoredSyncedState, registerSyncedStateSource } from "./synced-state-source";
 import {
+  numberOfKind,
   readLinkRecords,
   type LinkAnswerVerdict,
   type LinkRecordModel,
   type NewLinkRecord,
 } from "./link-records";
+import { installLinkRegister } from "./link-register";
 import {
   bytesToHex,
   stampEdits,
@@ -518,6 +525,8 @@ export function DeviceGroupSyncProvider(props: {
   let uninstallAddressRegister: (() => void) | null = null;
   let uninstallUsernameRegister: (() => void) | null = null;
   let uninstallQuickReactionRegister: (() => void) | null = null;
+  /** ADR-0087 section 13a: the own channel reactions and comments. */
+  let uninstallOwnFeedbackRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -679,7 +688,7 @@ export function DeviceGroupSyncProvider(props: {
     setSavedBlobIdsHex(p.savedBlobIdsHex);
     setEndedConversations(p.endedConversations);
     setAcknowledgedDevices(readAcknowledgedDevices(synced, untrack(acknowledgedDevices)));
-    if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
+    if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
     if (activeAccountIdB64 !== null) {
@@ -689,6 +698,8 @@ export function DeviceGroupSyncProvider(props: {
       // Reactions D3: the account's quick reaction.
       publishQuickReaction(activeAccountIdB64, synced.quickReaction() ?? null);
     }
+    // ADR-0087 section 13a: the own channel reactions and comments.
+    ownFeedbackChanged();
     setStateVersion((v) => v + 1);
   }
 
@@ -923,6 +934,9 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentQuickReaction();
     uninstallQuickReactionRegister?.();
     uninstallQuickReactionRegister = installQuickReactionRegister({ accountIdB64, set: setQuickReactionImpl });
+    void flushUnsentOwnFeedback();
+    uninstallOwnFeedbackRegister?.();
+    uninstallOwnFeedbackRegister = installOwnFeedbackRegister(ownFeedbackPortFor(accountIdB64));
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
@@ -1098,6 +1112,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallUsernameRegister = null;
     uninstallQuickReactionRegister?.();
     uninstallQuickReactionRegister = null;
+    uninstallOwnFeedbackRegister?.();
+    uninstallOwnFeedbackRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1416,6 +1432,143 @@ export function DeviceGroupSyncProvider(props: {
     await sendQuickReactionRegister(account);
   }
 
+  // ----- ADR-0087 section 13a: own channel reactions and comments ------
+
+  /** `localStorage` marker: an own reaction or comment record written here
+   *  has not been confirmed sent. Re-sending every held record is idempotent
+   *  (the fold keeps the newer stamp). */
+  const ownFeedbackUnsentKey = (account: string): string => `lakko.channel-feedback.unsent.v1.${account}`;
+
+  async function sendOwnFeedbackEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(ownFeedbackUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(ownFeedbackUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "channel feedback register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentOwnFeedback(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(ownFeedbackUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = [...synced.channelReactionEnvelopes(), ...synced.channelCommentEnvelopes()];
+    } catch {
+      return;
+    }
+    await sendOwnFeedbackEnvelopes(account, envelopes);
+  }
+
+  /** The port the channel screens write their own reactions and comments
+   *  through. Each write folds here at once and goes to the account's other
+   *  devices. */
+  function ownFeedbackPortFor(accountIdB64: string) {
+    const write = async (envelope: Uint8Array | undefined): Promise<boolean> => {
+      if (envelope === undefined) return false;
+      refresh();
+      if (activeAccountIdB64 === accountIdB64) await sendOwnFeedbackEnvelopes(accountIdB64, [envelope]);
+      return true;
+    };
+    return {
+      accountIdB64,
+      reactionsOn: (channelId: Uint8Array, postCursor: number): string[] =>
+        synced === null ? [] : synced.channelReactionsOn(channelId, BigInt(postCursor)),
+      commentNoncesOn: (channelId: Uint8Array, postCursor: number): Uint8Array[] =>
+        synced === null ? [] : splitNonces(synced.channelCommentsOn(channelId, BigInt(postCursor))),
+      setReaction: async (
+        channelId: Uint8Array,
+        postCursor: number,
+        emoji: string,
+        reacted: boolean,
+        postAtMs: number,
+      ): Promise<boolean> => {
+        if (synced === null) throw new Error("synced state not loaded");
+        // Throws `bounds:` for a fourth own reaction: the caller's to word.
+        const envelope = synced.setChannelReaction(
+          mintHlc(),
+          channelId,
+          BigInt(postCursor),
+          emoji,
+          reacted,
+          BigInt(Math.max(0, Math.floor(postAtMs))),
+        );
+        return write(envelope);
+      },
+      commentReactionsOn: (channelId: Uint8Array, postCursor: number, commentCursor: number): string[] =>
+        synced === null ? [] : synced.commentReactionsOn(channelId, BigInt(postCursor), BigInt(commentCursor)),
+      setCommentReaction: async (
+        channelId: Uint8Array,
+        postCursor: number,
+        commentCursor: number,
+        emoji: string,
+        reacted: boolean,
+        postAtMs: number,
+      ): Promise<boolean> => {
+        if (synced === null) throw new Error("synced state not loaded");
+        // Throws `bounds:` for a fourth own reaction on one comment.
+        const envelope = synced.setCommentReaction(
+          mintHlc(),
+          channelId,
+          BigInt(postCursor),
+          BigInt(commentCursor),
+          emoji,
+          reacted,
+          BigInt(Math.max(0, Math.floor(postAtMs))),
+        );
+        return write(envelope);
+      },
+      recordComment: async (
+        channelId: Uint8Array,
+        postCursor: number,
+        nonce: Uint8Array,
+        postAtMs: number,
+      ): Promise<void> => {
+        if (synced === null) throw new Error("synced state not loaded");
+        await write(
+          synced.recordChannelComment(
+            mintHlc(),
+            channelId,
+            BigInt(postCursor),
+            nonce,
+            BigInt(Math.max(0, Math.floor(postAtMs))),
+          ),
+        );
+      },
+      deleteComment: async (
+        channelId: Uint8Array,
+        postCursor: number,
+        nonce: Uint8Array,
+        postAtMs: number,
+      ): Promise<void> => {
+        if (synced === null) return;
+        await write(
+          synced.deleteChannelComment(
+            mintHlc(),
+            channelId,
+            BigInt(postCursor),
+            nonce,
+            BigInt(Math.max(0, Math.floor(postAtMs))),
+          ),
+        );
+      },
+    };
+  }
+
   // ----- Identity-recovery 17.5: the device-acknowledgement register -----
 
   /** `localStorage` marker: an acknowledgement written here has not been
@@ -1533,13 +1686,19 @@ export function DeviceGroupSyncProvider(props: {
       const r = new wasmSync.LinkRecord(
         record.linkId,
         record.linkSecret,
-        record.kind === "contact" ? wasmSync.LinkRecordKind.Contact : wasmSync.LinkRecordKind.Call,
+        numberOfKind(record.kind, wasmSync.LinkRecordKind),
         record.ledgerId,
         record.revocationSeed,
         BigInt(Math.max(0, Math.floor(record.expiryMs))),
         record.maxUses >>> 0,
         BigInt(Math.max(0, Math.floor(record.mintedAtMs))),
         record.label,
+        // ADR-0087 phase B — a `/g/` link's target, invite seed and sealed
+        // blob; omitted for a contact or call link.
+        record.targetId,
+        record.inviteSeed,
+        record.admissionVersion,
+        record.capability,
       );
       try {
         written = synced.setLinkRecord(mintHlc(), r);
@@ -2623,6 +2782,30 @@ export function DeviceGroupSyncProvider(props: {
         }
         return;
       }
+      // ADR-0087 section 13a - the own channel reaction and comment
+      // registers, the same way.
+      if (wasmSync !== null && wasmSync.isChannelReactionEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelReactionEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      if (wasmSync !== null && wasmSync.isChannelCommentEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelCommentEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
       // Reactions D3 - the quick-reaction register, the same way.
       if (wasmSync !== null && wasmSync.isQuickReactionEnvelope(parsed.serviceEnvelope)) {
         try {
@@ -3026,6 +3209,16 @@ export function DeviceGroupSyncProvider(props: {
     setOrder: setOrderImpl,
     applyFolderEdits: applyFolderEditsImpl,
   };
+
+  // ADR-0087 phase B — the channel and group link modules write `/g/` links
+  // to the register through this port.
+  installLinkRegister({
+    records: linkRecords,
+    accountIdB64: () => activeAccountIdB64,
+    set: setLinkRecordImpl,
+    revoke: revokeLinkRecordImpl,
+  });
+  onCleanup(() => installLinkRegister(null));
 
   return (
     <DeviceGroupSyncContext.Provider value={api}>

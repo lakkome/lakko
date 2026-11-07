@@ -59,6 +59,9 @@ final class ChannelPostSync: ObservableObject {
     /// "Couldn't check for new messages." (``FeedRefreshCenter``). Set by the
     /// session root.
     var onSyncDone: ((FeedCheckTally) -> Void)?
+    /// The account's current phrase seed, for the reaction outbox
+    /// (``ChannelBackgroundChecks``). Set by the session root.
+    var accountIdentitySeed: (() -> Data?)?
 
     init(
         accountIdB64: String,
@@ -188,6 +191,7 @@ final class ChannelPostSync: ObservableObject {
 
         for channel in readableChannels() {
             var metas: [SharedChannelMeta] = []
+            var bans: [(UInt64, [Data])] = []
             let decode: (String) async -> ChannelPostLog.PostOutcome = { payloadB64 in
                 guard let epoch = try? ChannelsComposer.postEpoch(postWireB64Url: payloadB64) else {
                     return .skip
@@ -199,9 +203,16 @@ final class ChannelPostSync: ObservableObject {
                     seed: seed, channelIdHex: channel.idHex, postWireB64Url: payloadB64)
                 else { return .skip }
                 switch ChannelMetaRecord.classify(plain) {
-                case .text(let text): return .text(text)
+                case .text(let envelope):
+                    // ADR-0087 section 13 — the plaintext is the chat
+                    // envelope; an edit or a delete is not a feed item.
+                    guard let line = ChannelPostBody.read(envelope).feedText else { return .skip }
+                    return .text(line)
                 case .meta(let meta):
                     metas.append(meta)
+                    return .skip
+                case .banList(let updatedAtMs, let authors):
+                    bans.append((updatedAtMs, authors))
                     return .skip
                 case .malformed: return .skip
                 }
@@ -230,6 +241,10 @@ final class ChannelPostSync: ObservableObject {
                     changed = true
                 }
                 onSlotSynced?(channel.idHex, updated)
+            } catch where ChannelsApiError.isChannelDeleted(error) {
+                // ADR-0087 phase B — the owner deleted it: it ends here.
+                channels.endDeleted(channel.idHex)
+                continue
             } catch {
                 failed += 1
                 // A channel the server does not answer for this time; the
@@ -241,8 +256,15 @@ final class ChannelPostSync: ObservableObject {
             for meta in metas {
                 _ = channels.recordSharedMeta(channelId: channel.idHex, meta: meta)
             }
+            for (updatedAtMs, authors) in bans {
+                channels.recordBanList(channelId: channel.idHex, updatedAtMs: updatedAtMs, authors: authors)
+            }
         }
 
+        // ADR-0087 sections 7.3 and 13.1 — a private channel's removal and the
+        // kept reaction adds, without the channel open.
+        await ChannelBackgroundChecks.run(
+            state: channels, client: client, accountIdentitySeed: accountIdentitySeed?())
         let tally = FeedCheckTally(tried: tried, answered: tried - failed)
         guard changed else { return tally }
         store.put(accountIdB64: accountIdB64, payload: next)

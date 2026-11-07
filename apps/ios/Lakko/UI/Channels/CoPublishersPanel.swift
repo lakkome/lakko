@@ -6,12 +6,12 @@ import LakkoCore
 import SwiftUI
 import UIKit
 
-/// ADR-0028 OQ3 — owner-side co-publisher card (``ChannelManageScreen``).
+/// ADR-0028 OQ3 — owner-side co-publisher card (the Publishers screen).
 /// Runs on the durable channel provider (``ChannelPublisherIdentity``): the
 /// pending set the poll loop fills is in that provider, so the approve finds
 /// it, and every action reopens the group from it rather than keeping a
-/// handle. Polls the journal every 5 s, and surfaces the invite link (Copy)
-/// and each request with Approve / Reject. The approve path is
+/// handle. Polls the journal and lists each request that did not come by a
+/// publisher link this account named someone with, with Approve / Reject. The approve path is
 /// `CoPublisher.approve`, recorded (G-50) before its reseal-after-add runs.
 struct CoPublishersPanel: View {
     let channelId: String
@@ -22,29 +22,39 @@ struct CoPublishersPanel: View {
 
     /// `true` once the PublisherGroup opened.
     @State private var ready = false
-    @State private var link: String?
     @State private var pending: [Data] = []
     @State private var busy = false
     @State private var error: UiText?
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
-    @State private var copied = false
     @State private var pollTask: Task<Void, Never>?
     /// ADR-0053 — how far the knocks have been read (their own id space).
     @State private var knockCursor: Int64 = 0
+    @State private var journalCursor: Int64 = 0
     /// ADR-0053 — the same per-group floor on knock reads the chat poll keeps;
-    /// the journal itself is still polled every 5 s.
-    @State private var knockThrottle = KnockPollThrottle()
+    /// the journal is read from its cursor every 10 s while the list is open.
+    @State private var knockThrottle = KnockPollThrottle(floorSeconds: KnockPollThrottle.backgroundFloorSeconds)
 
     private let ds = DsClient()
 
     var body: some View {
+        // UX 15.2 — the copy-paste link is gone (`Add publisher` names the
+        // person, and their request is approved without asking); a request
+        // that came by any other link still shows here.
+        Group {
+            if !pending.isEmpty || error != nil {
+                card
+            }
+        }
+        .task { await onAppearLoad() }
+        .onDisappear { teardown() }
+    }
+
+    private var card: some View {
         ChannelManageCard(
             title: l10n.t("channels.copublishers.title"),
             subtitle: l10n.t("channels.copublishers.desc")
         ) {
-            inviteLinkRow
-
             if !pending.isEmpty {
                 Text(l10n.t(
                     "channels.copublishers.requests",
@@ -66,51 +76,6 @@ struct CoPublishersPanel: View {
             if let error {
                 ChannelManageErrorLine(text: error.text)
             }
-        }
-        .task { await onAppearLoad() }
-        .onDisappear { teardown() }
-    }
-
-    /// The invite link as one row: create it, then Copy / Share it.
-    @ViewBuilder
-    private var inviteLinkRow: some View {
-        if let link {
-            HStack(spacing: 8) {
-                Image(systemName: "link")
-                    .foregroundStyle(Color.lakkoTextMuted)
-                Text(link)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 4)
-                Button {
-                    UIPasteboard.general.string = link
-                    copied = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        copied = false
-                    }
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel(l10n.t(copied ? "common.copied" : "chat.invite_link.copy"))
-                // Copy is the whole of it: a link is never handed to the
-                // system's share sheet.
-            }
-            .padding(10)
-            .background(Color.lakkoSurfaceSunken)
-            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
-        } else {
-            Button {
-                Task { await createLink() }
-            } label: {
-                Label(l10n.t(busy ? "chats.new_group.creating" : "chat.invite_link.create"), systemImage: "link")
-            }
-            .buttonStyle(.bordered)
-            .disabled(busy || !ready)
         }
     }
 
@@ -172,7 +137,7 @@ struct CoPublishersPanel: View {
         pollTask = Task { @MainActor in
             while !Task.isCancelled {
                 await refreshPending()
-                try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
             }
         }
     }
@@ -185,35 +150,19 @@ struct CoPublishersPanel: View {
             let outcome = try await CoPublisher.pollJournal(
                 ds: ds, identity: identity, publisherGroup: publisherGroup,
                 knockAfter: knockCursor,
-                readKnocks: knockThrottle.take(channelId))
+                readKnocks: knockThrottle.take(channelId),
+                after: journalCursor)
             knockCursor = outcome.knockCursor
+            journalCursor = outcome.journalCursor
+            ChannelAdmissionSeedShare.rememberRequests(outcome.requests, channelId: channelId)
+            if let groupId = try? publisherGroup.groupId() {
+                PublisherLinkApproval.remember(outcome.requests, groupId: groupId)
+            }
             // The poll applied commits and retained requests in the provider.
             ChannelPublisherIdentity.shared.persist()
             pending = try CoPublisher.pending(publisherGroup: publisherGroup)
         } catch {
             // Best-effort — keep the last good pending list.
-        }
-    }
-
-    private func createLink() async {
-        guard ready else { return }
-        busy = true
-        error = nil
-        defer { busy = false }
-        do {
-            let (identity, publisherGroup) = try open()
-            let channel = state.channels.first { $0.id == channelId }
-            let name = channel.map { $0.sharedMeta?.name ?? $0.localName }
-            // Uploaded to the group-invite ledger (no inline form since
-            // 2026-10-19): any failed upload mints nothing and shows the error;
-            // the button stays for another try.
-            link = try await CoPublisher.createCoPublisherLink(
-                identity: identity, publisherGroup: publisherGroup,
-                channelName: name?.isEmpty == false ? name : nil,
-                accountIdB64: AcceptedContactsStore.boundAccountIdB64)
-        } catch {
-            NSLog("Channels: create co-publisher link failed: %@", String(describing: error))
-            self.error = .key("chat.error.create_link")
         }
     }
 

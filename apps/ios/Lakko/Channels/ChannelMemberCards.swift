@@ -153,7 +153,26 @@ enum ChannelMemberCards {
     static func refresh(
         state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
     ) async -> [ProfileClaim] {
-        let seeds = state.subscribedSeeds(channelId: channelId)
+        await refreshMembers(state: state, channelId: channelId, resolveKey: resolveKey).map(\.claim)
+    }
+
+    /// One named member: the subscriber key the card was filed under and
+    /// what it says.
+    struct Member {
+        let subscriberPk: Data
+        let claim: ProfileClaim
+    }
+
+    /// ``refresh(state:channelId:resolveKey:)``, with the subscriber key of
+    /// each name (the subscriber list's rows, ADR-0087 section 15).
+    static func refreshMembers(
+        state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
+    ) async -> [Member] {
+        var seeds = state.subscribedSeeds(channelId: channelId)
+        // A publisher opens the cards of the current epoch with its own seed.
+        if let keys = state.keysByChannel[channelId], let epoch = state.epochByChannel[channelId] {
+            seeds[epoch] = keys.seed
+        }
         guard !seeds.isEmpty, let channelIdBytes = CoPublisher.hexToData(channelId) else { return [] }
         let ownPk = state.subscriberKeysByChannel[channelId]
             .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
@@ -162,7 +181,7 @@ enum ChannelMemberCards {
         // profile is filed under it, and under no account signed in while the
         // pages were being read.
         let readForAccountIdB64 = ProfileDirectory.shared.accountIdB64
-        var names: [ProfileClaim] = []
+        var names: [Member] = []
         var seen = Set<Data>()
         var after: String?
         repeat {
@@ -212,7 +231,7 @@ enum ChannelMemberCards {
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate,
                     avatar: ProfileAvatar(profile.avatar))
-                names.append(claim)
+                names.append(Member(subscriberPk: member.subscriberPk, claim: claim))
                 if channelGrant != nil {
                     ProfileDirectory.shared.acceptReceived(
                         claim, signatureKeyB64: keyB64, accountIdB64: readForAccountIdB64)

@@ -164,7 +164,12 @@ public class SubscriberAdmission(
         private const val TAG = "SubscriberAdmission"
 
         /** Between passes of the app-wide loop over the owned channels (chosen). */
-        public const val APP_INTERVAL_MS: Long = 15_000L
+        public const val APP_INTERVAL_MS: Long = 60_000L
+
+        /** The application context the ticket check reads the admission
+         *  seeds with; set by the session shell. */
+        @Volatile
+        public var appContext: android.content.Context? = null
 
         private val shared = WeakHashMap<ChannelsUiState, SubscriberAdmission>()
 
@@ -187,10 +192,23 @@ private class ChannelsPort(
     private val state: ChannelsUiState,
     private val client: ChannelsClient,
 ) : SubscriberAdmission.Port {
+    private val appContext: android.content.Context? get() = SubscriberAdmission.appContext
     override fun canPost(channelIdHex: String): Boolean =
         state.boundAccount != null && state.keysByChannel.value.containsKey(channelIdHex)
 
     override suspend fun listSubscribers(channelIdHex: String): List<String> {
+        // ADR-0087 section 7 — a private channel this device holds an
+        // admission seed for lets in only the rows whose ticket names a live
+        // invite key; a co-publisher with none leaves it to the owner.
+        state.boundAccount?.let { account ->
+            val context = appContext
+            if (context != null) {
+                if (ChannelAdmissionKeys.all(context, account, channelIdHex).also { l -> l.forEach { it.second.fill(0) } }.isNotEmpty()) {
+                    return ChannelSubscriberRows.admissible(context, state, client, channelIdHex).orEmpty()
+                }
+                if (state.joinedGroupIdOf(channelIdHex) != null) return emptyList()
+            }
+        }
         val pub = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
         return pub.withIdentity(persist = false) { identity ->
             client.listSubscribersAsPublisher(channelIdHex, identity)

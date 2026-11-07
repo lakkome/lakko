@@ -195,6 +195,43 @@ names; iOS / Android use the same names.
   mark on the current value; picking closes it. Keyboard on web: Enter /
   Space opens, arrows move, Enter picks, Escape closes. Replaces the
   native `<select>` and SwiftUI `Picker`.
+- **QR code** (`BrandedQr`; maintainer, 2026-11-05): every QR Lakko draws
+  (device pairing, invite links, the authenticator setup code) has one look
+  on the three clients, drawn by the app from the encoder's module matrix,
+  never the encoder's default bitmap. The encoded text is unchanged by the
+  styling.
+  - **Card**: always a white (`#ffffff`) rounded card, radius 12, in both
+    themes, because a light-on-dark code does not scan on every camera. The
+    card includes a quiet zone of 4 modules on every side. Callers put the
+    card on any surface; they add no white frame of their own.
+  - **Data modules**: dots, diameter 1.0 of a module (neighbours touch),
+    centred on the module, ink `#312e81` (the dark end of the brand
+    gradient). A gap between dots (0.9) made 11 to 27% of pairing codes
+    unreadable to jsQR at 576 and 864 px (measured 2026-11-06).
+  - **Finder patterns** (the three corner squares): drawn as rounded
+    squares, never dots: an outer ring 7 modules wide and 1 module thick
+    (outer corner radius 1 module, inner 0.5 module) and an inner rounded
+    square of 3 modules (corner radius 0.5 module), both in `#4338ca`; a
+    2-module outer radius cost decodes at 288 px. The finder colours are the
+    only fixed hex values outside the tokens, and exist because the card is
+    always light.
+  - **Logo**: the brand tile (`LakkoBrandMark` / `lakko_brand_mark` /
+    `/icon-192.png`), 76% of a white rounded badge (corner radius 22% of
+    the badge) centred on the code. The badge covers whole modules: k x k,
+    k the largest odd number not above 20% of the module count, so at most
+    20% of the side and 4% of the area; the modules under it are not drawn.
+    A logo is drawn only when the encoded text is at most 220 UTF-8 bytes
+    (it then fits QR version 15 at error correction H on every encoder) and
+    k is at least 5; the code is then encoded at level H. A longer text
+    (the device pairing code, about 835 characters) gets no logo and level
+    M, so its modules stay as large as possible.
+  - **Size**: the card side is at least 240 (px / pt / dp); a code without
+    a logo (a long payload) at least 288. Drawn at the screen's pixel
+    density, never upscaled from a small bitmap.
+  - **Accessibility**: one image with the label "QR code"
+    (`common.qr_code`), or a caller's more specific label; it is not
+    focusable. The text it carries is always also offered another way
+    (Copy link, the typed six-digit code, the secret key line).
 - **Banner**: inline, sunken surface, icon + one sentence + one action.
   Used for the incoming-call prompt, update notice, identity change.
 - **Empty state**: centred, one line of muted text and one primary
@@ -300,6 +337,7 @@ either, maintainer decision 2026-10-28.
 | dialog | `ConfirmDialog` / `LakkoDialog` | `LakkoDialog` (`.lakkoDialog`) | `LakkoDialog` |
 | action sheet / long-press menu | `LakkoMenu` popover / sheet | `LakkoMenuSheet` (`.lakkoLongPressMenu`, `.lakkoActionSheet`) | `LakkoMenu` bottom sheet |
 | picker | `LakkoPicker` | `LakkoPicker` | `LakkoPicker` |
+| QR code | `BrandedQr` (`ui/BrandedQr.tsx`, `ui/branded-qr.ts`) | `QrImageView` / `QrTextImageView` (`UI/Devices/BrandedQr.swift`) | `QrImageComposable` / `QrTextImageComposable` (`ui/devices/BrandedQr.kt`) |
 | back nav | breadcrumb / browser back | `NavigationStack` | system back |
 
 Platform-idiomatic divergence is allowed in mechanics (gesture, transition,

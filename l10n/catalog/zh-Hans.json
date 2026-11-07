@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "zh-Hans",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "你的账号已有新的密钥。我们正在完成更改。",
@@ -1238,8 +1237,136 @@
       "text": "无法解密此参与者的媒体",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "订阅者可以用任何表情回应。",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "订阅者不能回应帖子。",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "订阅者只能用你选择的表情回应。",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "它将从搜索和发现中移除。只有你邀请的人才能订阅。所有订阅者都会保留。",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "将此频道设为私密？",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "任何人都能找到并阅读它，Lakko 可能会在发现中推荐它。它的名称、照片和描述将对所有人可见。之前的帖子仍只有现有订阅者能阅读。",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "将此频道设为公开？",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "旧的 @名称将立即失效。它会为此频道保留 30 天。",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "只有订阅者能看到。",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "任何人都能通过此名称找到此频道。",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "只有你邀请的人可以订阅。它不会出现在搜索中。",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "任何人都能找到并订阅此频道。Lakko 可能会在发现中推荐它。",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "频道类型",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "正在更新订阅者... {done}/{total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "谁可以订阅",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "返回频道列表",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "禁止评论",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "没有人被禁止。",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "无法保存。请重试。",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "已禁止",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "解除禁止",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "某人",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "评论操作",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "评论",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "无法删除评论。请重试。",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "评论未能加载。",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "隐藏评论",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "这条评论太长，或含有无法发送的字符。",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "显示更多",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, other {# 条新评论}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, other {再显示 # 条评论}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "显示更多评论",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "写评论",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "共同发布者",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "频道及其帖子将从你的所有设备中删除，@{name} 将在 30 天后释放。此操作无法撤销。",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "频道及其帖子将从你的所有设备中删除。此操作无法撤销。",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "删除频道",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "无法删除频道。请重试。",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "删除此频道？",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "创建频道",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "还没有频道",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "频道及其帖子已不在你的设备上。",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "未找到频道 {handle}。",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "私密频道",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "公开频道",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "公开频道 · {band} 位订阅者",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "选择一个频道，或创建一个",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "此频道没有 @name。请选择一个。",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "邀请",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "邀请他人",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "名称和简介、谁在阅读，以及还有谁可以发布。",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "发布者",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "将频道从你的列表中移除，并从你的所有设备上删除其帖子。你以后可以重新订阅。",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "无法邀请 {names}。请重试。",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "此共同发布者邀请链接由旧版 Lakko 创建，已无法使用。请让频道所有者给你发送新的邀请链接。",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "订阅需要账户。请创建账户或登录。",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "加入频道",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "已订阅。所有者或管理员下次打开 Lakko 后，帖子就会出现。",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "无法创建链接。请重试。",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "此设备暂时无法为此频道创建链接。所有者的设备打开 Lakko 后即可。",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "无法撤销链接。请重试。",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "频道",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "禁止评论",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "已禁止",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "解除禁止",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "创建",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "描述",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "请重新登录以创建频道。",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "无法创建此频道。未创建任何内容。请重试。",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "其他人可以通过它找到并订阅此频道。",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "频道名称",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "订阅者可以看到名称和简介。它们以加密形式传输，服务器只会收到密文。",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "新频道",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "你今天创建了很多频道。请明天再试。",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "新建频道或加入频道",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "只有所有者可以更改照片。",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "订阅者将看到首字母缩写。",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "移除频道照片？",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "不可用",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "只有所有者和发布者可以在这里发帖。",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "这条帖子早于此设备能够读取的范围。",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "此帖子不可用。",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "无法在此设备上打开这条帖子。",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "更早的帖子不可用。",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "请重新登录以在此频道发布。",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "接受",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "添加发布者",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "邀请你成为 {channel} 的发布者。",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} 邀请你成为 {channel} 的发布者。",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "移除发布者",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "将 {name} 移出发布者？对方将无法再发帖或邀请。",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "无法移除发布者。请重试。",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, other {# 个发布请求}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "所有者",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "发布者",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "卸任",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "你将不再在此频道发布或邀请。所有者的设备下次打开 Lakko 时会生效。",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "无法卸任。请重试。",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "完成。所有者的设备下次打开 Lakko 时会生效。",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "频道中的回应是匿名的。没有人能看到谁做出了回应，即使是频道所有者也不能。",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "频道中的回应是匿名的。没有人能看到谁做出了回应，频道所有者也不能。",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "无法加载订阅者。请重试。",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "来自邀请",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "来自链接“{label}”",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "无法加载订阅者。请重试。",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "显示更多",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "还没有订阅者。",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, other {另有 # 人。}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "对方将不再收到新帖子。",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "移除此订阅者？",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "正在重试…",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "订阅者",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "订阅者（{count}）",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "取消关注",
+      "text": "取消订阅",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "取消关注此频道？",
+      "text": "要取消订阅此频道吗？",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "取消关注{name}？",
+      "text": "要取消订阅 {name} 吗？",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "该群组及其消息已从你的设备上移除。",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, other {你已不在 {name} 和另外 # 个对话中。}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "永不",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "群组和频道链接",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "频道链接",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "群组链接",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "共同发布者链接",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "标签（可选）",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "谁可以找到我",
       "status": "machine"
     }
-  }
+  },
+  "language": "zh-Hans"
 }

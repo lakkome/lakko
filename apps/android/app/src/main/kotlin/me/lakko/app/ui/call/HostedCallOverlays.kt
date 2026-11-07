@@ -340,7 +340,7 @@ private fun CallInvitePickerDialog(
 /** The production [InviteContactPorts]: the contact list, the one rule for
  *  "the one-to-one with a contact", the one creation path, the ordinary
  *  send. */
-private fun callInviteContactPorts(
+internal fun callInviteContactPorts(
     chatRepository: ChatRepository,
     contactsRepository: ContactsRepository,
 ): InviteContactPorts = object : InviteContactPorts {

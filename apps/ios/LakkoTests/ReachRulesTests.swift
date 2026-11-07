@@ -713,7 +713,8 @@ extension ReachRulesTests {
     }
 
     /// G — a restored device (no version state) whose mailbox holds the
-    /// `contact` key at v1 resumes at v1 and never registers v0; a class with
+    /// `contact` key at v1 resumes at v1 and never registers v0 (the
+    /// retired window keeps registered keys, it brings none back); a class with
     /// no registered key (`fof` here) starts at 0.
     func testARestoredDeviceResumesAtTheRegisteredVersionAndNeverRegistersALowerOne() async throws {
         let ds = FakeReachDs()
@@ -962,4 +963,128 @@ extension ReachRulesTests {
         }
         XCTAssertEqual(c.fofGrant()?.version, 1, "the due rotation ran when the app came back")
     }
+
+    // MARK: - ADR-0060 section 1 (2026-11-06): contact key rotation
+
+    /// Every `contact` version in the window stays registered; a version that
+    /// left it goes.
+    func testEveryContactVersionInTheWindowStaysRegistered() {
+        var state = emptyState
+        for _ in 0..<10 { state = ReachRules.bumping(.contact, scope: Data(), in: state, nowMs: 1) }
+        let current = ReachRules.version(of: .contact, scope: Data(), in: state)
+        func contactVersions(_ state: FfiReachState) -> [UInt32] {
+            ReachRules.desiredKeys(
+                setting: setting(mode: .nobody), state: state, groupIds: [], links: [], replies: [],
+                nowMs: 1, allowsScope: { allowsScope(setting: $0, scope: $1) },
+                allowsFof: { allowsContactsOfContacts(setting: $0) })
+                .filter { $0.reachClass == .contact }.map(\.version).sorted()
+        }
+        XCTAssertEqual(contactVersions(state), contactKeyVersions(current: current).sorted())
+        XCTAssertEqual(contactVersions(state).count, Int(retiredContactVersionsKept()) + 1)
+        XCTAssertTrue(contactVersions(state).contains(current))
+        let next = ReachRules.bumping(.contact, scope: Data(), in: state, nowMs: 2)
+        let after = contactVersions(next)
+        XCTAssertTrue(after.contains(current + 1))
+        XCTAssertFalse(after.contains(current - retiredContactVersionsKept()), "the oldest left the window")
+        XCTAssertEqual(contactVersions(emptyState), [ReachRules.version(of: .contact, scope: Data(), in: emptyState)])
+    }
+
+    /// The receive path's verdict: a retired key from a contact is processed
+    /// and regranted, from anyone else dropped; the current key and a row
+    /// with no key are processed. A Welcome is judged as a contact's until
+    /// joined; a link refusal is always processed.
+    func testTheMailboxRowVerdictWiring() throws {
+        let seed = Data(repeating: 0x31, count: 32)
+        func key(_ version: UInt32) throws -> Data {
+            try reachVerifyingKey(seed: reachSeed(accountSeed: seed, class: .contact, scopeId: Data(), version: version))
+        }
+        let retired = try key(1)
+        let current = try key(2)
+        let friend = Data(repeating: 0xF1, count: 32)
+        let stranger = Data(repeating: 0xF2, count: 32)
+        let verdict: (Data?, Bool) -> FfiContactKeyRowVerdict = { proving, isContact in
+            (try? mailboxRowContactVerdict(
+                accountSeed: seed, currentContactVersion: 2, provingKey: proving,
+                senderIsContact: isContact)) ?? .process
+        }
+        func ack(_ id: Int64, from: Data) -> IncomingMailboxEvent {
+            .contactAck(IncomingContactAck(
+                messageId: id, accepterPubkey: from, accepterAccountId: Data(repeating: 1, count: 16),
+                accepterX25519Pubkey: Data(repeating: 2, count: 32), ackToPseudonym: Data(repeating: 3, count: 32),
+                acceptedAtMs: 0, createdAt: ""))
+        }
+        let keys: [Int64: Data] = [1: retired, 2: retired, 3: current, 5: retired]
+        let isContact: (Data) -> Bool = { $0 == friend }
+        let fromFriend = ContactsRepository.rowContactDecision(
+            ack(1, from: friend), reachKeys: keys, isContact: isContact, verdict: verdict)
+        XCTAssertEqual(fromFriend.verdict, .processAndRegrant)
+        XCTAssertEqual(fromFriend.sender, friend)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            ack(2, from: stranger), reachKeys: keys, isContact: isContact, verdict: verdict).verdict, .drop)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            ack(3, from: stranger), reachKeys: keys, isContact: isContact, verdict: verdict).verdict, .process)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            ack(4, from: stranger), reachKeys: keys, isContact: isContact, verdict: verdict).verdict, .process,
+            "a proofless row")
+        // A Welcome: the peeked founder decides; an unreadable founder on a
+        // retired key drops it unjoined; a Welcome with no key is processed.
+        let welcomeRow = IncomingMailboxEvent.welcome(messageId: 5, welcomeBytes: Data(), createdAt: "")
+        let fromFriendFounder = ContactsRepository.rowContactDecision(
+            welcomeRow, reachKeys: keys, isContact: isContact, welcomeFounder: { _ in friend }, verdict: verdict)
+        XCTAssertEqual(fromFriendFounder.verdict, .processAndRegrant)
+        XCTAssertEqual(fromFriendFounder.sender, friend)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            welcomeRow, reachKeys: keys, isContact: isContact, welcomeFounder: { _ in stranger },
+            verdict: verdict).verdict, .drop)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            welcomeRow, reachKeys: keys, isContact: isContact, welcomeFounder: { _ in nil },
+            verdict: verdict).verdict, .drop, "a peek error on a retired-key row does not join")
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            .welcome(messageId: 6, welcomeBytes: Data(), createdAt: ""), reachKeys: keys,
+            isContact: isContact, welcomeFounder: { _ in nil }, verdict: verdict).verdict, .process)
+        XCTAssertEqual(ContactsRepository.rowContactDecision(
+            .linkRefusal(Data()), reachKeys: keys, isContact: isContact, verdict: verdict).verdict, .process)
+    }
+
+    /// A retired `contact` version is kept only while it is still registered:
+    /// the window never brings one back.
+    func testARetiredContactVersionIsKeptOnlyWhileRegistered() {
+        var state = emptyState
+        for _ in 0..<5 { state = ReachRules.bumping(.contact, scope: Data(), in: state, nowMs: 1) }
+        let current = ReachRules.version(of: .contact, scope: Data(), in: state)
+        let specs = contactKeyVersions(current: current).map {
+            ReachKeySpec(reachClass: .contact, scopeId: Data(), version: $0, expiresAtMs: nil)
+        } + [ReachKeySpec(reachClass: .fof, scopeId: Data(), version: 0, expiresAtMs: nil)]
+        let fake: (ReachKeySpec) -> Data? = { Data([UInt8(truncatingIfNeeded: $0.version)]) }
+        let kept = ReachRules.keepingRegisteredContactVersions(
+            specs, state: state, registered: [Data([UInt8(current - 1)])], publicKey: fake)
+        XCTAssertEqual(kept.filter { $0.reachClass == .contact }.map(\.version).sorted(), [current - 1, current])
+        XCTAssertTrue(kept.contains { $0.reachClass == .fof }, "other classes untouched")
+    }
+
+    /// Remove contact rotates `contact`: the new version is registered and
+    /// the one just retired stays registered (a contact still holding it is
+    /// admitted and regranted).
+    func testRotatingTheContactKeyKeepsTheRetiredOneRegistered() async throws {
+        let ds = FakeReachDs()
+        let (c, seed) = try restoredCenter(ds)
+        _ = await c.syncNow()
+        c.rotate(.contact)
+        _ = await c.syncNow()
+        let last = try XCTUnwrap(ds.updates.last)
+        let added = Set(last.add.map(\.publicKey))
+        XCTAssertTrue(added.contains(try pk(seed, .contact, Data(), 1)), "the new version")
+        XCTAssertTrue(added.contains(try pk(seed, .contact, Data(), 0)), "the retired one stays")
+        XCTAssertFalse(last.remove.contains(try pk(seed, .contact, Data(), 0)))
+    }
+
+    /// The removed person's own one-to-one gets no `contact` grant; another
+    /// one-to-one does.
+    func testAOneToOneWithARemovedPersonCarriesNoContactGrant() throws {
+        let (c, _) = try restoredCenter(FakeReachDs())
+        XCTAssertTrue(c.profileGrants(groupId: groupA, oneToOne: true).contains { $0.class == .contact })
+        XCTAssertFalse(c.profileGrants(groupId: groupA, oneToOne: true, contactGrant: false)
+            .contains { $0.class == .contact })
+    }
 }
+

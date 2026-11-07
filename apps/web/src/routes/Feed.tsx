@@ -377,7 +377,7 @@ export default function Feed(): JSX.Element {
       sharedName: groupNames.nameOf(g.groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => memberNameOf(profiles.resolve(k)),
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "a Feed source title"),
       groupTitle,
     });
 
@@ -455,7 +455,7 @@ export default function Feed(): JSX.Element {
     contactName: (key) => {
       contactVersion();
       if (!loadAccepted().some((a) => a.signaturePubkeyB64 === key)) return null;
-      return memberNameOf(profiles.resolve(key));
+      return memberNameOf(profiles.resolve(key), "a Feed item author");
     },
     ownKeyB64: () => ownPersonKeyB64(chats.identity()),
     sharedRow: () => sharedChannels.row(),
@@ -606,7 +606,7 @@ export default function Feed(): JSX.Element {
    *  message carries no author key (an unresolved member). */
   const knownAuthorOf = (ref: FeedCandidateRef): string | null => {
     const key = ref.message.authorKeyB64;
-    return key === null || key === undefined ? null : memberNameOf(profiles.resolve(key));
+    return key === null || key === undefined ? null : memberNameOf(profiles.resolve(key), "a Feed reply author");
   };
 
   /** ADR-0084 - whose photo sits beside the author's name: the author key of

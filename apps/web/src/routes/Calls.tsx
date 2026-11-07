@@ -87,7 +87,7 @@ export default function Calls(): JSX.Element {
       sharedName: groupNames.nameOf(groupIdB64),
       contactNameById: undefined,
       contactNameByMember: undefined,
-      nameOf: (k) => memberNameOf(profiles.resolve(k)),
+      nameOf: (k) => memberNameOf(profiles.resolve(k), "a Calls row title"),
       groupTitle,
     });
   };

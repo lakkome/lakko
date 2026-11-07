@@ -805,6 +805,36 @@ pub enum LinkRecordKind {
     Contact = 1,
     /// A call invite link (`/c/`).
     Call = 2,
+    /// A group invite link (`/g/`, ADR-0087 phase B): `targetId` is the
+    /// 32-byte group id.
+    Group = 3,
+    /// A channel subscriber invite link (`/g/`): `targetId` is the 16-byte
+    /// channel id; `inviteSeed` the 32-byte admission seed of a private
+    /// channel (empty for a public one) at `admissionVersion`.
+    Channel = 4,
+    /// A co-publisher (publisher) invite link (`/g/`): `targetId` is the
+    /// 16-byte channel id.
+    Publisher = 5,
+}
+
+fn link_kind_to_core(kind: LinkRecordKind) -> core::LinkRecordKind {
+    match kind {
+        LinkRecordKind::Contact => core::LinkRecordKind::Contact,
+        LinkRecordKind::Call => core::LinkRecordKind::Call,
+        LinkRecordKind::Group => core::LinkRecordKind::Group,
+        LinkRecordKind::Channel => core::LinkRecordKind::Channel,
+        LinkRecordKind::Publisher => core::LinkRecordKind::Publisher,
+    }
+}
+
+const fn link_kind_from_core(kind: core::LinkRecordKind) -> LinkRecordKind {
+    match kind {
+        core::LinkRecordKind::Contact => LinkRecordKind::Contact,
+        core::LinkRecordKind::Call => LinkRecordKind::Call,
+        core::LinkRecordKind::Group => LinkRecordKind::Group,
+        core::LinkRecordKind::Channel => LinkRecordKind::Channel,
+        core::LinkRecordKind::Publisher => LinkRecordKind::Publisher,
+    }
 }
 
 /// One of the account's invite links (ADR-0079 section 4). The link secret
@@ -825,6 +855,14 @@ impl LinkRecord {
     /// `maxUses` as the capability carries it (0 = single use,
     /// `0xFFFFFFFF` = no limit), `expiryMs` 0 = never.
     ///
+    /// ADR-0087 phase B, the `/g/` kinds (`Group`, `Channel`, `Publisher`):
+    /// `linkId` is `groupLinkRecordId(ledgerId)`; `targetId` the group id
+    /// (32 bytes) or channel id (16); `inviteSeed` the private channel's
+    /// 32-byte admission seed (SECRET, `Channel` only, else omit);
+    /// `admissionVersion` its version; `capability` the sealed `/g/` blob, so
+    /// another device can show and re-share the link. Omit all four for a
+    /// contact or call link.
+    ///
     /// # Errors
     ///
     /// Throws `"bounds: ..."` for a field out of bounds.
@@ -840,16 +878,17 @@ impl LinkRecord {
         max_uses: u32,
         minted_at_ms: u64,
         label: String,
+        target_id: Option<Vec<u8>>,
+        invite_seed: Option<Vec<u8>>,
+        admission_version: Option<u16>,
+        capability: Option<Vec<u8>>,
     ) -> Result<LinkRecord, JsError> {
         let value = core::LinkRecordEntry {
             link_id: <[u8; 16]>::try_from(link_id)
                 .map_err(|_| JsError::new("bounds: link id must be 16 bytes"))?,
             link_secret: <[u8; 12]>::try_from(link_secret)
                 .map_err(|_| JsError::new("bounds: link secret must be 12 bytes"))?,
-            kind: match kind {
-                LinkRecordKind::Contact => core::LinkRecordKind::Contact,
-                LinkRecordKind::Call => core::LinkRecordKind::Call,
-            },
+            kind: link_kind_to_core(kind),
             ledger_id: ledger_id.to_vec(),
             revocation_seed: revocation_seed.to_vec(),
             expiry_ms,
@@ -860,6 +899,10 @@ impl LinkRecord {
             minted_at_ms,
             label,
             answered: Vec::new(),
+            target_id: target_id.unwrap_or_default(),
+            invite_seed: invite_seed.unwrap_or_default(),
+            admission_version: admission_version.unwrap_or(0),
+            capability: capability.unwrap_or_default(),
         };
         value
             .validate()
@@ -888,10 +931,29 @@ impl LinkRecord {
     /// Which ledger.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> LinkRecordKind {
-        match self.inner.value.kind {
-            core::LinkRecordKind::Contact => LinkRecordKind::Contact,
-            core::LinkRecordKind::Call => LinkRecordKind::Call,
-        }
+        link_kind_from_core(self.inner.value.kind)
+    }
+    /// The group id (32 bytes) or channel id (16) of a `/g/` link; empty for
+    /// a contact or call link.
+    #[wasm_bindgen(getter, js_name = targetId)]
+    pub fn target_id(&self) -> Vec<u8> {
+        self.inner.value.target_id.clone()
+    }
+    /// A private channel link's 32-byte admission seed, or empty. SECRET.
+    #[wasm_bindgen(getter, js_name = inviteSeed)]
+    pub fn invite_seed(&self) -> Vec<u8> {
+        self.inner.value.invite_seed.clone()
+    }
+    /// The admission-key version `inviteSeed` belongs to (0 when none).
+    #[wasm_bindgen(getter, js_name = admissionVersion)]
+    pub fn admission_version(&self) -> u16 {
+        self.inner.value.admission_version
+    }
+    /// The sealed `/g/` blob of a group, channel or publisher link; empty
+    /// for a contact or call link.
+    #[wasm_bindgen(getter)]
+    pub fn capability(&self) -> Vec<u8> {
+        self.inner.value.capability.clone()
     }
     /// The 6-byte ledger id.
     #[wasm_bindgen(getter, js_name = ledgerId)]
@@ -1502,7 +1564,7 @@ impl SyncedState {
         self.with(|s| s.has_channel_reaction(&channel, post_cursor, emoji))
     }
 
-    /// The emoji this account holds on the post.
+    /// The emoji this account holds on the post itself (not its comments).
     #[wasm_bindgen(js_name = channelReactionsOn)]
     pub fn channel_reactions_on(
         &self,
@@ -1511,6 +1573,62 @@ impl SyncedState {
     ) -> Result<Vec<String>, JsError> {
         let channel = channel16(channel_id)?;
         self.with(|s| s.channel_reactions_on(&channel, post_cursor))
+    }
+
+    /// The same as `setChannelReaction` for a reaction on the comment at
+    /// `commentCursor` under the post at `postCursor` (ADR-0087 phase B).
+    /// `postAtMs` is the POST's time. Three reactions a comment, counted
+    /// apart from the post. Throws `bounds: ...` for a fourth.
+    #[wasm_bindgen(js_name = setCommentReaction)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_comment_reaction(
+        &self,
+        hlc: u64,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+        reacted: bool,
+        post_at_ms: u64,
+    ) -> Result<Option<Vec<u8>>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| {
+            s.set_comment_reaction(
+                hlc,
+                channel,
+                post_cursor,
+                comment_cursor,
+                emoji,
+                reacted,
+                post_at_ms,
+            )
+        })?
+        .map_err(js)
+    }
+
+    /// Whether this account holds `emoji` on the comment.
+    #[wasm_bindgen(js_name = hasCommentReaction)]
+    pub fn has_comment_reaction(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_cursor: u64,
+        emoji: &str,
+    ) -> Result<bool, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.has_comment_reaction(&channel, post_cursor, comment_cursor, emoji))
+    }
+
+    /// The emoji this account holds on the comment.
+    #[wasm_bindgen(js_name = commentReactionsOn)]
+    pub fn comment_reactions_on(
+        &self,
+        channel_id: &[u8],
+        post_cursor: u64,
+        comment_cursor: u64,
+    ) -> Result<Vec<String>, JsError> {
+        let channel = channel16(channel_id)?;
+        self.with(|s| s.comment_reactions_on(&channel, post_cursor, comment_cursor))
     }
 
     /// Every held own channel reaction as envelopes (the catch-up re-send).
@@ -2055,6 +2173,20 @@ pub fn is_channel_comment_envelope(bytes: &[u8]) -> bool {
 #[must_use]
 pub fn channel_reactions_per_post_max() -> u32 {
     u32::try_from(core::CHANNEL_REACTIONS_PER_POST_MAX).unwrap_or(u32::MAX)
+}
+
+/// ADR-0087 phase B: the 16-byte register id of a `/g/` link (group,
+/// channel or publisher), derived from its 6-byte ledger id, so every device
+/// of the account files it under the same key.
+///
+/// # Errors
+///
+/// Throws `"bounds: ..."` when `ledgerId` is not 6 bytes.
+#[wasm_bindgen(js_name = groupLinkRecordId)]
+pub fn group_link_record_id(ledger_id: &[u8]) -> Result<Vec<u8>, JsError> {
+    let id = <[u8; 6]>::try_from(ledger_id)
+        .map_err(|_| JsError::new("bounds: ledger id must be 6 bytes"))?;
+    Ok(lakko_contacts::group_invite::group_link_record_id(&id).to_vec())
 }
 
 /// `true` when `bytes` open with the link-record envelope domain
@@ -2714,6 +2846,20 @@ mod tests {
             .ok()
             .unwrap());
         let env = a
+            .set_comment_reaction(5, &[3; 16], 7, 12, "\u{1F44D}", true, 1_000)
+            .ok()
+            .flatten()
+            .unwrap();
+        assert!(b.apply_channel_reaction_envelope(&env).ok().unwrap());
+        assert!(b
+            .has_comment_reaction(&[3; 16], 7, 12, "\u{1F44D}")
+            .ok()
+            .unwrap());
+        assert_eq!(
+            b.comment_reactions_on(&[3; 16], 7, 12).ok().unwrap(),
+            vec!["\u{1F44D}".to_string()]
+        );
+        let env = a
             .record_channel_comment(3, &[3; 16], 7, &[9; 16], 1_000)
             .ok()
             .flatten()
@@ -2724,7 +2870,7 @@ mod tests {
             b.channel_comments_on(&[3; 16], 7).ok().unwrap(),
             vec![9; 16]
         );
-        assert_eq!(a.prune_channel_activity(u64::MAX).ok().unwrap(), 2);
+        assert_eq!(a.prune_channel_activity(u64::MAX).ok().unwrap(), 3);
         assert_eq!(channel_reactions_per_post_max(), 3);
     }
 }

@@ -312,7 +312,8 @@ public struct ChatListScreen: View {
             channels: channels,
             flags: deviceGroupSync.flags,
             readCursors: deviceGroupSync.readCursors,
-            channelUnread: feedReading.channelUnread)
+            channelUnread: feedReading.channelUnread,
+            channelLastPosts: feedReading.channelLastPost)
     }
 
     /// The merged list, ordered by the shared rule. One definition for the
@@ -322,11 +323,13 @@ public struct ChatListScreen: View {
         channels: ChannelsUiState,
         flags: [String: FlagsState],
         readCursors: [String: ReadCursorState],
-        channelUnread: [String: Int]
+        channelUnread: [String: Int],
+        channelLastPosts: [String: PersistedChannelPost] = [:]
     ) -> [ConversationListRow] {
         let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
         return ConversationList.sorted(
-            chatRows + Self.channelRows(channels: channels, channelUnread: channelUnread))
+            chatRows + Self.channelRows(
+                channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts))
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -385,12 +388,15 @@ public struct ChatListScreen: View {
     /// created; the alternative is a freshly subscribed channel invisible at
     /// the bottom of a long list until a fetch lands.
     static func channelRows(
-        channels: ChannelsUiState, channelUnread: [String: Int]
+        channels: ChannelsUiState, channelUnread: [String: Int],
+        lastPosts: [String: PersistedChannelPost] = [:]
     ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
             let posts = channels.postsByChannel[channel.id] ?? []
-            let lastPostMs = ChannelsFormatting.newestPostMs(posts.map(\.serverTsMs))
+            let lastPost = lastPosts[channel.id]
+            let lastPostMs = ChannelsFormatting.newestPostMs(
+                posts.map(\.serverTsMs) + [lastPost.map { UInt64(clamping: max(0, $0.serverTsMs)) }].compactMap { $0 })
             let model = ChannelsFormatting.rowModel(
                 sharedName: channel.sharedName,
                 name: channel.localName,
@@ -407,9 +413,14 @@ public struct ChatListScreen: View {
                 title: model.title,
                 // ADR-0073 phase 2 (UX 16.6) — on the device that reset the
                 // keys, a channel it owned says it can no longer post.
+                // UX navigation section 2 — the second line is the last post;
+                // the @name and role only while no post can be read here.
                 preview: channels.orphanedByReset(channelId: channel.id)
                     ? Localization.text("channels.keys_reset.row_sub")
-                    : model.secondLine,
+                    : (lastPost.map {
+                        $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            .replacingOccurrences(of: "\n", with: " ")
+                    } ?? model.secondLine),
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
                 unread: channelUnread[channel.id] ?? 0)
         }
@@ -441,9 +452,6 @@ public struct ChatListScreen: View {
     /// stack, so that with no notice the list holds no empty row.
     private var listNotices: some View {
         Group {
-            // UX 9.1 — removed from a group, anywhere but in it.
-            MembershipEndBanner(
-                center: viewModel.endNotices, onClose: viewModel.closeEndNotice(groupIdHex:))
             if let accountNotice { accountNotice }
             if let recalledNotice { recalledNotice }
             // UX 6.2 — the requests to join this device sent, with a count.
@@ -838,6 +846,9 @@ public struct ChatListScreen: View {
             openHeld: openHeldConversation,
             subscribe: { idHex, handle, name in
                 searchText = ""
+                // ADR-0087 section 6 — the record's read key opens the
+                // public seed: the channel reads at once.
+                if found.kind == .channel, found.key.count == 32 { FoundChannelReadKeys.put(idHex, found.key) }
                 onSubscribeFoundChannel(idHex, handle, name)
             },
             onClose: { foundCard = nil })
@@ -1064,7 +1075,7 @@ struct ConversationRowView: View {
         HStack(alignment: .center, spacing: 12) {
             InitialsAvatar(
                 // The id is hashed for the tint only, never shown.
-                name: row.title, identity: row.id, size: 40,
+                name: row.title, identity: row.tintIdentity, size: 40,
                 isGroup: row.kind == .group,
                 photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group))
             VStack(alignment: .leading, spacing: 3) {
@@ -1255,14 +1266,6 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: repository.knownGroupIdHexes) > 0
     }
 
-    /// UX 9.1 — the notices the banner shows.
-    var endNotices: MembershipEndNoticeCenter { repository.membershipEndNotices }
-
-    /// UX 9.1 — the close icon. The name goes with it.
-    func closeEndNotice(groupIdHex: String) {
-        repository.closeEndNotice(groupIdHex: groupIdHex)
-    }
-
     /// The conversation's kind (ADR-0062, read from the group's own
     /// GroupContext). Routes a tap, splits Chats from Groups and picks the
     /// preview's sender prefix. A two-person group is a group here, on every
@@ -1421,45 +1424,33 @@ struct InvitedChatRow: View {
     }
 }
 
-/// UX 9.1 — "You are no longer in {name}." with a close icon, at the top of
-/// Chats. It observes the notices itself, so the list is not re-evaluated by
-/// them. One banner per removal, the newest on top, each with its own close.
-struct MembershipEndBanner: View {
+/// UX group-and-channel-privacy 9.1 (2026-11-06) — "You are no longer in
+/// {name}." as a short notice at the bottom of the screen, gone by itself
+/// after 4 seconds; no close icon. It observes the center itself, so the
+/// screen under it is not re-evaluated.
+struct MembershipEndToast: View {
     @ObservedObject var center: MembershipEndNoticeCenter
-    let onClose: (String) -> Void
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        VStack(spacing: 0) {
-            ForEach(MembershipEndNoticeCenter.stacked(center.notices)) { notice in
-                banner(notice)
-            }
-        }
-    }
-
-    private func banner(_ notice: MembershipEndNotice) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text(l10n.t("chat.ended.notice", texts: ["name": notice.name]))
+        if let shown = center.shown {
+            Text(shown.text)
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                onClose(notice.groupIdHex)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoTextMuted)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel(l10n.t("common.dismiss"))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Capsule().fill(Color.lakkoSurface).shadow(radius: 6, y: 2))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 72)
+                .id(shown.id)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+                .accessibilityAddTraits(.updatesFrequently)
+                .onAppear { UIAccessibility.post(notification: .announcement, argument: shown.text) }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
-        .background(Color.lakkoSurface)
     }
 }
-
 
 /// UX 6.2 — the requests to join this device sent: avatar, name, one line;
 /// `Ask again` after 7 days with no answer. A request is never withdrawn, and

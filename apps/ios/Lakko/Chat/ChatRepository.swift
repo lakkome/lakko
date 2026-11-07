@@ -63,6 +63,11 @@ public final class ChatRepository: ObservableObject {
 
     @Published public internal(set) var state: ChatRepositoryState = ChatRepositoryState()
 
+    /// UX section 14.2 — group links minted while the synced register was not
+    /// loaded, keyed by lower-case group id: listed on this device for this
+    /// session only.
+    var unregisteredGroupLinks: [String: [GroupInviteLinkRow]] = [:]
+
     // MARK: - Wiring
 
     let chatClient: ChatClient
@@ -480,7 +485,7 @@ public final class ChatRepository: ObservableObject {
         journalId: { [weak self] groupIdHex in self?.groups[groupIdHex]?.groupId },
         ds: dsClient))
     /// ADR-0053 point 7 — the per-group floor on knock reads.
-    private let knockThrottle = KnockPollThrottle()
+    private let knockThrottle = KnockPollThrottle(floorSeconds: KnockPollThrottle.backgroundFloorSeconds)
     /// ADR-0053 — the same floor for the attribution read, which reads the
     /// whole knock queue for the members sheet. A sibling keyed the same way
     /// (by group), so the two reads do not starve each other.
@@ -728,9 +733,11 @@ public final class ChatRepository: ObservableObject {
                 guard let self, let record = self.groups[groupIdHex] else {
                     return ProfileDirectory.shared.ownProfileEnvelope()
                 }
+                let oneToOne = self.conversationKind(groupIdHex: groupIdHex) == .chat
                 return ProfileDirectory.shared.ownProfileEnvelope(
                     groupId: record.groupId,
-                    oneToOne: self.conversationKind(groupIdHex: groupIdHex) == .chat)
+                    oneToOne: oneToOne,
+                    contactGrant: !oneToOne || !self.peerWasRemoved(groupIdHex: groupIdHex))
             },
             canSend: { [weak self] groupIdHex in
                 guard let self, self.groups[groupIdHex] != nil else { return false }
@@ -1083,6 +1090,7 @@ public final class ChatRepository: ObservableObject {
     /// the full-wipe path.
     public func clear() {
         wipeInMemoryState()
+        unregisteredGroupLinks = [:]
         currentAccountIdB64 = nil
         // The bearer token was the closed session's too.
         currentAccountId = nil
@@ -1135,7 +1143,7 @@ public final class ChatRepository: ObservableObject {
         endsRunning.removeAll()
         heldWelcomesRunning = false
         heldWelcomesRerun = false
-        membershipEndNotices.replace([])
+        membershipEndNotices.reset()
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
@@ -2628,6 +2636,27 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0048 §2 — the own profile changed: publish it into every group.
+    /// ADR-0060 section 1 (2026-11-06) — the account key of the member that
+    /// sent a Welcome, read without joining; `nil` when it cannot be read.
+    public func peekWelcomeFounder(welcomeBytes: Data) -> Data? {
+        guard let identity = canonicalIdentity,
+              let founder = try? LakkoCore.peekWelcomeFounder(welcome: welcomeBytes, identity: identity)
+        else { return nil }
+        return founder.founderAccountKey
+    }
+
+    /// ADR-0060 section 1 (2026-11-06) — contacts who wrote with a retired
+    /// `contact` key get the current grant: the profile is republished in the
+    /// one-to-one with each, nothing shown.
+    public func regrantContacts(_ keys: [Data]) async {
+        var done: Set<String> = []
+        for key in keys {
+            guard let groupIdHex = oneToOneConversation(contactKey: key, linkedGroupIdHex: nil),
+                  done.insert(groupIdHex).inserted else { continue }
+            await profilePublisher.publishNow(groupIdHex: groupIdHex)
+        }
+    }
+
     public func publishOwnProfileToAllGroups() async {
         await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
     }
@@ -3244,6 +3273,17 @@ public final class ChatRepository: ObservableObject {
         // leaf. Removing the row removes every leaf of the person.
         guard let roster = try? record.group.members() else { return nil }
         return PersonKey.collapse(roster, ownLeafIndex: try? record.group.ownLeafIndex())
+    }
+
+    /// ADR-0060 section 1 (2026-11-06) — the other person of this one-to-one
+    /// was removed from this account's contacts: their conversation gets no
+    /// `contact` grant (the rotation on Remove contact took theirs away).
+    func peerWasRemoved(groupIdHex: String) -> Bool {
+        guard let accountIdB64 = currentAccountIdB64,
+              let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return false }
+        let removed = AcceptedContactsStore.loadRemovedKeys(accountIdB64: accountIdB64)
+        guard !removed.isEmpty else { return false }
+        return removed.contains { ReachCenter.shared.keyResolver.samePerson($0, peer) }
     }
 
     /// ADR-0048 — the other member's signature key in a one-to-one, or `nil`
@@ -4090,7 +4130,9 @@ public final class ChatRepository: ObservableObject {
     /// removed on 2026-10-19). A name the display-name
     /// rule refuses fails the mint rather than minting a link that says
     /// something else.
-    public func createGroupInviteLink(groupIdHex: String) async throws -> String {
+    public func createGroupInviteLink(
+        groupIdHex: String, label: String = "", expiryMs: UInt64 = 0, maxUses: UInt32 = UInt32.max
+    ) async throws -> String {
         // ADR-0074 Stage A — the issuer is the key the roster knows this
         // person by.
         guard let identity = conversationAccountIdentity else {
@@ -4109,7 +4151,7 @@ public final class ChatRepository: ObservableObject {
             mint = try composeGroupInviteCapabilityWithPreview(
                 issuerSigningSeed: identity.ed25519Seed(),
                 groupId: record.group.groupId(),
-                expiryMs: 0,
+                expiryMs: expiryMs,
                 groupName: groupName(groupIdHex: groupIdHex),
                 inviterName: ProfileDirectory.shared.ownProfile?.displayName,
                 memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0),
@@ -4145,13 +4187,28 @@ public final class ChatRepository: ObservableObject {
         let base: String
         do {
             let blobId = try await bearer.uploadGroupInvite(
-                mint: mint, revocationPubkey: revocation.publicKey, expiryMs: 0, maxUses: UInt32.max)
+                mint: mint, revocationPubkey: revocation.publicKey, expiryMs: expiryMs, maxUses: maxUses)
             base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+            let mintedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+            // ADR-0087 phase B / UX section 14.2 — a group link in the synced
+            // register, with its label and terms, so every device of the
+            // account lists it and any of them revokes it.
+            let registered = await GroupLinkRegister.record(
+                kind: .group, ledgerId: blobId, linkSecret: mint.linkSecret,
+                revocationSeed: revocation.seed, targetId: try record.group.groupId(), capability: mint.sealed,
+                label: label, expiryMs: expiryMs, maxUses: maxUses)
+            if !registered {
+                // The register is not loaded: the link is listed on this
+                // device for this session only.
+                unregisteredGroupLinks[groupIdHex.lowercased(), default: []].insert(GroupInviteLinkRow(
+                    ledgerId: blobId, url: InviteLinkSecret.link(base: base, secret: mint.linkSecret),
+                    label: label, expiryMs: expiryMs, maxUses: maxUses, mintedAtMs: mintedAtMs), at: 0)
+            }
             if let accountIdB64 = currentAccountIdB64 {
                 OwnLinkStore.shared.put(accountIdB64: accountIdB64, OwnLink(
                     kind: .group, slug: base64UrlEncodeNoPad(blobId), revocationSeed: revocation.seed,
-                    label: "", expiryMs: 0, maxUses: Int64(UInt32.max), bootstrapReferral: false,
-                    mintedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+                    label: label, expiryMs: Int64(clamping: expiryMs), maxUses: Int64(maxUses),
+                    bootstrapReferral: false, mintedAtMs: mintedAtMs))
             }
         } catch {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
@@ -4219,8 +4276,14 @@ public final class ChatRepository: ObservableObject {
             // by the link's own revocation key is the authorisation, the
             // bearer the DoS gate.
             let slug = base64UrlEncodeNoPad(blobId)
-            guard let own = OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: .group, slug: slug),
-                  let seed = own.seed else { return false }
+            // ADR-0087 phase B — the register's seed (a link made on another
+            // device of the account), else this device's own; revoked in the
+            // register first so every device stops listing it.
+            let registered = GroupLinkRegister.record(ledgerId: blobId)
+            guard let seed = registered.flatMap({ $0.revocationSeed.count == 32 ? $0.revocationSeed : nil })
+                ?? OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: .group, slug: slug)?.seed
+            else { return false }
+            await GroupLinkRegister.markRevoked(ledgerId: blobId)
             let bearer = try bearerDiscovery()
             do {
                 _ = try await bearer.revokeGroupInvite(blobId: blobId, signingSeed: seed)
@@ -4231,6 +4294,33 @@ public final class ChatRepository: ObservableObject {
             OwnLinkStore.shared.remove(accountIdB64: accountIdB64, kind: .group, slug: slug)
             return true
         }
+    }
+
+    /// UX section 14.2 — the group's live invite links, made on any device of
+    /// the account (the synced register), newest first, with the links this
+    /// device minted while the register was not loaded.
+    public func groupInviteLinks(groupIdHex: String) -> [GroupInviteLinkRow] {
+        let key = groupIdHex.lowercased()
+        guard let groupId = ChannelsClient.hexToData(key) else { return [] }
+        var rows = GroupLinkRegister.records(kinds: [.group], targetId: groupId).compactMap { record in
+            GroupLinkRegister.url(record).map {
+                GroupInviteLinkRow(
+                    ledgerId: record.ledgerId, url: $0, label: record.label, expiryMs: record.expiryMs,
+                    maxUses: record.maxUses, mintedAtMs: Int64(clamping: record.mintedAtMs))
+            }
+        }
+        let listed = Set(rows.map(\.ledgerId))
+        rows += (unregisteredGroupLinks[key] ?? []).filter { !listed.contains($0.ledgerId) }
+        return rows.sorted { $0.mintedAtMs > $1.mintedAtMs }
+    }
+
+    /// Revoke one listed link (any device's, through the register's seed).
+    /// `true` when its ledger row was revoked; `false` when no device of the
+    /// account holds a key for it.
+    public func revokeGroupInviteLink(_ row: GroupInviteLinkRow, groupIdHex: String) async throws -> Bool {
+        let revoked = try await revokeGroupInviteLink(link: row.url)
+        unregisteredGroupLinks[groupIdHex.lowercased()]?.removeAll { $0.ledgerId == row.ledgerId }
+        return revoked
     }
 
     /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug (a 6-byte ledger id) to the
@@ -4302,13 +4392,18 @@ public final class ChatRepository: ObservableObject {
         }
         record.markPending(localId: localId)
         state = state.with(threads: buildThreadList())
+        // ADR-0087 section 14 — a channel invitation goes out again with its
+        // card, kept under the row's local id while it was unsent.
+        let card = ChannelInviteCardStore.shared.card(
+            conversationIdHex: groupIdHex, messageId: localId, accountIdB64: currentAccountIdB64)
         let envelopeBytes: Data
         do {
             envelopeBytes = try Self.composeChatEnvelope(
                 text: row.text,
                 attachments: row.attachments,
                 reply: row.reply,
-                forward: row.forward
+                forward: row.forward,
+                channelInviteCard: card
             )
         } catch {
             record.markFailed(localId: localId)
@@ -4328,6 +4423,11 @@ public final class ChatRepository: ObservableObject {
         }
         record.markSent(
             localId: localId, messageId: result.messageId, createdAt: result.createdAt)
+        if card != nil {
+            ChannelInviteCardStore.shared.move(
+                conversationIdHex: groupIdHex, from: localId, to: result.messageId,
+                accountIdB64: currentAccountIdB64)
+        }
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
     }
@@ -4349,8 +4449,14 @@ public final class ChatRepository: ObservableObject {
         text: String,
         attachments: [AttachmentRef],
         reply: ReplyRef?,
-        forward: ForwardRef? = nil
+        forward: ForwardRef? = nil,
+        channelInviteCard: Data? = nil
     ) throws -> Data {
+        // ADR-0087 section 14 — a channel invitation: the card beside the
+        // text (the link, so a client that does not draw the card shows it).
+        if let channelInviteCard {
+            return try composeChannelInviteEnvelope(text: text, card: channelInviteCard)
+        }
         if let forward {
             return try AttachmentBridge.composeForwardBytes(
                 text: text,
@@ -4376,7 +4482,8 @@ public final class ChatRepository: ObservableObject {
         plaintext: String,
         attachments: [AttachmentRef] = [],
         reply: ReplyRef? = nil,
-        forward: ForwardRef? = nil
+        forward: ForwardRef? = nil,
+        channelInviteCard: Data? = nil
     ) async throws {
         guard canonicalIdentity != nil else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -4414,7 +4521,8 @@ public final class ChatRepository: ObservableObject {
                 text: plaintext,
                 attachments: attachments,
                 reply: reply,
-                forward: forward
+                forward: forward,
+                channelInviteCard: channelInviteCard
             )
         } catch {
             throw ChatError.wrapped(
@@ -4451,6 +4559,13 @@ public final class ChatRepository: ObservableObject {
             reply: reply,
             forward: forward
         )
+        // ADR-0087 section 14 — the card is drawn from the row's local id
+        // while sending, and moved to its DS id once published.
+        if let channelInviteCard {
+            ChannelInviteCardStore.shared.put(
+                card: channelInviteCard, conversationIdHex: groupIdHex, messageId: localId,
+                accountIdB64: currentAccountIdB64)
+        }
         state = state.with(threads: buildThreadList())
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
@@ -4475,6 +4590,11 @@ public final class ChatRepository: ObservableObject {
             localId: localId,
             messageId: result.messageId,
             createdAt: result.createdAt)
+        if channelInviteCard != nil {
+            ChannelInviteCardStore.shared.move(
+                conversationIdHex: groupIdHex, from: localId, to: result.messageId,
+                accountIdB64: currentAccountIdB64)
+        }
         // The MLS ratchet snapshot was already durably persisted
         // (fail-closed) inside `chatClient.sendMessage` BEFORE the publish,
         // and neither the publish nor `appendOutgoing` advances MLS state,
@@ -5292,7 +5412,7 @@ public final class ChatRepository: ObservableObject {
         let groupId = record.groupId
         // ADR-0053 point 7 — an owner / admin device reads what non-members
         // knocked, next to the journal and on its own cursor, at most once per
-        // `KnockPollThrottle.floorSeconds` per group (the journal is polled far
+        // `KnockPollThrottle.backgroundFloorSeconds` per group (the journal is polled far
         // more often than anyone knocks). Not awaited with the long poll: a
         // knock waiting for approval must not sit behind 30 s of an idle
         // journal.
@@ -11217,4 +11337,17 @@ enum OwedAnswers {
             if let messageId = row.answerRequestMessageId { await ports.ack(messageId) }
         }
     }
+}
+
+/// UX section 14.2 — one row of a group's invite-link list.
+public struct GroupInviteLinkRow: Equatable, Identifiable, Sendable {
+    public let ledgerId: Data
+    public let url: String
+    public let label: String
+    /// Unix ms; `0` never expires.
+    public let expiryMs: UInt64
+    /// `UInt32.max` unlimited.
+    public let maxUses: UInt32
+    public let mintedAtMs: Int64
+    public var id: Data { ledgerId }
 }

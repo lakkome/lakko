@@ -1017,6 +1017,115 @@ public class DeviceGroupSyncRepository(
     }
 
     // ------------------------------------------------------------
+    // ADR-0087 section 13a - this account's own channel reactions and comments
+    // ------------------------------------------------------------
+
+    /** The emoji this account holds on a channel post, every device's. */
+    public fun channelReactionsOn(channelId: ByteArray, postCursor: ULong): List<String> = synchronized(stateLock) {
+        runCatching { syncedState?.channelReactionsOn(channelId, postCursor) }.getOrNull().orEmpty()
+    }
+
+    /** The emoji this account holds on a comment under a channel post,
+     *  every device's (ADR-0087 phase B). */
+    public fun commentReactionsOn(channelId: ByteArray, postCursor: ULong, commentCursor: ULong): List<String> =
+        synchronized(stateLock) {
+            runCatching { syncedState?.commentReactionsOn(channelId, postCursor, commentCursor) }.getOrNull().orEmpty()
+        }
+
+    /**
+     * Record a reaction on a comment added or taken off and tell the other
+     * devices. `false` when the register refused it (a fourth reaction on
+     * one comment, or no synced state): nothing is to be sent then. `true`
+     * when it is recorded, or nothing changed.
+     */
+    public suspend fun setCommentReaction(
+        channelId: ByteArray,
+        postCursor: ULong,
+        commentCursor: ULong,
+        emoji: String,
+        reacted: Boolean,
+        postAtMs: ULong,
+    ): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            try {
+                state.setCommentReaction(Hlc.mint(), channelId, postCursor, commentCursor, emoji, reacted, postAtMs)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "comment reaction refused by the register (${cause.javaClass.simpleName})")
+                return false
+            }
+        } ?: return true
+        republish()
+        try {
+            sendServiceEnvelope(envelope)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "comment reaction register not published (${cause.javaClass.simpleName})")
+            pendingFlag?.recordFailure()
+        }
+        return true
+    }
+
+    /** The nonces of this account's live comments under a channel post. */
+    public fun channelCommentsOn(channelId: ByteArray, postCursor: ULong): List<ByteArray> = synchronized(stateLock) {
+        runCatching { syncedState?.channelCommentsOn(channelId, postCursor) }.getOrNull().orEmpty()
+    }
+
+    /** Record a reaction added or taken off, and tell the other devices. */
+    public suspend fun setChannelReaction(
+        channelId: ByteArray,
+        postCursor: ULong,
+        emoji: String,
+        reacted: Boolean,
+        postAtMs: ULong,
+    ) = sendRegister {
+        it.setChannelReaction(Hlc.mint(), channelId, postCursor, emoji, reacted, postAtMs)
+    }
+
+    /** Record a comment written (its nonce) and tell the other devices. */
+    public suspend fun recordChannelComment(channelId: ByteArray, postCursor: ULong, nonce: ByteArray, postAtMs: ULong) =
+        sendRegister { it.recordChannelComment(Hlc.mint(), channelId, postCursor, nonce, postAtMs) }
+
+    /** Record a comment deleted and tell the other devices. */
+    public suspend fun deleteChannelComment(channelId: ByteArray, postCursor: ULong, nonce: ByteArray, postAtMs: ULong) =
+        sendRegister { it.deleteChannelComment(Hlc.mint(), channelId, postCursor, nonce, postAtMs) }
+
+    private suspend fun sendRegister(write: (SyncedState) -> ByteArray?) {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                write(state)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel feedback register refused (${cause.javaClass.simpleName})")
+                null
+            }
+        } ?: return
+        republish()
+        try {
+            sendServiceEnvelope(envelope)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "channel feedback register not published (${cause.javaClass.simpleName})")
+            pendingFlag?.recordFailure()
+        }
+    }
+
+    private fun applyChannelFeedback(envelope: ByteArray, reaction: Boolean) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                if (reaction) state.applyChannelReactionEnvelope(envelope) else state.applyChannelCommentEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel feedback envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
+    // ------------------------------------------------------------
     // ADR-0076 - the account's own username
     // ------------------------------------------------------------
 
@@ -1820,6 +1929,12 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in linkRecordEnvelopes) sendServiceEnvelope(envelope)
+        // ADR-0087 section 13a - nor are the own channel reactions and comments.
+        val feedbackEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.channelReactionEnvelopes() }.getOrNull().orEmpty() +
+                runCatching { syncedState?.channelCommentEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in feedbackEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -2060,6 +2175,16 @@ public class DeviceGroupSyncRepository(
                                 // ADR-0079 - one of the account's invite links
                                 // from another of its devices.
                                 applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isChannelReactionEnvelope(body.envelope)
+                            ) {
+                                // ADR-0087 section 13a - an own channel reaction.
+                                applyChannelFeedback(body.envelope, reaction = true)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isChannelCommentEnvelope(body.envelope)
+                            ) {
+                                // ADR-0087 section 13a - an own channel comment.
+                                applyChannelFeedback(body.envelope, reaction = false)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isQuickReactionEnvelope(body.envelope)
                             ) {

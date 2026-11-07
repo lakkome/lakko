@@ -28,9 +28,10 @@ final class SubscriberAdmission: ObservableObject {
 
     static let shared = SubscriberAdmission()
 
-    /// Between passes over the channels this device posts to (chosen, the
-    /// web client's 15 s). The Manage screen polls faster while open.
-    static let intervalSeconds: UInt64 = 15
+    /// Between passes over the channels this device posts to: the channel
+    /// publisher pass of 60 s (2026-11-06, was 15 s; web and Android use the
+    /// same). Chosen, not measured.
+    static let intervalSeconds: UInt64 = 60
 
     /// How one subscriber's envelope stands on this device.
     enum Status: Equatable { case ready, failed }
@@ -146,6 +147,18 @@ final class SubscriberAdmission: ObservableObject {
         defer { inFlight.remove(channelId) }
 
         let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+        // ADR-0087 section 7 — a private channel lets in only the rows whose
+        // sealed ticket names one of its live invite keys.
+        if state.extras(channelId).isPublic == false {
+            // A co-publisher holding no seed yet lets nobody in (it cannot
+            // check a ticket); the owner's device does meanwhile.
+            let seeds = ChannelInvites.admissionSeeds(channelIdHex: channelId).map(\.seed)
+            if !seeds.isEmpty {
+                try await admitPrivate(
+                    channelId: channelId, state: state, identity: identity, admissionSeeds: seeds)
+            }
+            return
+        }
         // Owner-signed, with the co-publisher fallback inside the client.
         let list = try await client.listSubscribers(channelIdHex: channelId, accountIdentity: identity)
         state.setSubscriberCount(channelId: channelId, count: list.count)
@@ -172,12 +185,64 @@ final class SubscriberAdmission: ObservableObject {
     /// co-published). The channel state is bound at construction, so the
     /// keys are already loaded. Returns when the calling task is cancelled
     /// (sign-out, account switch).
+    /// Section 7 — read the rows a page at a time, open each ticket with the
+    /// channel's admission seed, check the invite key it names is live, seal
+    /// only then; a row with no valid ticket is removed.
+    private func admitPrivate(
+        channelId: String, state: ChannelsUiState, identity: Identity, admissionSeeds: [Data]
+    ) async throws {
+        guard let channelIdBytes = ChannelsClient.hexToData(channelId) else { return }
+        let live = Set(try await client.inviteKeys(channelIdHex: channelId, accountIdentity: identity))
+        let epoch = try await currentEpoch(channelId: channelId, state: state)
+        var after: UInt64 = 0
+        var all: [String] = []
+        for _ in 0..<200 {
+            let page = try await client.subscriberPage(channelIdHex: channelId, after: after, accountIdentity: identity)
+            for row in page.rows {
+                if Task.isCancelled { return }
+                all.append(row.pubkeyHex)
+                if let entry = byChannel[channelId]?.status[row.pubkeyHex], entry.status == .ready, entry.epoch == epoch {
+                    continue
+                }
+                // Every held version, newest first: a ticket sealed to an
+                // older version (an older link) still opens.
+                guard let pk = Data(channelHex: row.pubkeyHex), let ticket = row.sealedTicket,
+                      let inviteKey = admissionSeeds.reversed().lazy.compactMap({ seed in
+                          try? openChannelAdmissionTicket(
+                              admissionSeed: seed, channelId: channelIdBytes, subscriberPk: pk, ticket: ticket)
+                      }).first,
+                      live.contains(inviteKey)
+                else {
+                    // A row already let in under an earlier epoch stays: a
+                    // revoked link removes nobody (section 7).
+                    if byChannel[channelId]?.status[row.pubkeyHex]?.status == .ready { continue }
+                    try? await client.removeSubscriber(
+                        channelIdHex: channelId, pubkeyHex: row.pubkeyHex, accountIdentity: identity)
+                    continue
+                }
+                do {
+                    try await admit(channelId: channelId, pubkeyHex: row.pubkeyHex, state: state, accountIdentity: identity)
+                } catch {
+                    NSLog("[channels] letting a subscriber in failed")
+                }
+            }
+            guard !page.rows.isEmpty, page.nextAfter > after else { break }
+            after = page.nextAfter
+        }
+        var a = byChannel[channelId] ?? ChannelAdmission()
+        a.subscribers = all
+        byChannel[channelId] = a
+    }
+
     func runLoop(channels: ChannelsUiState, accountIdentitySeed: () -> Data?) async {
         while !Task.isCancelled {
             if UIApplication.shared.applicationState != .background,
                let seed = accountIdentitySeed() {
                 for id in channels.keysByChannel.keys.sorted() {
                     if Task.isCancelled { return }
+                    // ADR-0087 section 6 — a public channel's subscribers read
+                    // its public seed; nobody reads its subscriber list.
+                    if channels.extras(id).isPublic == true { continue }
                     do {
                         try await admitNewSubscribers(
                             channelId: id, state: channels, accountIdentitySeed: seed)

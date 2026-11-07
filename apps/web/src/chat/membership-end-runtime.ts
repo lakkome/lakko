@@ -66,6 +66,9 @@ export class MembershipEndRuntime {
     private readonly store: MembershipEndStore,
     private readonly port: EndPort,
     private readonly now: () => number = () => Date.now(),
+    /** A new end that tells the person: the dialog over the open
+     *  conversation or the short notice (UX section 9). */
+    private readonly onNotice?: (notice: EndNotice) => void,
   ) {}
 
   /**
@@ -97,7 +100,9 @@ export class MembershipEndRuntime {
     const notice: EndNotice | null = end.left
       ? null
       : { key, title: end.title, routeIdsB64: end.routeIdsB64, draft: end.draft, atMs: record.atMs };
-    await this.store.begin(record, notice);
+    await this.store.begin(record);
+    // In memory only: a notice nobody saw is not shown at the next start.
+    if (notice !== null) this.onNotice?.(notice);
     await this.run(key);
   }
 

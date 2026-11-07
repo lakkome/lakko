@@ -199,6 +199,10 @@ export interface MailboxMessage {
   /** Raw payload bytes (decoded from the server's `payload_b64`). */
   payload: Uint8Array;
   createdAt: string;
+  /** The owner's signed mailbox read only: the reach key that admitted the
+   *  row (ADR-0060 section 1, amended 2026-11-06); absent on a proofless row
+   *  and on any other read. */
+  reachPk?: Uint8Array;
 }
 
 /** Result of `DsClient.fetchMailbox`. */
@@ -979,16 +983,28 @@ export class DsClient implements StatementSender, CommitSender {
       plan,
     });
     const json = (await response.json()) as {
-      messages: { id: number; payload_b64: string; created_at: string }[];
+      messages: { id: number; payload_b64: string; created_at: string; reach_pk_b64?: unknown }[];
       has_more: boolean;
       latest_epoch?: number;
     };
     return {
-      messages: json.messages.map((m) => ({
-        id: m.id,
-        payload: base64Decode(m.payload_b64),
-        createdAt: m.created_at,
-      })),
+      messages: json.messages.map((m) => {
+        let reachPk: Uint8Array | undefined;
+        if (typeof m.reach_pk_b64 === "string") {
+          try {
+            const pk = base64Decode(m.reach_pk_b64);
+            if (pk.length === 32) reachPk = pk;
+          } catch {
+            reachPk = undefined;
+          }
+        }
+        return {
+          id: m.id,
+          payload: base64Decode(m.payload_b64),
+          createdAt: m.created_at,
+          ...(reachPk === undefined ? {} : { reachPk }),
+        };
+      }),
       hasMore: json.has_more,
       ...(typeof json.latest_epoch === "number" ? { latestEpoch: json.latest_epoch } : {}),
     };

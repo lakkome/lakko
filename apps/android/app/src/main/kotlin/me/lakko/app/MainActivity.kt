@@ -3,6 +3,7 @@
 
 package me.lakko.app
 
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import android.Manifest
 import android.content.Intent
@@ -97,9 +98,8 @@ import me.lakko.app.ui.auth.SignupViewModel
 import me.lakko.app.ui.chat.ChatListScreen
 import me.lakko.app.ui.chat.ChatScreen
 import me.lakko.app.ui.chat.ChatViewModel
-import me.lakko.app.ui.channels.ChannelDetailScreen
-import me.lakko.app.ui.channels.ChannelManageScreen
-import me.lakko.app.ui.channels.ChannelSubscribeScreen
+import me.lakko.app.ui.channels.ChannelConversationScreen
+import me.lakko.app.ui.channels.ChannelInfoScreen
 import me.lakko.app.ui.channels.JoinCoPublisherScreen
 import me.lakko.app.ui.channels.NewChannelScreen
 import me.lakko.app.ui.channels.rememberChannelsUiState
@@ -1458,6 +1458,10 @@ private fun SessionRoot(
     // route, Manage, New channel, Join as co-publisher): one local channels
     // state (Keystore-backed key persistence) and one REST client.
     val channelsState = rememberChannelsUiState()
+    // ADR-0087 section 15.2 — a co-publisher link opened from the /g/ page.
+    var pendingCoPublisherLink by remember { mutableStateOf<String?>(null) }
+    val channelLinkScope = androidx.compose.runtime.rememberCoroutineScope()
+    val appContextForLinks = LocalContext.current.applicationContext
     // ADR-0060 — people search (who-can-find-me.md section 6.1).
     val peopleSearchContext = LocalContext.current.applicationContext
     val peopleSearch = remember(contactsRepository) {
@@ -1573,6 +1577,7 @@ private fun SessionRoot(
     // is still skipped from the next pass on) without ever discarding a sweep
     // that is part way through.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val sweepContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     LaunchedEffect(lifecycleOwner, chatRepository, callHost) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             callHost.setForeground(true)
@@ -1585,9 +1590,12 @@ private fun SessionRoot(
                     // sweep that fails as a whole counts as not answered.
                     val sweepAccount = chatRepository.currentAccountIdB64()
                     try {
+                        // 2026-11-06 — one read of every group per sweep, no
+                        // long polls held open; the pause below decides how
+                        // often (`ReceiveCadence`).
                         chatRepository.feedRefresh.reporting(sweepAccount, me.lakko.app.feed.CheckKind.GROUPS) {
                             chatRepository.pollAllGroups(
-                                waitSecs = APP_LONG_POLL_SECS,
+                                waitSecs = 0,
                                 exclude = chatRepository.screenPolledGroups.value,
                             )
                         }
@@ -1598,12 +1606,18 @@ private fun SessionRoot(
                     } catch (_: Throwable) {
                         kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                     }
-                    // A poll that returns at once (not bootstrapped yet, or a
-                    // group momentarily in flight elsewhere) must not become
-                    // a busy loop.
+                    // The pause before the next sweep: short while a push
+                    // wake's window is open or a call is up, long otherwise; a
+                    // new wake ends it early.
                     val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
-                    if (elapsed < APP_POLL_MIN_ITERATION_MS) {
-                        kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
+                    val pause = me.lakko.app.chat.ReceiveCadence.intervalMs(
+                        wakeWindowOpen = me.lakko.app.chat.ReceiveCadence.wakeWindowOpen(),
+                        callInProgress = me.lakko.app.calls.AppCallHost.occupantNow() != null,
+                        pushReachable = me.lakko.app.push.PushDeviceTokens(sweepContext).fcm != null,
+                    )
+                    val wakeBefore = me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.value
+                    kotlinx.coroutines.withTimeoutOrNull((pause - elapsed).coerceAtLeast(APP_POLL_MIN_ITERATION_MS)) {
+                        me.lakko.app.chat.ReceiveCadence.lastWakeAtMs.first { it > wakeBefore }
                     }
                 }
             } finally {
@@ -1849,12 +1863,124 @@ private fun SessionRoot(
         me.lakko.app.channels.SubscriberAdmission.forChannels(channelsState, channelsClient)
     }
     val publisherChannels by channelsState.keysByChannel.collectAsStateWithLifecycle()
-    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
-        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+    me.lakko.app.channels.SubscriberAdmission.appContext = LocalContext.current.applicationContext
+    me.lakko.app.channels.ChannelRemovalWatch.notice = { id, name -> chatRepository.noteChannelEndHeard(id, name) }
+    // ADR-0087 section 14.1 — the channel invitation card in a chat.
+    val inviteCardContext = LocalContext.current.applicationContext
+    androidx.compose.runtime.DisposableEffect(channelsState, chatRepository) {
+        me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions = object : me.lakko.app.ui.channels.ChannelInviteActions {
+            override suspend fun inspect(link: me.lakko.app.contacts.LakkoLink.Group): me.lakko.app.ui.channels.ChannelInviteFacts? {
+                val sealed = chatRepository.resolveGroupInviteSlug(link.slug).first
+                val card = chatRepository.inspectGroupInvite(
+                    sealed,
+                    me.lakko.app.chat.parseGroupInviteFragment(link.fragment),
+                    System.currentTimeMillis().toULong(),
+                )
+                val preview = card.preview ?: return null
+                val id = preview.channelId ?: return null
+                if (!card.valid) return null
+                return me.lakko.app.ui.channels.ChannelInviteFacts(
+                    channelIdHex = me.lakko.app.channels.ChannelsComposer.bytesToHex(id),
+                    // A nameless channel reads by the catalog word, never "?".
+                    name = preview.groupName?.takeIf { it.isNotBlank() }
+                        ?: me.lakko.app.l10n.Localization.strings.value["channels.fallback_name"],
+                    preview = preview,
+                )
+            }
+
+            override fun isFollowed(channelIdHex: String): Boolean =
+                channelsState.channels.value.any { it.id == channelIdHex }
+
+            override suspend fun subscribe(facts: me.lakko.app.ui.channels.ChannelInviteFacts) {
+                val invite = facts.preview.subscriber ?: return
+                val idHex = me.lakko.app.channels.ChannelInviteLinks.subscribeFromLink(
+                    inviteCardContext,
+                    channelsState,
+                    channelsClient,
+                    me.lakko.app.channels.ChannelsClient.channelIdBytes(facts.channelIdHex),
+                    facts.name,
+                    invite,
+                )
+                navController.navigate(
+                    Routes.channelSubscribe(idHex, null, pressed = facts.public, name = facts.name),
+                ) { launchSingleTop = true }
+            }
+
+            override fun openChannel(channelIdHex: String) {
+                navController.navigate(Routes.channel(channelIdHex)) { launchSingleTop = true }
+            }
+
+            override suspend fun acceptPublisher(
+                facts: me.lakko.app.ui.channels.ChannelInviteFacts,
+                link: me.lakko.app.contacts.LakkoLink.Group,
+                onStatus: (me.lakko.app.l10n.UiText?) -> Unit,
+            ): String? {
+                val argument = me.lakko.app.chat.composeGroupJoinArgument(
+                    me.lakko.app.chat.GroupJoinLink(link.slug, link.fragment),
+                )
+                return me.lakko.app.ds.DsClient().use { ds ->
+                    me.lakko.app.ui.channels.joinAsCoPublisher(
+                        inviteCardContext,
+                        channelsState,
+                        ds,
+                        "https://lakko.me/g/$argument",
+                        facts.name,
+                        me.lakko.app.channels.CoPublishedJournals.onDevice(inviteCardContext) { channelsState.boundAccount },
+                        onStatus,
+                    )
+                }
+            }
+        }
+        onDispose { me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions = null }
+    }
+    // ADR-0087 section 9.5 — a removal from a private channel is noticed
+    // app-wide, not only with the channel open: every few minutes each
+    // channel this device only reads asks whether its key is still let in.
+    val followedChannels by channelsState.subscriberKeysByChannel.collectAsStateWithLifecycle()
+    LaunchedEffect(lifecycleOwner, identitySecrets, followedChannels.keys) {
+        if (identitySecrets == null || followedChannels.isEmpty()) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 if (channelsState.boundAccount != null) {
-                    subscriberAdmission.admitAll(channelsState.keysByChannel.value.keys.toList())
+                    try {
+                        me.lakko.app.channels.ChannelRemovalWatch.checkAll(channelsState, channelsClient) { id, name ->
+                            chatRepository.noteChannelEndHeard(id, name)
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        // The next pass asks again.
+                    }
+                }
+                kotlinx.coroutines.delay(5L * 60L * 1_000L)
+            }
+        }
+    }
+    // ADR-0087 section 12 / plan step 9 — the rotation heartbeat, the
+    // co-publisher requests, owed handle and record writes and a public
+    // channel's seed per epoch run here, app-wide, not on a screen.
+    val publisherLoopContext = LocalContext.current.applicationContext
+    val publisherLoop = remember(channelsState, channelsClient) {
+        me.lakko.app.channels.ChannelPublisherLoop.forChannels(publisherLoopContext, channelsState, channelsClient)
+    }
+    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
+        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            var lastAdmitMs = 0L
+            while (true) {
+                if (channelsState.boundAccount != null) {
+                    // Section 6 — a public channel's readers open its public
+                    // seed; only private channels are let in one by one,
+                    // once a pass (a new private subscriber waits up to it).
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastAdmitMs >= PRIVATE_ADMIT_INTERVAL_MS) {
+                        lastAdmitMs = now
+                        val privateOnes = channelsState.keysByChannel.value.keys.filter { id ->
+                            channelsState.channels.value.firstOrNull { it.id == id }?.sharedListed != true
+                        }
+                        subscriberAdmission.admitAll(privateOnes)
+                    }
+                    publisherLoop.passAll()
                 }
                 kotlinx.coroutines.delay(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS)
             }
@@ -1923,6 +2049,7 @@ private fun SessionRoot(
         // the publisher provider snapshot stay for the next sign-in.
         channelsState.unbind()
         subscriberAdmission.clear()
+        me.lakko.app.channels.ChannelPublisherLoop.peek(channelsState)?.clear()
         // Before the chat side: its poll hands the reach manager envelopes
         // from the account's other devices, and one handed over after the
         // reach manager let the account go would wait there for the next
@@ -1946,6 +2073,7 @@ private fun SessionRoot(
         contactsRepository.clear()
         channelsState.unbind()
         subscriberAdmission.clear()
+        me.lakko.app.channels.ChannelPublisherLoop.peek(channelsState)?.clear()
         // Device sync before chat, as in logout above.
         deviceGroupSync.clear()
         chatRepository.forgetDevice()
@@ -2231,18 +2359,11 @@ private fun SessionRoot(
                             sessionToken = secrets.sessionToken,
                             onBack = { navController.popBackStack() },
                             onCreated = { id ->
-                                // The Channels tab is gone, so a created
-                                // channel pops back to the one list every
-                                // conversation now lives in.
+                                // A created channel opens in the one
+                                // conversation view.
                                 navController.navigate(Routes.channel(id)) {
                                     popUpTo(Routes.CHANNEL_NEW) { inclusive = true }
                                 }
-                            },
-                            // ADR-0028 OQ3 — the co-publisher join is reached
-                            // from here because the create menu is fixed at
-                            // three items and this is the same moment.
-                            onJoinAsCoPublisher = {
-                                navController.navigate(Routes.CHANNEL_JOIN)
                             },
                         )
                     } else {
@@ -2254,6 +2375,7 @@ private fun SessionRoot(
                     if (secrets != null) {
                         JoinCoPublisherScreen(
                             state = channelsState,
+                            initialLink = pendingCoPublisherLink,
                             onBack = { navController.popBackStack() },
                             onJoined = { id ->
                                 navController.navigate(Routes.channel(id)) {
@@ -2267,13 +2389,21 @@ private fun SessionRoot(
                 }
                 composable(Routes.CHANNEL) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
-                    ChannelDetailScreen(
+                    // ADR-0087 section 12 — a channel opens where a group opens.
+                    ChannelConversationScreen(
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,
                         onBack = { navController.popBackStack() },
-                        onSubscribe = { navController.navigate(Routes.channelSubscribe(id, handle = null, pressed = true)) },
-                        onManage = { navController.navigate(Routes.channelManage(id)) },
+                        onOpenInfo = { navController.navigate(Routes.channelInfo(id)) },
+                        onForwardPost = { request ->
+                            me.lakko.app.chat.PendingForward.publish(request)
+                            navController.navigate(Routes.FORWARD)
+                        },
+                        // Section 9 — the membership ended: Chats, with nothing
+                        // of the channel (its link or subscribe page) left
+                        // under it.
+                        onEnded = { navController.navigateToChatsClearing() },
                     )
                 }
                 composable(
@@ -2296,29 +2426,40 @@ private fun SessionRoot(
                     ),
                 ) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
-                    ChannelSubscribeScreen(
+                    ChannelConversationScreen(
                         channelId = id,
                         state = channelsState,
                         client = channelsClient,
                         handle = entry.arguments?.getString("handle")?.takeIf { it.isNotEmpty() },
-                        subscribePressed = entry.arguments?.getBoolean("pressed") == true,
+                        subscribeOnOpen = entry.arguments?.getBoolean("pressed") == true,
                         name = entry.arguments?.getString("name")?.takeIf { it.isNotBlank() },
                         onBack = { navController.popBackStack() },
+                        onOpenInfo = { navController.navigate(Routes.channelInfo(id)) },
+                        onForwardPost = { request ->
+                            me.lakko.app.chat.PendingForward.publish(request)
+                            navController.navigate(Routes.FORWARD)
+                        },
+                        // Section 9 — the membership ended: Chats, with nothing
+                        // of the channel (its link or subscribe page) left
+                        // under it.
+                        onEnded = { navController.navigateToChatsClearing() },
                     )
                 }
-                composable(Routes.CHANNEL_MANAGE) { entry ->
+                composable(Routes.CHANNEL_INFO) { entry ->
                     val id = entry.arguments?.getString("channelId") ?: return@composable
-                    val secrets = identitySecrets
-                    if (secrets != null) {
-                        ChannelManageScreen(
-                            channelId = id,
-                            state = channelsState,
-                            client = channelsClient,
-                            onBack = { navController.popBackStack() },
-                        )
-                    } else {
-                        LoadingScreen()
-                    }
+                    ChannelInfoScreen(
+                        channelId = id,
+                        state = channelsState,
+                        client = channelsClient,
+                        chatRepository = chatRepository,
+                        contactsRepository = contactsRepository,
+                        onBack = { navController.popBackStack() },
+                        onLeft = {
+                            // Section 9.5 — the row and its posts are gone:
+                            // back to the list.
+                            navController.popBackStack(Routes.channel(id), inclusive = true)
+                        },
+                    )
                 }
                 composable(Routes.CONTACTS) {
                     val contactsVm: ContactsViewModel = viewModel(
@@ -2340,6 +2481,8 @@ private fun SessionRoot(
                         // A scanned /i/, /g/ or /c/ link takes the route an
                         // opened app link takes.
                         onScannedLink = { link -> inviteIntake.publishLink(link) },
+                        channelsState = channelsState,
+                        channelsClient = channelsClient,
                     )
                 }
                 // docs/ux/navigation.md section 5 — Calls: recent calls across
@@ -2887,6 +3030,14 @@ private fun SessionRoot(
                             me.lakko.app.chat.PendingMessageJump.publish(hex, messageId)
                             navController.navigate(Routes.chat(hex))
                         },
+                        channelTitle = { hex ->
+                            channelsState.channels.value.firstOrNull { it.id.equals(hex, ignoreCase = true) }
+                                ?.let { me.lakko.app.ui.channels.channelTitle(it, me.lakko.app.l10n.Localization.strings.value) }
+                        },
+                        onOpenChannel = { hex ->
+                            val id = channelsState.channels.value.firstOrNull { it.id.equals(hex, ignoreCase = true) }?.id ?: hex
+                            navController.navigate(Routes.channel(id))
+                        },
                     )
                 }
                 composable(Routes.FOLDERS) {
@@ -3027,6 +3178,66 @@ private fun SessionRoot(
                     me.lakko.app.ui.chat.JoinGroupLandingScreen(
                         viewModel = groupJoinVm,
                         onDone = { navController.popBackStack() },
+                        // ADR-0087 section 7.2 — a channel's link page.
+                        onSubscribeChannel = { preview ->
+                            val channelBytes = preview.channelId
+                            val invite = preview.subscriber
+                            if (channelBytes != null && invite != null) {
+                                channelLinkScope.launch {
+                                    try {
+                                        val idHex = me.lakko.app.channels.ChannelInviteLinks.subscribeFromLink(
+                                            appContextForLinks,
+                                            channelsState,
+                                            channelsClient,
+                                            channelBytes,
+                                            preview.groupName,
+                                            invite,
+                                        )
+                                        val pressedPublic = invite.access is uniffi.lakko_ffi_uniffi.FfiChannelAccess.Public
+                                        // The link page is replaced by the channel,
+                                        // never left under it.
+                                        navController.navigate(
+                                            Routes.channelSubscribe(idHex, null, pressed = pressedPublic, name = preview.groupName),
+                                        ) {
+                                            popUpTo(Routes.GROUP_JOIN) { inclusive = true }
+                                            launchSingleTop = true
+                                        }
+                                    } catch (e: kotlinx.coroutines.CancellationException) {
+                                        throw e
+                                    } catch (e: Throwable) {
+                                        android.util.Log.w("SessionRoot", "channel subscribe from link failed", e)
+                                    }
+                                }
+                            }
+                        },
+                        onJoinAsPublisher = {
+                            pendingCoPublisherLink = "https://lakko.me/g/$groupJoinArgument"
+                            navController.popBackStack()
+                            navController.navigate(Routes.CHANNEL_JOIN)
+                        },
+                        // Section 15.2 — Accept joins here, then the channel
+                        // replaces the link page.
+                        onAcceptPublisher = { onStatus ->
+                            val joined = me.lakko.app.ds.DsClient().use { ds ->
+                                me.lakko.app.ui.channels.joinAsCoPublisher(
+                                    inviteCardContext,
+                                    channelsState,
+                                    ds,
+                                    "https://lakko.me/g/$groupJoinArgument",
+                                    groupJoinVm.card.value?.preview?.groupName.orEmpty()
+                                        .ifBlank { me.lakko.app.l10n.UiText("channels.join.default_name").render() },
+                                    me.lakko.app.channels.CoPublishedJournals.onDevice(inviteCardContext) { channelsState.boundAccount },
+                                    onStatus,
+                                )
+                            }
+                            if (joined != null) {
+                                navController.navigate(Routes.channel(joined)) {
+                                    popUpTo(Routes.GROUP_JOIN) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                            }
+                            joined
+                        },
                         onOpenChat = { hex ->
                             // Replace the landing with the chat, so Back from
                             // the chat does not return to a finished join.
@@ -3042,6 +3253,9 @@ private fun SessionRoot(
 
 /** App-level receive loop: DS long-poll budget per pass. */
 private const val APP_LONG_POLL_SECS: Int = 30
+
+/** ADR-0087 section 7 — between let-in passes over private channels (chosen). */
+private const val PRIVATE_ADMIT_INTERVAL_MS: Long = 0L
 
 /** App-level receive loop: pause after a failed pass. */
 private const val APP_POLL_RETRY_BACKOFF_MS: Long = 5_000L
@@ -3091,8 +3305,9 @@ private object Routes {
     fun channelSubscribe(channelId: String, handle: String?, pressed: Boolean, name: String? = null): String =
         "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}&pressed=$pressed" +
             "&name=${android.net.Uri.encode(name.orEmpty())}"
-    const val CHANNEL_MANAGE = "channel/{channelId}/manage"
-    fun channelManage(channelId: String): String = "channel/$channelId/manage"
+    /** ADR-0087 section 12.1 — a channel's info screen (the Manage page is gone). */
+    const val CHANNEL_INFO = "channel/{channelId}/info"
+    fun channelInfo(channelId: String): String = "channel/$channelId/info"
     const val PROFILE = "settings/profile"
     const val WHO_CAN_FIND_ME = "settings/privacy/who-can-find-me"
     const val PASSKEYS = "settings/passkeys"
@@ -3182,6 +3397,15 @@ private val Tabs: List<TabSpec> = listOf(
 )
 
 /** Standard tab switch: one back-stack per tab, state saved and restored. */
+/** Chats with every pushed screen above it removed (section 9: a
+ *  conversation that ended leaves nothing of itself in the back stack). */
+private fun NavHostController.navigateToChatsClearing() {
+    navigate(Routes.CHATS) {
+        popUpTo(graph.findStartDestination().id) { inclusive = false }
+        launchSingleTop = true
+    }
+}
+
 private fun NavHostController.navigateToTab(route: String) {
     navigate(route) {
         popUpTo(graph.findStartDestination().id) { saveState = true }

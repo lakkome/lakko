@@ -276,3 +276,95 @@ public actor RotationCron {
         UInt64(Date().timeIntervalSince1970 * 1000.0)
     }
 }
+
+/// Per-channel persistence for the rotation state (`lastRotationMs` +
+/// `postsSinceRotation`). Non-secret operational metadata — no key material
+/// — so plain `UserDefaults` is appropriate (invariant #7 governs key
+/// material only; the channel list itself is likewise not SQLCipher-backed
+/// on iOS today).
+///
+/// Per account (2026-09-30): the state belongs to the account that publishes
+/// the channel, so it is filed under that account
+/// (`lakko.channels.rotation-state.v2.<account>.<channel>`), the way
+/// ``AcceptedContactsStore`` files the contacts. It used to be keyed by the
+/// channel alone. No account: nothing is read or written (``loadOrSeed`` then
+/// hands back an unpersisted genesis state).
+enum ChannelRotationStateStore {
+    private static let prefix = "lakko.channels.rotation-state.v2."
+    /// The device-wide prefix used before the state was per account. Never
+    /// read; removed by ``clear(accountIdB64:defaults:)``.
+    static let legacyPrefix = "lakko.channels.rotation-state.v1."
+
+    private struct Persisted: Codable {
+        let lastRotationMs: UInt64
+        let postsSinceRotation: UInt32
+    }
+
+    private static func accountPrefix(_ accountIdB64: String) -> String {
+        prefix + accountIdB64 + "."
+    }
+
+    static func load(
+        accountIdB64: String?,
+        channelId: String,
+        defaults: UserDefaults = .standard
+    ) -> ChannelRotationState? {
+        guard
+            let accountIdB64,
+            let data = defaults.data(forKey: accountPrefix(accountIdB64) + channelId),
+            let p = try? JSONDecoder().decode(Persisted.self, from: data)
+        else { return nil }
+        return ChannelRotationState(
+            lastRotationMs: p.lastRotationMs,
+            postsSinceRotation: p.postsSinceRotation
+        )
+    }
+
+    static func save(
+        accountIdB64: String?,
+        channelId: String,
+        state: ChannelRotationState,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let accountIdB64 else { return }
+        // Not written once the account's session has ended
+        // (``AccountStoreGate``): the rotation cron files its state from its
+        // own actor after the rotation's network calls.
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        let p = Persisted(
+            lastRotationMs: state.lastRotationMs,
+            postsSinceRotation: state.postsSinceRotation
+        )
+        guard let data = try? JSONEncoder().encode(p) else { return }
+        defaults.set(data, forKey: accountPrefix(accountIdB64) + channelId)
+    }
+
+    /// Forget-device: drop one account's rotation states (and the old
+    /// device-wide rows). Other accounts' stay.
+    static func clear(accountIdB64: String, defaults: UserDefaults = .standard) {
+        let mine = accountPrefix(accountIdB64)
+        for key in defaults.dictionaryRepresentation().keys
+        where key.hasPrefix(mine) || key.hasPrefix(legacyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// Return the persisted state, or seed a genesis `after_rotation(now)`
+    /// snapshot when absent — so the first scheduled check on an existing
+    /// channel does not fire an immediate rotation (it lands ~one interval
+    /// later instead).
+    static func loadOrSeed(
+        accountIdB64: String?,
+        channelId: String,
+        nowMs: UInt64,
+        defaults: UserDefaults = .standard
+    ) -> ChannelRotationState {
+        if let existing = load(accountIdB64: accountIdB64, channelId: channelId, defaults: defaults) {
+            return existing
+        }
+        let seeded = channelRotationStateAfterRotation(nowMs: nowMs)
+        save(accountIdB64: accountIdB64, channelId: channelId, state: seeded, defaults: defaults)
+        return seeded
+    }
+}

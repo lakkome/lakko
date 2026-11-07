@@ -8,10 +8,17 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#3730a3" />
+    <!-- Link preview tags (description, og:*, twitter:*). The build replaces
+         everything between the two markers: scripts/link-previews.mjs writes
+         the home tags here and one copy of this page per link kind (/i/, /g/,
+         /c/, /feed/import) into dist/link-preview/, which nginx serves for
+         those paths. -->
+    <!-- link-preview:start -->
     <meta
       name="description"
-      content="Lakko. Private messaging, end-to-end encrypted by default."
+      content="Private messages and calls, end-to-end encrypted."
     />
+    <!-- link-preview:end -->
 
     <!-- Phase 1.17 will add SRI hashes + a strict CSP header. The
          skeleton meta below is the floor we never want to drop below. -->

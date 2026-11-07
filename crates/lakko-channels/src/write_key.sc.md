@@ -15,8 +15,9 @@ A channel subscriber has no MLS leaf, so a reaction or a comment is a row at the
 
 - `reaction_write_seed(account_seed, channel_id, post_cursor, label)` — `BLAKE3-derive-key("lakko/channel/reaction-write-key/v1", account_seed ‖ channel_id ‖ post_cursor_be ‖ label)`. Adding and taking off one reaction use one key; two reactions of one person on one post have unrelated keys.
 - `comment_write_seed(account_seed, channel_id, post_cursor, comment_nonce)` — the same under `lakko/channel/comment-write-key/v1` with a random 16-byte nonce (`new_comment_nonce`); the author's other devices learn the nonce from the own-comments register in `lakko-sync`. The two domains differ, so a reaction key never equals a comment key.
-- `ReactionWriteKey::new` signs only that reaction: `sign_add`, `sign_delete`. `CommentWriteKey::new` signs only that comment: `sign_add(sealed)`, `sign_delete(comment_cursor)`. `public_key()` is what the row names; `Debug` prints the public key and the post, never a seed. Clock and nonce are the caller's.
-- `SubscriberWrite` — `AddReaction{label}`, `DeleteReaction{label}`, `AddComment{sealed}`, `DeleteComment{comment_cursor}`, op bytes `0x01..=0x04` (frozen).
+- `comment_reaction_write_seed(account_seed, channel_id, post_cursor, comment_cursor, label)` — the same under `lakko/channel/comment-reaction-write-key/v1` (2026-11-05, UX 13.1: a reaction on a comment), the label a `CommentReactionKey` label; a third domain, so it is never a post-reaction or comment key.
+- `ReactionWriteKey::new` signs only that reaction: `sign_add`, `sign_delete`. `CommentWriteKey::new` signs only that comment: `sign_add(sealed)`, `sign_delete(comment_cursor)`. `CommentReactionWriteKey::new` signs only that reaction on that comment: `sign_add`, `sign_delete`. `public_key()` is what the row names; `Debug` prints the public key and the post, never a seed. Clock and nonce are the caller's.
+- `SubscriberWrite` — `AddReaction{label}`, `DeleteReaction{label}`, `AddComment{sealed}`, `DeleteComment{comment_cursor}`, `AddCommentReaction{comment_cursor, label}`, `DeleteCommentReaction{comment_cursor, label}`, op bytes `0x01..=0x06` (frozen).
 - `write_proof_canonical_bytes`, `verify_write_proof(proof, statement, now_ms)` — pure: window first, then a valid Ed25519 key of full order, then the signature.
 - `WriteProof` / `WriteProofError` are the owner proof's types (`v1.<unix_ms>.<nonce>.<sig>`), carried in `x-lakko-channel-write-proof`.
 
@@ -25,13 +26,14 @@ A channel subscriber has no MLS leaf, so a reaction or a comment is a row at the
 ```text
 "lakko/channel/write-proof/v1" ‖ 0x00 ‖ op(1) ‖ channel_id(16) ‖ post_cursor(8 BE) ‖ writer_key(32)
   ‖ subject ‖ unix_ms(8 BE) ‖ nonce(16)
-subject: label(16) for ops 1-2, BLAKE3(sealed)(32) for op 3, comment_cursor(8 BE) for op 4
+subject: label(16) for ops 1-2, BLAKE3(sealed)(32) for op 3, comment_cursor(8 BE) for op 4, comment_cursor(8 BE) ‖ label(16) for ops 5-6
 ```
 
 The op fixes the subject length, so the encoding is injective.
 
 ## Invariants upheld
 
+- A comment-reaction proof names its comment: another comment cursor, or the same label read as a post reaction, is `BadSignature` (`a_comment_reaction_proof_names_its_comment`).
 - A proof covers exactly one write: another op, label, sealed comment, comment cursor, post, channel or key is `BadSignature` (`a_proof_covers_exactly_one_write`).
 - No two writes of one account share a key (`every_write_has_its_own_key_and_every_device_the_same_one`).
 - Invariants #2 / #5: the service sees one public key per write, never an account key.
@@ -52,4 +54,4 @@ The header reaches the service from anyone. Fuzz target `write_proof_parse` pars
 
 ## References
 
-ADR-0087 section 13a; ADR-0053 (window); tests `the_seeds_are_pinned_and_depend_on_every_input`, `every_write_round_trips_through_the_header_and_verifies`, `the_window_is_checked_first_and_a_weak_key_is_refused`, `the_canonical_bytes_are_pinned`.
+ADR-0087 section 13a; ADR-0053 (window); tests `the_seeds_are_pinned_and_depend_on_every_input`, `every_write_round_trips_through_the_header_and_verifies`, `the_window_is_checked_first_and_a_weak_key_is_refused`, `the_canonical_bytes_are_pinned`, `a_comment_reaction_proof_names_its_comment`.

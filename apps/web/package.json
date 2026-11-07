@@ -9,7 +9,7 @@
     "build:wasm": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --release",
     "build:wasm:dev": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --dev",
     "dev": "npm run build:wasm:dev && vite",
-    "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/post-build.mjs && node scripts/build-sw.mjs",
+    "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/post-build.mjs && node scripts/link-previews.mjs && node scripts/build-sw.mjs",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",

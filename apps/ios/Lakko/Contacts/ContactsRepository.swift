@@ -630,12 +630,26 @@ public final class ContactsRepository: ObservableObject {
             // longer an established contact is an ordinary request.
             var newPending: [IncomingContactRequest] = await retryWaitingKnownRequests(client: client)
             var undecidedArrived = false
+            // ADR-0060 section 1 (2026-11-06) — the contacts who wrote with a
+            // retired `contact` key and get the current grant, invisibly.
+            var regrant: [Data] = []
             for event in pollResult.events {
                 // The session ended (or changed account) while this batch
                 // was in flight, or while a Welcome of it was being joined:
                 // the rest belongs to the old account. Its grants, profiles
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
+                let decision = Self.rowContactDecision(
+                    event, reachKeys: pollResult.reachKeyByMessageId,
+                    isContact: { [weak self] in self?.isCurrentContact($0) ?? false },
+                    welcomeFounder: { [weak self] in self?.chatRepository?.peekWelcomeFounder(welcomeBytes: $0) },
+                    verdict: { ReachCenter.shared.mailboxRowVerdict(provingKey: $0, senderIsContact: $1) })
+                // A retired key from someone who is not a contact: nothing is
+                // shown and nothing names them in the log.
+                if decision.verdict == .drop { continue }
+                if decision.verdict == .processAndRegrant, let sender = decision.sender {
+                    regrant.append(sender)
+                }
                 switch event {
                 case .contactRequest(let req, let replyGrant, let linkAnswer):
                     // ADR-0060 section 6 — the requester's `reply` grant, filed
@@ -731,6 +745,9 @@ public final class ContactsRepository: ObservableObject {
                     applyContactAck(ack)
                     continue
                 }
+            }
+            if !regrant.isEmpty, boundAccountIdB64 == pollAccountIdB64 {
+                await chatRepository?.regrantContacts(regrant)
             }
             // Keep a join failure visible across the background long-poll
             // loop (whose next quiet poll would otherwise clear it within
@@ -874,6 +891,41 @@ public final class ContactsRepository: ObservableObject {
             } catch {
                 NSLog("contacts inbox: a predecessor mailbox could not be read: \(type(of: error))")
             }
+        }
+    }
+
+    /// ADR-0060 section 1 (2026-11-06) — a current contact of this account
+    /// (by proof across key rotations).
+    func isCurrentContact(_ key: Data) -> Bool {
+        let samePerson = provenSamePerson
+        return state.accepted.contains { samePerson($0.request.fromPubkey, key) }
+    }
+
+    /// ADR-0060 section 1 (amended 2026-11-06) — the verdict on one mailbox
+    /// row from the reach key that admitted it (`reachKeys`, by message id)
+    /// and its sender as the row's verified content names it: a Welcome's
+    /// founder is peeked before it is joined (`welcomeFounder`). A link
+    /// refusal is always processed.
+    nonisolated static func rowContactDecision(
+        _ event: IncomingMailboxEvent, reachKeys: [Int64: Data],
+        isContact: (Data) -> Bool,
+        welcomeFounder: (Data) -> Data? = { _ in nil },
+        verdict: (Data?, Bool) -> FfiContactKeyRowVerdict
+    ) -> (verdict: FfiContactKeyRowVerdict, sender: Data?) {
+        switch event {
+        case .contactRequest(let req, _, _):
+            return (verdict(reachKeys[req.messageId], isContact(req.fromPubkey)), req.fromPubkey)
+        case .contactAck(let ack):
+            return (verdict(reachKeys[ack.messageId], isContact(ack.accepterPubkey)), ack.accepterPubkey)
+        case .welcome(let messageId, let welcomeBytes, _):
+            // The founder, peeked before joining. A row admitted by no key is
+            // processed without a peek; one whose founder cannot be read is
+            // judged as a stranger's (a retired key then drops it unjoined).
+            guard let proving = reachKeys[messageId] else { return (.process, nil) }
+            let founder = welcomeFounder(welcomeBytes)
+            return (verdict(proving, founder.map(isContact) ?? false), founder)
+        case .linkRefusal:
+            return (.process, nil)
         }
     }
 
@@ -2063,7 +2115,8 @@ public final class ContactsRepository: ObservableObject {
             hlc: 0, linkId: linkId, linkSecret: mint.linkSecret, kind: .contact, ledgerId: blobId,
             revocationSeed: revocation.seed,
             expiryMs: UInt64(max(0, expiryMs)), maxUses: maxUses, uses: 0, revoked: false,
-            mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: [])) ?? false
+            mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: [],
+            targetId: Data(), inviteSeed: Data(), capability: Data())) ?? false
         guard recorded else {
             // A link this device would not remember after a restart is not
             // handed out: every request through it would wait for ever. The

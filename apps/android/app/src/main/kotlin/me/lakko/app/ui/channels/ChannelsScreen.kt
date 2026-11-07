@@ -94,6 +94,7 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CoPublishedJournalMarks
 import me.lakko.app.channels.CoPublishedJournals
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.LegacyChannelException
@@ -111,6 +112,7 @@ import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.copyToClipboard
+import me.lakko.app.profile.toFfi
 import uniffi.lakko_ffi_uniffi.ChannelInfoCapabilities
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
 import uniffi.lakko_ffi_uniffi.InfoSection
@@ -226,14 +228,17 @@ private fun ErrorLine(message: UiText, modifier: Modifier = Modifier) {
 }
 
 // ============================================================================
-// New channel
+// New channel (docs/ux/group-and-channel-privacy.md sections 3.2 and 3.3)
 // ============================================================================
 
 /**
- * Create a channel: a local name and description, an optional public handle.
- * The handle is claimed first so a taken handle aborts before anything is
- * created; the channel key seed comes from the account's publisher group
- * (G-27 / ADR-0017) on the shared [ChannelPublisherIdentity] the state owns.
+ * Create a channel: its name, description, `@name` (proposed from the name
+ * until edited, `suggestHandle`, one rule) and who can subscribe. When Public,
+ * Topic and Language. In order: the PublisherGroup is founded and its journal
+ * claimed with the owner's root; the `@name` is claimed (a held name stops
+ * here, nothing created); the channel is created on the service with its
+ * flag; the metadata record (v3: the signed `@name` and the flag) is the first
+ * post; a public channel files its first public seed (the publisher loop).
  */
 @Composable
 public fun NewChannelScreen(
@@ -242,23 +247,43 @@ public fun NewChannelScreen(
     sessionToken: String,
     onBack: () -> Unit,
     onCreated: (channelId: String) -> Unit,
-    /**
-     * Join somebody else's channel as a co-publisher (ADR-0028 OQ3).
-     *
-     * It lives here rather than in the create menu because
-     * `docs/ux/navigation.md` section 3 fixes that menu at exactly three items,
-     * and because this is the same moment — setting a channel up — reached by
-     * the same route. `null` hides it.
-     */
-    onJoinAsCoPublisher: (() -> Unit)? = null,
 ) {
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+    var private by remember { mutableStateOf(true) }
+    val random = remember { me.lakko.app.chat.handleRandom() }
     var handle by remember { mutableStateOf("") }
+    var handleEdited by remember { mutableStateOf(false) }
+    var topic by remember { mutableStateOf(0) }
+    val appLanguage = LocalStrings.current.language.substringBefore('-').lowercase()
+    var language by remember { mutableStateOf(appLanguage.takeIf { it.length in 2..3 } ?: "") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
+    var taken by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // Section 2.1 — the proposed name follows the name until edited.
+    val suggested = remember(name, private) { suggestedChannelHandle(name, private, random) }
+    val shownHandle = if (handleEdited) handle else suggested
+    val canonical = me.lakko.app.chat.canonicalHandleInput(shownHandle)
+    val wellFormed = remember(canonical) { me.lakko.app.chat.handleWellFormed(canonical) }
+
+    // Section 3.3 — a public name that answers a lookup reads "taken", 500 ms
+    // after typing stops, from 3 characters. A private one is checked at
+    // Create only.
+    LaunchedEffect(canonical, private) {
+        taken = false
+        if (private || canonical.length < 3 || !wellFormed) return@LaunchedEffect
+        delay(500)
+        taken = try {
+            me.lakko.app.discovery.DiscoveryClient().use { it.lookupChannel(canonical) != null }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     Scaffold(topBar = { ChannelTopBar(title = t("channels.new.title"), onBack = onBack) }) { inner ->
         Column(
@@ -269,10 +294,17 @@ public fun NewChannelScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            LakkoAvatar(
+                name = name.ifBlank { "#" },
+                seed = name,
+                size = 96.dp,
+                group = true,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text(t("channels.field.name")) },
+                label = { Text(t("channels.new.name_label")) },
                 enabled = !busy,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
@@ -281,2092 +313,263 @@ public fun NewChannelScreen(
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
-                label = { Text(t("channels.field.description_optional")) },
+                label = { Text(t("channels.new.description_label")) },
                 enabled = !busy,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
-                value = handle,
-                onValueChange = { handle = it },
-                label = { Text(t("channels.new.handle_label")) },
-                placeholder = { Text(t("channels.new.handle_placeholder")) },
-                supportingText = { Text(t("channels.new.handle_hint")) },
+                value = if (shownHandle.isEmpty()) "" else "@$shownHandle",
+                onValueChange = {
+                    handleEdited = true
+                    handle = it.removePrefix("@")
+                },
+                label = { Text(t("group_type.handle")) },
                 enabled = !busy,
                 singleLine = true,
+                isError = canonical.isNotEmpty() && !wellFormed || taken,
+                supportingText = {
+                    Text(
+                        when {
+                            canonical.isNotEmpty() && !wellFormed -> t("group_handle.error.bad_form")
+                            taken -> t("group_handle.error.taken")
+                            private -> t("channel_type.handle_private")
+                            else -> t("channel_type.handle_public")
+                        },
+                    )
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
+            Text(t("channel_type.who_can_subscribe"), style = MaterialTheme.typography.labelLarge)
+            me.lakko.app.ui.components.LakkoPicker(
+                selected = private,
+                options = listOf(true to t("group_type.private"), false to t("group_type.public")),
+                onPick = { private = it },
+                enabled = !busy,
+                heading = t("channel_type.who_can_subscribe"),
+            )
+            Text(
+                if (private) t("channel_type.private_desc") else t("channel_type.public_desc"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!private) {
+                ChannelTopicLanguage(
+                    topic = topic,
+                    language = language,
+                    enabled = !busy,
+                    onTopic = { topic = it },
+                    onLanguage = { language = it },
+                )
+            }
             error?.let { ErrorLine(it) }
             Button(
                 onClick = {
-                    if (busy || name.trim().isEmpty()) return@Button
+                    if (busy || name.trim().isEmpty() || !wellFormed) return@Button
                     busy = true
                     error = null
-                    val wantedHandle = handle.trim().removePrefix("@")
+                    val wanted = canonical
                     val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
                     val claimAccount = state.boundAccount.orEmpty()
-                    // A retry of a failed create reuses the id its handle was
+                    // A retry of a failed create reuses the id its name was
                     // claimed for.
-                    val id = claims.idFor(claimAccount, wantedHandle)
+                    val id = claims.idFor(claimAccount, wanted)
                     scope.launch {
                         try {
-                            val publisher = state.publisher
-                                ?: throw IllegalStateException("channel publisher identity not available")
-                            // ADR-0057 finding 3 — the channel's PublisherGroup
-                            // journal is claimed with the owner's root BEFORE
-                            // anything announces the channel; a claim that does
-                            // not land aborts the creation with nothing sent.
-                            try {
-                                publisher.withIdentity { identity ->
-                                    DsClient().use { ds ->
-                                        CoPublisher.foundAndClaimAtCreation(ds, identity, id)
-                                    }
-                                }
-                            } catch (e: LegacyChannelException) {
-                                throw e
-                            } catch (e: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(e) {
-                                    busy = false
-                                }
-                                Log.w(TAG, "channel journal claim did not land; not created", e)
-                                // The claim is a DS request; whatever refused it, the
-                                // person can only check the connection and retry.
-                                error = UiText("common.error.offline")
-                                busy = false
-                                return@launch
-                            }
-                            // Claim the optional handle FIRST so a first-come
-                            // collision aborts cleanly without a half-created
-                            // channel. An empty handle skips discovery.
-                            if (wantedHandle.isNotEmpty()) {
-                                try {
-                                    publisher.withIdentity { identity ->
-                                        ChannelDiscovery.claimChannelHandle(
-                                            identity = identity,
-                                            handle = wantedHandle,
-                                            channelIdHex = id,
-                                            name = name.trim(),
-                                            description = description.trim(),
-                                        )
-                                    }
-                                } catch (e: me.lakko.app.discovery.HandleWriteError) {
-                                    Log.w(TAG, "handle claim failed: ${e.status}", e)
-                                    error = if (e.code == "name-taken") {
-                                        // Bound to another channel id: not ours.
-                                        claims.forget(claimAccount, wantedHandle)
-                                        UiText(
-                                            "channels.new.error.handle_taken",
-                                            texts = mapOf("handle" to "@$wantedHandle"),
-                                        )
-                                    } else if (e.status == 429) {
-                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
-                                    } else {
-                                        UiText("channels.new.error.handle")
-                                    }
-                                    busy = false
-                                    return@launch
-                                } catch (e: me.lakko.app.discovery.DiscoveryHttpError) {
-                                    // The OPRF evaluation or a lookup before the
-                                    // claim: a 429 is the per-network limit.
-                                    Log.w(TAG, "handle claim: discovery ${e.status}", e)
-                                    error = if (e.status == 429) {
-                                        me.lakko.app.chat.HANDLE_RATE_LIMITED
-                                    } else {
-                                        UiText("channels.new.error.handle")
-                                    }
-                                    busy = false
-                                    return@launch
-                                } catch (e: me.lakko.app.discovery.DiscoveryNetworkError) {
-                                    Log.w(TAG, "handle claim: no network", e)
-                                    error = UiText("channels.new.error.handle_offline")
-                                    busy = false
-                                    return@launch
-                                } catch (e: me.lakko.app.anon.AnonTokenException) {
-                                    // ADR-0054 UX section 3 - the handle costs a
-                                    // lookup and a register token.
-                                    Log.w(TAG, "handle registration: no token", e)
-                                    error = me.lakko.app.chat.anonTokenFailureText(
-                                        e,
-                                        me.lakko.app.chat.AllowanceKind.ACTION,
-                                    ) ?: UiText("channels.new.error.handle_offline")
-                                    busy = false
-                                    return@launch
-                                }
-                            }
-                            // G-27 / ADR-0017: the channel content-key seed
-                            // comes from a real MLS publisher group exporter,
-                            // created in the shared publisher identity's
-                            // provider and snapshotted with it so the seed
-                            // survives a relaunch. The same identity derives
-                            // the owner key the channel is registered under
-                            // (ADR-0059 section 1).
-                            val owner = publisher.withIdentity(persist = false) { identity ->
-                                ChannelsClient.ownerSigner(identity, id)
-                            }
-                            owner.use { client.createChannel(id, it) }
-                            val keys = publisher.withIdentity { identity ->
-                                ChannelsComposer.freshPublisherKeys(
-                                    identity = identity,
-                                    channelIdHex = id,
-                                    existingSigningSeed = state.persistedPublisherSigningSeed(id),
-                                )
-                            }
-                            state.addChannel(
-                                ChannelHandle(
-                                    id = id,
-                                    localName = name.trim(),
-                                    localDescription = description.trim(),
-                                    addedAtMs = System.currentTimeMillis().toULong(),
-                                    handle = wantedHandle,
-                                ),
+                            createChannel(
+                                state = state,
+                                client = client,
+                                id = id,
+                                name = name.trim(),
+                                description = description.trim(),
+                                handle = wanted,
+                                private = private,
+                                topic = topic,
+                                language = language,
                             )
-                            state.setKeys(id, keys)
-                            claims.forget(claimAccount, wantedHandle)
-                            // ADR-0051 §4 — the metadata record is the first
-                            // post: subscribers title the channel from it. A
-                            // failed post leaves the channel created; the next
-                            // Save or rotation re-issues it.
-                            try {
-                                ChannelMetaPublisher.post(
-                                    state = state,
-                                    client = client,
-                                    channelId = id,
-                                    name = name.trim(),
-                                    description = description.trim(),
-                                    updatedAtMs = System.currentTimeMillis().toULong(),
-                                )
-                            } catch (e: Throwable) {
-                                me.lakko.app.rethrowIfCancelled(e)
-                                Log.w(TAG, "channel record not posted at creation", e)
-                            }
+                            claims.forget(claimAccount, wanted)
                             onCreated(id)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
                         } catch (e: LegacyChannelException) {
                             error = e.text
+                        } catch (e: me.lakko.app.discovery.HandleWriteError) {
+                            Log.w(TAG, "channel @name not claimed: ${e.status}")
+                            if (e.code == "name-taken") claims.forget(claimAccount, wanted)
+                            error = when {
+                                e.code == "name-taken" -> UiText("group_handle.error.held")
+                                e.status == 429 -> UiText("channels.new.too_many")
+                                else -> UiText("channels.new.failed")
+                            }
+                        } catch (e: me.lakko.app.anon.AnonTokenQuotaExhausted) {
+                            error = UiText("channels.new.too_many")
+                        } catch (e: me.lakko.app.discovery.DiscoveryNetworkError) {
+                            error = UiText("group_handle.error.offline")
+                        } catch (e: ChannelCreateOffline) {
+                            error = UiText("group_handle.error.offline")
                         } catch (e: Throwable) {
-                            me.lakko.app.rethrowIfCancelled(e)
                             Log.w(TAG, "create channel failed", e)
-                            error = channelsErrorText(e, "channels.new.error.create")
+                            error = me.lakko.app.chat.handleWriteFailure(e).takeIf {
+                                it.key == "group_handle.error.offline" || it.key == "common.error.too_many_attempts"
+                            } ?: UiText("channels.new.failed")
                         } finally {
                             busy = false
                         }
                     }
                 },
-                enabled = !busy && name.trim().isNotEmpty(),
+                enabled = !busy && name.trim().isNotEmpty() && wellFormed,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (busy) t("common.creating") else t("channels.new.create"))
             }
-            if (onJoinAsCoPublisher != null) {
-                TextButton(
-                    onClick = onJoinAsCoPublisher,
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(t("channels.join.title"))
-                }
-            }
         }
     }
 }
 
-// ============================================================================
-// Channel view
-// ============================================================================
+/** The channel journal claim did not land: nothing was created. */
+private class ChannelCreateOffline(cause: Throwable) : Exception(cause)
 
-/**
- * Per-post render state. `null` means "still decoding"; the two non-readable
- * cases render "Not available" with their own one-line reason and are never
- * force-decrypted (invariant #4).
- */
-internal sealed interface PostRender {
-    data class Plain(val value: String) : PostRender
-    object Unreadable : PostRender
-    object OlderKeyWindow : PostRender
-
-    /** ADR-0051 §4 — a metadata record (adopted into the channel log) or a
-     *  malformed one (dropped): never a card. */
-    object Hidden : PostRender
+/** Section 2.1 — the proposed `@name` of a channel (`suggestHandle`). */
+private fun suggestedChannelHandle(name: String, private: Boolean, random: ULong): String = try {
+    uniffi.lakko_ffi_uniffi.suggestHandle(name, uniffi.lakko_ffi_uniffi.HandleKind.CHANNEL, private, random)
+} catch (_: Throwable) {
+    ""
 }
 
-/**
- * ADR-0051 §4 — the render for one decrypted plaintext: text renders, a
- * metadata record is filed as the channel's newest (when newer) and hidden, a
- * malformed record is hidden. Runs before the text path on every post.
- */
-private fun renderDecrypted(state: ChannelsUiState, channelId: String, plaintext: ByteArray): PostRender =
-    when (val c = classifyChannelPlaintext(plaintext)) {
-        is ClassifiedPost.Text -> PostRender.Plain(c.text)
-        is ClassifiedPost.Meta -> {
-            state.adoptSharedMeta(channelId, c.meta)
-            PostRender.Hidden
-        }
-        ClassifiedPost.Malformed -> PostRender.Hidden
-    }
-
-/**
- * The channel: posts as cards, newest at the bottom like a chat. An owner
- * gets the publish composer and a Manage action; a subscriber reads through
- * its own key; anyone else gets a Subscribe button.
- */
-@Composable
-public fun ChannelDetailScreen(
-    channelId: String,
+/** The New channel steps, in the order of [NewChannelScreen]. */
+private suspend fun createChannel(
     state: ChannelsUiState,
     client: ChannelsClient,
-    onBack: () -> Unit,
-    onSubscribe: () -> Unit,
-    onManage: () -> Unit,
+    id: String,
+    name: String,
+    description: String,
+    handle: String,
+    private: Boolean,
+    topic: Int,
+    language: String,
 ) {
-    val channels by state.channels.collectAsState()
-    val keysByChannel by state.keysByChannel.collectAsState()
-    val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
-    // ADR-0073 phase 2 / UX 16.6 — a channel this account owned under keys it
-    // reset: the notice and one control, nothing else.
-    val orphaned by state.orphaned.collectAsState()
-    val isOrphaned = me.lakko.app.channels.channelIsOrphaned(channelId, orphaned)
-    val channel = channels.firstOrNull { it.id == channelId }
-    val keys = keysByChannel[channelId]?.takeIf { !isOrphaned }
-    // Following needs the list row too: a reader key alone is what a subscribe
-    // that never finished left, and this screen registers nobody.
-    val isSubscriber = channelIsFollowed(
-        listed = channel != null,
-        readerKeyHeld = subscriberKeysByChannel.containsKey(channelId),
-    ) && !isOrphaned
-    val strings = LocalStrings.current
-    val title = channel?.let { channelTitle(it, strings) } ?: t("channels.fallback_name")
-    // The header card below carries the name, the handle, the description and
-    // the status; the top bar shows the title once and nothing else.
-    val header = channel?.let { channelHeaderModel(it, isOwner = keys != null, strings) }
-    // docs/ux/conversation-info.md section 1 — the third destination. Tapping
-    // the name opens the channel, the way a chat's name opens the person and a
-    // group's opens the group.
-    var infoOpen by remember { mutableStateOf(false) }
-    // Only a publisher ever lists subscribers, so only a publisher has a count
-    // (section 2.3: "where the client has it").
-    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
-    val admissions by admission.state.collectAsState()
-    val subscriberCount = admissions[channelId]?.subscribers?.size
-
-    // ADR-0060 section 3 / UX 6.3 — the channel's member list, opened from
-    // the `Members` row of channel info.
-    var membersOpen by remember { mutableStateOf(false) }
-    if (membersOpen && channel != null) {
-        ChannelMembersSheet(
-            channelId = channelId,
+    val publisher = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
+    // ADR-0057 finding 3 — the PublisherGroup journal is claimed with the
+    // owner's root BEFORE anything announces the channel.
+    try {
+        publisher.withIdentity { identity ->
+            DsClient().use { ds -> CoPublisher.foundAndClaimAtCreation(ds, identity, id) }
+        }
+    } catch (e: LegacyChannelException) {
+        throw e
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        Log.w(TAG, "channel journal claim did not land; not created", e)
+        throw ChannelCreateOffline(e)
+    }
+    // Section 3 — the @name first: a held name stops here, nothing created.
+    val signed = publisher.withIdentity(persist = false) { identity ->
+        ChannelDiscovery.writeHandle(
+            identity = identity,
+            channelIdHex = id,
+            handle = handle,
+            public = !private,
+            name = name,
+            description = description,
+            route = me.lakko.app.discovery.HandleRoute.CLAIM,
+        )
+    }
+    val owner = publisher.withIdentity(persist = false) { identity -> ChannelsClient.ownerSigner(identity, id) }
+    owner.use { client.createChannel(id, it, private = private) }
+    val keys = publisher.withIdentity { identity ->
+        ChannelsComposer.freshPublisherKeys(
+            identity = identity,
+            channelIdHex = id,
+            existingSigningSeed = state.persistedPublisherSigningSeed(id),
+        )
+    }
+    state.addChannel(
+        ChannelHandle(
+            id = id,
+            localName = name,
+            localDescription = description,
+            addedAtMs = System.currentTimeMillis().toULong(),
+            handle = handle,
+        ),
+    )
+    state.setKeys(id, keys)
+    // ADR-0051 §4 / ADR-0087 section 18.2 — the v3 record is the first post:
+    // subscribers title the channel from it and read its @name and flag. A
+    // failed post leaves the channel created; the publisher loop re-issues it.
+    try {
+        ChannelMetaPublisher.post(
             state = state,
             client = client,
-            onDismiss = { membersOpen = false },
+            channelId = id,
+            name = name,
+            description = description,
+            updatedAtMs = System.currentTimeMillis().toULong(),
+            topic = topic,
+            language = language,
+            listed = !private,
+            handle = ChannelDiscovery.conversationHandleOf(signed),
         )
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        Log.w(TAG, "channel record not posted at creation", e)
     }
-
-    if (infoOpen && channel != null) {
-        ChannelInfoSheet(
-            channel = channel,
-            isPublisher = keys != null,
-            // A publisher registers a subscriber key only to upload its member
-            // card (ADR-0060 section 3); it still has no subscription to end.
-            isSubscriber = isSubscriber && keys == null,
-            subscriberCount = subscriberCount,
-            onOpenMembers = {
-                infoOpen = false
-                membersOpen = true
-            },
-            onManage = {
-                infoOpen = false
-                onManage()
-            },
-            onStopFollowing = {
-                // ADR-0060 §3 — forget the reader keypair, the seeds it
-                // recovered and the channel on this device at once, and tell
-                // the server with a DELETE signed by the subscriber key (in
-                // the background; a failure is logged, the local state is
-                // gone either way).
-                infoOpen = false
-                me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
-                // The channel this screen is about is gone from the list, so
-                // staying on it would show an empty reader for something no
-                // longer followed.
-                onBack()
-            },
-            onDismiss = { infoOpen = false },
-        )
-    }
-
-    Scaffold(
-        topBar = {
-            ChannelTopBar(
-                title = title,
-                onBack = onBack,
-                onShowInfo = channel?.let { { infoOpen = true } },
-                actions = {
-                    if (keys != null) {
-                        IconButton(onClick = onManage) {
-                            Icon(Icons.Filled.Tune, contentDescription = t("channels.manage.title"))
-                        }
-                    }
-                },
-            )
-        },
-    ) { inner ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner),
-        ) {
-            when {
-                isOrphaned -> OrphanedChannelView(
-                    onRemove = {
-                        state.removeChannel(channelId)
-                        onBack()
-                    },
-                )
-                keys != null -> OwnerChannelView(
-                    channelId = channelId,
-                    header = header,
-                    state = state,
-                    client = client,
-                    keys = keys,
-                )
-                isSubscriber -> SubscriberChannelView(
-                    channelId = channelId,
-                    header = header,
-                    state = state,
-                    client = client,
-                )
-                else -> SubscribePrompt(
-                    description = channel?.let { channelDescription(it) },
-                    onSubscribe = onSubscribe,
-                )
-            }
-        }
-    }
-}
-
-/**
- * The page of a channel this account does not follow. It spends no token and
- * registers no key: a person becomes a subscriber only by pressing Subscribe
- * (`docs/ux/group-and-channel-privacy.md` section 5.1).
- */
-@Composable
-private fun SubscribePrompt(description: String?, onSubscribe: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        description?.let {
-            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-        }
-        Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            t("channels.subscribe.prompt_body"),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
-    }
-}
-
-/**
- * A channel found by handle or id. Until Subscribe is pressed it is the
- * [SubscribePrompt] page and nothing else; once pressed, here or on the card
- * that led here, it registers this device's reader key, waits for the channel
- * owner's key, then shows the posts — the same view the channel screen shows a
- * subscriber afterwards.
- */
-@Composable
-public fun ChannelSubscribeScreen(
-    channelId: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-    /** The handle the channel was found by, if any: its list name until it has a better one. */
-    handle: String?,
-    /** Subscribe was already pressed, on the card that opened this page. */
-    subscribePressed: Boolean,
-    onBack: () -> Unit,
-    /** The channel's name as the card that opened this page read it. */
-    name: String? = null,
-) {
-    val channels by state.channels.collectAsState()
-    val subscriberKeys by state.subscriberKeysByChannel.collectAsState()
-    val channel = channels.firstOrNull { it.id == channelId }
-    var pressed by rememberSaveable(channelId) { mutableStateOf(subscribePressed) }
-    val reading = channelPageReads(
-        followed = channelIsFollowed(listed = channel != null, readerKeyHeld = subscriberKeys.containsKey(channelId)),
-        pressed = pressed,
-    )
-    // A channel this device subscribes to belongs in its list, else there is
-    // no way back to it after leaving this screen.
-    LaunchedEffect(channelId, reading) {
-        if (reading && state.channels.value.none { it.id == channelId }) {
-            val bare = handle?.trim()?.removePrefix("@").orEmpty()
-            state.addChannel(
-                ChannelHandle(
-                    id = channelId,
-                    localName = name?.trim()?.takeIf { it.isNotEmpty() } ?: bare,
-                    localDescription = "",
-                    addedAtMs = System.currentTimeMillis().toULong(),
-                    handle = bare,
-                ),
-            )
-        }
-    }
-    Scaffold(
-        topBar = {
-            ChannelTopBar(
-                title = channel?.let { channelTitle(it, LocalStrings.current) }
-                    ?: name?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: handle?.takeIf { it.isNotBlank() }?.let { "@" + it.trim().removePrefix("@") }
-                    ?: t("channels.fallback_name"),
-                onBack = onBack,
-            )
-        },
-    ) { inner ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner),
-        ) {
-            if (reading) {
-                SubscriberChannelView(
-                    channelId = channelId,
-                    header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
-                    state = state,
-                    client = client,
-                )
-            } else {
-                SubscribePrompt(
-                    description = channel?.let { channelDescription(it) },
-                    onSubscribe = { pressed = true },
-                )
-            }
-        }
-    }
-}
-
-/**
- * ADR-0073 phase 2 / UX 16.6 — the owner's view of an orphaned channel: one
- * notice stating what the reset did (the old keys signed the posts; subscribers
- * are not told) and one control, `Remove from this device`. The composer, the
- * rotation and the subscriber management are gone.
- */
-@Composable
-private fun OrphanedChannelView(onRemove: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            t("channels.keys_reset.notice"),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(16.dp))
-        Button(onClick = onRemove) { Text(t("channels.keys_reset.remove")) }
-    }
-}
-
-/** The owner's view: the post list, the publish composer, the headless key fan-out. */
-@Composable
-private fun OwnerChannelView(
-    channelId: String,
-    header: ChannelHeaderModel?,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-    keys: ChannelPublisherKeys,
-) {
-    val postsByChannel by state.postsByChannel.collectAsState()
-    val epochByChannel by state.epochByChannel.collectAsState()
-    val posts = postsByChannel[channelId] ?: emptyList()
-    val epoch = epochByChannel[channelId] ?: 0u
-
-    var composeText by remember { mutableStateOf("") }
-    var publishBusy by remember { mutableStateOf(false) }
-    var publishError by remember { mutableStateOf<UiText?>(null) }
-    var loadError by remember { mutableStateOf<UiText?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
-    val scope = rememberCoroutineScope()
-
-    // New subscribers receive the channel key from this device while the
-    // channel is open (or its Manage screen is): the same 5 s fan-out as before.
-    SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
-
-    suspend fun refresh(quiet: Boolean = false) {
-        if (!quiet) loading = true
-        loadError = null
+    // ADR-0087 section 16 — public means listed in Discover.
+    if (!private) {
         try {
-            val fetched = client.fetchPosts(channelId, 0u)
-            val ep = client.fetchEpoch(channelId)
-            state.setPosts(channelId, fetched.posts)
-            state.setEpoch(channelId, ep)
-            // The publisher holds the current content seed only; a post it
-            // published under an earlier key shows as not available here
-            // (the subscriber-side key map, ADR-0031, is what recovers older
-            // windows; the publisher does not retain old seeds).
-            val currentSeed = state.keysByChannel.value[channelId]?.seed ?: keys.seed
-            decodedByCursor.clear()
-            for (p in fetched.posts) {
-                decodedByCursor[p.cursor] = try {
-                    // ADR-0051 §4 — classify before the text path: the
-                    // publisher's own metadata record is never a card.
-                    renderDecrypted(
-                        state,
-                        channelId,
-                        ChannelsComposer.verifyAndDecrypt(
-                            seed = currentSeed,
-                            channelIdHex = channelId,
-                            postWireB64Url = p.payloadB64,
-                        ),
-                    )
-                } catch (_: Throwable) {
-                    PostRender.Unreadable
-                }
-            }
+            me.lakko.app.discover.DiscoverListing.listChannel(state, client, publisher, id, topic, language)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "fetch posts failed", e)
-            loadError = channelsErrorText(e, "channels.posts.error.load")
-        } finally {
-            loading = false
+            Log.w(TAG, "Discover listing not published at creation", e)
         }
-    }
-
-    val context = LocalContext.current
-    LaunchedEffect(channelId) {
-        refresh()
-        // ADR-0060 section 3 — publishers upload a member card like anyone
-        // else, under a subscriber key registered on the channel.
-        me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
-        // A co-publisher's post appears here without reopening, as a reader's
-        // list does.
-        while (true) {
-            kotlinx.coroutines.delay(OPEN_CHANNEL_REFRESH_MS)
-            refresh(quiet = true)
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        PostList(
-            posts = posts,
-            renderOf = { decodedByCursor[it.cursor] },
-            loading = loading,
-            header = header,
-            emptyLine = t("channels.posts.empty_owner"),
-            modifier = Modifier.weight(1f),
-        )
-        PublishComposer(
-            text = composeText,
-            onTextChange = { composeText = it },
-            busy = publishBusy,
-            error = publishError ?: loadError,
-            onRetry = if (loadError != null) ({ scope.launch { refresh() } }) else null,
-            onPublish = {
-                val text = composeText.trim()
-                if (publishBusy || text.isEmpty()) return@PublishComposer
-                publishBusy = true
-                publishError = null
-                scope.launch {
-                    try {
-                        val current = state.keysByChannel.value[channelId] ?: keys
-                        val counter = state.nextCounter(channelId)
-                        val wire = ChannelsComposer.compose(
-                            keys = current,
-                            channelIdHex = channelId,
-                            epochId = epoch,
-                            messageCounter = counter,
-                            plaintext = text.toByteArray(Charsets.UTF_8),
-                        )
-                        val pub = state.publisher
-                            ?: throw IllegalStateException("channel publisher identity not available")
-                        // ADR-0059 section 9: signed with this account's role.
-                        ChannelPublisherSigners.derive(pub, channelId).use {
-                            client.publishPost(channelId, wire, it)
-                        }
-                        composeText = ""
-                        // The author's own post goes into the feed now, not
-                        // at the next sync (ADR-0063).
-                        me.lakko.app.feed.requestChannelPostSync()
-                        refresh()
-                    } catch (e: Throwable) {
-                        me.lakko.app.rethrowIfCancelled(e)
-                        Log.w(TAG, "publish failed", e)
-                        publishError = channelsErrorText(
-                            e,
-                            genericKey = "channels.publish.error.generic",
-                            prefixKey = "channels.publish.error.prefix",
-                        )
-                    } finally {
-                        publishBusy = false
-                    }
-                }
-            },
-        )
     }
 }
 
-/**
- * The publish composer, in the chat composer's shape: a hairline, a pill
- * field on the sunken surface and a filled send button.
- */
+/** The topic and language pickers of a public channel (section 3.2). */
 @Composable
-private fun PublishComposer(
-    text: String,
-    onTextChange: (String) -> Unit,
-    busy: Boolean,
-    error: UiText?,
-    onRetry: (() -> Unit)?,
-    onPublish: () -> Unit,
+internal fun ChannelTopicLanguage(
+    topic: Int,
+    language: String,
+    enabled: Boolean,
+    onTopic: (Int) -> Unit,
+    onLanguage: (String) -> Unit,
 ) {
-    val publishLabel = t("channels.compose.publish")
-    Column(modifier = Modifier.imePadding()) {
-        HorizontalDivider()
-        if (error != null) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            ) {
-                ErrorLine(error, modifier = Modifier.weight(1f))
-                if (onRetry != null) {
-                    TextButton(onClick = onRetry) { Text(t("common.retry")) }
-                }
-            }
-        }
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-        ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = onTextChange,
-                placeholder = { Text(t("channels.compose.placeholder")) },
-                singleLine = false,
-                maxLines = 5,
-                enabled = !busy,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    focusedBorderColor = Color.Transparent,
-                    unfocusedBorderColor = Color.Transparent,
-                    disabledBorderColor = Color.Transparent,
-                ),
-                textStyle = MaterialTheme.typography.bodyLarge,
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            FilledIconButton(
-                onClick = onPublish,
-                enabled = !busy && text.isNotBlank(),
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
-                modifier = Modifier
-                    .size(48.dp)
-                    .semantics { contentDescription = publishLabel },
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
-                }
-            }
+    val topics = remember {
+        try {
+            uniffi.lakko_ffi_uniffi.channelTopics().map { it.id.toInt() to it.name }
+        } catch (_: Throwable) {
+            listOf(0 to "Other")
         }
     }
-}
-
-/**
- * The reader (docs/ux/group-and-channel-names.md section 3.2, redesign 5.4):
- * a header card — avatar, name, `@handle`, the description when present and
- * the standing status — then the posts as cards, newest at the bottom (a
- * reversed lazy list over the newest-first order starts scrolled to the bottom
- * like a chat). A post whose render is [PostRender.Hidden] (a metadata record)
- * is left out; with nothing visible the empty sentence sits under the header.
- */
-@Composable
-private fun PostList(
-    posts: List<PostView>,
-    renderOf: (PostView) -> PostRender?,
-    loading: Boolean,
-    header: ChannelHeaderModel?,
-    emptyLine: String,
-    modifier: Modifier = Modifier,
-    statusLine: (@Composable () -> Unit)? = null,
-    /** `docs/ux/feed.md` section 5 — the newest readable post on screen, so
-     *  the channel's read marker can move to it. */
-    onShown: ((cursor: Long) -> Unit)? = null,
-) {
-    val zone = remember { ZoneId.systemDefault() }
-    // ADR-0061: the date words and the date itself in the interface language.
-    val strings = LocalStrings.current
-    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
-    val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
-    val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
-    // "5 min ago" moves on while the screen stays open.
-    val now by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
-        while (true) {
-            kotlinx.coroutines.delay(RELATIVE_TIME_TICK_MS)
-            value = System.currentTimeMillis()
-        }
-    }
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    val readable = visible.filter { renderOf(it) is PostRender.Plain }.map { it.cursor.toLong() }.toSet()
-    if (onShown != null) {
-        LaunchedEffect(listState, readable) {
-            androidx.compose.runtime.snapshotFlow {
-                listState.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? Long)?.takeIf { k -> k in readable } }
-                    .maxOrNull()
-            }.collect { newest -> if (newest != null) onShown(newest) }
-        }
-    }
-
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxWidth(),
-        reverseLayout = true,
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        items(items = visible, key = { it.cursor.toLong() }) { post ->
-            PostCard(
-                time = postRelativeTimeLabel(post.serverTsMs.toLong(), now, zone, locale, strings),
-                render = renderOf(post),
-            )
-        }
-        if (visible.isEmpty()) {
-            item("empty") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    when {
-                        statusLine != null -> statusLine()
-                        loading -> CircularProgressIndicator()
-                        else -> Text(
-                            emptyLine,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        } else if (statusLine != null) {
-            item("status") { statusLine() }
-        }
-        if (header != null) {
-            item("header") { ChannelHeaderCard(header) }
-        }
-    }
-}
-
-/**
- * The channel a conversation's header opens — docs/ux/conversation-info.md
- * sections 2.3 and 3.
- *
- * A layer over the channel, which stays where it is behind it: the sheet's
- * handle and its scrim are the one obvious way out. The common shape the three
- * info surfaces share — the identity, then the actions, then the detail.
- *
- * Which blocks those are is asked, never decided here: the one copy of the
- * rule is `crates/lakko-ui-rules/src/info.rs`, and `Unsubscribe` arrives from
- * it for a subscriber and not for a publisher, because a publisher reads its
- * own channel from its own keys and has no subscription to end.
- *
- * `Unsubscribe` drops the channel on this device and, since ADR-0060 §3, also
- * retires the subscriber on the server (`ChannelUnsubscribe.leave`).
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ChannelInfoSheet(
-    channel: ChannelHandle,
-    isPublisher: Boolean,
-    isSubscriber: Boolean,
-    subscriberCount: Int?,
-    /** Open the channel's member list (ADR-0060 section 3). */
-    onOpenMembers: () -> Unit,
-    onManage: () -> Unit,
-    /** Stop following on every device of the person (`channels.info.unsubscribe_sub`). */
-    onStopFollowing: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    // Remembered because asking now crosses the FFI: the rule is a native
-    // call, and its answer changes only when one of its inputs does.
-    val countKnown = subscriberCount != null
-    val sections = remember(isPublisher, isSubscriber, countKnown) {
-        channelInfoSections(
-            ChannelInfoCapabilities(
-                isPublisher = isPublisher,
-                isSubscriber = isSubscriber,
-                subscriberCountKnown = countKnown,
-            ),
-        )
-    }
-    val header = channelHeaderModel(channel, isOwner = isPublisher, LocalStrings.current)
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var confirmingStopFollowing by remember { mutableStateOf(false) }
-    if (confirmingStopFollowing) {
-        LakkoDialog(
-            onDismissRequest = { confirmingStopFollowing = false },
-            title = t("channels.unsubscribe.title_named", mapOf("name" to header.title)),
-            body = t("channels.unsubscribe.body"),
-            confirm = LakkoDialogAction(t("channels.unsubscribe.action"), LakkoDialogTone.Danger) {
-                confirmingStopFollowing = false
-                onStopFollowing()
-            },
-        )
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            LakkoAvatar(name = header.title, seed = channel.id, size = 72.dp)
-            Spacer(Modifier.height(12.dp))
-            Text(
-                header.title,
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center,
-            )
-            if (InfoSection.CHANNEL_HANDLE in sections) {
-                header.handleLine?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Text(
-                header.statusLine.text(),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (InfoSection.SUBSCRIBER_COUNT in sections) {
-                subscriberCountLine(subscriberCount)?.let {
-                    Text(
-                        it.text(),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            if (InfoSection.MANAGE_CHANNEL in sections) {
-                Spacer(Modifier.height(16.dp))
-                OutlinedButton(
-                    onClick = onManage,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(t("channels.manage.title")) }
-            }
-            // docs/ux/who-can-find-me.md section 6.3 — a channel lists its
-            // members to its members. The core decides the block.
-            if (InfoSection.CHANNEL_MEMBERS in sections) {
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider()
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenMembers() }
-                        .padding(vertical = 14.dp),
-                ) {
-                    Text(t("channels.members.title"), style = MaterialTheme.typography.bodyLarge)
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        t("channels.members.info_sub"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            // docs/ux/who-can-find-me.md section 5 — this channel's
-            // `Members can find me` switch (absent unless the setting includes
-            // groups and channels).
-            me.lakko.app.ui.settings.MembersCanFindMeRow(
-                reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
-                kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
-                idHex = channel.id,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (InfoSection.CHANNEL_DESCRIPTION in sections) {
-                header.description?.let {
-                    Spacer(Modifier.height(16.dp))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(16.dp))
-                    Text(it, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            if (InfoSection.UNSUBSCRIBE in sections) {
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider()
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { confirmingStopFollowing = true }
-                        .padding(vertical = 14.dp),
-                ) {
-                    Text(
-                        t("channels.unsubscribe.action"),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        t("channels.info.unsubscribe_sub"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-        }
-    }
-}
-
-// docs/ux/conversation-info.md section 2.3 — the copy speaks for THIS DEVICE.
-// Since ADR-0060 §3 the server is told too (a signed DELETE), but that request
-// is best-effort and may not land, so the words still promise only what
-// happens here. The web client says the same words.
-
-// The catalog keys: `channels.unsubscribe.action` (the control and the
-// confirming button), `channels.info.unsubscribe_sub` (the line under it),
-// `channels.unsubscribe.body` and `channels.unsubscribe.title_named` (the
-// dialog, which names the channel being left).
-
-/** The card at the top of the reader: who this channel is. */
-@Composable
-private fun ChannelHeaderCard(header: ChannelHeaderModel) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 6.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = MaterialTheme.shapes.medium,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            LakkoAvatar(name = header.title, seed = header.title, size = 72.dp)
-            Spacer(Modifier.height(12.dp))
-            Text(
-                header.title,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            header.handleLine?.let {
-                Spacer(Modifier.height(2.dp))
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            header.description?.let {
-                Spacer(Modifier.height(10.dp))
-                Text(it, style = MaterialTheme.typography.bodyMedium)
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                header.statusLine.text(),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PostCard(time: String, render: PostRender?) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = MaterialTheme.shapes.medium,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-            when (render) {
-                null -> Text(
-                    t("common.loading"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                PostRender.Unreadable, PostRender.OlderKeyWindow -> {
-                    Text(t("channels.post.not_available"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    Text(
-                        unreadableReasonLine(olderThanKeys = render == PostRender.OlderKeyWindow).text(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                is PostRender.Plain -> me.lakko.app.ui.components.MessageLinkText(
-                    text = render.value,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    linkColor = MaterialTheme.colorScheme.primary,
-                )
-                PostRender.Hidden -> Unit
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                time,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.align(Alignment.End),
-            )
-        }
-    }
-}
-
-// ============================================================================
-// Subscriber view — register, wait for the channel key, read
-// ============================================================================
-
-private enum class SubscribeBootstrap { Registering, Waiting, Active, Failed }
-
-/**
- * Generates (or restores) this device's reader keypair, registers it on the
- * channel, catches up on the retained key envelopes (ADR-0031), then renders
- * the posts decrypted with the key matching each post's window. Unchanged
- * behaviour; the states read in plain words.
- */
-@Composable
-private fun SubscriberChannelView(
-    channelId: String,
-    header: ChannelHeaderModel?,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-) {
-    // Collected to recompose when a seed lands; the helpers read the latest
-    // value off `state` directly.
-    state.subscribedSeedsByChannel.collectAsState()
-    val postsByChannel by state.postsByChannel.collectAsState()
-    val posts = postsByChannel[channelId] ?: emptyList()
-    val context = LocalContext.current
-
-    var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
-    var subscribeFailure by remember(channelId) { mutableStateOf(UiText("channels.subscribe.error.prefix")) }
-    var attempt by remember(channelId) { mutableIntStateOf(0) }
-    val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
-
-    // ADR-0031 — open one epoch's seed envelope into the per-channel
-    // epoch->seed map; a wrong epoch fails the open and is skipped by the
-    // caller, never a wrong seed.
-    suspend fun openEnvelopeIntoMap(epoch: UInt, wire: ByteArray) {
-        val kp = state.subscriberKeysByChannel.value[channelId]
-            ?: throw ChannelsComposerException.Ffi("missing subscriber keypair")
-        val recovered = ChannelsComposer.openSubscriberSeedEnvelope(
-            keys = kp,
-            channelIdHex = channelId,
-            epochId = epoch,
-            wire = wire,
-        )
-        state.setSubscribedSeed(channelId, epoch, recovered)
-    }
-
-    // Whether this open has already spent its one `channel-subscribe` token.
-    // At most one registration per open: a fresh subscribe IS that
-    // registration, and the re-sync in `catchUp` re-registers only a device
-    // that did not register this time. Without it the 3 s catch-up loop
-    // re-registered on every tick while waiting for the publisher's fanout,
-    // draining the token allowance in about a minute.
-    val registeredThisOpen = remember(channelId) { booleanArrayOf(false) }
-
-    // ADR-0031 catch-up + re-sync: the retained set, the singular latest as a
-    // fallback, and an idempotent re-subscribe when the current key is still
-    // missing. Best-effort per step. True once at least one key is available.
-    suspend fun catchUp(pubHex: String): Boolean {
-        val retained = try {
-            client.fetchEnvelopes(channelId, pubHex)
+    val languages = remember {
+        try {
+            uniffi.lakko_ffi_uniffi.l10nSupportedLanguages().map { it.code.substringBefore('-').lowercase() to it.ownName }
         } catch (_: Throwable) {
             emptyList()
-        }
-        for ((epoch, wire) in retained) {
-            try {
-                openEnvelopeIntoMap(epoch, wire)
-            } catch (_: Throwable) {
-                // Skip a single bad / wrong-epoch envelope.
-            }
-        }
-        val currentEpoch = try {
-            client.fetchEpoch(channelId)
-        } catch (_: Throwable) {
-            null
-        }
-        if (currentEpoch != null) {
-            state.setEpoch(channelId, currentEpoch)
-            if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
-                val latest = try {
-                    client.fetchEnvelope(channelId, pubHex)
-                } catch (_: Throwable) {
-                    null
-                }
-                val wire = latest?.let { ChannelsComposer.base64UrlDecodeOrNull(it) }
-                if (wire != null) {
-                    try {
-                        openEnvelopeIntoMap(currentEpoch, wire)
-                    } catch (_: Throwable) {
-                        // Wrong-epoch guess — skip, never a wrong seed.
-                    }
-                }
-            }
-            if (state.subscribedSeeds(channelId)[currentEpoch] == null && !registeredThisOpen[0]) {
-                // Once per open: the token is spent whether or not it lands.
-                registeredThisOpen[0] = true
-                try {
-                    client.subscribe(channelId, pubHex)
-                } catch (_: Throwable) {
-                    // Best-effort; the poll loop retries.
-                }
-            }
-        }
-        return state.subscribedSeeds(channelId).isNotEmpty()
+        }.distinctBy { it.first }
     }
-
-    suspend fun loadAndDecodePosts() {
-        val seeds = state.subscribedSeeds(channelId)
-        if (seeds.isEmpty()) return
-        try {
-            val page = client.fetchPosts(channelId, 0u)
-            state.setPosts(channelId, page.posts)
-            decodedByCursor.clear()
-            for (p in page.posts) {
-                decodedByCursor[p.cursor] = try {
-                    when (
-                        val r = ChannelsComposer.verifyAndDecryptForEpochs(
-                            seedByEpoch = seeds,
-                            channelIdHex = channelId,
-                            postWireB64Url = p.payloadB64,
-                        )
-                    ) {
-                        // ADR-0051 §4 — classify before the text path: a
-                        // metadata record titles the channel, never a card.
-                        is ChannelsComposer.SubscriberPostResult.Decoded ->
-                            renderDecrypted(state, channelId, r.plaintext)
-                        is ChannelsComposer.SubscriberPostResult.MissingEpochSeed ->
-                            PostRender.OlderKeyWindow
-                        ChannelsComposer.SubscriberPostResult.Unreadable ->
-                            PostRender.Unreadable
-                    }
-                } catch (_: Throwable) {
-                    PostRender.Unreadable
-                }
-            }
-        } catch (_: Throwable) {
-            // The status line already shows the bootstrap state.
-        }
-    }
-
-    // Bootstrap on first composition; `attempt` re-runs it after a failure.
-    // The 3 s catch-up loop lives inside this effect, so leaving the screen
-    // cancels it.
-    LaunchedEffect(channelId, attempt) {
-        bootstrap = SubscribeBootstrap.Registering
-        try {
-            // A registration spends a `channel-subscribe` token (ADR-0059
-            // section 4): a channel this device already follows with a key
-            // it already holds is not registered again on every open; the
-            // catch-up re-registers when the current epoch's seed is missing.
-            val existingKeys = state.subscriberKeysByChannel.value[channelId]
-            // `attempt` above 0 is `Try again` after a failed subscribe, whose
-            // key and list row are already here: that press must register.
-            val alreadyFollowing = attempt == 0 && existingKeys != null &&
-                state.channels.value.any { it.id == channelId }
-            val kp = existingKeys
-                ?: ChannelsComposer.freshSubscriberKeys().also {
-                    state.setSubscriberKeys(channelId, it)
-                }
-            val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
-            if (!alreadyFollowing) {
-                registeredThisOpen[0] = true
-                client.subscribe(channelId, pubHex)
-                // ADR-0087 section 9.5 - back on a channel this account left.
-                me.lakko.app.channels.ChannelUnsubscribe.noteFollowing(channelId)
-            }
-
-            if (state.subscribedSeeds(channelId).isNotEmpty()) {
-                bootstrap = SubscribeBootstrap.Active
-                loadAndDecodePosts()
-            } else {
-                bootstrap = SubscribeBootstrap.Waiting
-            }
-            // Runs until the screen is left (the effect is cancelled). Before
-            // the current epoch's seed lands: catch up every 3 s. After it:
-            // reload the posts every 5 s so a post published while the reader
-            // is open appears, and re-check the epoch about every 30 s so a
-            // rotation is noticed without fetching the envelope set per tick.
-            var haveCurrent = catchUp(pubHex)
-            if (haveCurrent) {
-                bootstrap = SubscribeBootstrap.Active
-                loadAndDecodePosts()
-                // ADR-0060 section 3 — this reader's member card for the
-                // newest epoch it holds (uploaded only when due).
-                me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
-            }
-            var ticks = 0
-            while (true) {
-                delay(if (haveCurrent) READER_REFRESH_MS else SEED_WAIT_MS)
-                ticks += 1
-                try {
-                    if (!haveCurrent || ticks % EPOCH_RECHECK_EVERY_TICKS == 0) {
-                        haveCurrent = catchUp(pubHex)
-                        // A rotation brings a new epoch: the card follows it.
-                        if (haveCurrent) {
-                            me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(
-                                context, state, client, channelId,
-                            )
-                        }
-                    }
-                    if (state.subscribedSeeds(channelId).isNotEmpty()) {
-                        bootstrap = SubscribeBootstrap.Active
-                        loadAndDecodePosts()
-                    }
-                } catch (cause: kotlinx.coroutines.CancellationException) {
-                    throw cause
-                } catch (_: Throwable) {
-                    // Transient — keep polling.
-                }
-            }
-        } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "subscribe failed", e)
-            // ADR-0059 section 4 — a used-up `channel-subscribe` allowance has
-            // its own line (docs/ux/feed.md section 7).
-            subscribeFailure = me.lakko.app.chat.anonTokenFailureText(e, me.lakko.app.chat.AllowanceKind.SUBSCRIBE)
-                ?: UiText("channels.subscribe.error.prefix")
-            bootstrap = SubscribeBootstrap.Failed
-        }
-    }
-
-    val status: (@Composable () -> Unit)? = when (bootstrap) {
-        SubscribeBootstrap.Registering -> {
-            { StatusLine(t("channels.subscribe.status.subscribing")) }
-        }
-        SubscribeBootstrap.Waiting -> {
-            { StatusLine(t("channels.subscribe.waiting_notice")) }
-        }
-        SubscribeBootstrap.Failed -> {
-            {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    ErrorLine(subscribeFailure)
-                    TextButton(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
-                }
-            }
-        }
-        SubscribeBootstrap.Active -> null
-    }
-
-    PostList(
-        posts = if (bootstrap == SubscribeBootstrap.Active) posts else emptyList(),
-        renderOf = { decodedByCursor[it.cursor] },
-        loading = bootstrap != SubscribeBootstrap.Active,
-        header = header,
-        emptyLine = t("channels.posts.empty"),
-        statusLine = status,
-        modifier = Modifier.fillMaxSize(),
-        // A post read here is read in the feed too, and the other way round.
-        onShown = { cursor ->
-            state.boundAccount?.let { acct ->
-                me.lakko.app.feed.FeedReadingStore.update(context, acct) {
-                    me.lakko.app.feed.advanceChannelRead(it, channelId, cursor)
-                }
-            }
-        },
+    Text(t("discover.listing.topic"), style = MaterialTheme.typography.labelLarge)
+    me.lakko.app.ui.components.LakkoPicker(
+        selected = topic,
+        options = topics,
+        onPick = onTopic,
+        enabled = enabled,
+        heading = t("discover.listing.topic"),
     )
-}
-
-@Composable
-private fun StatusLine(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 24.dp),
-    )
-}
-
-// ============================================================================
-// Subscriber key fan-out (owner side) — the headless part of the old panel
-// ============================================================================
-
-/** Fan-out cadence while a channel screen is open (the session shell's own
- *  loop runs every [SubscriberAdmission.APP_INTERVAL_MS]). */
-private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
-private const val SEED_WAIT_MS: Long = 3_000L
-private const val READER_REFRESH_MS: Long = 5_000L
-private const val OPEN_CHANNEL_REFRESH_MS: Long = 5_000L
-private const val RELATIVE_TIME_TICK_MS: Long = 30_000L
-private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
-
-/**
- * The channel screens' faster let-in poll: while the channel view or its
- * Manage screen is open, every 5 s run the same pass the session shell runs
- * every 15 s ([SubscriberAdmission]), so a subscriber who registers now is
- * served within seconds. Cancelled when the hosting screen leaves the
- * composition; the shared record of who was let in stays.
- */
-@Composable
-private fun SubscriberFanoutEffect(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
-    LaunchedEffect(channelId, admission) {
-        while (true) {
-            admission.admitNewSubscribers(channelId)
-            delay(SUBSCRIBERS_POLL_INTERVAL_MS)
-        }
-    }
-}
-
-// ============================================================================
-// Manage (owners): subscribers, co-publishers, keys
-// ============================================================================
-
-/**
- * The owner's Manage screen. Opens the channel's publisher group once —
- * rotation and co-publisher management mutate the SAME MLS group, so one
- * handle serves both. Every call on the group goes through the state's
- * shared [ChannelPublisherIdentity]: serialised, off the main thread, and
- * followed by a provider snapshot after each epoch-advancing operation so a
- * relaunch reopens the group at the epoch the subscribers hold.
- */
-@Composable
-public fun ChannelManageScreen(
-    channelId: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-    onBack: () -> Unit,
-) {
-    val channels by state.channels.collectAsState()
-    val channel = channels.firstOrNull { it.id == channelId }
-    val context = LocalContext.current
-    val zone = remember { ZoneId.systemDefault() }
-    val language = LocalStrings.current.language
-    val locale = remember(language) { Locale.forLanguageTag(language) }
-    val publisher = state.publisher
-
-    var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
-    var openError by remember(channelId) { mutableStateOf<UiText?>(null) }
-    LaunchedEffect(channelId) {
-        try {
-            val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
-            // Open-or-create: persisted so a group minted here is not lost.
-            val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId, state.coPublished) }
-            // ADR-0057 — the channel OWNER claims the publisher journal (at
-            // creation the first registration, afterwards an idempotent
-            // re-send). A co-publisher device never claims: its root would
-            // squat the journal against the owner. Best effort, and BEFORE the
-            // handle is published to this screen: the rotation heartbeat and
-            // the approve path register epochs on it, and a registration ahead
-            // of the claim is refused on a journal still unclaimed.
-            try {
-                val coPublished = CoPublishedJournals.onDevice(context) { state.boundAccount }
-                pub.withIdentity(persist = false) { id ->
-                    DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                Log.w(TAG, "publisher journal claim did not run", e)
-            }
-            pubGroup = opened
-        } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "open publisher group failed", e)
-            openError = LegacyChannelV1.describeText(e) { UiText("channels.manage.error.open") }
-        }
-    }
-
-    // The key fan-out keeps running while Manage is open, so a subscriber
-    // who registers now is served here too.
-    SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
-
-    /** G-50 — a commit whose record could not be made durable rolled the
-     *  channel provider back; the handle this screen holds still carries the
-     *  rolled-back epoch in memory, so it is opened again from the provider. */
-    suspend fun reopenPublisherGroup() {
-        val pub = publisher ?: return
-        try {
-            pubGroup = pub.withIdentity(persist = false) { id ->
-                CoPublisher.loadPublisherGroup(id, channelId, state.coPublished)
-            }
-        } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "publisher group not reopened", e)
-        }
-    }
-
-    /** After a rotation or an approve the group's current key changed: refresh
-     *  the composer's copy so the next post seals under the key the
-     *  subscribers were just given. */
-    suspend fun refreshPublisherKey() {
-        val pub = publisher ?: return
-        val pg = pubGroup ?: return
-        val current = state.keysByChannel.value[channelId] ?: return
-        try {
-            val seed = pub.withIdentity(persist = false) { id -> pg.channelSeed(id) }
-            state.setKeys(channelId, current.copy(seed = seed))
-            state.setEpoch(channelId, client.fetchEpoch(channelId))
-        } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "publisher key refresh failed", e)
-        }
-    }
-
-    Scaffold(
-        topBar = {
-            ChannelTopBar(
-                title = t("common.manage"),
-                subtitle = channel?.let { channelTitle(it, LocalStrings.current) },
-                onBack = onBack,
-            )
-        },
-    ) { inner ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            openError?.let { ErrorLine(it) }
-            channel?.let { ChannelDetailsCard(channel = it, state = state, client = client) }
-            // ADR-0059 / UX 6.4 — the owner lists the channel in Discover; a
-            // co-publisher sees the state only.
-            me.lakko.app.ui.discover.ListInDiscoverCard(channelId = channelId, state = state, client = client)
-            SubscribersCard(channelId = channelId, state = state, client = client)
-            CoPublishersCard(
-                channelId = channelId,
-                state = state,
-                client = client,
-                publisher = publisher,
-                publisherGroup = pubGroup,
-                onCopy = { copyToClipboard(context, it) },
-                afterApprove = { refreshPublisherKey() },
-                afterFailure = { reopenPublisherGroup() },
-            )
-            KeysCard(
-                channelId = channelId,
-                state = state,
-                client = client,
-                publisher = publisher,
-                publisherGroup = pubGroup,
-                zone = zone,
-                locale = locale,
-                afterFailure = { reopenPublisherGroup() },
-                afterRotate = {
-                    refreshPublisherKey()
-                    // ADR-0051 §4 — re-issue the record under the new key so a
-                    // late subscriber, who holds only the newest epochs, still
-                    // finds one it can read. The stored stamp, verbatim.
-                    ChannelMetaPublisher.reissue(state, client, channelId)
-                },
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-    }
-}
-
-/**
- * ADR-0051 §4 / UX 3.2 — the channel's name and description, editable by the
- * publisher. Save posts a new metadata record (a fresh stamp) and updates the
- * local copy; an empty name is refused with "A channel needs a name".
- */
-@Composable
-private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, client: ChannelsClient) {
-    val current = remember(channel.id) { channel.sharedMeta() }
-    var name by remember(channel.id) { mutableStateOf(current?.name ?: channel.localName) }
-    var description by remember(channel.id) { mutableStateOf(current?.description ?: channel.localDescription) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<UiText?>(null) }
-    // "Saved." after a successful post, cleared by the next edit or save (web ManagePanel).
-    var saved by remember(channel.id) { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current.applicationContext
-    val dirty = name.trim() != channelTitle(channel, LocalStrings.current) || description.trim() != channelDescription(channel).orEmpty()
-
-    SectionCard(
-        title = t("channels.meta.title"),
-        description = t("channels.meta.desc"),
-    ) {
-        OutlinedTextField(
-            value = name,
-            onValueChange = {
-                name = it
-                error = null
-                saved = false
-            },
-            label = { Text(t("channels.field.name")) },
-            singleLine = true,
-            enabled = !busy,
-            isError = error != null && name.trim().isEmpty(),
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = description,
-            onValueChange = {
-                description = it
-                error = null
-                saved = false
-            },
-            label = { Text(t("channels.field.description_optional")) },
-            enabled = !busy,
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        error?.let { ErrorLine(it) }
-        if (saved) {
-            Text(
-                t("channels.meta.saved"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-            )
-        }
-        Button(
-            onClick = {
-                if (busy) return@Button
-                val trimmedName = name.trim()
-                if (trimmedName.isEmpty()) {
-                    error = UiText("channels.meta.error.name_empty")
-                    return@Button
-                }
-                busy = true
-                error = null
-                saved = false
-                scope.launch {
-                    try {
-                        ChannelMetaPublisher.post(
-                            state = state,
-                            client = client,
-                            channelId = channel.id,
-                            name = trimmedName,
-                            description = description.trim(),
-                            updatedAtMs = System.currentTimeMillis().toULong(),
-                        )
-                        state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
-                        // group-and-channel-privacy.md 4.5.4 — a channel with
-                        // an @name publishes its name and description in its
-                        // public record: owed now, durably, sent at once and
-                        // retried by the heartbeat until it lands.
-                        val acct = state.boundAccount
-                        val owner = state.publisher
-                        if (acct != null && owner != null && channel.handle.isNotBlank()) {
-                            me.lakko.app.chat.GroupSettingsStore.saveOwedChannelRecord(context, acct, channel.id, true)
-                            val current = state.channels.value.firstOrNull { it.id == channel.id } ?: channel
-                            ChannelDiscovery.sendOwedRecordIfAny(context, owner, acct, current)
-                        }
-                        // ADR-0059 — a listed channel's listing carries the name
-                        // and description too; editing them updates it (UX 6.4).
-                        var listingOk = true
-                        val pub = state.publisher
-                        if (pub != null) {
-                            try {
-                                me.lakko.app.discover.DiscoverListing.refreshListingAfterEdit(state, client, pub, channel.id)
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e
-                            } catch (e: Throwable) {
-                                Log.w(TAG, "listing not refreshed after edit", e)
-                                listingOk = false
-                                error = UiText("discover.listing.update_failed")
-                            }
-                        }
-                        if (listingOk) saved = true
-                    } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
-                        // The message opens with the frozen reason code; the
-                        // screen reads the catalog sentence for it, never the prose.
-                        Log.w(TAG, "channel record refused: ${e.message}")
-                        error = channelMetaErrorText(e.message)
-                    } catch (e: Throwable) {
-                        me.lakko.app.rethrowIfCancelled(e)
-                        Log.w(TAG, "channel record not posted", e)
-                        error = channelsErrorText(
-                            e,
-                            genericKey = "channels.meta.error.save",
-                            prefixKey = "channels.meta.error.save_prefix",
-                        )
-                    } finally {
-                        busy = false
-                    }
-                }
-            },
-            enabled = !busy && dirty,
-        ) {
-            Text(if (busy) t("common.saving") else t("common.save"))
-        }
-    }
-}
-
-@Composable
-private fun SectionCard(title: String, description: String? = null, content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = MaterialTheme.shapes.medium,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            if (description != null) {
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            content()
-        }
-    }
-}
-
-/** "Subscriber N" rows with their key-delivery state; never a key. */
-@Composable
-private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
-    val admissions by admission.state.collectAsState()
-    val entry = admissions[channelId]
-    val subs = entry?.subscribers
-    val epoch = state.epochByChannel.collectAsState().value[channelId]
-    val scope = rememberCoroutineScope()
-    SectionCard(
-        title = subs?.let {
-            t(
-                "common.sentence_pair",
-                mapOf(
-                    "first" to t("channels.subscribers.title"),
-                    "second" to t("channels.subscribers.count", mapOf("count" to it.size.toString())),
-                ),
-            )
-        } ?: t("channels.subscribers.title"),
-        description = t("channels.subscribers.desc"),
-    ) {
-        when {
-            subs == null -> Text(t("common.loading"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            subs.isEmpty() -> Text(
-                t("channels.subscribers.empty"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            else -> subs.forEachIndexed { index, pk ->
-                // A key sealed for an older epoch is being let in again.
-                val st = entry?.statusByKey?.get(pk)
-                val status = st?.takeIf { epoch == null || it.epoch == epoch }?.status
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    val rowLabel = t("channels.subscribers.row", mapOf("number" to (index + 1).toString()))
-                    LakkoAvatar(name = rowLabel, seed = pk, size = 32.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text(rowLabel, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                    when (status) {
-                        SubscriberAdmission.Status.Ready -> Text(
-                            t("channels.subscribers.status.ready"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        SubscriberAdmission.Status.Failed -> TextButton(
-                            onClick = { scope.launch { admission.admit(channelId, pk) } },
-                        ) { Text(t("common.retry")) }
-                        null -> Text(
-                            t("channels.subscribers.status.setting_up"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Co-publishers (ADR-0028 OQ3): the invite link with Copy, and the
- * pending requests with Approve / Reject. Approve is the audited path that
- * adds the joiner AND reseals the new key to every subscriber.
- */
-@Composable
-private fun CoPublishersCard(
-    channelId: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-    publisher: ChannelPublisherIdentity?,
-    publisherGroup: PublisherGroup?,
-    onCopy: (String) -> Unit,
-    afterApprove: suspend () -> Unit,
-    afterFailure: suspend () -> Unit,
-) {
-    var link by remember(channelId) { mutableStateOf<String?>(null) }
-    var pending by remember(channelId) { mutableStateOf<List<ByteArray>>(emptyList()) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<UiText?>(null) }
-    val ds = remember { DsClient() }
-    val scope = rememberCoroutineScope()
-
-    // Poll the publisher group's journal for join requests with the SHARED
-    // handle the screen owns; re-armed if the handle re-opens. A poll that
-    // applied a peer's commit advanced the epoch, so the provider is
-    // snapshotted then (and only then).
-    LaunchedEffect(publisherGroup) {
-        val pub = publisher ?: return@LaunchedEffect
-        val pg = publisherGroup ?: return@LaunchedEffect
-        while (true) {
-            try {
-                val poll = pub.withIdentity(persist = false) { id -> CoPublisher.pollJournal(ds, id, pg) }
-                if (poll.applied > 0) pub.persist()
-                pending = pub.withIdentity(persist = false) { CoPublisher.pending(pg) }
-                // G-50 — a recorded approve whose Welcome waited for the
-                // joiner's reply key (re-read by the poll just now) or whose
-                // reseal failed is resumed here.
-                val account = state.boundAccount
-                val store = state.commitStore
-                if (account != null && store != null && store.entries(account).isNotEmpty()) {
-                    val finished = pub.withIdentity(persist = false) { id ->
-                        CoPublisher.replayPublisherCommits(ds, client, id, account, store, state.coPublished)
-                    }
-                    if (finished.isNotEmpty()) afterApprove()
-                }
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (_: Throwable) {
-                // Best-effort — keep the last good pending list.
-            }
-            delay(5_000L)
-        }
-    }
-
-    SectionCard(
-        title = t("channels.copublishers.title"),
-        description = t("channels.copublishers.desc"),
-    ) {
-        val current = link
-        if (current == null) {
-            OutlinedButton(
-                onClick = {
-                    val pub = publisher
-                    val pg = publisherGroup
-                    if (busy || pub == null || pg == null) return@OutlinedButton
-                    busy = true
-                    error = null
-                    scope.launch {
-                        try {
-                            // ADR-0078 section 6 — the link's sealed preview
-                            // carries the channel id and its name.
-                            val name = state.channels.value.firstOrNull { it.id == channelId }
-                                ?.let { it.sharedName.ifEmpty { it.localName } }
-                            val mint = pub.withIdentity(persist = false) { id ->
-                                CoPublisher.mintCoPublisherLink(id, pg, name)
-                            }
-                            // Uploaded to the group-invite ledger (no inline
-                            // form since 2026-10-19): any failed upload mints
-                            // nothing and shows the error; the button stays.
-                            val discovery = me.lakko.app.discovery.DiscoveryClient()
-                            discovery.setSessionToken(me.lakko.app.auth.SessionTokens.provider?.current())
-                            link = discovery.use { client ->
-                                CoPublisher.uploadCoPublisherLink(
-                                    mint.sealed,
-                                    mint.linkSecret,
-                                    client,
-                                    state.boundAccount,
-                                )
-                            }
-                        } catch (e: Throwable) {
-                            me.lakko.app.rethrowIfCancelled(e)
-                            Log.w(TAG, "create co-publisher link failed", e)
-                            error = UiText("chat.error.create_link")
-                        } finally {
-                            busy = false
-                        }
-                    }
-                },
-                enabled = !busy && publisherGroup != null,
-            ) { Text(t("chat.invite_link.create")) }
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                // The card's description already says who may ask.
-                Text(
-                    t("channels.copublishers.link"),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = { onCopy(current) }) {
-                    Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
-                }
-            }
-        }
-
-        if (pending.isNotEmpty()) {
-            HorizontalDivider()
-            Text(t("channels.copublishers.requests", mapOf("count" to pending.size.toString())), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            pending.forEachIndexed { index, ref ->
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text(t("channels.copublishers.request_row"), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                    TextButton(
-                        onClick = {
-                            val pub = publisher
-                            val pg = publisherGroup
-                            if (busy || pub == null || pg == null) return@TextButton
-                            error = null
-                            scope.launch {
-                                try {
-                                    // A drop of the retained request: no commit,
-                                    // no epoch advance. The retained set is part
-                                    // of the provider snapshot, so this persists
-                                    // (the default) or the request reappears on
-                                    // the next open.
-                                    pending = pub.withIdentity { id ->
-                                        CoPublisher.reject(id, pg, ref)
-                                        CoPublisher.pending(pg)
-                                    }
-                                } catch (e: Throwable) {
-                                    me.lakko.app.rethrowIfCancelled(e)
-                                    Log.w(TAG, "reject failed", e)
-                                    error = UiText("channels.copublishers.error.reject")
-                                }
-                            }
-                        },
-                        enabled = !busy,
-                    ) { Text(t("chat.members.join.reject"), color = MaterialTheme.colorScheme.error) }
-                    TextButton(
-                        onClick = {
-                            val pub = publisher
-                            val pg = publisherGroup
-                            if (busy || pub == null || pg == null) return@TextButton
-                            busy = true
-                            error = null
-                            scope.launch {
-                                try {
-                                    // The audited approve: adds the joiner and
-                                    // reseals the new key to every subscriber.
-                                    // G-50 — recorded with the N+1 provider
-                                    // snapshot (persistNow) before any of its
-                                    // steps leaves the device.
-                                    val account = state.boundAccount
-                                        ?: throw IllegalStateException("no account bound")
-                                    val store = state.commitStore
-                                        ?: throw IllegalStateException("no commit store")
-                                    pending = pub.withIdentityPersistingFirst { id, persistNow ->
-                                        CoPublisher.approve(
-                                            ds, client, id, pg, ref, channelId, account, store, persistNow,
-                                        )
-                                        CoPublisher.pending(pg)
-                                    }
-                                    afterApprove()
-                                } catch (e: Throwable) {
-                                    me.lakko.app.rethrowIfCancelled(e)
-                                    Log.w(TAG, "approve failed", e)
-                                    afterFailure()
-                                    error = channelsErrorText(e, "channels.copublishers.error.approve")
-                                } finally {
-                                    busy = false
-                                }
-                            }
-                        },
-                        enabled = !busy,
-                    ) { Text(t("chat.members.join.approve")) }
-                }
-            }
-        }
-        error?.let { ErrorLine(it) }
-    }
-}
-
-/**
- * Key rotation (ADR-0010 / C-54). The Rust core owns the *when*
- * (`channelShouldRotate`), [RotationCron] the *how* (rotate the group, reseal
- * every subscriber, one atomic fan-out). The heartbeat state is persisted per
- * channel in the state's channel log (like the web and iOS stores), so the
- * schedule survives a relaunch: a channel opened past its rotation deadline
- * rotates on the first tick. A channel with no persisted state is seeded as
- * "rotated just now" on first open, so the policy does not fire against a
- * genesis state. "Rotate now" is the immediate control. Every group call
- * runs on the shared [ChannelPublisherIdentity]; the provider is snapshotted
- * after a rotation that landed.
- */
-@Composable
-private fun KeysCard(
-    channelId: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-    publisher: ChannelPublisherIdentity?,
-    publisherGroup: PublisherGroup?,
-    zone: ZoneId,
-    locale: Locale,
-    afterFailure: suspend () -> Unit,
-    afterRotate: suspend () -> Unit,
-) {
-    val policy = remember { channelRotationPolicyDefault() }
-    var cronState by remember(channelId) {
-        mutableStateOf(
-            state.rotationState(channelId)?.toFfi()
-                ?: channelRotationStateAfterRotation(System.currentTimeMillis().toULong())
-                    .also { seeded -> state.saveRotationState(channelId, seeded.toStored()) },
-        )
-    }
-    var lastRotatedAtMs by remember(channelId) {
-        mutableStateOf(cronState.lastRotationMs.takeIf { it > 0uL }?.toLong())
-    }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<UiText?>(null) }
-    val scope = rememberCoroutineScope()
-    val strings = LocalStrings.current
-
-    /** Persist + adopt a new heartbeat state. */
-    fun adoptState(next: ChannelRotationState) {
-        cronState = next
-        state.saveRotationState(channelId, next.toStored())
-    }
-
-    val heartbeatContext = LocalContext.current.applicationContext
-    // The rotation heartbeat, armed once the publisher handle is open,
-    // cancelled when this card leaves the composition. One pass at once, then
-    // one per interval, the [RotationCron.start] cadence — driven here rather
-    // than by `start` so each pass runs on the shared identity and a landed
-    // rotation is snapshotted before the next tick.
-    LaunchedEffect(publisher, publisherGroup) {
-        val pub = publisher ?: return@LaunchedEffect
-        val pg = publisherGroup ?: return@LaunchedEffect
-        while (true) {
-            // 4.5.4 — an owed republish of the channel's public record.
-            state.boundAccount?.let { acct ->
-                state.channels.value.firstOrNull { it.id == channelId }?.let { ch ->
-                    ChannelDiscovery.sendOwedRecordIfAny(heartbeatContext, pub, acct, ch)
-                }
-            }
-            try {
-                val result = rotateOnce(
-                    pub, pg, channelId, client, state,
-                    saveState = { next -> adoptState(next) },
-                    policy = policy,
-                    rotationState = cronState,
-                )
-                if (result.rotated) {
-                    lastRotatedAtMs = System.currentTimeMillis()
-                    afterRotate()
-                }
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (e: Throwable) {
-                Log.w(TAG, "scheduled rotation failed", e)
-                afterFailure()
-                error = UiText("channels.rotation.error.check")
-            }
-            delay(ROTATION_HEARTBEAT_MS)
-        }
-    }
-
-    SectionCard(
-        title = t("channels.rotation.title"),
-        description = t("channels.rotation.desc"),
-    ) {
-        Text(
-            rotationStatusLine(lastRotatedAtMs, System.currentTimeMillis(), zone, locale, strings),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        OutlinedButton(
-            onClick = {
-                val pub = publisher
-                val pg = publisherGroup
-                if (busy || pub == null || pg == null) return@OutlinedButton
-                busy = true
-                error = null
-                scope.launch {
-                    try {
-                        // A genesis {0,0} state makes the policy fire against
-                        // any real wall-clock now; runOnce rotates + reseals
-                        // every subscriber atomically and returns the fresh
-                        // after-rotation state adopted as the new baseline.
-                        val result = rotateOnce(
-                            pub, pg, channelId, client, state,
-                            saveState = { next -> adoptState(next) },
-                            policy = policy,
-                            rotationState = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
-                        )
-                        adoptState(result.newState)
-                        if (result.rotated) {
-                            lastRotatedAtMs = System.currentTimeMillis()
-                            afterRotate()
-                        }
-                    } catch (e: Throwable) {
-                        me.lakko.app.rethrowIfCancelled(e)
-                        Log.w(TAG, "rotate now failed", e)
-                        afterFailure()
-                        error = UiText("channels.rotation.error.refresh")
-                    } finally {
-                        busy = false
-                    }
-                }
-            },
-            enabled = !busy && publisherGroup != null,
-        ) {
-            Text(if (busy) t("channels.rotation.refreshing") else t("channels.rotation.refresh_now"))
-        }
-        error?.let { ErrorLine(it) }
-    }
-}
-
-/**
- * One rotation pass on the shared channel provider (G-50): the rotation is
- * recorded with the N+1 provider snapshot before its steps run
- * (`withIdentityPersistingFirst`), and the provider is snapshotted again
- * after a pass that returns normally.
- */
-private suspend fun rotateOnce(
-    pub: ChannelPublisherIdentity,
-    pg: PublisherGroup,
-    channelId: String,
-    client: ChannelsClient,
-    state: ChannelsUiState,
-    saveState: suspend (ChannelRotationState) -> Unit,
-    policy: uniffi.lakko_ffi_uniffi.ChannelRotationPolicy,
-    rotationState: ChannelRotationState,
-): RotationCron.OnceResult {
-    val account = state.boundAccount ?: throw IllegalStateException("no account bound")
-    val store = state.commitStore ?: throw IllegalStateException("no commit store")
-    return pub.withIdentityPersistingFirst { id, persistNow ->
-        RotationCron(
-            publisherGroup = pg,
-            identity = id,
-            channelIdHex = channelId,
-            channelsClient = client,
-            saveState = saveState,
-            accountIdB64 = account,
-            store = store,
-            persistNow = persistNow,
-        ).runOnce(
-            policy = policy,
-            state = rotationState,
-            nowMs = System.currentTimeMillis().toULong(),
+    if (languages.isNotEmpty()) {
+        Text(t("discover.language"), style = MaterialTheme.typography.labelLarge)
+        me.lakko.app.ui.components.LakkoPicker(
+            selected = language,
+            options = languages,
+            onPick = onLanguage,
+            enabled = enabled,
+            heading = t("discover.language"),
         )
     }
 }
 
-/** The scheduled rotation check cadence — the [RotationCron.start] default. */
-private const val ROTATION_HEARTBEAT_MS: Long = 5L * 60L * 1_000L
-
-private fun StoredRotationState.toFfi(): ChannelRotationState =
-    ChannelRotationState(lastRotationMs = lastRotationMs, postsSinceRotation = postsSinceRotation)
-
-private fun ChannelRotationState.toStored(): StoredRotationState =
-    StoredRotationState(lastRotationMs = lastRotationMs, postsSinceRotation = postsSinceRotation)
 
 // ============================================================================
 // Join as co-publisher (ADR-0028 OQ3, joiner side)
@@ -2381,8 +584,10 @@ public fun JoinCoPublisherScreen(
     state: ChannelsUiState,
     onBack: () -> Unit,
     onJoined: (channelId: String) -> Unit,
+    /** ADR-0087 section 15.2 — the co-publisher link that opened this page. */
+    initialLink: String? = null,
 ) {
-    var link by remember { mutableStateOf("") }
+    var link by remember { mutableStateOf(initialLink.orEmpty()) }
     var localName by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<UiText?>(null) }
@@ -2439,64 +644,19 @@ public fun JoinCoPublisherScreen(
                 status = UiText("group.join.sending")
                 scope.launch {
                     try {
-                        val publisher = state.publisher
-                            ?: throw IllegalStateException("channel publisher identity not available")
-                        // The request mints a KeyPackage whose private keys
-                        // live in the shared identity's provider; the join
-                        // below must run on the SAME identity, and the
-                        // joined group is persisted with it.
-                        val request = me.lakko.app.discovery.DiscoveryClient().use { discovery ->
-                            publisher.withIdentityPersistingFirst { identity, persistNow ->
-                                CoPublisher.requestToCoPublish(
-                                    ds,
-                                    identity,
-                                    trimmed,
-                                    coPublished,
-                                    persistNow,
-                                ) { blobId -> discovery.fetchGroupInvite(blobId) }
-                            }
-                        }
-                        status = UiText("channels.join.waiting")
-                        var keys: ChannelPublisherKeys? = null
-                        var attempts = 0
-                        while (keys == null && attempts < 60) {
-                            keys = publisher.withIdentity(persist = false) { identity ->
-                                CoPublisher.pollForCoPublishWelcome(
-                                    ds,
-                                    identity,
-                                    request.groupId,
-                                    request.joinerKey,
-                                    request.channelIdHex,
-                                    coPublished,
-                                    // G-29 — reuse the persisted signing seed on a re-poll.
-                                    state.persistedPublisherSigningSeed(request.channelIdHex),
-                                )
-                            }
-                            if (keys == null) {
-                                delay(3_000L)
-                                attempts += 1
-                            } else {
-                                // Joined: the PublisherGroup now lives in the
-                                // provider at the post-approve epoch.
-                                publisher.persist()
-                            }
-                        }
-                        val resolved = keys
-                        if (resolved == null) {
+                        val joined = joinAsCoPublisher(
+                            context,
+                            state,
+                            ds,
+                            trimmed,
+                            localName.trim().ifEmpty { defaultName },
+                            coPublished,
+                        ) { status = it }
+                        if (joined == null) {
                             error = UiText("channels.join.no_approval")
                             return@launch
                         }
-                        val name = localName.trim()
-                        state.addChannel(
-                            ChannelHandle(
-                                id = request.channelIdHex,
-                                localName = name.ifEmpty { defaultName },
-                                localDescription = "",
-                                addedAtMs = System.currentTimeMillis().toULong(),
-                            ),
-                        )
-                        state.setKeys(request.channelIdHex, resolved)
-                        onJoined(request.channelIdHex)
+                        onJoined(joined)
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: LegacyChannelException) {
@@ -2533,5 +693,102 @@ public fun JoinCoPublisherScreen(
                 ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
             }
         }
+    }
+}
+
+
+/**
+ * Ask to join a channel as a co-publisher through [link] (a `/g/` co-publisher
+ * link), wait for the owner's device to approve, then mint local publisher
+ * keys and add the channel. Returns the channel id, or `null` when the owner's
+ * device did not approve within the wait (the request stays and is approved
+ * later). [onStatus] receives the progress line. Throws on a refused or
+ * failed request ([LegacyChannelException] for an old link). Shared by the
+ * join page and the publisher invitation card (UX section 15.2).
+ */
+public suspend fun joinAsCoPublisher(
+    context: android.content.Context,
+    state: ChannelsUiState,
+    ds: DsClient,
+    link: String,
+    channelName: String,
+    coPublished: CoPublishedJournalMarks,
+    onStatus: (UiText?) -> Unit,
+): String? {
+    val publisher = state.publisher
+        ?: throw IllegalStateException("channel publisher identity not available")
+    onStatus(UiText("group.join.sending"))
+    // The request mints a KeyPackage whose private keys live in the shared
+    // identity's provider; the join below must run on the SAME identity, and
+    // the joined group is persisted with it.
+    val request = me.lakko.app.discovery.DiscoveryClient().use { discovery ->
+        publisher.withIdentityPersistingFirst { identity, persistNow ->
+            CoPublisher.requestToCoPublish(
+                ds,
+                identity,
+                link,
+                coPublished,
+                persistNow,
+                { blobId -> discovery.fetchGroupInvite(blobId) },
+                ownProfileEnvelopeWithAccount(context, state.boundAccount),
+            )
+        }
+    }
+    onStatus(UiText("channels.join.waiting"))
+    var keys: ChannelPublisherKeys? = null
+    var attempts = 0
+    while (keys == null && attempts < 60) {
+        keys = publisher.withIdentity(persist = false) { identity ->
+            CoPublisher.pollForCoPublishWelcome(
+                ds,
+                identity,
+                request.groupId,
+                request.joinerKey,
+                request.channelIdHex,
+                coPublished,
+                // G-29 — reuse the persisted signing seed on a re-poll.
+                state.persistedPublisherSigningSeed(request.channelIdHex),
+            )
+        }
+        if (keys == null) {
+            delay(3_000L)
+            attempts += 1
+        } else {
+            // Joined: the PublisherGroup now lives in the provider at the
+            // post-approve epoch.
+            publisher.persist()
+        }
+    }
+    val resolved = keys ?: return null
+    if (state.channels.value.none { it.id == request.channelIdHex }) {
+        state.addChannel(
+            ChannelHandle(
+                id = request.channelIdHex,
+                localName = channelName,
+                localDescription = "",
+                addedAtMs = System.currentTimeMillis().toULong(),
+            ),
+        )
+    }
+    state.setKeys(request.channelIdHex, resolved)
+    return request.channelIdHex
+}
+
+/** ADR-0087 section 7 — this account's profile envelope carrying its account
+ *  id, for a co-publisher request; empty when none can be composed. */
+private fun ownProfileEnvelopeWithAccount(context: android.content.Context, accountIdB64: String?): ByteArray {
+    val acct = accountIdB64 ?: return ByteArray(0)
+    val accountId = try {
+        java.util.Base64.getDecoder().decode(acct)
+    } catch (_: IllegalArgumentException) {
+        return ByteArray(0)
+    }
+    return try {
+        me.lakko.app.profile.OwnProfileStore.load(context, accountId)
+            ?.toFfi(accountId = accountId, shareUsername = false)
+            ?.let { uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it) }
+            ?: ByteArray(0)
+    } catch (_: Throwable) {
+        ByteArray(0)
     }
 }

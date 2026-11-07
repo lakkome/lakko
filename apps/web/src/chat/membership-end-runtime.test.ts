@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { endKey, MembershipEndStore, type EndRecord, type MembershipEndBackend, type MembershipEndRow } from "./membership-end";
+import { endKey, MembershipEndStore, type EndNotice, type EndRecord, type MembershipEndBackend, type MembershipEndRow } from "./membership-end";
 import { MembershipEndRuntime, type EndPort, type NewEnd } from "./membership-end-runtime";
 
 /** One device's disk: survives a "crash" (a new store and runtime over it). */
@@ -71,21 +71,23 @@ describe("the order", () => {
     expect(store.records()).toEqual([]);
   });
 
-  it("leaves the notice behind, and none for a person who left", async () => {
+  it("tells of the end once, in memory, and not for a person who left", async () => {
     const store = await storeOn(disk());
-    const runtime = new MembershipEndRuntime(store, port([]));
+    const told: EndNotice[] = [];
+    const runtime = new MembershipEndRuntime(store, port([]), undefined, (n) => told.push(n));
     await runtime.begin(end({ draft: "half a sentence" }));
-    expect(store.notices()).toMatchObject([{ key: KEY, title: "Book club", draft: "half a sentence" }]);
+    expect(told).toMatchObject([{ key: KEY, title: "Book club", draft: "half a sentence" }]);
     await runtime.begin(end({ idHex: "bb", left: true }));
-    expect(store.notices()).toHaveLength(1);
+    expect(told).toHaveLength(1);
   });
 
   it("a device that heard of it publishes nothing and clears nothing", async () => {
     const log: Step[] = [];
     const store = await storeOn(disk());
-    await new MembershipEndRuntime(store, port(log)).begin(end({ origin: "heard" }));
+    const told: EndNotice[] = [];
+    await new MembershipEndRuntime(store, port(log), undefined, (n) => told.push(n)).begin(end({ origin: "heard" }));
     expect(log).toEqual(["stop", "wipe"]);
-    expect(store.notices()).toHaveLength(1);
+    expect(told).toHaveLength(1);
   });
 
   it("records the epoch as a decimal, which is what the delete gets back", async () => {
@@ -195,23 +197,26 @@ describe("running", () => {
   });
 });
 
-describe("each removal tells the person once, with its own banner (base walk 2026-11-04)", () => {
-  it("a second removal adds its own notice; an earlier one still waiting stays beside it", async () => {
-    const store = await storeOn(disk());
-    const runtime = new MembershipEndRuntime(store, port([]));
+describe("each removal tells the person once (UX section 9, 2026-11-06)", () => {
+  it("every removal is told, in order; nothing is written for it", async () => {
+    const d = disk();
+    const store = await storeOn(d);
+    const told: EndNotice[] = [];
+    const runtime = new MembershipEndRuntime(store, port([]), undefined, (n) => told.push(n));
     await runtime.begin(end({ idHex: "aa", title: "QA Phase A Walk", routeIdsB64: ["qg=="], segmentsB64: ["qg=="] }));
     await runtime.begin(end({ idHex: "bb", title: "QA Base Alone", routeIdsB64: ["uw=="], segmentsB64: ["uw=="] }));
-    expect(store.notices().map((n) => n.title)).toEqual(["QA Phase A Walk", "QA Base Alone"]);
-    // Closing one leaves the other.
-    await store.dismiss(endKey(2, "aa"));
-    expect(store.notices().map((n) => n.title)).toEqual(["QA Base Alone"]);
+    expect(told.map((n) => n.title)).toEqual(["QA Phase A Walk", "QA Base Alone"]);
+    // A store opened again (the next start) holds no notice to show.
+    const again = await storeOn(d);
+    expect("notices" in again).toBe(false);
   });
 
   it("a removal heard from the account's other device tells this device too; leaving tells nobody", async () => {
     const store = await storeOn(disk());
-    const runtime = new MembershipEndRuntime(store, port([]));
+    const told: EndNotice[] = [];
+    const runtime = new MembershipEndRuntime(store, port([]), undefined, (n) => told.push(n));
     await runtime.begin(end({ idHex: "cc", title: "Heard", origin: "heard" }));
     await runtime.begin(end({ idHex: "dd", title: "Left", left: true }));
-    expect(store.notices().map((n) => n.title)).toEqual(["Heard"]);
+    expect(told.map((n) => n.title)).toEqual(["Heard"]);
   });
 });

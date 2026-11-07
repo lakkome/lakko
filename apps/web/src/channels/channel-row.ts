@@ -99,3 +99,11 @@ export function channelRowMatches(model: ChannelRowModel, query: string): boolea
     model.title.toLowerCase().includes(q) || model.handle.toLowerCase().replace(/^@/, "").includes(q)
   );
 }
+
+/** UX navigation 2.1 — a channel row's second line: the newest post this
+ *  device can read, flattened to one line; else `fallback` (the @name or the
+ *  status line). A channel post has no sender to name. */
+export function channelRowPreview(lastPostText: string | null, fallback: string): string {
+  const text = (lastPostText ?? "").replace(/\s+/g, " ").trim();
+  return text.length > 0 ? text : fallback;
+}

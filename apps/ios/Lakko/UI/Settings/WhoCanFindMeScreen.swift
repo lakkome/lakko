@@ -441,12 +441,14 @@ struct TheirContactsCanFindMeSection: View {
 /// other group and channel on, said once in place.
 struct MembersCanFindMeSection: View {
     let groupIdHex: String
+    /// A group, or a channel (`group-and-channel-privacy.md` 12.1).
+    var kind: FfiScopeKind = .group
     @ObservedObject private var reach = ReachCenter.shared
     @State private var switchedToChosen = false
     @ObservedObject private var l10n = Localization.shared
 
     private var scope: FfiScopeId? {
-        CoPublisher.hexToData(groupIdHex).map { FfiScopeId(kind: .group, id: $0) }
+        CoPublisher.hexToData(groupIdHex).map { FfiScopeId(kind: kind, id: $0) }
     }
 
     var body: some View {

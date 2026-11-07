@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "ar",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "لحسابك مفاتيح جديدة. نُكمل التغيير الآن.",
@@ -1238,8 +1237,136 @@
       "text": "تعذّر فك تشفير صوت هذا المشارك وصورته",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "يمكن للمشتركين التفاعل بأي رمز تعبيري.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "لا يمكن للمشتركين التفاعل مع المنشورات.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "يمكن للمشتركين التفاعل فقط بالرموز التعبيرية التي تختارها.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "ستختفي من البحث والاستكشاف. لا يمكن للأشخاص الاشتراك إلا إذا دعوتهم. يبقى جميع المشتركين.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "هل تريد جعل هذه القناة خاصة؟",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "يمكن لأي شخص العثور عليها وقراءتها، وقد يقترحها Lakko في الاستكشاف. سيصبح اسمها وصورتها ووصفها مرئيًا للجميع. تبقى المنشورات السابقة مقروءة فقط للمشتركين الحاليين.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "هل تريد جعل هذه القناة عامة؟",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "يتوقف @الاسم القديم عن العمل الآن. يبقى محجوزًا لهذه القناة لمدة 30 يومًا.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "يراه المشتركون فقط.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "يمكن لأي شخص العثور على هذه القناة بهذا الاسم.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "يمكن فقط للأشخاص الذين تدعوهم الاشتراك. لا تظهر في البحث.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "يمكن لأي شخص العثور على هذه القناة والاشتراك فيها. قد يقترحها Lakko في الاستكشاف.",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "نوع القناة",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "جارٍ تحديث المشتركين... {done} من {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "من يمكنه الاشتراك",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "العودة إلى القنوات",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "حظر من التعليقات",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "لا يوجد أحد محظور.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "تعذّر الحفظ. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "المحظورون",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "إلغاء الحظر",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "شخص ما",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "إجراءات التعليق",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "تعليق",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "تعذّر حذف التعليق. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "لم يتم تحميل التعليقات.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "إخفاء التعليقات",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "هذا التعليق طويل جدًا أو يحتوي على أحرف لا يمكن إرسالها.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "عرض المزيد",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, zero {لا تعليقات جديدة} one {تعليق جديد} two {تعليقان جديدان} few {# تعليقات جديدة} many {# تعليقًا جديدًا} other {# تعليق جديد}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, zero {لا تعليقات أخرى} one {عرض تعليق آخر} two {عرض تعليقين آخرين} few {عرض # تعليقات أخرى} many {عرض # تعليقًا آخر} other {عرض # تعليق آخر}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "عرض المزيد من التعليقات",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "اكتب تعليقًا",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "الناشرون المشاركون",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "ستُزال القناة ومنشوراتها من جميع أجهزتك وسيُحرَّر @{name} بعد 30 يومًا. لا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "ستُزال القناة ومنشوراتها من جميع أجهزتك. لا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "حذف القناة",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "تعذّر حذف القناة. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "حذف هذه القناة؟",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "إنشاء قناة",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "لا توجد قنوات بعد",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "لم تعد القناة ومنشوراتها على أجهزتك.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "لم يُعثر على قناة باسم {handle}.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "قناة خاصة",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "قناة عامة",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "قناة عامة · {band} مشترك",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "اختر قناة أو أنشئ واحدة",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "ليس لهذه القناة @name. اختر واحدًا.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "دعوة",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "دعوة أشخاص",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "اسمها ووصفها، ومن يقرؤها، ومن يمكنه النشر فيها أيضًا.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "الناشرون",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "تزيل القناة من قائمتك وتحذف منشوراتها من كل أجهزتك. يمكنك الاشتراك مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "تعذرت دعوة {names}. حاول مرة أخرى.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "أُنشئ رابط دعوة الناشرين المشاركين هذا بإصدار أقدم من Lakko ولم يعد يعمل. اطلب من مالك القناة أن يرسل لك رابط دعوة جديدًا.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "تحتاج إلى حساب للاشتراك. أنشئ حسابًا أو سجّل الدخول.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "الانضمام إلى قناة",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "تم الاشتراك. ستظهر المنشورات عندما يفتح المالك أو أحد المشرفين Lakko في المرة القادمة.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "تعذّر إنشاء الرابط. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "لا يمكن لهذا الجهاز إنشاء روابط لهذه القناة بعد. سيمكنه ذلك عندما يفتح جهاز المالك Lakko.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "تعذّر إلغاء الرابط. حاول مرة أخرى.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "القناة",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "حظر من التعليقات",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "المحظورون",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "إلغاء الحظر",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "إنشاء",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "الوصف",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "سجّل الدخول مجددًا لإنشاء قناة.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "تعذر إنشاء هذه القناة. لم يُنشأ أي شيء. حاول مرة أخرى.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "يستطيع الآخرون العثور على القناة والاشتراك فيها من خلاله.",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "اسم القناة",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "يرى المشتركون الاسم والوصف.",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "قناة جديدة",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "لقد أنشأت الكثير من القنوات اليوم. حاول مرة أخرى غدًا.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "قناة جديدة أو الانضمام إلى قناة",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "يمكن للمالك فقط تغيير الصورة.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "سيرى المشتركون الأحرف الأولى بدلًا منها.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "هل تريد إزالة صورة القناة؟",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "غير متاح",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "يمكن للمالك والناشرين فقط النشر هنا.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "هذا المنشور أقدم مما يستطيع هذا الجهاز قراءته.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "هذا المنشور غير متاح.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "تعذّر فتح هذا المنشور على هذا الجهاز.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "المنشورات الأقدم غير متاحة.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "سجّل الدخول مجددًا للنشر في هذه القناة.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "قبول",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "إضافة ناشر",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "أنت مدعو لتكون ناشرًا في {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} يدعوك لتكون ناشرًا في {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "إزالة الناشر",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "هل تريد إزالة {name} كناشر؟ لن يتمكن من النشر أو الدعوة.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "تعذّرت إزالة الناشر. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, zero {لا طلبات للنشر} one {طلب واحد للنشر} two {طلبان للنشر} few {# طلبات للنشر} many {# طلبًا للنشر} other {# طلب للنشر}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "المالك",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "ناشر",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "التنحي",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "لن تنشر أو تدعو في هذه القناة بعد الآن. يطبّق جهاز المالك ذلك عند فتح Lakko في المرة القادمة.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "تعذّر التنحّي. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "تم. يطبّق جهاز المالك ذلك عند فتح Lakko في المرة القادمة.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "التفاعلات في القناة مجهولة الهوية. لا يمكن لأحد معرفة من تفاعل، ولا حتى مالك القناة.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "التفاعلات في القناة مجهولة. لا يمكن لأحد أن يرى من تفاعل، ولا حتى مالك القناة.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "تعذّر تحميل المشتركين. حاول مجددًا.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "من دعوة",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "من الرابط \"{label}\"",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "تعذر تحميل المشتركين. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "عرض المزيد",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "لا يوجد مشتركون بعد.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, zero {لا أحد آخر.} one {شخص آخر واحد.} two {شخصان آخران.} few {# آخرون.} many {# آخرين.} other {# آخر.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "لن يتلقى منشورات جديدة.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "هل تريد إزالة هذا المشترك؟",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "جارٍ إعادة المحاولة...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "المشتركون",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "المشتركون ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "إلغاء المتابعة",
+      "text": "إلغاء الاشتراك",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "هل تريد إلغاء متابعة هذه القناة؟",
+      "text": "إلغاء الاشتراك في هذه القناة؟",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "هل تريد إلغاء متابعة {name}؟",
+      "text": "إلغاء الاشتراك في {name}؟",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "أُزيلت المجموعة ورسائلها من أجهزتك.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, zero {لم تعد في {name}.} one {لم تعد في {name} ومحادثة أخرى.} two {لم تعد في {name} ومحادثتين أخريين.} few {لم تعد في {name} و# محادثات أخرى.} many {لم تعد في {name} و# محادثة أخرى.} other {لم تعد في {name} و# محادثة أخرى.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "أبدًا",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "روابط المجموعات والقنوات",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "رابط قناة",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "رابط مجموعة",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "رابط ناشر مشارك",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "التسمية (اختياري)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "من يمكنه العثور عليّ",
       "status": "machine"
     }
-  }
+  },
+  "language": "ar"
 }

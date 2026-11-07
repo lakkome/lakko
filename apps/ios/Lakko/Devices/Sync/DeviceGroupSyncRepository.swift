@@ -2004,6 +2004,23 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0087 section 13a — the account's own channel reactions and
+            // comments, the same way.
+            if isChannelReactionEnvelope(bytes: envelope) || isChannelCommentEnvelope(bytes: envelope) {
+                do {
+                    let changed = isChannelReactionEnvelope(bytes: envelope)
+                        ? try syncedState.applyChannelReactionEnvelope(envelope: envelope)
+                        : try syncedState.applyChannelCommentEnvelope(envelope: envelope)
+                    if changed {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                        channelActivityRevision &+= 1
+                    }
+                } catch {
+                    NSLog("channel-activity: envelope refused")
+                }
+                return
+            }
             // Reactions-and-emoji spec section 6 (D3) — the quick reaction,
             // the same way.
             if isQuickReactionEnvelope(bytes: envelope) {
@@ -2172,6 +2189,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         // D3 — and the quick reaction.
         if let envelope = (try? syncedState.quickReactionEnvelope()).flatMap({ $0 }) {
+            await sendServiceEnvelope(envelope)
+        }
+        // ADR-0087 section 13a — and the own channel reactions and comments.
+        for envelope in (try? syncedState.channelReactionEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
+        for envelope in (try? syncedState.channelCommentEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
         // ADR-0079 — and every link record, with its original stamp.
@@ -2417,6 +2441,115 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     static func quickReactionUnsentKey(accountIdB64: String) -> String {
         "lakko.quick-reaction.unsent.v1.\(accountIdB64)"
+    }
+
+    // MARK: - ADR-0087 section 13a: own channel reactions and comments
+
+    /// Bumped whenever an own channel reaction or comment changed, here or on
+    /// another device: what a channel screen re-reads on.
+    @Published public private(set) var channelActivityRevision: UInt64 = 0
+
+    /// The emoji this account holds on a post.
+    public func channelReactions(channelId: Data, postCursor: UInt64) -> [String] {
+        (try? syncedState.channelReactionsOn(channelId: channelId, postCursor: postCursor)) ?? []
+    }
+
+    /// Write one own reaction (on or off) and send it to the account's other
+    /// devices. `postAtMs` bounds the entry to the post's retention.
+    @discardableResult
+    public func setChannelReaction(
+        channelId: Data, postCursor: UInt64, emoji: String, reacted: Bool, postAtMs: UInt64
+    ) async -> Bool {
+        guard !deviceRemoved else { return false }
+        let envelope: Data?
+        do {
+            envelope = try syncedState.setChannelReaction(
+                hlc: Hlc.mint(), channelId: channelId, postCursor: postCursor, emoji: emoji,
+                reacted: reacted, postAtMs: postAtMs)
+        } catch {
+            NSLog("channel-activity: reaction register refused")
+            return false
+        }
+        guard let envelope else { return true }
+        stateChanged()
+        channelActivityRevision &+= 1
+        persistSyncState()
+        // Best effort: an unsent register reaches the other devices at the
+        // next growth re-send.
+        try? await sendLineageEnvelopes([envelope])
+        return true
+    }
+
+    /// The emoji this account holds on a comment (the synced own-reactions
+    /// register, so every device of the account shows them as its own).
+    public func channelCommentReactions(channelId: Data, postCursor: UInt64, commentCursor: UInt64) -> [String] {
+        (try? syncedState.commentReactionsOn(
+            channelId: channelId, postCursor: postCursor, commentCursor: commentCursor)) ?? []
+    }
+
+    /// Write one own comment reaction (on or off) and send it to the
+    /// account's other devices. `false` when the register refused it (the
+    /// per-comment limit among them): nothing is to be sent then.
+    @discardableResult
+    public func setCommentReaction(
+        channelId: Data, postCursor: UInt64, commentCursor: UInt64, emoji: String, reacted: Bool, postAtMs: UInt64
+    ) async -> Bool {
+        guard !deviceRemoved else { return false }
+        let envelope: Data?
+        do {
+            envelope = try syncedState.setCommentReaction(
+                hlc: Hlc.mint(), channelId: channelId, postCursor: postCursor, commentCursor: commentCursor,
+                emoji: emoji, reacted: reacted, postAtMs: postAtMs)
+        } catch {
+            NSLog("channel-activity: comment reaction register refused")
+            return false
+        }
+        guard let envelope else { return true }
+        stateChanged()
+        channelActivityRevision &+= 1
+        persistSyncState()
+        // Best effort: an unsent register reaches the other devices at the
+        // next growth re-send.
+        try? await sendLineageEnvelopes([envelope])
+        return true
+    }
+
+    /// The nonces of this account's comments under a post.
+    public func channelCommentNonces(channelId: Data, postCursor: UInt64) -> [Data] {
+        (try? syncedState.channelCommentsOn(channelId: channelId, postCursor: postCursor)) ?? []
+    }
+
+    /// Record (`present`) or drop one own comment by its nonce.
+    public func noteChannelComment(
+        channelId: Data, postCursor: UInt64, nonce: Data, postAtMs: UInt64, present: Bool
+    ) async {
+        guard !deviceRemoved else { return }
+        let envelope: Data?
+        do {
+            envelope = present
+                ? try syncedState.recordChannelComment(
+                    hlc: Hlc.mint(), channelId: channelId, postCursor: postCursor,
+                    commentNonce: nonce, postAtMs: postAtMs)
+                : try syncedState.deleteChannelComment(
+                    hlc: Hlc.mint(), channelId: channelId, postCursor: postCursor,
+                    commentNonce: nonce, postAtMs: postAtMs)
+        } catch {
+            NSLog("channel-activity: comment register refused")
+            return
+        }
+        guard let envelope else { return }
+        stateChanged()
+        channelActivityRevision &+= 1
+        persistSyncState()
+        try? await sendLineageEnvelopes([envelope])
+    }
+
+    /// Drop the entries of posts past their retention.
+    public func pruneChannelActivity() {
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        if let dropped = try? syncedState.pruneChannelActivity(nowMs: now), dropped > 0 {
+            stateChanged()
+        }
     }
 
     /// The account's quick reaction, `nil` for the default.

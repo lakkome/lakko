@@ -146,7 +146,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
-  const name = (): string => memberNameOf(resolved());
+  const name = (): string => memberNameOf(resolved(), "a contact card");
   const [numberOpen, setNumberOpen] = createSignal(false);
   const [number, setNumber] = createSignal<string | null>(null);
   const [numberBusy, setNumberBusy] = createSignal(false);

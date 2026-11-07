@@ -753,6 +753,10 @@ final class MultiJoinerCall {
             // GROUP JOURNAL (opened in `ContactsRepository`), never the SFU
             // signal-relay. Out of place here — drop.
             break
+        case .channelReadKey:
+            // ADR-0087 section 6 — a channel read key rides a PublisherGroup
+            // journal, never the SFU signal-relay. Out of place here — drop.
+            break
         case .pin:
             // ADR-0052 decision 3 — a shared-pin envelope rides the GROUP
             // JOURNAL (standing-gated in `ChatRepository.receivePin`), never

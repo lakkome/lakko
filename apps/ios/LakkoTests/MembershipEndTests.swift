@@ -167,13 +167,11 @@ final class MembershipEndTests: XCTestCase {
 
     // MARK: - The store
 
-    func testTheStoreKeepsTheEndAndItsNoticeTogether() throws {
+    func testTheStoreKeepsTheEnd() throws {
         let store = MembershipEndStore(defaults: try suite())
         let end = OwedMembershipEnd(groupIdHex: "ab", endedEpoch: 7, heard: false, oneToOne: false)
-        XCTAssertTrue(store.record(
-            end, notice: MembershipEndNotice(groupIdHex: "ab", name: "Hikers"), accountIdB64: "a"))
+        XCTAssertTrue(store.record(end, accountIdB64: "a"))
         XCTAssertEqual(store.owed(accountIdB64: "a"), [end])
-        XCTAssertEqual(store.notices(accountIdB64: "a").map(\.name), ["Hikers"])
         XCTAssertTrue(store.owed(accountIdB64: "other").isEmpty, "per account")
 
         var next = end
@@ -182,28 +180,38 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertEqual(store.owed(accountIdB64: "a", groupIdHex: "ab")?.published, true)
         store.removeOwed(accountIdB64: "a", groupIdHex: "ab")
         XCTAssertTrue(store.owed(accountIdB64: "a").isEmpty)
-        XCTAssertEqual(store.notices(accountIdB64: "a").count, 1, "the notice outlives the end")
-        store.removeNotice(accountIdB64: "a", groupIdHex: "ab")
-        XCTAssertTrue(store.notices(accountIdB64: "a").isEmpty)
     }
 
-    /// UX 9.1 (decided 2026-11-04) — several removals each have their own
-    /// banner, the newest on top; closing one leaves the others. (Base walk:
-    /// an older banner hid a new removal.)
-    func testEveryRemovalHasItsOwnBannerNewestOnTop() throws {
-        let store = MembershipEndStore(defaults: try suite())
-        for (hex, name) in [("aa", "QA Phase A Walk"), ("bb", "QA Base Alone"), ("cc", "Third")] {
-            store.record(
-                OwedMembershipEnd(groupIdHex: hex, endedEpoch: 3, heard: false, oneToOne: false),
-                notice: MembershipEndNotice(groupIdHex: hex, name: name), accountIdB64: "a")
-        }
-        XCTAssertEqual(
-            MembershipEndNoticeCenter.stacked(store.notices(accountIdB64: "a")).map(\.name),
-            ["Third", "QA Base Alone", "QA Phase A Walk"])
-        store.removeNotice(accountIdB64: "a", groupIdHex: "bb")
-        XCTAssertEqual(
-            MembershipEndNoticeCenter.stacked(store.notices(accountIdB64: "a")).map(\.name),
-            ["Third", "QA Phase A Walk"], "closing one leaves the others")
+    /// UX 9.1 (decided 2026-11-06) — one notice at a time: removals noticed
+    /// together give one notice; one noticed while it is up joins it; it goes
+    /// by itself; a claimed one (the open conversation's dialog) is not shown.
+    @MainActor
+    func testRemovalsNoticedTogetherShowOneNoticeThatGoesByItself() async throws {
+        let center = MembershipEndNoticeCenter()
+        center.gatherNanos = 50_000_000
+        center.visibleNanos = 300_000_000
+        center.post(MembershipEndNotice(groupIdHex: "aa", name: "Hikers"))
+        center.post(MembershipEndNotice(groupIdHex: "bb", name: "Chess"))
+        center.post(MembershipEndNotice(groupIdHex: "cc", name: "Open here"))
+        XCTAssertEqual(center.claim(groupIdHex: "cc")?.name, "Open here")
+        XCTAssertNil(center.shown, "gathered first")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(center.shown?.names, ["Hikers", "Chess"])
+
+        center.post(MembershipEndNotice(groupIdHex: "dd", name: "Later"))
+        center.flush()
+        XCTAssertEqual(center.shown?.names, ["Hikers", "Chess", "Later"], "joined to the one up")
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertNil(center.shown, "gone by itself")
+    }
+
+    func testTheNoticeTextNamesOneAndCountsTheRest() {
+        XCTAssertEqual(MembershipEndNoticeCenter.text(names: []), "")
+        XCTAssertTrue(MembershipEndNoticeCenter.text(names: ["Hikers"]).contains("Hikers"))
+        let several = MembershipEndNoticeCenter.text(names: ["Hikers", "Chess", "Later"])
+        XCTAssertTrue(several.contains("Hikers"))
+        XCTAssertTrue(several.contains("2"), several)
+        XCTAssertFalse(several.contains("Chess"))
     }
 
     func testHeldWelcomesAreBoundedAndDeduplicated() throws {
@@ -223,10 +231,10 @@ final class MembershipEndTests: XCTestCase {
         let defaults = try suite()
         let store = MembershipEndStore(defaults: defaults)
         store.record(
-            OwedMembershipEnd(groupIdHex: "ab", endedEpoch: 7, heard: false, oneToOne: false),
-            notice: MembershipEndNotice(groupIdHex: "ab", name: "Hikers"), accountIdB64: "a")
+            OwedMembershipEnd(groupIdHex: "abcdef", endedEpoch: 7, heard: false, oneToOne: false),
+            accountIdB64: "a")
         let raw = try XCTUnwrap(defaults.dictionaryRepresentation().values.compactMap { $0 as? Data }.first)
-        XCTAssertNil(raw.range(of: Data("Hikers".utf8)), "a notice names a group")
+        XCTAssertNil(raw.range(of: Data("abcdef".utf8)), "an end names a group")
     }
 
     // MARK: - The registers
@@ -482,7 +490,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertNil(try loadGroup(identity: restarted, groupId: f.groupId))
 
         // Told once, by name.
-        XCTAssertEqual(repo.membershipEndNotices.notices.map(\.name), ["Hikers"])
+        XCTAssertEqual(repo.membershipEndNotices.noticeNames, ["Hikers"])
     }
 
     func testAPersonWhoLeftSeesNoNotice() async throws {
@@ -498,7 +506,7 @@ final class MembershipEndTests: XCTestCase {
         f.repo.endMembershipIfOut(groupIdHex: f.groupIdHex)
         await waitUntil { f.repo.groups[f.groupIdHex] == nil }
         XCTAssertNil(f.repo.groups[f.groupIdHex])
-        XCTAssertTrue(f.repo.membershipEndNotices.notices.isEmpty)
+        XCTAssertTrue(f.repo.membershipEndNotices.noticeNames.isEmpty)
     }
 
     func testARetiredOwnLeafKeepsItsHistory() async throws {
@@ -520,7 +528,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertFalse(f.repo.isEnding(groupIdHex: f.groupIdHex))
         XCTAssertNotNil(f.repo.groups[f.groupIdHex])
         XCTAssertEqual(f.repo.buildThreadList().first?.membershipEnded, true, "the row stays, ended")
-        XCTAssertTrue(f.repo.membershipEndNotices.notices.isEmpty)
+        XCTAssertTrue(f.repo.membershipEndNotices.noticeNames.isEmpty)
 
         // Re-admitted by a Welcome: the old transcript carries.
         let again = try f.ownerGroup.addMemberFromWire(
@@ -536,7 +544,7 @@ final class MembershipEndTests: XCTestCase {
         await waitUntil { f.repo.groups[f.groupIdHex] == nil }
         XCTAssertNil(f.repo.groups[f.groupIdHex])
         XCTAssertEqual(f.sync.calls, ["ended", "cleared"])
-        XCTAssertEqual(f.repo.membershipEndNotices.notices.count, 1, "a closed app shows it at the next start")
+        XCTAssertEqual(f.repo.membershipEndNotices.noticeNames.count, 1, "found at launch, noticed now")
     }
 
     func testAnOwedEndResumesAfterACrash() async throws {
@@ -573,7 +581,9 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertNil(f.repo.groups[f.groupIdHex])
         XCTAssertTrue(store.owed(accountIdB64: f.accountIdB64).isEmpty)
         XCTAssertEqual(f.sync.calls, ["ended", "cleared"], "each step once")
-        XCTAssertEqual(f.repo.membershipEndNotices.notices.count, 1)
+        XCTAssertTrue(
+            f.repo.membershipEndNotices.noticeNames.isEmpty,
+            "UX 9.1 (2026-11-06): a notice not seen before the restart is not shown after it")
     }
 
     func testAResumedEndDoesNotPublishTwice() async throws {
@@ -611,7 +621,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertNil(f.repo.groups[f.groupIdHex])
         XCTAssertTrue(f.sync.ended.isEmpty, "a device that heard has nothing to tell")
         XCTAssertEqual(f.sync.calls, ["cleared"])
-        XCTAssertEqual(f.repo.membershipEndNotices.notices.count, 1)
+        XCTAssertEqual(f.repo.membershipEndNotices.noticeNames.count, 1)
 
         let restarted = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
         try restarted.restoreStorage(
@@ -634,7 +644,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertFalse(f.repo.isEnding(groupIdHex: f.groupIdHex), "the check comes before any stopping")
         XCTAssertNotNil(f.repo.groups[f.groupIdHex])
         XCTAssertEqual(f.sync.joined.first?.1, epoch)
-        XCTAssertTrue(f.repo.membershipEndNotices.notices.isEmpty)
+        XCTAssertTrue(f.repo.membershipEndNotices.noticeNames.isEmpty)
     }
 
     func testAChannelEndGoesToTheChannelLayer() throws {
@@ -698,7 +708,7 @@ final class MembershipEndTests: XCTestCase {
         XCTAssertEqual(f.sync.calls.first, "ended")
         await waitUntil { !f.sync.joined.isEmpty }
         XCTAssertEqual(f.sync.joined.first?.1, try rejoined.group.epoch())
-        XCTAssertTrue(f.repo.membershipEndNotices.notices.isEmpty, "they are back")
+        XCTAssertTrue(f.repo.membershipEndNotices.noticeNames.isEmpty, "they are back")
     }
 
     func testAHeldWelcomeForAGroupStillActiveAtTheHeadIsDropped() async throws {
@@ -756,7 +766,7 @@ final class MembershipEndTests: XCTestCase {
         await waitUntil { model.endDialog != nil }
         XCTAssertEqual(model.endDialog?.draft, "see you tomorrow")
         XCTAssertEqual(model.draft, "", "it has nowhere else to go")
-        XCTAssertTrue(f.repo.membershipEndNotices.notices.isEmpty, "shown once: not the banner too")
+        XCTAssertTrue(f.repo.membershipEndNotices.noticeNames.isEmpty, "shown once: not the banner too")
         XCTAssertFalse(model.conversationGone)
         model.endDialogClosed()
         XCTAssertNil(model.endDialog)
@@ -866,7 +876,7 @@ final class MembershipEndTests: XCTestCase {
         await waitUntil { f.repo.groups[f.groupIdHex] == nil }
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertNil(model.endDialog)
-        XCTAssertEqual(f.repo.membershipEndNotices.notices.count, 1)
+        XCTAssertEqual(f.repo.membershipEndNotices.noticeNames.count, 1)
     }
 
     func testAPersonWhoLeftWithTheConversationOpenGoesBackWithNoDialog() async throws {

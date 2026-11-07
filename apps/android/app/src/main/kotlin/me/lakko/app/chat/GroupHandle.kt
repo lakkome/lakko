@@ -402,13 +402,24 @@ public suspend fun searchPublicConversations(discovery: DiscoveryClient, query: 
     return out.values.toList()
 }
 
+/** What a channel's handle write publishes beside its @name (ADR-0087
+ *  sections 3, 4, 6 and 18.3). A private channel publishes nothing. */
+public class ChannelHandleFacts(
+    public val public: Boolean,
+    public val name: String,
+    public val description: String,
+    /** Section 6 — the 32-byte read key of a public channel. */
+    public val readKey: ByteArray,
+    public val sizeBand: Int = 0,
+    public val avatar: uniffi.lakko_ffi_uniffi.FfiAvatar? = null,
+)
+
 /**
  * ADR-0087 section 1 (one namespace) — take a channel's @name on the handle
- * mechanism. The write key comes from the channel's PublisherGroup journal
- * root ([journalId], the owner's). A channel that has an @name is found by it
- * (the creation form's existing intent), so the name is public with a record
- * of kind channel. The record's read key is the phase B public-seed key; until
- * that is built the field carries 32 zero bytes and no client reads it.
+ * mechanism. The write key is derived from the journal root over the
+ * channel's PublisherGroup id ([journalId]) of the CURRENT account seed
+ * ([accountSeed]); see `ChannelDiscovery`. A public channel publishes a record
+ * of kind channel carrying its read key; a private one only reserves the name.
  */
 public suspend fun claimChannelHandle(
     discovery: DiscoveryClient,
@@ -416,15 +427,12 @@ public suspend fun claimChannelHandle(
     journalId: ByteArray,
     channelId: ByteArray,
     handle: String,
-    name: String,
-    description: String,
-): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, name, description, update = false)
+    facts: ChannelHandleFacts,
+): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, facts, HandleRoute.CLAIM)
 
 /**
- * group-and-channel-privacy.md 4.5.4 — republish a channel's public record
- * after its name or description changed: the same record as the claim, under
- * the `update` route (no token). The owner's device only: it holds the
- * PublisherGroup journal root the write key comes from.
+ * Republish the record (name, description, photo, flag) or renew the lease:
+ * the `update` route, no token. The owner's device only.
  */
 public suspend fun updateChannelHandle(
     discovery: DiscoveryClient,
@@ -432,9 +440,20 @@ public suspend fun updateChannelHandle(
     journalId: ByteArray,
     channelId: ByteArray,
     handle: String,
-    name: String,
-    description: String,
-): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, name, description, update = true)
+    facts: ChannelHandleFacts,
+): SignedGroupHandle = writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, facts, HandleRoute.UPDATE)
+
+/** Move a channel to a new @name; the old one is held 30 days. */
+public suspend fun replaceChannelHandle(
+    discovery: DiscoveryClient,
+    accountSeed: ByteArray,
+    journalId: ByteArray,
+    channelId: ByteArray,
+    oldHandle: String,
+    handle: String,
+    facts: ChannelHandleFacts,
+): SignedGroupHandle =
+    writeChannelHandle(discovery, accountSeed, journalId, channelId, handle, facts, HandleRoute.REPLACE, oldHandle)
 
 private suspend fun writeChannelHandle(
     discovery: DiscoveryClient,
@@ -442,44 +461,51 @@ private suspend fun writeChannelHandle(
     journalId: ByteArray,
     channelId: ByteArray,
     handle: String,
-    name: String,
-    description: String,
-    update: Boolean,
+    facts: ChannelHandleFacts,
+    route: HandleRoute,
+    oldHandle: String? = null,
 ): SignedGroupHandle {
     val canonical = canonicalHandleInput(handle)
-    val own = evaluateOwnHandleTerms(discovery, listOf(canonical), name)
-    val pair = own.usernames[0]
+    val names = if (oldHandle != null) listOf(canonicalHandleInput(oldHandle), canonical) else listOf(canonical)
+    val own = evaluateOwnHandleTerms(discovery, names, facts.name.takeIf { facts.public })
+    val pair = own.usernames.last()
     val seed = groupHandleSeed(accountSeed, journalId)
     try {
-        val outputs = arrayListOf(pair.output)
-        val terms = arrayListOf(pair.lookupKey)
-        for (p in own.nameTerms) {
-            outputs += p.output
-            terms += p.lookupKey
-        }
-        val now = System.currentTimeMillis().toULong()
-        val payload = uniffi.lakko_ffi_uniffi.FfiHandleRecordPayload(
-            kind = uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.CHANNEL,
-            updatedAtMs = now,
-            id = channelId,
-            key = ByteArray(32),
-            handle = canonical,
-            name = name,
-            description = description,
-            sizeBand = 0u,
-            avatar = null,
-        )
-        val record = uniffi.lakko_ffi_uniffi.composeHandleRecord(payload, outputs, now)
-        val hash = uniffi.lakko_ffi_uniffi.handleContentHash(record, terms)
-        val body = if (update) {
-            FfiHandleStatementBody.Update(FfiHandleVisibility.PUBLIC, hash)
+        val (record, terms) = if (facts.public) {
+            val outputs: ArrayList<ByteArray> = arrayListOf(pair.output)
+            val lookupKeys = arrayListOf(pair.lookupKey)
+            for (p in own.nameTerms) {
+                outputs += p.output
+                lookupKeys += p.lookupKey
+            }
+            val now = System.currentTimeMillis().toULong()
+            val payload = uniffi.lakko_ffi_uniffi.FfiHandleRecordPayload(
+                kind = uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.CHANNEL,
+                updatedAtMs = now,
+                id = channelId,
+                key = facts.readKey,
+                handle = canonical,
+                name = facts.name,
+                description = facts.description,
+                sizeBand = facts.sizeBand.coerceIn(0, 5).toUByte(),
+                avatar = facts.avatar,
+            )
+            Pair<ByteArray?, List<ByteArray>>(uniffi.lakko_ffi_uniffi.composeHandleRecord(payload, outputs, now), lookupKeys)
         } else {
-            FfiHandleStatementBody.Claim(FfiHandleVisibility.PUBLIC, hash)
+            Pair<ByteArray?, List<ByteArray>>(null, emptyList())
         }
-        val statement = uniffi.lakko_ffi_uniffi.signHandleStatement(seed, pair.lookupKey, body)
-        val cert = discovery.handleWrite(if (update) HandleRoute.UPDATE else HandleRoute.CLAIM, statement, record, terms)
+        val hash = uniffi.lakko_ffi_uniffi.handleContentHash(record, terms)
+        val vis = visibility(facts.public)
+        val body = when (route) {
+            HandleRoute.UPDATE -> FfiHandleStatementBody.Update(vis, hash)
+            HandleRoute.REPLACE -> FfiHandleStatementBody.Replace(pair.lookupKey, vis, hash)
+            else -> FfiHandleStatementBody.Claim(vis, hash)
+        }
+        val signingKey = if (route == HandleRoute.REPLACE) own.usernames[0].lookupKey else pair.lookupKey
+        val statement = uniffi.lakko_ffi_uniffi.signHandleStatement(seed, signingKey, body)
+        val cert = discovery.handleWrite(route, statement, record, terms)
             ?: throw IllegalStateException("handle write answered no certificate")
-        return signedEnvelope(seed, journalId, canonical, true, cert, discovery.lastLeaseUntilMs)
+        return signedEnvelope(seed, journalId, canonical, facts.public, cert, discovery.lastLeaseUntilMs)
     } finally {
         seed.fill(0)
     }

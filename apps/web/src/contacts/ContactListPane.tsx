@@ -96,7 +96,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const [sentOpen, setSentOpen] = createSignal(false);
 
   const nameOf = (c: AcceptedContact): string =>
-    memberNameOf(profiles.resolve(c.signaturePubkeyB64));
+    memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contact list");
   const usernameOf = (c: AcceptedContact): string | null =>
     profiles.resolve(c.signaturePubkeyB64).username;
 
@@ -206,9 +206,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
               return (
                 <div class="lk-row lk-request-row">
-                  <Avatar label={memberNameOf(r())} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
+                  <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
                   <div class="lk-row-body">
-                    <span class="lk-row-title">{memberNameOf(r())}</span>
+                    <span class="lk-row-title">{memberNameOf(r(), "a contact request row")}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
                     <Show when={props.viaGroupName?.(req) ?? null}>
                       {(name) => <span class="lk-row-sub">{viaGroupLine(name())}</span>}

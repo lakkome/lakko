@@ -145,6 +145,11 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     // ADR-0087: the small sealed rows (group photo, reactions, handle, knock
     // seeds, requests sent).
     { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|group-photos`, ciphertext: ct } },
+    // ADR-0087 section 13a: the kept channel ban lists and the channel
+    // reactions waiting for a token (`channels/ban-list.ts`,
+    // `channels/post-feedback.ts`).
+    { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|channel-ban-lists`, ciphertext: ct } },
+    { db: "lakko-account-kv", store: "rows", row: { id: `${acct}|channel-reactions-waiting`, ciphertext: ct } },
     byId("lakko-group-closed", "rows"),
     byId("lakko-membership-end", "rows"),
     byId("lakko-registrar-seeds", "rows"),
@@ -259,6 +264,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
@@ -681,6 +687,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.recent:": "account",
   "lakko.emoji.recent-reactions:": "account",
   "lakko.quick-reaction.unsent.v1.": "account",
+  "lakko.channel-feedback.unsent.v1.": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",
   // Reactions section 12: this device's notification filter.

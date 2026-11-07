@@ -3390,13 +3390,6 @@ input.lk-sas-code {
   background: var(--accent-soft);
   color: var(--accent);
 }
-/* "You are no longer in {name}." (group-and-channel-privacy UX 9.1). */
-.lk-end-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 12px;
-}
 .lk-end-dialog {
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-md);
@@ -3599,12 +3592,13 @@ input.lk-sas-code {
   font-weight: 400;
   color: var(--surface-muted);
 }
+/* BrandedQr (design system "QR code"): the canvas draws its own white card
+   and quiet zone, so no frame here. */
 .lk-qr {
   display: block;
   margin: 8px auto;
-  border-radius: var(--radius-sm);
-  background: #ffffff;
-  padding: 8px;
+  max-width: 100%;
+  height: auto;
 }
 .lk-camera {
   display: block;
@@ -4553,17 +4547,6 @@ button.lk-reactors-row:focus-visible {
 .lk-qr-dialog-body p {
   margin: 0;
 }
-.lk-qr-tile {
-  background: #fff;
-  border-radius: var(--radius-sm);
-  padding: 8px;
-  line-height: 0;
-}
-.lk-qr-tile canvas {
-  width: 256px;
-  height: 256px;
-  max-width: 100%;
-}
 
 /* ------------------------------------------------------------ channels */
 
@@ -4582,16 +4565,6 @@ button.lk-reactors-row:focus-visible {
 }
 .lk-self-center {
   align-self: center;
-}
-.lk-channel-posts {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.lk-channel-posts[hidden],
-.lk-channel-manage[hidden] {
-  display: none;
 }
 .lk-channel-scroll {
   gap: 0;
@@ -4642,22 +4615,11 @@ button.lk-reactors-row:focus-visible {
 .lk-channel-compose-error {
   margin: 0 16px 8px;
 }
-.lk-channel-manage {
-  padding: 16px 24px 24px;
-}
-.lk-channel-manage-body {
-  width: 100%;
-  max-width: 720px;
-  margin: 0 auto;
-}
 .lk-channel-notice {
   flex: 0 0 auto;
   margin: 12px 24px 0;
 }
 @media (max-width: 720px) {
-  .lk-channel-manage {
-    padding: 12px 16px 16px;
-  }
   .lk-channel-notice {
     margin: 12px 16px 0;
   }
@@ -8479,4 +8441,143 @@ button.lk-card-row-button {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* ADR-0087 section 12 — a channel opens where any conversation opens. A post
+   is a card at the width of the pane (UX group-and-channel-privacy 12), with
+   its reactions and comments under it (13.1, 13.2). No sender line: the
+   channel is the sender. */
+.lk-channel-post {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.lk-channel-post-bubble {
+  outline: none;
+  border-radius: var(--radius-sm);
+}
+.lk-channel-post-bubble:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.lk-channel-post-media {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.lk-channel-files {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.lk-channel-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+}
+.lk-channel-compose .lk-channel-files {
+  margin: 0 16px 8px;
+}
+.lk-channel-earlier {
+  margin: 12px auto 0;
+  font-size: 13px;
+  color: var(--surface-muted);
+  text-align: center;
+}
+.lk-post-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lk-post-comments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-top: 1px solid var(--surface-border);
+  padding-top: var(--space-2);
+}
+.lk-comment-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.lk-comment {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+.lk-comment.pending {
+  opacity: 0.7;
+}
+.lk-comment-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.lk-comment-name {
+  color: var(--surface-fg);
+}
+.lk-comment-quote {
+  border-inline-start: 3px solid var(--accent);
+  padding-inline-start: var(--space-2);
+}
+.lk-comment-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lk-comment-field {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+.lk-comments-more,
+.lk-comments-hide {
+  align-self: flex-start;
+}
+.lk-comments-loading {
+  height: 2px;
+  background: var(--accent-soft);
+  border-radius: var(--radius-pill);
+}
+.lk-info-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.lk-info-title-row h1 {
+  margin: 0;
+}
+.lk-info-description {
+  white-space: pre-wrap;
+  text-align: center;
+  margin: 0;
+}
+.lk-bubble-channel-invite {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+}
+.lk-bubble-channel-invite-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.lk-bubble-channel-invite-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Readable in both bubble colours: on the accent (own) bubble the muted
+   line takes the bubble's text colour, as links do there. */
+.lk-bubble.outgoing .lk-bubble-channel-invite .lk-meta {
+  color: inherit;
+  opacity: 0.85;
 }

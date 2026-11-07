@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "ru",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "У аккаунта новые ключи. Завершаем изменение.",
@@ -1318,8 +1317,136 @@
       "text": "Не удаётся расшифровать звук и видео этого участника",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "Подписчики могут реагировать любым эмодзи.",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "Подписчики не могут реагировать на публикации.",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "Подписчики могут реагировать только выбранными вами эмодзи.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "Канал исчезнет из поиска и «Обзора». Подписаться смогут только приглашённые вами. Все подписчики останутся.",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "Сделать канал закрытым?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "Любой сможет найти и читать канал, а Lakko может предлагать его в разделе «Обзор». Название, фото и описание станут видны всем. Прежние публикации останутся доступны только тем, кто уже подписан.",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "Сделать канал открытым?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "Старое @имя перестанет работать сейчас. Оно будет зарезервировано за этим каналом 30 дней.",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "Это видят только подписчики.",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "Любой может найти канал по этому имени.",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "Подписаться могут только приглашённые вами. Канал не виден в поиске.",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "Любой может найти канал и подписаться. Lakko может предлагать его в разделе «Обзор».",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "Тип канала",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "Обновляем подписчиков... {done} из {total}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "Кто может подписаться",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "Назад к каналам",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "Запретить комментировать",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "Заблокированных нет.",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "Заблокированные",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "Разблокировать",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "Кто-то",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "Действия с комментарием",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "Комментировать",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "Не удалось удалить комментарий. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "Комментарии не загрузились.",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "Скрыть комментарии",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "Комментарий слишком длинный или содержит символы, которые нельзя отправить.",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "Показать ещё",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# новый комментарий} few {# новых комментария} many {# новых комментариев} other {# нового комментария}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {Ещё # комментарий} few {Ещё # комментария} many {Ещё # комментариев} other {Ещё # комментария}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "Показать ещё комментарии",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "Напишите комментарий",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1370,12 +1497,36 @@
       "text": "Соиздатели",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "Канал и его публикации будут удалены со всех ваших устройств, а @{name} освободится через 30 дней. Это нельзя отменить.",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "Канал и его публикации будут удалены со всех ваших устройств. Это нельзя отменить.",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "Удалить канал",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "Не удалось удалить канал. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "Удалить этот канал?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "Создать канал",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "Каналов пока нет",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "Канал и его публикации удалены с ваших устройств.",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1430,12 +1581,40 @@
       "text": "Канал {handle} не найден.",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "Закрытый канал",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "Открытый канал",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "Открытый канал · {band} подписчиков",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "Выберите канал или создайте новый",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "У этого канала нет @name. Выберите его.",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "Пригласить",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "Пригласить людей",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "Название и описание, кто его читает и кто ещё может публиковать.",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "Публикаторы",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1444,6 +1623,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "Канал исчезнет из вашего списка, а его посты будут удалены со всех ваших устройств. Позже можно подписаться снова.",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "Не удалось пригласить: {names}. Попробуйте ещё раз.",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1500,6 +1683,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "Эта ссылка-приглашение для соиздателя создана старой версией Lakko и больше не работает. Попросите владельца канала прислать новую ссылку-приглашение.",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "Чтобы подписаться, нужен аккаунт. Создайте его или войдите.",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "Вступить в канал",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "Вы подписаны. Публикации появятся, когда владелец или администратор в следующий раз откроет Lakko.",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "Не удалось создать ссылку. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "С этого устройства пока нельзя создавать ссылки для этого канала. Это станет возможно, когда устройство владельца откроет Lakko.",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "Не удалось отозвать ссылку. Попробуйте ещё раз.",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1614,8 +1821,24 @@
       "text": "Канал",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "Запретить комментировать",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "Заблокированные",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "Разблокировать",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "Создать",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "Описание",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1642,6 +1865,10 @@
       "text": "Войдите снова, чтобы создать канал.",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "Не удалось создать канал. Ничего не создано. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "По нему любой может найти канал и подписаться.",
       "status": "machine"
@@ -1654,6 +1881,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "Название канала",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "Подписчики видят название и описание.",
       "status": "machine"
@@ -1662,20 +1893,48 @@
       "text": "Новый канал",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "Сегодня вы создали много каналов. Попробуйте завтра.",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "Новый канал или присоединиться",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "Сменить фото может только владелец.",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "Подписчики увидят вместо него инициалы.",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "Удалить фото канала?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "Недоступно",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "Публиковать здесь могут только владелец и публикаторы.",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "Этот пост старше того, что может прочитать это устройство.",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "Эта публикация недоступна.",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "Этот пост не удалось открыть на этом устройстве.",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "Более ранние публикации недоступны.",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1704,6 +1963,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "Войдите снова, чтобы публиковать в этом канале.",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "Принять",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "Добавить публикатора",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "Вас приглашают стать публикатором канала {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} приглашает вас стать публикатором канала {channel}.",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "Удалить публикатора",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "Убрать {name} из публикаторов? Публиковать и приглашать будет нельзя.",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "Не удалось убрать публикатора. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {# запрос на публикацию} few {# запроса на публикацию} many {# запросов на публикацию} other {# запроса на публикацию}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "Владелец",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "Публикатор",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "Сложить полномочия",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "Вы больше не сможете публиковать и приглашать в этом канале. Устройство владельца применит это, когда в следующий раз откроет Lakko.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "Не удалось сложить полномочия. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "Готово. Устройство владельца применит это, когда в следующий раз откроет Lakko.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "Реакции в канале анонимны. Никто не видит, кто отреагировал, даже владелец канала.",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "Реакции в канале анонимны. Никто не видит, кто отреагировал, даже владелец канала.",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1826,6 +2149,38 @@
       "text": "Не удалось загрузить подписчиков. Попробуйте ещё раз.",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "По приглашению",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "По ссылке «{label}»",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "Не удалось загрузить подписчиков. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "Показать ещё",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "Подписчиков пока нет.",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {Ещё #.} few {Ещё #.} many {Ещё #.} other {Ещё #.}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "Новые публикации перестанут приходить.",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "Удалить этого подписчика?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "Повторная попытка...",
       "status": "machine"
@@ -1850,6 +2205,10 @@
       "text": "Подписчики",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "Подписчики ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
       "text": "Отписаться",
       "status": "machine"
@@ -1863,7 +2222,7 @@
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "Отписаться от канала «{name}»?",
+      "text": "Отписаться от {name}?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2196,6 +2555,10 @@
     },
     "chat.ended.notice_body": {
       "text": "Группа и её сообщения удалены с ваших устройств.",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {Вы больше не состоите в {name} и ещё в #.} few {Вы больше не состоите в {name} и ещё в #.} many {Вы больше не состоите в {name} и ещё в #.} other {Вы больше не состоите в {name} и ещё в #.}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6710,6 +7073,22 @@
       "text": "Никогда",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "Ссылки на группы и каналы",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "Ссылка на канал",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "Ссылка на группу",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "Ссылка для соавтора",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "Метка (необязательно)",
       "status": "machine"
@@ -9586,5 +9965,6 @@
       "text": "Кто может меня найти",
       "status": "machine"
     }
-  }
+  },
+  "language": "ru"
 }

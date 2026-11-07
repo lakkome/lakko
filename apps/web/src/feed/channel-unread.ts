@@ -22,7 +22,20 @@ import { loadChannelPostLog, subscribeChannelPostLogChanged } from "./channel-po
 import { channelUnreadCount, emptyFeedMarks, type FeedMarks } from "./feed-marks";
 import { readFeedMarks, subscribeFeedMarksChanged } from "./feed-marks-store";
 
+/** What the channel rows read from the channel-post log: the count of new
+ *  posts, and the newest post this device could read (its text and time), or
+ *  `null` when it holds none. */
+export interface ChannelRowFeed {
+  readonly unread: Accessor<(channelIdHex: string) => number>;
+  readonly lastPost: Accessor<(channelIdHex: string) => { readonly text: string; readonly serverTsMs: number } | null>;
+}
+
 export function createChannelUnread(): Accessor<(channelIdHex: string) => number> {
+  return createChannelRowFeed().unread;
+}
+
+/** One load of the log and the marks for both reads. */
+export function createChannelRowFeed(): ChannelRowFeed {
   const auth = useAuth();
   const [posts, setPosts] = createSignal<{ readonly [hex: string]: ChannelPostSlot }>({});
   const [marks, setMarks] = createSignal<FeedMarks>(emptyFeedMarks());
@@ -61,7 +74,7 @@ export function createChannelUnread(): Accessor<(channelIdHex: string) => number
     });
   });
 
-  return () => {
+  const unread = (): ((hex: string) => number) => {
     const p = posts();
     const m = marks();
     const own = channelsState.keysByChannel();
@@ -72,4 +85,12 @@ export function createChannelUnread(): Accessor<(channelIdHex: string) => number
         own.has(hex),
       );
   };
+  const lastPost = (): ((hex: string) => { readonly text: string; readonly serverTsMs: number } | null) => {
+    const p = posts();
+    return (hex: string) => {
+      const last = p[hex]?.posts.at(-1);
+      return last === undefined ? null : { text: last.text, serverTsMs: last.serverTsMs };
+    };
+  };
+  return { unread, lastPost };
 }

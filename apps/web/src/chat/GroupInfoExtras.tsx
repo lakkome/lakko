@@ -593,8 +593,30 @@ export function ReactionsScreen(props: {
   readonly bindLeave: (leave: (() => void) | null) => void;
 }): JSX.Element {
   const groupNames = useGroupNames();
+  return (
+    <AllowedReactionsScreen
+      initial={groupNames.reactionsOf(props.entry.groupIdB64)}
+      save={(a) => groupNames.setReactions(props.entry, a)}
+      onDone={props.onDone}
+      bindLeave={props.bindLeave}
+      audience="members"
+    />
+  );
+}
+
+/** reactions-and-emoji.md section 9 — the Reactions screen, for a group (its
+ *  owner and admins) or a channel (its owner): the setting in effect and how
+ *  to save it are the caller's. */
+export function AllowedReactionsScreen(props: {
+  readonly initial: AllowedSetting;
+  readonly save: (allowed: AllowedSetting) => Promise<void>;
+  readonly onDone: () => void;
+  readonly bindLeave: (leave: (() => void) | null) => void;
+  /** Whose reactions: a group's members or a channel's subscribers. */
+  readonly audience: "members" | "subscribers";
+}): JSX.Element {
   const [asking, setAsking] = createSignal(false);
-  const initial = (): AllowedSetting => groupNames.reactionsOf(props.entry.groupIdB64);
+  const initial = (): AllowedSetting => props.initial;
   const [mode, setMode] = createSignal<AllowedSetting["mode"]>(initial().mode);
   const [chosen, setChosen] = createSignal<string[]>(initial().mode === "only" ? [...(initial() as { emoji: readonly string[] }).emoji] : []);
   const [picking, setPicking] = createSignal(false);
@@ -624,7 +646,7 @@ export function ReactionsScreen(props: {
     setBusy(true);
     setError(null);
     try {
-      await groupNames.setReactions(props.entry, current());
+      await props.save(current());
       setAsking(false);
       props.onDone();
     } catch {
@@ -655,9 +677,9 @@ export function ReactionsScreen(props: {
   onCleanup(() => props.bindLeave(null));
 
   const options: ReadonlyArray<{ value: AllowedSetting["mode"]; title: string; sub: string }> = [
-    { value: "all", title: "group_reactions.all", sub: "group_reactions.all_sub" },
-    { value: "only", title: "group_reactions.some", sub: "group_reactions.some_sub" },
-    { value: "off", title: "group_reactions.none", sub: "group_reactions.none_sub" },
+    { value: "all", title: "group_reactions.all", sub: props.audience === "subscribers" ? "channel_reactions.all_sub" : "group_reactions.all_sub" },
+    { value: "only", title: "group_reactions.some", sub: props.audience === "subscribers" ? "channel_reactions.some_sub" : "group_reactions.some_sub" },
+    { value: "off", title: "group_reactions.none", sub: props.audience === "subscribers" ? "channel_reactions.none_sub" : "group_reactions.none_sub" },
   ];
 
   return (

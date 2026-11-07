@@ -2381,6 +2381,54 @@ impl JoinRequest {
     }
 }
 
+/// Who sent a Welcome, read without joining (`peekWelcomeFounder`).
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WelcomeFounder {
+    group_id: Vec<u8>,
+    founder_account_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WelcomeFounder {
+    /// The group the Welcome is for.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    #[must_use]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.group_id.clone()
+    }
+
+    /// The 32-byte account key of the member that sent the Welcome (the
+    /// founder of a new one-to-one), from its verified ADR-0050 binding.
+    #[wasm_bindgen(getter, js_name = founderAccountKey)]
+    #[must_use]
+    pub fn founder_account_key(&self) -> Vec<u8> {
+        self.founder_account_key.clone()
+    }
+}
+
+/// Read who founded a Welcome WITHOUT joining it (2026-11-07). Writes
+/// nothing and keeps the KeyPackage usable, so `Group.joinFromWelcome` of the
+/// same bytes still works. Use it on a Welcome that arrived under a retired
+/// `contact` reach key: feed `founderAccountKey` (is it a current contact?)
+/// to `mailboxRowContactVerdict` before joining.
+///
+/// # Errors
+///
+/// Throws for bytes that are not a Welcome for this identity, or the typed
+/// `deviceBindingInvalid` refusal when the sender's binding does not verify.
+#[wasm_bindgen(js_name = peekWelcomeFounder)]
+pub fn peek_welcome_founder(
+    welcome: &[u8],
+    identity: &Identity,
+) -> Result<WelcomeFounder, JsValue> {
+    let f = MlsGroup::peek_welcome_founder(welcome, &identity.inner).map_err(mls_err)?;
+    Ok(WelcomeFounder {
+        group_id: f.group_id,
+        founder_account_key: f.founder_account_key.to_vec(),
+    })
+}
+
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (ADR-0010 Tier 1). Mirror of the
 /// UniFFI `PublisherGroup` (`crates/lakko-ffi-uniffi`).
@@ -2687,6 +2735,78 @@ impl PublisherGroup {
         group::encode_message(&msg).map_err(mls_err)
     }
 
+    /// ADR-0087 phase B — the publishers at the current epoch, one
+    /// `GroupMember` per leaf with its account key. Same shape as
+    /// `Group.members()`.
+    #[wasm_bindgen]
+    pub fn members(&self) -> Result<Vec<JsValue>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.members()
+            .into_iter()
+            .map(|m| {
+                JsValue::from(GroupMember {
+                    leaf_index_val: m.leaf_index,
+                    signature_public_key_val: m.signature_public_key,
+                    account: m.account_key,
+                })
+            })
+            .collect())
+    }
+
+    /// Whether `identity` is the channel's owner (the account whose seed
+    /// this PublisherGroup's id derives from).
+    #[wasm_bindgen(js_name = isOwnedBy)]
+    pub fn is_owned_by(&self, identity: &Identity) -> Result<bool, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.is_owned_by(&identity.inner))
+    }
+
+    /// `false` once a commit removed this device's own leaf.
+    #[wasm_bindgen(js_name = isActive)]
+    pub fn is_active(&self) -> Result<bool, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.is_active())
+    }
+
+    /// ADR-0087 section 15 (phase B) — the owner removes a publisher: every
+    /// leaf of `accountKey` in ONE commit, merged here; returns the encoded
+    /// commit. Take the epoch-N access signer before the call, publish
+    /// through the ADR-0081 commit route, then rotate and reseal.
+    #[wasm_bindgen(js_name = removePublisher)]
+    pub fn remove_publisher(
+        &self,
+        identity: &Identity,
+        account_key: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        g.remove_publisher(&identity.inner, account_key)
+            .map_err(mls_err)
+    }
+
+    /// ADR-0087 section 15 (phase B) — a co-publisher steps down: an
+    /// encrypted application message the owner's device applies as
+    /// `removePublisher` of the sender's account. Refused for the owner.
+    #[wasm_bindgen(js_name = stepDown)]
+    pub fn step_down(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        g.step_down(&identity.inner).map_err(mls_err)
+    }
+
     /// ADR-0028 OQ3 — signature keys of the pending co-publisher external-join
     /// proposals, flat-concatenated 32-byte chunks (the role-table FFI
     /// convention). Each chunk is a handle for `approveExternalJoin` /
@@ -2749,6 +2869,29 @@ impl PublisherGroup {
             .map_err(mls_err)?;
         Ok(())
     }
+}
+
+/// ADR-0087 section 15 (phase B) — whether a decrypted PublisherGroup
+/// application message is a step-down for `channelId`.
+#[wasm_bindgen(js_name = isPublisherStepDown)]
+#[must_use]
+pub fn is_publisher_step_down(plaintext: &[u8], channel_id: &[u8]) -> bool {
+    MlsChannelId::try_from_slice(channel_id)
+        .is_ok_and(|cid| lakko_mls::is_publisher_step_down(plaintext, &cid))
+}
+
+/// Whether a decrypted plaintext is a step-down envelope of any channel.
+#[wasm_bindgen(js_name = isPublisherStepDownEnvelope)]
+#[must_use]
+pub fn is_publisher_step_down_envelope(plaintext: &[u8]) -> bool {
+    lakko_mls::is_publisher_step_down_envelope(plaintext)
+}
+
+/// The one well-formed step-down envelope length.
+#[wasm_bindgen(js_name = publisherStepDownLen)]
+#[must_use]
+pub fn publisher_step_down_len() -> u32 {
+    u32::try_from(lakko_mls::PUBLISHER_STEP_DOWN_LEN).unwrap_or(u32::MAX)
 }
 
 /// ADR-0078 section 6 — the PublisherGroup id the account whose identity is

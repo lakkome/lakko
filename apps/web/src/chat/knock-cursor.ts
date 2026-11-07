@@ -112,9 +112,12 @@ export function clearKnockCursorsForAccount(accountIdB64: string): void {
  * approval, so reading it faster buys nothing, and the knock read sits beside
  * the journal fetch, which returns early and often (a new row, a user
  * action, a wake) - iOS was measured reading knocks about twice a second
- * before this floor, which Android and web now share.
+ * before this floor, which Android and web now share. Raised from 10 s to
+ * 60 s on 2026-11-05 (an idle web client read 13 knock queues in 20 s): a
+ * knock is only read by an owner or admin, and a minute is nothing next to
+ * the human approval it waits on.
  */
-export const KNOCK_READ_MIN_INTERVAL_MS = 10_000;
+export const KNOCK_READ_MIN_INTERVAL_MS = 60_000;
 
 const lastKnockReadMs = new Map<string, number>();
 

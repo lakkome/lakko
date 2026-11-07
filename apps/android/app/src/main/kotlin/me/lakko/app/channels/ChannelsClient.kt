@@ -96,7 +96,7 @@ public class ChannelsClient(
     // -----------------------------------------------------------------
 
     @Serializable
-    private data class CreateReq(val channel_id: String, val owner_pubkey_hex: String)
+    private data class CreateReq(val channel_id: String, val owner_pubkey_hex: String, val private: Boolean = false)
 
     @Serializable
     private data class CreateResp(val channel_id: String)
@@ -105,11 +105,16 @@ public class ChannelsClient(
      *  [accountIdentity] derives for it (ADR-0059 section 1). The same key
      *  again is idempotent; another key for an existing id is refused with
      *  409 `channel-exists`. [owner] is [ownerSigner] of this channel. */
-    public suspend fun createChannel(channelIdHex: String, owner: ChannelOwnerSigner): String {
+    public suspend fun createChannel(
+        channelIdHex: String,
+        owner: ChannelOwnerSigner,
+        /** ADR-0087 section 7 — applied only when the channel is created. */
+        private: Boolean = false,
+    ): String {
         val ownerHex = owner.verifyingKey().joinToString("") { "%02x".format(it) }
         val response: HttpResponse = client.post("$baseUrl/v1/channels") {
             contentType(ContentType.Application.Json)
-            setBody(CreateReq(channelIdHex, ownerHex))
+            setBody(CreateReq(channelIdHex, ownerHex, private))
         }
         if (!response.status.isSuccess()) {
             throw decodeError(response, "create channel")
@@ -724,6 +729,496 @@ public class ChannelsClient(
     }
 
     // -----------------------------------------------------------------
+    // ADR-0087 phase B — public seeds, the flag, the count, removal,
+    // invite keys, reactions and comments
+    // -----------------------------------------------------------------
+
+    @Serializable
+    private data class AccessReq(val private: Boolean)
+
+    /** `PUT /v1/channels/:id/access` — the channel's public / private flag
+     *  (owner-signed, section 8). */
+    public suspend fun setAccess(channelIdHex: String, owner: ChannelOwnerSigner, private: Boolean) {
+        val path = "/v1/channels/$channelIdHex/access"
+        val body = jsonCodec.encodeToString(AccessReq.serializer(), AccessReq(private)).toByteArray(Charsets.UTF_8)
+        val proof = owner.sign("PUT", path, "", body)
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Put
+            header(channelOwnerProofHeaderName(), proof)
+            setBody(ByteArrayContent(body, ContentType.Application.Json))
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "set access")
+    }
+
+    /** `PUT /v1/channels/:id/public-seed/:epoch` — file a public channel's
+     *  seed envelope for [epoch] (section 6), publisher-signed. Immutable: the
+     *  identical envelope again is a success. */
+    public suspend fun putPublicSeed(
+        channelIdHex: String,
+        epoch: UInt,
+        envelope: ByteArray,
+        proofs: ChannelPublisherProofs,
+    ) {
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Put,
+            "/v1/channels/$channelIdHex/public-seed/$epoch",
+            "",
+            envelope,
+            ContentType.Application.OctetStream,
+            "put public seed",
+        )
+    }
+
+    /** `GET /v1/channels/:id/public-seed/:epoch` — the envelope, or `null`
+     *  when none is filed (404). Open, no session. */
+    public suspend fun fetchPublicSeed(channelIdHex: String, epoch: UInt): ByteArray? {
+        val response: HttpResponse = anonClient.get("$baseUrl/v1/channels/$channelIdHex/public-seed/$epoch")
+        if (response.status.value == 404) return null
+        if (!response.status.isSuccess()) throw decodeError(response, "fetch public seed")
+        return response.body<ByteArray>()
+    }
+
+    @Serializable
+    private data class CountResp(val count: Long)
+
+    /** `GET /v1/channels/:id/subscribers/count` — the exact count, for the
+     *  owner and publishers (section 15). */
+    public suspend fun subscriberCount(channelIdHex: String, proofs: ChannelPublisherProofs): Long {
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Get,
+            "/v1/channels/$channelIdHex/subscribers/count",
+            "",
+            ByteArray(0),
+            null,
+            "subscriber count",
+        )
+        return response.body<CountResp>().count
+    }
+
+    /** `DELETE /v1/channels/:id/subscribers/:pk` by a publisher (section 7):
+     *  removes a subscriber of a private channel; a rotation follows. */
+    public suspend fun removeSubscriber(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        proofs: ChannelPublisherProofs,
+    ) {
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Delete,
+            "/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex",
+            "",
+            ByteArray(0),
+            null,
+            "remove subscriber",
+        )
+    }
+
+    @Serializable
+    private data class SubscriberRowJson(
+        val seq: Long,
+        val subscriber_id: String,
+        val sealed_ticket_b64: String? = null,
+    )
+
+    @Serializable
+    private data class SubscriberPageResp(
+        val entries: List<SubscriberRowJson> = emptyList(),
+        val next_after: Long = 0,
+    )
+
+    /** One page of subscriber rows with their sealed tickets (section 7),
+     *  publisher-signed. */
+    public suspend fun subscriberPage(
+        channelIdHex: String,
+        proofs: ChannelPublisherProofs,
+        after: Long = 0,
+        limit: Int = 500,
+    ): SubscriberPage {
+        val query = "after=$after&limit=$limit"
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Get,
+            "/v1/channels/$channelIdHex/subscribers",
+            query,
+            ByteArray(0),
+            null,
+            "list subscribers",
+        )
+        val body = response.body<SubscriberPageResp>()
+        return SubscriberPage(
+            rows = body.entries.map { e ->
+                SubscriberRow(
+                    seq = e.seq,
+                    pubkeyHex = e.subscriber_id,
+                    sealedTicket = e.sealed_ticket_b64?.let { ChannelsComposer.base64UrlDecodeOrNull(it) },
+                )
+            },
+            nextAfter = body.next_after,
+        )
+    }
+
+    @Serializable
+    private data class InviteKeyJson(val invite_pk_hex: String)
+
+    @Serializable
+    private data class InviteKeysResp(val invite_keys: List<InviteKeyJson> = emptyList())
+
+    /** `GET /v1/channels/:id/invite-keys` — the channel's registered invite
+     *  keys (hex), publisher-signed. */
+    public suspend fun listInviteKeys(channelIdHex: String, proofs: ChannelPublisherProofs): List<String> {
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Get,
+            "/v1/channels/$channelIdHex/invite-keys",
+            "",
+            ByteArray(0),
+            null,
+            "list invite keys",
+        )
+        return response.body<InviteKeysResp>().invite_keys.map { it.invite_pk_hex.lowercase() }
+    }
+
+    @Serializable
+    private data class InviteKeyReq(val expiry_ms: Long, val max_uses: Long)
+
+    /** `PUT /v1/channels/:id/invite-keys/:pk` (section 7): register a link's
+     *  invite key with its expiry and use limit, publisher-signed. */
+    public suspend fun putInviteKey(
+        channelIdHex: String,
+        invitePubkeyHex: String,
+        expiryMs: Long,
+        maxUses: Long,
+        proofs: ChannelPublisherProofs,
+    ) {
+        val body = jsonCodec.encodeToString(InviteKeyReq.serializer(), InviteKeyReq(expiryMs, maxUses))
+            .toByteArray(Charsets.UTF_8)
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Put,
+            "/v1/channels/$channelIdHex/invite-keys/$invitePubkeyHex",
+            "",
+            body,
+            ContentType.Application.Json,
+            "put invite key",
+        )
+    }
+
+    /** `DELETE /v1/channels/:id/invite-keys/:pk`: revoke, publisher-signed. */
+    public suspend fun deleteInviteKey(channelIdHex: String, invitePubkeyHex: String, proofs: ChannelPublisherProofs) {
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Delete,
+            "/v1/channels/$channelIdHex/invite-keys/$invitePubkeyHex",
+            "",
+            ByteArray(0),
+            null,
+            "delete invite key",
+        )
+    }
+
+    @Serializable
+    private data class SubscribeTicketReq(val subscriber_pubkey_hex: String, val sealed_ticket_b64: String)
+
+    /** Subscribe to a PRIVATE channel (section 7): the sealed admission
+     *  ticket in the body and the invite proof in its header; one
+     *  `channel-subscribe` token. Every invite refusal is `401
+     *  invite-proof-required`. */
+    public suspend fun subscribeWithInvite(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        sealedTicket: ByteArray,
+        inviteProof: String,
+    ): String {
+        val url = "$baseUrl/v1/channels/$channelIdHex/subscribers"
+        val ticketB64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(sealedTicket)
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CHANNEL_SUBSCRIBE) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Post
+                header(name, value)
+                header(uniffi.lakko_ffi_uniffi.channelInviteProofHeaderName(), inviteProof)
+                contentType(ContentType.Application.Json)
+                setBody(SubscribeTicketReq(subscriberPubkeyHex, ticketB64))
+            }
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "subscribe")
+        return response.body<SubscribeResp>().subscriber_id
+    }
+
+    @Serializable
+    private data class ReactionReq(val writer_key_hex: String, val label_hex: String)
+
+    /** Add a reaction row (section 13a): the write proof, then one
+     *  `channel-react` token. */
+    public suspend fun addReaction(
+        channelIdHex: String,
+        postCursor: ULong,
+        writerKeyHex: String,
+        labelHex: String,
+        writeProof: String,
+    ) {
+        val url = "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/reactions"
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CHANNEL_REACT) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Post
+                header(name, value)
+                header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+                contentType(ContentType.Application.Json)
+                setBody(ReactionReq(writerKeyHex, labelHex))
+            }
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "add reaction")
+    }
+
+    /** Take a reaction off: a signed delete, no token. */
+    public suspend fun deleteReaction(
+        channelIdHex: String,
+        postCursor: ULong,
+        writerKeyHex: String,
+        labelHex: String,
+        writeProof: String,
+    ) {
+        val response: HttpResponse = anonClient.request(
+            "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/reactions/$writerKeyHex/$labelHex",
+        ) {
+            method = HttpMethod.Delete
+            header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+        }
+        if (!response.status.isSuccess() && response.status.value != 404) throw decodeError(response, "delete reaction")
+    }
+
+    @Serializable
+    private data class LabelCountJson(val label_hex: String, val count: Long)
+
+    @Serializable
+    private data class PostCountsJson(
+        val cursor: Long,
+        val labels: List<LabelCountJson> = emptyList(),
+        /** The post's maintained comment count (2026-11-05). */
+        val comments: Long = 0,
+    )
+
+    @Serializable
+    private data class CountsResp(val posts: List<PostCountsJson> = emptyList())
+
+    /** What `GET .../reactions` says of the posts asked about: their label
+     *  counts and their comment counts. */
+    public class ReactionSummary(
+        public val labels: Map<ULong, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>>,
+        public val comments: Map<ULong, Long>,
+    )
+
+    /** Label counts of up to 50 posts, no session (cacheable). */
+    public suspend fun reactionCounts(
+        channelIdHex: String,
+        cursors: List<ULong>,
+    ): Map<ULong, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>> = reactionSummary(channelIdHex, cursors).labels
+
+    /** Label counts and comment counts of up to 50 posts, no session. */
+    public suspend fun reactionSummary(channelIdHex: String, cursors: List<ULong>): ReactionSummary {
+        if (cursors.isEmpty()) return ReactionSummary(emptyMap(), emptyMap())
+        val response: HttpResponse = anonClient.get("$baseUrl/v1/channels/$channelIdHex/reactions") {
+            parameter("posts", cursors.take(50).joinToString(","))
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "reaction counts")
+        val posts = response.body<CountsResp>().posts
+        return ReactionSummary(
+            labels = posts.associate { p ->
+                p.cursor.toULong() to p.labels.mapNotNull { l ->
+                    hexOrNull(l.label_hex)?.let { uniffi.lakko_ffi_uniffi.FfiReactionLabelCount(it, l.count.toULong()) }
+                }
+            },
+            comments = posts.associate { it.cursor.toULong() to it.comments },
+        )
+    }
+
+    /** Section 13a (phase B) — a reaction on a comment: the write proof, then
+     *  one `channel-react` token. 201 added, 200 a repeat. */
+    public suspend fun addCommentReaction(
+        channelIdHex: String,
+        postCursor: ULong,
+        commentCursor: Long,
+        writerKeyHex: String,
+        labelHex: String,
+        writeProof: String,
+    ) {
+        val url = "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comments/$commentCursor/reactions"
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CHANNEL_REACT) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Post
+                header(name, value)
+                header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+                contentType(ContentType.Application.Json)
+                setBody(ReactionReq(writerKeyHex, labelHex))
+            }
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "add comment reaction")
+    }
+
+    /** Take a reaction off a comment: a signed delete, no token. */
+    public suspend fun deleteCommentReaction(
+        channelIdHex: String,
+        postCursor: ULong,
+        commentCursor: Long,
+        writerKeyHex: String,
+        labelHex: String,
+        writeProof: String,
+    ) {
+        val response: HttpResponse = anonClient.request(
+            "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comments/$commentCursor/reactions/$writerKeyHex/$labelHex",
+        ) {
+            method = HttpMethod.Delete
+            header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+        }
+        if (!response.status.isSuccess() && response.status.value != 404) {
+            throw decodeError(response, "delete comment reaction")
+        }
+    }
+
+    @Serializable
+    private data class CommentCountsJson(val cursor: Long, val labels: List<LabelCountJson> = emptyList())
+
+    @Serializable
+    private data class CommentCountsResp(val comments: List<CommentCountsJson> = emptyList())
+
+    /** Label counts of up to 50 comments under one post, no session. */
+    public suspend fun commentReactionCounts(
+        channelIdHex: String,
+        postCursor: ULong,
+        commentCursors: List<Long>,
+    ): Map<Long, List<uniffi.lakko_ffi_uniffi.FfiReactionLabelCount>> {
+        if (commentCursors.isEmpty()) return emptyMap()
+        val response: HttpResponse = anonClient.get(
+            "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comment-reactions",
+        ) {
+            parameter("comments", commentCursors.take(50).joinToString(","))
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "comment reaction counts")
+        return response.body<CommentCountsResp>().comments.associate { c ->
+            c.cursor to c.labels.mapNotNull { l ->
+                hexOrNull(l.label_hex)?.let { uniffi.lakko_ffi_uniffi.FfiReactionLabelCount(it, l.count.toULong()) }
+            }
+        }
+    }
+
+    /** Section 15 (phase B) — the owner deletes the channel: an owner proof
+     *  over the empty body. Afterwards every route answers `410
+     *  channel-deleted`. A `410` here is done already. */
+    public suspend fun deleteChannel(channelIdHex: String, accountIdentity: Identity) {
+        val path = "/v1/channels/$channelIdHex"
+        val proof = ownerSigner(accountIdentity, channelIdHex).use {
+            it.sign("DELETE", path, "", ByteArray(0))
+        }
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Delete
+            header(channelOwnerProofHeaderName(), proof)
+        }
+        if (!response.status.isSuccess() && response.status.value != 410) throw decodeError(response, "delete channel")
+    }
+
+    @Serializable
+    private data class CommentReq(val writer_key_hex: String, val sealed_b64: String)
+
+    @Serializable
+    private data class CommentAdded(val cursor: Long)
+
+    /** Add a comment (section 13a): the write proof, then one
+     *  `channel-comment` token. Returns the comment cursor. */
+    public suspend fun addComment(
+        channelIdHex: String,
+        postCursor: ULong,
+        writerKeyHex: String,
+        sealed: ByteArray,
+        writeProof: String,
+    ): Long {
+        val url = "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comments"
+        val sealedB64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(sealed)
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CHANNEL_COMMENT) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Post
+                header(name, value)
+                header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+                contentType(ContentType.Application.Json)
+                setBody(CommentReq(writerKeyHex, sealedB64))
+            }
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "add comment")
+        return response.body<CommentAdded>().cursor
+    }
+
+    @Serializable
+    private data class CommentJson(
+        val cursor: Long,
+        val writer_key_hex: String,
+        val sealed_b64: String,
+        val server_ts_ms: Long = 0,
+    )
+
+    @Serializable
+    private data class CommentsResp(val comments: List<CommentJson> = emptyList(), val next_after: Long = 0)
+
+    /** A page of comments under a post, oldest first, at most 20. */
+    public suspend fun listComments(channelIdHex: String, postCursor: ULong, after: Long = 0): CommentPage {
+        val response: HttpResponse = anonClient.get("$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comments") {
+            parameter("after", after.toString())
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "list comments")
+        val body = response.body<CommentsResp>()
+        return CommentPage(
+            rows = body.comments.mapNotNull { c ->
+                val writer = hexOrNull(c.writer_key_hex) ?: return@mapNotNull null
+                val sealed = ChannelsComposer.base64UrlDecodeOrNull(c.sealed_b64) ?: return@mapNotNull null
+                CommentRow(c.cursor, writer, sealed, c.server_ts_ms)
+            },
+            nextAfter = body.next_after,
+        )
+    }
+
+    /** Delete a comment by its author (the comment's own write proof). */
+    public suspend fun deleteCommentAsAuthor(
+        channelIdHex: String,
+        postCursor: ULong,
+        commentCursor: Long,
+        writeProof: String,
+    ) {
+        val response: HttpResponse = anonClient.request(
+            "$baseUrl/v1/channels/$channelIdHex/posts/$postCursor/comments/$commentCursor",
+        ) {
+            method = HttpMethod.Delete
+            header(uniffi.lakko_ffi_uniffi.channelWriteProofHeaderName(), writeProof)
+        }
+        if (!response.status.isSuccess() && response.status.value != 404) throw decodeError(response, "delete comment")
+    }
+
+    /** Delete a comment as the owner or a publisher (a publisher proof). */
+    public suspend fun deleteCommentAsPublisher(
+        channelIdHex: String,
+        postCursor: ULong,
+        commentCursor: Long,
+        proofs: ChannelPublisherProofs,
+    ) {
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Delete,
+            "/v1/channels/$channelIdHex/posts/$postCursor/comments/$commentCursor",
+            "",
+            ByteArray(0),
+            null,
+            "delete comment",
+        )
+    }
+
+    private fun hexOrNull(hex: String): ByteArray? {
+        if (hex.length % 2 != 0) return null
+        return try {
+            ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        } catch (_: NumberFormatException) {
+            null
+        }
+    }
+
+    // -----------------------------------------------------------------
     // ADR-0060 §3 — member cards
     // -----------------------------------------------------------------
 
@@ -880,6 +1375,26 @@ public class ChannelsClient(
 // ============================================================================
 // Wire types
 // ============================================================================
+
+/** One subscriber row as a publisher reads it (ADR-0087 section 7). */
+public data class SubscriberRow(
+    public val seq: Long,
+    public val pubkeyHex: String,
+    /** The sealed admission ticket of a private channel's row, else `null`. */
+    public val sealedTicket: ByteArray?,
+)
+
+public data class SubscriberPage(public val rows: List<SubscriberRow>, public val nextAfter: Long)
+
+/** One comment row under a post (ADR-0087 section 13a), still sealed. */
+public class CommentRow(
+    public val cursor: Long,
+    public val writerKey: ByteArray,
+    public val sealed: ByteArray,
+    public val serverTsMs: Long,
+)
+
+public class CommentPage(public val rows: List<CommentRow>, public val nextAfter: Long)
 
 /** One post in the cursor-paginated fetch response. */
 public data class PostView(

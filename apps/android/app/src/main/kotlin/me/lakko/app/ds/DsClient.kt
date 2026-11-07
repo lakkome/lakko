@@ -469,6 +469,9 @@ public class DsClient(
                     id = it.id,
                     payload = base64Decode(it.payload_b64),
                     createdAt = it.created_at,
+                    reachPk = it.reach_pk_b64?.let { pk ->
+                        runCatching { base64Decode(pk) }.getOrNull()?.takeIf { b -> b.size == 32 }
+                    },
                 )
             },
             hasMore = parsed.has_more,
@@ -1068,6 +1071,9 @@ private data class FetchWireMessage(
     val id: Long,
     val payload_b64: String,
     val created_at: String,
+    /** ADR-0060 (2026-11-06) — on the owner's signed mailbox read, the reach
+     *  key that admitted the row; absent on a proofless row. */
+    val reach_pk_b64: String? = null,
 )
 
 @Serializable
@@ -1144,6 +1150,9 @@ public data class MailboxMessage(
     /** Raw payload bytes (decoded from the server's `payload_b64`). */
     val payload: ByteArray,
     val createdAt: String,
+    /** ADR-0060 (2026-11-06) — the reach key that admitted a mailbox row (the
+     *  owner's read only); `null` on a proofless row and on journals. */
+    val reachPk: ByteArray? = null,
 ) {
     // Override equals/hashCode for the `payload` ByteArray —
     // same reason as the auth Result types: data-class default

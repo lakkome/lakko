@@ -17,7 +17,9 @@
  */
 import { getDeviceKey } from "../auth/key-store";
 import { groupIdHex } from "../devices/sync/state";
-import { composeEnvelope } from "./attachments";
+import { composeEnvelope, type AttachmentRefBytes, type ForwardRef } from "./attachments";
+import { persistedFromForwardRef } from "./forward";
+import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { authorIdentityToPersisted, resolveMemberIdentity, type RosterMember } from "./author-identity";
 import type { ActiveGroup } from "./ChatContext";
 import type { ChatClient } from "./client";
@@ -31,8 +33,17 @@ export async function sendTextToConversation(deps: {
   readonly accountId: string;
   readonly entry: ActiveGroup;
   readonly text: string;
+  /** The envelope to send, when it is not the plain text one (a channel
+   *  invitation: ADR-0087 section 14). `text` is still what the sent row
+   *  shows. */
+  readonly envelope?: Uint8Array;
+  /** What the envelope carries besides its text, for the sent row: the
+   *  attachments (already uploaded) and a forward's attribution (a post
+   *  forwarded out of a channel, ADR-0087 section 12). */
+  readonly attachments?: readonly AttachmentRefBytes[];
+  readonly forward?: ForwardRef;
 }): Promise<void> {
-  const bytes = await composeEnvelope(deps.text, []);
+  const bytes = deps.envelope ?? (await composeEnvelope(deps.text, []));
   const result = await deps.chat.sendMessage(null, deps.entry.group, bytes);
 
   // The author as every other sent row names it: the person, resolved from
@@ -54,7 +65,8 @@ export async function sendTextToConversation(deps: {
     messageId: String(result.messageId),
     direction: "outgoing",
     text: deps.text,
-    attachments: [],
+    attachments: (deps.attachments ?? []).map((a) => persistedFromAttachmentRef(a)),
+    ...(deps.forward === undefined ? {} : { forward: persistedFromForwardRef(deps.forward) }),
     createdAt: result.createdAt,
     authorKeyB64: authorIdentityToPersisted(author),
   };

@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.contacts
 
+import kotlinx.coroutines.launch
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -128,6 +129,11 @@ public fun ContactsScreen(
      *  to the same intake an opened app link uses; `null` hides Scan QR code
      *  (tests). */
     onScannedLink: ((me.lakko.app.contacts.LakkoLink) -> Unit)? = null,
+    /** ADR-0087 phase B — the channel state and client a private channel
+     *  link's revoke uses to delete its invite key; `null` deletes the ledger
+     *  row and the record only (tests). */
+    channelsState: me.lakko.app.channels.ChannelsUiState? = null,
+    channelsClient: me.lakko.app.channels.ChannelsClient? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -172,6 +178,14 @@ public fun ContactsScreen(
             onCopy = { row, url -> viewModel.onCopyInviteClicked(row.slug, url) { copyToClipboard(context, it) } },
             onDelete = { row -> viewModel.onDeleteInviteClicked(row.slug) },
             onDismiss = { inviteSheetOpen = false },
+            // ADR-0087 phase B — group, channel and publisher links made on
+            // any device of the account.
+            groupLinks = remember(linkRecords) {
+                linkRecords.filter { me.lakko.app.channels.GroupLinkRegister.isGroupKind(it) && !it.revoked }
+                    .sortedByDescending { it.mintedAtMs }
+            },
+            channelsState = channelsState,
+            channelsClient = channelsClient,
         )
     }
     if (scanSheetOpen && onScannedLink != null) {
@@ -726,6 +740,9 @@ private fun InviteLinksSheet(
     onCopy: (InviteLinkRow, String) -> Unit,
     onDelete: (InviteLinkRow) -> Unit,
     onDismiss: () -> Unit,
+    groupLinks: List<uniffi.lakko_ffi_uniffi.LinkRecord> = emptyList(),
+    channelsState: me.lakko.app.channels.ChannelsUiState? = null,
+    channelsClient: me.lakko.app.channels.ChannelsClient? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // The server's list loads when the sheet opens; there is no Refresh button.
@@ -822,6 +839,7 @@ private fun InviteLinksSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (editing == null && groupLinks.isNotEmpty()) GroupLinksSection(groupLinks, channelsState, channelsClient)
             if (editing == null) LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1000,3 +1018,67 @@ internal fun viaGroupLine(viaGroupIdHex: String?, groupName: String?): ViaLine? 
 
 internal fun acceptButtonKey(acceptFailed: Boolean): String =
     if (acceptFailed) "common.try_again" else "contacts.request.accept"
+
+
+/**
+ * ADR-0087 phase B — the account's group, channel and publisher links, as
+ * the synced link register lists them (made on any of the account's
+ * devices), each with its kind, its label and Revoke. A revoke deletes the
+ * ledger row with the revocation key the record carries, then marks the
+ * record revoked on every device.
+ */
+@Composable
+private fun GroupLinksSection(
+    records: List<uniffi.lakko_ffi_uniffi.LinkRecord>,
+    channelsState: me.lakko.app.channels.ChannelsUiState?,
+    channelsClient: me.lakko.app.channels.ChannelsClient?,
+) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var busy by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
+    Text(t("invite.links.group_title"), style = MaterialTheme.typography.titleMedium)
+    for (record in records) {
+        val id = record.linkId.joinToString("") { "%02x".format(it) }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when (record.kind) {
+                        uniffi.lakko_ffi_uniffi.LinkRecordKind.CHANNEL -> t("invite.links.kind_channel")
+                        uniffi.lakko_ffi_uniffi.LinkRecordKind.PUBLISHER -> t("invite.links.kind_publisher")
+                        else -> t("invite.links.kind_group")
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                if (record.label.isNotBlank()) {
+                    Text(
+                        record.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            androidx.compose.material3.TextButton(
+                enabled = busy == null,
+                onClick = {
+                    busy = id
+                    error = null
+                    scope.launch {
+                        try {
+                            me.lakko.app.channels.GroupLinkRegister.revoke(record, channelsState, channelsClient)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            android.util.Log.w("ContactsScreen", "group link revoke failed: ${e.javaClass.simpleName}")
+                            error = me.lakko.app.l10n.UiText(
+                                me.lakko.app.channels.channelLinkErrorKey(e, "channels.links.revoke_failed"),
+                            )
+                        } finally {
+                            busy = null
+                        }
+                    }
+                },
+            ) { Text(t("chat.invite_link.revoke"), color = MaterialTheme.colorScheme.error) }
+        }
+    }
+    error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+}

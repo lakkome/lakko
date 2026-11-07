@@ -117,6 +117,7 @@ pub mod avatar;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
+pub mod channel_read_key;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
@@ -189,6 +190,11 @@ pub use call_kp_forward::{
 pub use call_welcome::{
     try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
     CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
+pub use channel_read_key::{
+    compose_channel_read_key, decode_channel_read_key, try_unwrap_channel_read_key,
+    ChannelReadKeyEnvelope, ChannelReadKeyError, CHANNEL_READ_KEY_ENVELOPE_DOMAIN_V1,
+    CHANNEL_READ_KEY_ENVELOPE_LEN,
 };
 pub use channel_text::{
     check_description as check_channel_description, check_name as check_channel_name,
@@ -376,9 +382,11 @@ pub use push_wake::{
     PUSH_WAKE_NONCE_LEN,
 };
 pub use reach::{
-    continuity_reach_seed, reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant,
-    CONTINUITY_ACCOUNT_ID_LEN, CONTINUITY_REACH_SEED_DOMAIN, MAX_REACH_SCOPE_ID_LEN,
-    REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
+    classify_contact_key, contact_key_row_verdict, contact_key_versions, continuity_reach_seed,
+    reach_seed, reach_verifying_key, ContactKeyRowVerdict, ContactKeyStanding, ReachClass,
+    ReachError, ReachGrant, CONTINUITY_ACCOUNT_ID_LEN, CONTINUITY_REACH_SEED_DOMAIN,
+    MAX_REACH_SCOPE_ID_LEN, REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
+    RETIRED_CONTACT_VERSIONS_KEPT,
 };
 pub use registrar_seed::{
     compose_registrar_seed, decode_registrar_seed, registrar_public_key, try_unwrap_registrar_seed,
@@ -627,6 +635,22 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::AdmissionSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel read-key envelope (ADR-0087 phase B) and
+    /// check the dispatcher agrees. `None` when the decoder refuses;
+    /// `Some(true)` when it re-encodes to the same bytes at the fixed length
+    /// and dispatches as the same envelope.
+    #[must_use]
+    pub fn channel_read_key_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::channel_read_key::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ChannelReadKey(
+                _
+            ))
         );
         Some(ok && dispatched)
     }

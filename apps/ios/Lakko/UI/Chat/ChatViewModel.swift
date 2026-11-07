@@ -2355,18 +2355,25 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// ADR-0028 (G-3) — mint a group invite-link (owner/admin only) and publish
-    /// it to `inviteLink` for the members sheet to show + copy. Fail-closed.
-    func onCreateInviteLink() {
-        membershipError = nil
-        membershipNotice = nil
-        Task { @MainActor in
-            do {
-                inviteLink = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
-            } catch {
-                reportMembershipFailure(error, op: "onCreateInviteLink", key: "chat.error.create_link")
-            }
-        }
+    /// UX section 14.2 — the group's live invite links from any device of the
+    /// account, for the invite-link screen.
+    func groupInviteLinks() -> [GroupInviteLinkRow] {
+        repository.groupInviteLinks(groupIdHex: groupIdHex)
+    }
+
+    /// UX section 14.2 — mint a link with a label and terms (owner/admin).
+    /// Throws so the screen shows the failure where the person pressed.
+    func createGroupInviteLink(label: String, expiryMs: UInt64, maxUses: UInt32) async throws {
+        inviteLink = try await repository.createGroupInviteLink(
+            groupIdHex: groupIdHex, label: label, expiryMs: expiryMs, maxUses: maxUses)
+    }
+
+    /// UX section 14.2 — revoke one listed link, made on any device of the
+    /// account. `false` when no device holds its key.
+    func revokeGroupInviteLink(_ row: GroupInviteLinkRow) async throws -> Bool {
+        let revoked = try await repository.revokeGroupInviteLink(row, groupIdHex: groupIdHex)
+        if inviteLink == row.url { inviteLink = nil }
+        return revoked
     }
 
     /// The confirmation shown after Revoke (the web and Android rule): a link
@@ -2375,24 +2382,6 @@ public final class ChatViewModel: ObservableObject {
     /// screen and must not claim more.
     nonisolated static func inviteLinkRevokeNotice(revoked: Bool) -> String {
         revoked ? "chat.invite_link.revoked" : "chat.invite_link.cleared"
-    }
-
-    /// ADR-0028 revoke — revoke the currently-shown group invite link (issuer
-    /// only): the server deletes its ledger row; without a kept revocation key
-    /// the field is only cleared. Fail-closed.
-    func onRevokeInviteLink() {
-        guard let link = inviteLink else { return }
-        membershipError = nil
-        membershipNotice = nil
-        Task { @MainActor in
-            do {
-                let revoked = try await repository.revokeGroupInviteLink(link: link)
-                inviteLink = nil
-                membershipNotice = .key(Self.inviteLinkRevokeNotice(revoked: revoked))
-            } catch {
-                reportMembershipFailure(error, op: "onRevokeInviteLink", key: "chat.error.revoke_link")
-            }
-        }
     }
 
     /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.

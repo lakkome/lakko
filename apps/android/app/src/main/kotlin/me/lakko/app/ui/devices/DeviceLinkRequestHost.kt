@@ -280,4 +280,5 @@ public fun DeviceLinkRequestHost(
 /** How often a foregrounded signed-in device reads the open request. Chosen,
  *  not measured: a person walking between two devices sees the code within a
  *  few seconds, and the route is one small authenticated GET. */
-private const val DEVICE_LINK_POLL_MS: Long = 4_000L
+/** 2026-11-06 — the idle request budget web keeps (chosen, not measured). */
+private const val DEVICE_LINK_POLL_MS: Long = 20_000L

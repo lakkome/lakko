@@ -130,6 +130,9 @@ public class StorageClient(
          *  bubble's determinate upload ring. Optional; `null` changes nothing
          *  about the request. */
         onProgress: ((sent: Long, total: Long) -> Unit)? = null,
+        /** ADR-0087 section 13 — the blob's idle life in days (a channel
+         *  file: 45); `null` keeps the service default. */
+        idleDays: Int? = null,
     ) {
         if (blobId.size != BLOB_ID_LEN) {
             throw StorageClientArgError(
@@ -158,6 +161,7 @@ public class StorageClient(
                 contentType(ContentType.Application.OctetStream)
                 pass?.let { header(BLOB_PASS_HEADER, it) }
                 deleteKey?.let { header(BLOB_DELETE_KEY_HEADER, base64UrlNoPad(it)) }
+                idleDays?.takeIf { it in 1..255 }?.let { header("x-lakko-blob-idle-days", it.toString()) }
                 setBody(ciphertext)
                 if (onProgress != null) {
                     onUpload { sent, length ->

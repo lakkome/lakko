@@ -527,10 +527,7 @@ private fun PairSection(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                QrImageComposable(
-                    payload = s.qrPayload,
-                    size = 240.dp,
-                )
+                QrImageComposable(payload = s.qrPayload)
                 Text(
                     t("device_link.qr.waiting"),
                     style = MaterialTheme.typography.bodySmall,

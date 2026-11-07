@@ -633,8 +633,16 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         self.ports = ports
     }
 
-    /// How often an active app looks for a sign-in request (Android's 4 s).
-    public static let foregroundPollNanos: UInt64 = 4_000_000_000
+    /// How often an active app looks for a sign-in request while none is on
+    /// screen (2026-11-06: was 4 s, which an idle client must not spend;
+    /// web and Android use 20 s). Chosen, not measured.
+    public static let foregroundPollNanos: UInt64 = 20_000_000_000
+    /// While the request modal is up, the exchange is in progress and its
+    /// next step is read sooner.
+    public static let modalPollNanos: UInt64 = 4_000_000_000
+
+    /// The pause before the next ``check(now:)``.
+    public var pollNanos: UInt64 { modal == nil ? Self.foregroundPollNanos : Self.modalPollNanos }
 
     /// One check: called when the app comes to the foreground and on a timer
     /// while the modal is up.

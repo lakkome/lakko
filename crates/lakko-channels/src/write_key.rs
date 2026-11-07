@@ -17,6 +17,10 @@
 //!                                    account_seed(32) ‖ channel_id(16) ‖ post_cursor(8, BE) ‖ label(16))
 //! comment:  seed = BLAKE3-derive-key("lakko/channel/comment-write-key/v1",
 //!                                    account_seed(32) ‖ channel_id(16) ‖ post_cursor(8, BE) ‖ comment_nonce(16))
+//! reaction on a comment:
+//!           seed = BLAKE3-derive-key("lakko/channel/comment-reaction-write-key/v1",
+//!                                    account_seed(32) ‖ channel_id(16) ‖ post_cursor(8, BE)
+//!                                    ‖ comment_cursor(8, BE) ‖ label(16))
 //! key = Ed25519 from seed
 //! ```
 //!
@@ -57,6 +61,8 @@
 //! | `0x02` | take a reaction off | the 16-byte label |
 //! | `0x03` | add a comment | `BLAKE3(sealed)`, 32 bytes |
 //! | `0x04` | delete one's own comment | the comment's server cursor, 8 bytes BE |
+//! | `0x05` | add a reaction on a comment | comment cursor (8, BE) ‖ the 16-byte label |
+//! | `0x06` | take a reaction off a comment | comment cursor (8, BE) ‖ the 16-byte label |
 //!
 //! The op fixes the subject's length, so the encoding is injective. The
 //! domain is distinct from every other proof domain in the crate.
@@ -87,6 +93,9 @@ use crate::CHANNEL_ID_LEN;
 pub const REACTION_WRITE_KEY_DOMAIN: &str = "lakko/channel/reaction-write-key/v1";
 /// BLAKE3 derive-key context of a comment write key. Frozen.
 pub const COMMENT_WRITE_KEY_DOMAIN: &str = "lakko/channel/comment-write-key/v1";
+/// BLAKE3 derive-key context of the write key of a reaction on a comment
+/// (2026-11-05, UX 13.1). Frozen.
+pub const COMMENT_REACTION_WRITE_KEY_DOMAIN: &str = "lakko/channel/comment-reaction-write-key/v1";
 /// Domain separator that opens a write proof's canonical bytes. Frozen.
 pub const WRITE_PROOF_DOMAIN: &[u8] = b"lakko/channel/write-proof/v1";
 /// The request header a write proof travels in (lowercase).
@@ -153,6 +162,29 @@ pub fn comment_write_seed(
     )
 }
 
+/// Derive the write key seed of the reaction `label` on the comment
+/// `comment_cursor` under the post at `post_cursor` in `channel_id`. The
+/// label is a [`crate::reaction::CommentReactionKey`] label.
+#[must_use]
+pub fn comment_reaction_write_seed(
+    account_seed: &[u8; ACCOUNT_SEED_LEN],
+    channel_id: &[u8; CHANNEL_ID_LEN],
+    post_cursor: u64,
+    comment_cursor: u64,
+    label: &ReactionLabel,
+) -> [u8; 32] {
+    derive(
+        COMMENT_REACTION_WRITE_KEY_DOMAIN,
+        account_seed,
+        &[
+            channel_id,
+            &post_cursor.to_be_bytes(),
+            &comment_cursor.to_be_bytes(),
+            label,
+        ],
+    )
+}
+
 /// A fresh random comment nonce from the OS CSPRNG.
 #[must_use]
 pub fn new_comment_nonce() -> [u8; COMMENT_NONCE_LEN] {
@@ -184,6 +216,20 @@ pub enum SubscriberWrite<'a> {
         /// The comment's server cursor.
         comment_cursor: u64,
     },
+    /// Add a reaction row with this label on the comment at `comment_cursor`.
+    AddCommentReaction {
+        /// The comment's server cursor.
+        comment_cursor: u64,
+        /// The label ([`crate::reaction::CommentReactionKey::label`]).
+        label: ReactionLabel,
+    },
+    /// Take off the reaction row with this label on the comment.
+    DeleteCommentReaction {
+        /// The comment's server cursor.
+        comment_cursor: u64,
+        /// The label.
+        label: ReactionLabel,
+    },
 }
 
 impl SubscriberWrite<'_> {
@@ -195,6 +241,8 @@ impl SubscriberWrite<'_> {
             Self::DeleteReaction { .. } => 0x02,
             Self::AddComment { .. } => 0x03,
             Self::DeleteComment { .. } => 0x04,
+            Self::AddCommentReaction { .. } => 0x05,
+            Self::DeleteCommentReaction { .. } => 0x06,
         }
     }
 
@@ -206,6 +254,17 @@ impl SubscriberWrite<'_> {
             Self::AddComment { sealed } => out.extend_from_slice(&hash::blake3(sealed)),
             Self::DeleteComment { comment_cursor } => {
                 out.extend_from_slice(&comment_cursor.to_be_bytes());
+            },
+            Self::AddCommentReaction {
+                comment_cursor,
+                label,
+            }
+            | Self::DeleteCommentReaction {
+                comment_cursor,
+                label,
+            } => {
+                out.extend_from_slice(&comment_cursor.to_be_bytes());
+                out.extend_from_slice(label);
             },
         }
     }
@@ -461,6 +520,95 @@ impl CommentWriteKey {
     }
 }
 
+/// The account's key for one reaction on one comment. It signs adding and
+/// taking off that reaction, nothing else. Clock and nonce are the caller's.
+pub struct CommentReactionWriteKey {
+    signer: WriteSigner,
+    comment_cursor: u64,
+    label: ReactionLabel,
+}
+
+impl core::fmt::Debug for CommentReactionWriteKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CommentReactionWriteKey")
+            .field("public_key", &self.signer.public_key())
+            .field("post_cursor", &self.signer.post_cursor)
+            .field("comment_cursor", &self.comment_cursor)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommentReactionWriteKey {
+    /// The key of the reaction `label` on the comment `comment_cursor` under
+    /// the post at `post_cursor` in `channel_id`, for the account whose
+    /// identity seed is `account_seed`.
+    #[must_use]
+    pub fn new(
+        account_seed: &[u8; ACCOUNT_SEED_LEN],
+        channel_id: &[u8; CHANNEL_ID_LEN],
+        post_cursor: u64,
+        comment_cursor: u64,
+        label: ReactionLabel,
+    ) -> Self {
+        let seed = comment_reaction_write_seed(
+            account_seed,
+            channel_id,
+            post_cursor,
+            comment_cursor,
+            &label,
+        );
+        Self {
+            signer: WriteSigner::from_seed(seed, channel_id, post_cursor),
+            comment_cursor,
+            label,
+        }
+    }
+
+    /// The public half the reaction row names.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; WRITE_KEY_LEN] {
+        self.signer.public_key()
+    }
+
+    /// The label this key is for.
+    #[must_use]
+    pub const fn label(&self) -> ReactionLabel {
+        self.label
+    }
+
+    /// The comment this key is for.
+    #[must_use]
+    pub const fn comment_cursor(&self) -> u64 {
+        self.comment_cursor
+    }
+
+    /// Sign adding the reaction.
+    #[must_use]
+    pub fn sign_add(&self, now_ms: u64, nonce: [u8; OWNER_PROOF_NONCE_LEN]) -> WriteProof {
+        self.signer.sign(
+            SubscriberWrite::AddCommentReaction {
+                comment_cursor: self.comment_cursor,
+                label: self.label,
+            },
+            now_ms,
+            nonce,
+        )
+    }
+
+    /// Sign taking the reaction off.
+    #[must_use]
+    pub fn sign_delete(&self, now_ms: u64, nonce: [u8; OWNER_PROOF_NONCE_LEN]) -> WriteProof {
+        self.signer.sign(
+            SubscriberWrite::DeleteCommentReaction {
+                comment_cursor: self.comment_cursor,
+                label: self.label,
+            },
+            now_ms,
+            nonce,
+        )
+    }
+}
+
 /// Fuzz oracle behind `fuzz_api::write_proof_parse`: parse `value` as a write
 /// proof header and verify it for a fixed write. `None` when it does not
 /// parse; `Some(true)` when it re-encodes to the same text.
@@ -552,6 +700,70 @@ mod tests {
         assert!(format!("{a:?}").starts_with("ReactionWriteKey"));
         assert!(format!("{c1:?}").starts_with("CommentWriteKey"));
         assert_ne!(new_comment_nonce(), new_comment_nonce());
+    }
+
+    /// A reaction on a comment: its own domain, its own ops, bound to the
+    /// comment cursor and the label; a proof for one comment does not verify
+    /// for another, nor as a post reaction.
+    #[test]
+    fn a_comment_reaction_proof_names_its_comment() {
+        let mut material = ACCOUNT.to_vec();
+        material.extend_from_slice(&CHANNEL);
+        material.extend_from_slice(&7u64.to_be_bytes());
+        material.extend_from_slice(&4u64.to_be_bytes());
+        material.extend_from_slice(&LABEL);
+        assert_eq!(
+            comment_reaction_write_seed(&ACCOUNT, &CHANNEL, 7, 4, &LABEL),
+            hash::blake3_derive_key_from_material(
+                "lakko/channel/comment-reaction-write-key/v1",
+                &material
+            )
+        );
+        let k = CommentReactionWriteKey::new(&ACCOUNT, &CHANNEL, 7, 4, LABEL);
+        assert_ne!(
+            k.public_key(),
+            ReactionWriteKey::new(&ACCOUNT, &CHANNEL, 7, LABEL).public_key()
+        );
+        assert_ne!(
+            k.public_key(),
+            CommentReactionWriteKey::new(&ACCOUNT, &CHANNEL, 7, 5, LABEL).public_key()
+        );
+        assert_eq!(k.comment_cursor(), 4);
+        assert_eq!(k.label(), LABEL);
+        let pk = k.public_key();
+        let add = k.sign_add(NOW, [1; 16]);
+        let ok = statement_for(
+            &pk,
+            7,
+            SubscriberWrite::AddCommentReaction {
+                comment_cursor: 4,
+                label: LABEL,
+            },
+        );
+        assert!(verify_write_proof(&add, &ok, NOW).is_ok());
+        let other_comment = statement_for(
+            &pk,
+            7,
+            SubscriberWrite::AddCommentReaction {
+                comment_cursor: 5,
+                label: LABEL,
+            },
+        );
+        assert!(verify_write_proof(&add, &other_comment, NOW).is_err());
+        let as_post = statement_for(&pk, 7, SubscriberWrite::AddReaction { label: LABEL });
+        assert!(verify_write_proof(&add, &as_post, NOW).is_err());
+        let del = k.sign_delete(NOW, [2; 16]);
+        let del_stmt = statement_for(
+            &pk,
+            7,
+            SubscriberWrite::DeleteCommentReaction {
+                comment_cursor: 4,
+                label: LABEL,
+            },
+        );
+        assert!(verify_write_proof(&del, &del_stmt, NOW).is_ok());
+        assert!(verify_write_proof(&del, &ok, NOW).is_err());
+        assert!(format!("{k:?}").starts_with("CommentReactionWriteKey"));
     }
 
     #[test]

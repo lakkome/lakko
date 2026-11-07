@@ -359,7 +359,9 @@ export function PeopleSearch(props: {
           props.onOpenChannel?.(foundIdHex(found), found.handle, found.name, subscribe);
         }}
       />
-      <Show when={channel()}>
+      {/* The exact-handle row, unless the same channel is already among the
+          groups and channels found (that row carries what subscribing needs). */}
+      <Show when={channel() !== null && !conversations().some((f) => f.kind === "channel" && foundIdHex(f) === channel()?.idHex) ? channel() : null}>
         {(c) => (
           <button
             type="button"

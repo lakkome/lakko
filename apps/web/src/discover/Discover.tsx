@@ -23,7 +23,8 @@ import { cardsWithoutHidden } from "../feed/feed-marks";
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { apiError, fetchBucket, fetchListing, searchDirectory, type DirectoryItem } from "../channels/api";
-import { resolveChannelHandle } from "../channels/channel-discovery";
+import { lookupPublicChannel } from "../channels/channel-lookup";
+import { subscribeToChannel } from "../channels/channel-access";
 import { bytesToHex } from "../channels/composer";
 import { paths } from "../routes/paths";
 import { channelsState } from "../state/channels-state";
@@ -396,24 +397,35 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     // The handle check is a network round trip; a person who went elsewhere
     // meanwhile is not sent to the channel (`ui/screen-anchor.ts`).
     const here = screenAnchor(location);
-    let resolved: string | null;
+    // ADR-0087 sections 6 and 16 — the handle's record names the channel and
+    // carries the read key; a listing whose handle answers another id (or
+    // none) is gone.
+    let found: Awaited<ReturnType<typeof lookupPublicChannel>>;
     try {
-      resolved = await resolveChannelHandle(card.handle);
+      found = await lookupPublicChannel(card.handle);
     } catch (err) {
       if (anonTokenQuotaExhausted(err) !== null) setNotice(LOOKUP_ALLOWANCE_USED);
       else setNotice(COPY.unavailable);
       return;
     }
-    if (verifyDecision(card.channelIdHex, resolved) === "gone") {
+    if (verifyDecision(card.channelIdHex, found?.idHex ?? null) === "gone" || found === null) {
       setGone(new Set([...gone(), card.channelIdHex]));
       setNotice(COPY.gone);
       return;
     }
     setVerified(new Set([...verified(), card.channelIdHex]));
+    try {
+      await subscribeToChannel(found.idHex, { kind: "public", readKey: found.readKey }, {
+        name: found.name,
+        description: found.description,
+        handle: found.handle,
+      });
+    } catch {
+      setNotice(COPY.unavailable);
+      return;
+    }
     if (!here()) return;
-    navigate(paths.channelSubscribe(card.channelIdHex), {
-      state: { handle: card.handle, subscribe: true },
-    });
+    navigate(paths.channel(found.idHex));
   }
 
   return {

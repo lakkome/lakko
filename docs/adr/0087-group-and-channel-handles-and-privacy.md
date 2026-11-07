@@ -507,6 +507,28 @@ epoch is one envelope under the tree's key, and a removal is about 1.4 KB of pat
 The tree's edges are about 63 MB at 2^20 leaves (30 bytes an edge, from the crate's
 measured sizes, arithmetic), stored once. Step 8 of the plan, before release.
 
+**The read key to a co-publisher (phase B, 2026-11-06).** A co-publisher must hold
+the channel's read key before the channel goes public, and the admission seed is sent
+only for a private channel, so the read key travels on its own: the owner sends each
+co-publisher `lakko-contacts::channel_read_key`, a fixed 155-byte envelope
+`lakko/channel-read-key/v1\0 ‖ 0x01 ‖ channel_id(16) ‖ member_account_key(32) ‖
+sealed(80)`, the 32-byte read key sealed to that person's account X25519 key with the
+clear header as AAD, as a PublisherGroup application message. It carries no version
+because the read key never changes. The receiver keeps it only when it is addressed to
+its own account and the MLS sender resolves to the owner. Dispatched as
+`IncomingEnvelope::ChannelReadKey`; fuzz `channel_read_key_decode`.
+
+**Invite links in the link register (phase B, 2026-11-06).** The ADR-0079 register now
+holds `/g/` links: kinds `group` (3), `channel` (4) and `publisher` (5), each with its
+target (the 32-byte group id, or the 16-byte channel id), the sealed capability the
+ledger holds (so another device can show and re-share the link) and, for a private
+channel subscriber link only, the 32-byte invite seed and its admission-key version
+(secret, left out of `Debug`). A `/g/` record is filed under `group_link_record_id`,
+the first 16 bytes of `BLAKE3-derive-key("lakko/sync/group-link-id/v1", ledger_id)`,
+so every device files one link under one key. Revocation stays final. Envelope version
+`0x04`, persisted state version 11; older ones are refused (flag day). A `/g/` record
+never answers a contact request (the verdict is `Dead`).
+
 ### 8. Changing the flag
 
 Only the owner changes it. Each direction is one signed `PUT /discovery/handle`,
@@ -745,7 +767,12 @@ needs no token.
   among its devices over the DeviceGroup and in the backup, and are never asked of the
   service: a request naming several write keys would link exactly what they keep apart.
   The registers are bounded to the channel's retained posts: a post past its 30 days takes
-  its entries with it.
+  its entries with it. Since phase B (2026-11-06) the reaction register also holds the account's
+  reactions on comments: its key is `(channel, post cursor, comment cursor or none, emoji)`,
+  three reactions a comment counted apart from the post, and a comment's entries go with
+  its post. The envelope (`lakko/sync/channel-reaction/v1`) is version `0x02`, a target
+  byte and a comment cursor after the post cursor; `0x01` is refused, and the persisted
+  state is version 12.
 
 **Who may write.** One anonymous token per added reaction and per comment, in contexts of
 their own (`channel-react`, `channel-comment`, ADR-0054), so the service learns the writer
@@ -793,6 +820,25 @@ post id, 32 of key, 16 of label): 640 KB at 10,000 reactions. A reader gets at m
 labels with a count, about 2 KB for a post, usually far less. A comment page at the cap is
 41 KB. Nothing a reader does grows with the number of reactions or comments on the post.
 
+**Phase B (2026-11-06): comment counts, reactions on comments, a deleted channel.**
+The counts read `GET /v1/channels/{id}/reactions?posts=` returns each post's comment count beside
+its labels, from a counter the service maintains in the same transaction as each
+comment add and delete (`channel_comment_counts`), never a `COUNT(*)`. A comment takes
+reactions the way a post does: `lakko_channels::CommentReactionKey` (HKDF info
+`lakko/channel/comment-reaction-key/v1`, labels over `post ‖ comment ‖ emoji`, so a
+comment label never equals a post label), a write key per (account, channel, post,
+comment, label) under `lakko/channel/comment-reaction-write-key/v1`, write-proof ops 5
+(add) and 6 (delete) whose subject is `comment_cursor ‖ label`, one `channel-react`
+token per add. Routes: `POST .../posts/{post}/comments/{comment}/reactions` (201, 200
+on a repeat; 404 `unknown-comment`), `DELETE .../comments/{comment}/reactions/{writer}/{label}`
+(204), and the batched `GET .../posts/{post}/comment-reactions?comments=` (at most 50
+cursors; `bad-comments` / `too-many-comments`). A deleted comment takes its reactions
+with it. The owner deletes a channel with `DELETE /v1/channels/{id}` (owner proof over
+an empty body, 204): the rows go and a tombstone stays (`channel_deleted`); from then
+on every route that names the channel answers `410 channel-deleted`, a repeat delete
+answers 204 without a proof, and a create of that id is refused with the same 410.
+Migration `0012`. The service still holds no key and reads no row.
+
 ### 14. Inviting people to a channel
 
 For the owner and admins, public and private, from one row, `Invite people`.
@@ -809,6 +855,12 @@ For the owner and admins, public and private, from one row, `Invite people`.
 - **By link.** The section 7 link, for public channels too: there it carries the read
   key and needs no invite key. `Copy link`, expiry, use limit, list and `Revoke` are the
   group's.
+
+- **A publisher's invitation (phase B, 2026-11-06).** The co-publisher link (preview
+  kind 2) now carries the name of the publisher who made it, under the display-name
+  rule (`compose_co_publisher_invite_capability(..., inviter_name)`), and the channel
+  invitation card opens kind 2 as well as kind 3, so `Add publisher` can send the card
+  in the one-to-one. A channel preview carries no member count.
 
 ### 15. Subscribers and admins
 
@@ -844,6 +896,24 @@ not proposed here.
 - `Remove publisher` revokes the appointment, removes the leaf and rotates. `DELETE
   .../copublishers/{pk}` exists and no client flow calls it; a member list on the
   PublisherGroup FFI is what it needs.
+
+**Removing a publisher and stepping down (2026-11-06, phase B; an invariant #3 change).**
+`PublisherGroup::remove_publisher(owner, account_key)` removes every leaf of that
+account in one commit, merged at once. Only the owner (the account whose seed derives
+the PublisherGroup id, `is_owned_by`) may call it, and the owner's own account key is
+refused. A co-publisher leaves with `PublisherGroup::step_down`: OpenMLS does not let a
+member commit its own removal, and a table-less group stores no proposals, so the
+step-down is an encrypted application message `lakko/publisher-step-down/v1\0 ‖ 0x01 ‖
+channel_id` (46 bytes) that the owner's device applies as `remove_publisher` of the
+account the MLS sender resolves to at receipt (C-68); the owner cannot step down.
+Either way the next epoch's channel seed is out of the removed person's reach (RFC 9420
+section 12.4), and the owner then rotates and reseals as after any membership change.
+Both rules are held by the owner's client: peers do not enforce them, the same limit
+this section states for adding. Property tests in `tests/publisher_group_removal.rs`:
+a removed publisher cannot derive the next epoch's seed, and after a step-down the
+owner rotates with the remaining publishers. `PublisherGroup::members()` lists the
+publishers with their account keys, which is the member list the `Publishers` block
+and `DELETE .../copublishers/{pk}` needed.
 
 The info blocks, in `lakko_ui_rules::info`:
 

@@ -214,6 +214,7 @@ struct LakkoApp: App {
             )
         )
         let sync = DeviceGroupSyncRepository()
+        GroupLinkRegister.sync = sync
         // ADR-0060 section 7 — a local change of the "who can find me"
         // setting or of a reach-key version goes to the account's other
         // devices over the DeviceGroup.
@@ -779,7 +780,7 @@ struct LakkoApp: App {
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
                     await deviceLinkResponder.check()
-                    try? await Task.sleep(nanoseconds: DeviceLinkResponderFlow.foregroundPollNanos)
+                    try? await Task.sleep(nanoseconds: deviceLinkResponder.pollNanos)
                 }
             }
             .sheet(isPresented: Binding(
@@ -1186,6 +1187,8 @@ enum TabRoute: Hashable {
     /// (`docs/ux/group-and-channel-privacy.md` section 5.1): the channel,
     /// subscribed at once and named by its record.
     case channelSubscribe(channelId: String, handle: String, name: String)
+    /// A channel's info, pushed over its conversation (section 12.1).
+    case channelInfo(channelId: String, foundHandle: String)
     /// The create menu's Create channel.
     case newChannel
     /// ADR-0028 OQ3 — the joiner side of a co-publisher link.
@@ -1312,6 +1315,9 @@ private final class SessionModels: ObservableObject {
         // that reset them.
         channelsState.currentKeyGeneration = services.authRepository.identitySecrets?.session.keyGeneration
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        channelPostSync.accountIdentitySeed = { [authRepository = services.authRepository] in
+            authRepository.identitySecrets?.accountIdentitySeed
+        }
         // G-50 — resume the channel PublisherGroup commits whose steps had not
         // all landed before the app was closed.
         if let seed = services.authRepository.identitySecrets?.accountIdentitySeed {
@@ -1355,6 +1361,9 @@ private final class SessionModels: ObservableObject {
         // ADR-0087 section 9 — a channel's end, in both directions.
         channels.onUnsubscribedHere = { [weak chatRepository] channelId in
             chatRepository?.noteChannelUnsubscribed(channelIdHex: channelId.lowercased())
+        }
+        channels.onRemovedHere = { [weak chatRepository] channelId, name in
+            chatRepository?.noteChannelRemoved(channelIdHex: channelId.lowercased(), name: name)
         }
         channels.onSubscribedHere = { [weak chatRepository] channelId in
             chatRepository?.noteChannelSubscribed(channelIdHex: channelId.lowercased())
@@ -1725,6 +1734,12 @@ private struct SessionRoot: View, Equatable {
             }
             .tag(SessionTab.settings)
         }
+        // UX group-and-channel-privacy 9.1 — "You are no longer in {name}."
+        // at the bottom of whatever screen is up, for 4 seconds.
+        .overlay(alignment: .bottom) {
+            MembershipEndToast(center: chatRepository.membershipEndNotices)
+                .animation(.easeOut(duration: 0.2), value: chatRepository.membershipEndNotices.shown)
+        }
         // Deep links: park on the current tab's stack when a slug arrives
         // (a tap while signed in), and pick up one already parked (a tap
         // while anonymous that the sign-in just completed).
@@ -1809,6 +1824,17 @@ private struct SessionRoot: View, Equatable {
                 channels: models.channelsState,
                 accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed })
         }
+        // ADR-0087 section 12 — the rotation, the public seed and the
+        // co-publisher journal read of every channel this device publishes,
+        // app-wide, so a channel rotates whether or not its owner opens it.
+        .task(id: account.accountIdB64) {
+            let loops = ChannelPublisherLoops.shared
+            loops.reset()
+            defer { loops.reset() }
+            await loops.runLoop(
+                channels: models.channelsState,
+                accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed })
+        }
         // A landing popped with the back gesture (not its own Done) drops the
         // parked slug, so the next tap of the same link opens it again; and a
         // chat popped from every stack releases its view model.
@@ -1889,6 +1915,22 @@ private struct SessionRoot: View, Equatable {
                 }
                 ReachCenter.shared.channelIdsProvider = { [channelsState] in
                     channelsState.channels.compactMap { CoPublisher.hexToData($0.id) }
+                }
+                // ADR-0087 section 14 — a channel invitation card in a chat:
+                // `Open` when this device holds the channel, else `Subscribe`.
+                ChannelInviteActions.shared.isHeld = { [channelsState] id in
+                    channelsState.channels.contains { $0.id == id }
+                        && (channelsState.subscriberKeysByChannel[id] != nil || channelsState.keysByChannel[id] != nil)
+                }
+                ChannelInviteActions.shared.subscribe = { channel in
+                    openChannelInvitation(channel, on: selectedTab)
+                }
+                // ADR-0087 section 15.2 — a publisher card's Accept joins in place.
+                CoPublisherAcceptance.shared.reset()
+                CoPublisherAcceptance.shared.state = channelsState
+                CoPublisherAcceptance.shared.seedProvider = { accountIdentitySeed }
+                CoPublisherAcceptance.shared.openChannel = { channelId in
+                    push(.channel(channelId: channelId), on: selectedTab)
                 }
                 ReachCenter.shared.contactsProvider = { [contactsRepository] in
                     contactsRepository.state.accepted.compactMap { contact in
@@ -2062,6 +2104,52 @@ private struct SessionRoot: View, Equatable {
         authRepository.identitySecrets?.accountIdentitySeed
     }
 
+    /// ADR-0087 sections 7.2 and 14 — `Subscribe` on a link page or an
+    /// invitation card: the channel opens subscribing with what the link
+    /// carried, or opens when this device already holds it.
+    private func openChannelInvitation(_ channel: ChannelLinkFacts, on tab: SessionTab) {
+        if ChannelInviteActions.shared.isHeld(channel.channelIdHex) {
+            push(.channel(channelId: channel.channelIdHex), on: tab)
+            return
+        }
+        switch channel.access {
+        case .public(let readKey):
+            FoundChannelReadKeys.put(channel.channelIdHex, readKey)
+        case .private(let inviteSeed, let admissionPublicKey, let admissionVersion):
+            PendingChannelInvites.put(channel.channelIdHex, .init(
+                inviteSeed: inviteSeed, admissionPublicKey: admissionPublicKey,
+                admissionVersion: admissionVersion))
+        }
+        push(.channelSubscribe(channelId: channel.channelIdHex, handle: "", name: channel.name), on: tab)
+    }
+
+    /// ADR-0087 section 12 — one channel in the conversation view.
+    @ViewBuilder
+    private func channelConversation(
+        channelId: String, seed: Data, tab: SessionTab,
+        handle: String = "", name: String = "", subscribe: Bool = false
+    ) -> some View {
+        ChannelConversationScreen(
+            channelId: channelId,
+            state: channelsState,
+            client: ChannelsClient(),
+            accountIdentitySeed: seed,
+            foundHandle: handle,
+            foundName: name,
+            foundReadKey: FoundChannelReadKeys.take(channelId),
+            subscribeOnOpen: subscribe,
+            onPostRead: { [feedReading = models.feedReading] in
+                feedReading.advanceChannelRead($0, cursor: $1)
+            },
+            onOpenInfo: { push(.channelInfo(channelId: channelId, foundHandle: handle), on: tab) },
+            // UX group-and-channel-privacy section 9 — after the end: Chats.
+            onEndedHere: {
+                path(for: tab).wrappedValue = []
+                if tab != .chats { selectedTab = .chats }
+            })
+        .toolbar(.hidden, for: .tabBar)
+    }
+
     @ViewBuilder
     private func channelSeedMissing(_ title: String) -> some View {
         VStack(spacing: 16) {
@@ -2176,52 +2264,53 @@ private struct SessionRoot: View, Equatable {
                 }
             )
         case .channel(let channelId):
-            // ADR-0010 — a channel opened from the merged conversation list.
-            // Pushed on the Chats stack: Channels is no longer a destination,
-            // so the screens it used to root now live under the list that holds
-            // the row.
+            // ADR-0087 section 12 — a channel opens where a group opens, in
+            // the same conversation view, pushed on the Chats stack.
             if let seed = accountIdentitySeed {
-                ChannelDetailScreen(
-                    channelId: channelId,
-                    state: channelsState,
-                    client: ChannelsClient(),
-                    accountIdentitySeed: seed,
-                    onPostRead: { [feedReading = models.feedReading] in
-                        feedReading.advanceChannelRead($0, cursor: $1)
-                    })
+                channelConversation(channelId: channelId, seed: seed, tab: tab)
             } else {
                 channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .channelSubscribe(let channelId, let handle, let name):
             if let seed = accountIdentitySeed {
-                ChannelDetailScreen(
-                    channelId: channelId,
-                    state: channelsState,
-                    client: ChannelsClient(),
-                    accountIdentitySeed: seed,
-                    foundHandle: handle,
-                    foundName: name,
-                    subscribeOnOpen: true,
-                    onPostRead: { [feedReading = models.feedReading] in
-                        feedReading.advanceChannelRead($0, cursor: $1)
-                    })
+                channelConversation(
+                    channelId: channelId, seed: seed, tab: tab, handle: handle, name: name, subscribe: true)
             } else {
                 channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .channelFound(let channelId, let handle):
             // A channel the ONE network lookup resolved by `@handle`. This
-            // device may hold no seed for it yet, so the reader screen offers
-            // Subscribe.
+            // device may hold no seed for it yet: Subscribe shows.
             if let seed = accountIdentitySeed {
-                ChannelDetailScreen(
+                channelConversation(channelId: channelId, seed: seed, tab: tab, handle: handle)
+            } else {
+                channelSeedMissing(l10n.t("channels.fallback_name"))
+            }
+        case .channelInfo(let channelId, let handle):
+            if let seed = accountIdentitySeed {
+                ChannelInfoSheet(
                     channelId: channelId,
                     state: channelsState,
                     client: ChannelsClient(),
                     accountIdentitySeed: seed,
                     foundHandle: handle,
-                    onPostRead: { [feedReading = models.feedReading] in
-                        feedReading.advanceChannelRead($0, cursor: $1)
+                    contacts: contactsVM,
+                    chat: chatRepository,
+                    onUnsubscribed: {
+                        // Section 9.5 — the row and its posts are gone: the
+                        // info and the conversation under it both go.
+                        let binding = path(for: tab)
+                        binding.wrappedValue = binding.wrappedValue.filter {
+                            switch $0 {
+                            case .channel(let id), .channelInfo(let id, _), .channelFound(let id, _),
+                                 .channelSubscribe(let id, _, _):
+                                return id != channelId
+                            default:
+                                return true
+                            }
+                        }
                     })
+                .toolbar(.hidden, for: .tabBar)
             } else {
                 channelSeedMissing(l10n.t("channels.fallback_name"))
             }
@@ -2234,7 +2323,9 @@ private struct SessionRoot: View, Equatable {
                     sessionTokenProvider: {
                         authRepository.identitySecrets?.sessionToken
                     },
-                    onJoinAsCoPublisher: { push(.joinCoPublisher, on: tab) })
+                    onCreated: { channelId in
+                        replaceTop(route, with: .channel(channelId: channelId), in: tab)
+                    })
             } else {
                 channelSeedMissing(l10n.t("channels.new.title"))
             }
@@ -2453,6 +2544,26 @@ private struct SessionRoot: View, Equatable {
                 onDone: { pop(route, from: tab) },
                 onOpenChat: { hex in
                     replaceTop(route, with: .chat(groupIdHex: hex), in: tab)
+                },
+                // ADR-0087 section 7.2 — a channel's link page: Subscribe
+                // opens the channel subscribing, with what the link carried.
+                onSubscribeChannel: { channel in
+                    switch channel.access {
+                    case .public(let readKey):
+                        FoundChannelReadKeys.put(channel.channelIdHex, readKey)
+                    case .private(let inviteSeed, let admissionPublicKey, let admissionVersion):
+                        PendingChannelInvites.put(channel.channelIdHex, .init(
+                            inviteSeed: inviteSeed, admissionPublicKey: admissionPublicKey,
+                            admissionVersion: admissionVersion))
+                    }
+                    if channelsState.channels.contains(where: { $0.id == channel.channelIdHex }),
+                       channelsState.subscriberKeysByChannel[channel.channelIdHex] != nil
+                        || channelsState.keysByChannel[channel.channelIdHex] != nil {
+                        replaceTop(route, with: .channel(channelId: channel.channelIdHex), in: tab)
+                    } else {
+                        replaceTop(route, with: .channelSubscribe(
+                            channelId: channel.channelIdHex, handle: "", name: channel.name), in: tab)
+                    }
                 }
             )
         case .callJoinLanding(let slug):

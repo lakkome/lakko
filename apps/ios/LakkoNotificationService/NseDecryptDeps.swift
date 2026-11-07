@@ -383,6 +383,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                 isGroupPhotoEnvelope(plaintext: bytes) || isGroupReactionsEnvelope(plaintext: bytes)
                     || isConversationHandleEnvelope(plaintext: bytes) || isKnockSeedEnvelope(plaintext: bytes)
                     || isAdmissionSeedEnvelope(plaintext: bytes)
+                    // ADR-0087 phase B — a channel read key and a publisher's
+                    // step-down ride PublisherGroup journals; never shown.
+                    || isChannelReadKeyEnvelope(plaintext: bytes)
+                    || isPublisherStepDownEnvelope(plaintext: bytes)
             },
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
             // group: a yes / no from the slim FFI, never opened here.

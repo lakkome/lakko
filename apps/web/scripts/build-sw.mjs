@@ -58,7 +58,7 @@ const ROOT_ASSETS = ["/", "/index.html", "/manifest.webmanifest"];
 
 /** Files we never count toward the precache (dev-aid / SW
  *  surface itself). */
-const EXCLUDE_RE = /\.map$|^sw\.js$|^manifest\.webmanifest$/;
+const EXCLUDE_RE = /\.map$|^sw\.js$|^manifest\.webmanifest$|^robots\.txt$/;
 
 function walk(dir) {
   const out = [];
@@ -121,6 +121,10 @@ function main() {
     if (rel === "sw-wasm" || rel.startsWith("sw-wasm/") || rel.startsWith("sw-wasm\\")) {
       continue;
     }
+    // Link preview pages and their picture (scripts/link-previews.mjs) are
+    // for the fetchers of other apps, never for the app offline.
+    if (rel.startsWith("link-preview/") || rel.startsWith("link-preview\\")) continue;
+    if (/^assets[\\/]link-preview-[0-9a-f]+\.png$/.test(rel)) continue;
     if (rel === "index.html") continue; // already covered by ROOT_ASSETS
     precache.add("/" + rel);
   }

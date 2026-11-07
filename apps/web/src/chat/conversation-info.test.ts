@@ -46,6 +46,7 @@ import {
   infoOpening,
   infoTargetForKind,
   personInfoSections,
+  type ChannelInfoCapabilities,
   type ConversationInfoInput,
   type InfoSection,
 } from "./conversation-info";
@@ -146,18 +147,11 @@ describe("the vocabulary that crosses the boundary", () => {
       );
       expect(conversationInfoSectionsFor(rules, input)).toHaveLength(raw.length);
     }
-    for (let bits = 0; bits < 8; bits += 1) {
-      const caps = {
-        isPublisher: (bits & 1) !== 0,
-        isSubscriber: (bits & 2) !== 0,
-        subscriberCountKnown: (bits & 4) !== 0,
-      };
+    for (const caps of everyChannelInput()) {
+      const role = caps.role === "owner" ? 0 : caps.role === "publisher" ? 1 : 2;
+      const Caps = wasm.ChannelInfoCapabilities as unknown as new (...a: unknown[]) => never;
       const raw = wasm.channelInfoSections(
-        new wasm.ChannelInfoCapabilities(
-          caps.isPublisher,
-          caps.isSubscriber,
-          caps.subscriberCountKnown,
-        ),
+        new Caps(role, caps.hasHandle, caps.hasOtherPublishers, caps.membersOfGroupsAndChannelsOn),
       );
       expect(channelInfoSections(rules, caps)).toHaveLength(raw.length);
     }
@@ -178,12 +172,7 @@ describe("the vocabulary that crosses the boundary", () => {
     for (const input of everyGroupInput()) {
       for (const s of conversationInfoSectionsFor(rules, input)) produced.add(s);
     }
-    for (let bits = 0; bits < 8; bits += 1) {
-      const caps = {
-        isPublisher: (bits & 1) !== 0,
-        isSubscriber: (bits & 2) !== 0,
-        subscriberCountKnown: (bits & 4) !== 0,
-      };
+    for (const caps of everyChannelInput()) {
       for (const s of channelInfoSections(rules, caps)) produced.add(s);
     }
     const branchedOn: readonly InfoSection[] = [
@@ -204,11 +193,13 @@ describe("the vocabulary that crosses the boundary", () => {
       "handle",
       "group-type",
       "reactions",
-      // routes/Channels.tsx
-      "subscriber-count",
-      "manage-channel",
+      // channels/ChannelInfo.tsx
+      "channel-description",
+      "invite-people",
+      "subscribers",
+      "admins",
+      "members-can-find-me",
       "unsubscribe",
-      "channel-members",
     ];
     for (const name of branchedOn) expect([...produced]).toContain(name);
   });
@@ -360,79 +351,63 @@ describe("conversationInfoSectionsFor (ADR-0087 section 18)", () => {
   });
 });
 
+function everyChannelInput(): ChannelInfoCapabilities[] {
+  const out: ChannelInfoCapabilities[] = [];
+  for (const role of ["owner", "publisher", "subscriber"] as const) {
+    for (let bits = 0; bits < 8; bits += 1) {
+      out.push({
+        role,
+        hasHandle: (bits & 1) !== 0,
+        hasOtherPublishers: (bits & 2) !== 0,
+        membersOfGroupsAndChannelsOn: (bits & 4) !== 0,
+      });
+    }
+  }
+  return out;
+}
+
 describe("channelInfoSections", () => {
+  const caps = (
+    role: "owner" | "publisher" | "subscriber",
+    extra: Partial<{ hasHandle: boolean; hasOtherPublishers: boolean; membersOfGroupsAndChannelsOn: boolean }> = {},
+  ): ChannelInfoCapabilities => ({
+    role,
+    hasHandle: true,
+    hasOtherPublishers: false,
+    membersOfGroupsAndChannelsOn: true,
+    ...extra,
+  });
+
   it("renders nothing until the shared rules have loaded", () => {
-    expect(
-      channelInfoSections(null, {
-        isPublisher: true,
-        isSubscriber: false,
-        subscriberCountKnown: true,
-      }),
-    ).toEqual([]);
+    expect(channelInfoSections(null, caps("owner"))).toEqual([]);
   });
 
-  it("always identifies the channel", () => {
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: false,
-        isSubscriber: false,
-        subscriberCountKnown: false,
-      }),
-    ).toEqual(["channel-handle", "channel-description"]);
+  it("always identifies the channel and lists its subscribers", () => {
+    for (const role of ["owner", "publisher", "subscriber"] as const) {
+      const s = channelInfoSections(rules, caps(role));
+      expect(s).toContain("channel-description");
+      expect(s).toContain("subscribers");
+    }
   });
 
-  it("a publisher reaches the screen it already has, a subscriber the way out", () => {
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: true,
-        isSubscriber: false,
-        subscriberCountKnown: false,
-      }),
-    ).toContain("manage-channel");
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: false,
-        isSubscriber: true,
-        subscriberCountKnown: false,
-      }),
-    ).toContain("unsubscribe");
+  it("the owner and publishers invite; only the owner changes the type", () => {
+    expect(channelInfoSections(rules, caps("publisher"))).toContain("invite-people");
+    expect(channelInfoSections(rules, caps("publisher"))).not.toContain("group-type");
+    expect(channelInfoSections(rules, caps("owner"))).toContain("group-type");
+    expect(channelInfoSections(rules, caps("subscriber"))).not.toContain("invite-people");
   });
 
-  it("a publisher is never offered an unsubscribe that would end nothing", () => {
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: true,
-        isSubscriber: true,
-        subscriberCountKnown: true,
-      }),
-    ).not.toContain("unsubscribe");
-  });
-
-  it("offers a subscriber count only where this device has one", () => {
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: true,
-        isSubscriber: false,
-        subscriberCountKnown: true,
-      }),
-    ).toContain("subscriber-count");
-    expect(
-      channelInfoSections(rules, {
-        isPublisher: true,
-        isSubscriber: false,
-        subscriberCountKnown: false,
-      }),
-    ).not.toContain("subscriber-count");
+  it("a subscriber gets the way out, a publisher none", () => {
+    expect(channelInfoSections(rules, caps("subscriber"))).toContain("unsubscribe");
+    expect(channelInfoSections(rules, caps("publisher"))).not.toContain("unsubscribe");
   });
 
   it("never shows anything that only makes sense for a group", () => {
-    for (let bits = 0; bits < 8; bits += 1) {
-      const sections = channelInfoSections(rules, {
-        isPublisher: (bits & 1) !== 0,
-        isSubscriber: (bits & 2) !== 0,
-        subscriberCountKnown: (bits & 4) !== 0,
-      });
-      expect(holdsGroupOnlySection(sections)).toBe(false);
+    for (const c of everyChannelInput()) {
+      const s = channelInfoSections(rules, c);
+      for (const g of ["group-name", "members", "add-member", "roles", "transfer-ownership", "leave-group"] as const) {
+        expect(s).not.toContain(g);
+      }
     }
   });
 });

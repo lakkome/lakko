@@ -59,7 +59,7 @@ use lakko_ui_rules::info::{
     conversation_info_sections as rust_conversation_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
-    ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    ChannelInfoCapabilities as RustChannelInfoCapabilities, ChannelRole as RustChannelRole,
     ConversationInfoCapabilities as RustConversationInfoCapabilities,
     ConversationInfoKind as RustConversationInfoKind, ConversationRole as RustConversationRole,
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoSection as RustInfoSection,
@@ -360,19 +360,22 @@ pub enum InfoSection {
     TransferOwnership,
     /// Leave the group.
     LeaveGroup,
-    /// The `@handle` a channel is found by.
+    /// The `@handle` a channel is found by. Produced by no rule since the
+    /// ADR-0087 channel info, which uses [`Self::Handle`].
     ChannelHandle,
     /// What the channel says it is.
     ChannelDescription,
-    /// How many devices read it. Only a publisher can know.
+    /// How many devices read it. Produced by no rule since the ADR-0087
+    /// channel info: the number is the [`Self::Subscribers`] row's.
     SubscriberCount,
-    /// The publisher's own screen.
+    /// The publisher's own screen. Produced by no rule: the Manage page is
+    /// gone (ADR-0087 section 12).
     ManageChannel,
     /// Stop following a channel.
     Unsubscribe,
     /// The channel's member list, for its readers (ADR-0060 section 3,
-    /// UX `who-can-find-me.md` 6.3). Appended last: uniffi decodes by
-    /// ordinal.
+    /// UX `who-can-find-me.md` 6.3). Produced by no rule since the ADR-0087
+    /// channel info: the list opens from [`Self::Subscribers`].
     ChannelMembers,
     /// Put a person the viewer removed back on the contact list: local,
     /// sends nothing (UX `conversation-info.md` 2.1). Appended last: uniffi
@@ -383,7 +386,8 @@ pub enum InfoSection {
     /// ordinal.
     TheirContactsCanFindMe,
     /// ADR-0087: a group's or channel's `@name` row. The blocks from here on
-    /// are produced only by [`conversation_info_sections`]. Appended last.
+    /// are produced by [`conversation_info_sections`] and
+    /// [`channel_info_sections`]. Appended last.
     Handle,
     /// ADR-0087: `Who can join` / `Who can subscribe`. Owner only.
     GroupType,
@@ -399,6 +403,11 @@ pub enum InfoSection {
     /// conversation takes (a group's owner and admins, a channel's owner).
     /// Appended last: uniffi lowers this enum by ordinal.
     Reactions,
+    /// `Members can find me` on a channel's info (UX
+    /// `group-and-channel-privacy.md` 12.1, `who-can-find-me.md` section 5),
+    /// while Members of my groups and channels is on. Appended last: uniffi
+    /// lowers this enum by ordinal.
+    MembersCanFindMe,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -433,6 +442,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::Subscribers => Self::Subscribers,
             RustInfoSection::Admins => Self::Admins,
             RustInfoSection::Reactions => Self::Reactions,
+            RustInfoSection::MembersCanFindMe => Self::MembersCanFindMe,
         }
     }
 }
@@ -496,23 +506,48 @@ impl From<GroupInfoCapabilities> for RustGroupInfoCapabilities {
     }
 }
 
-/// What the viewer is to a channel.
+/// What the viewer is to a channel (ADR-0087 section 15): one role, never
+/// two. A publisher reads from its publisher keys, so it is not also a
+/// subscriber here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelRole {
+    /// The channel's owner.
+    Owner,
+    /// A publisher (a co-publisher in the protocol).
+    Publisher,
+    /// Reads the channel.
+    Subscriber,
+}
+
+/// What the viewer is to a channel and what its info depends on (UX
+/// `group-and-channel-privacy.md` 12.1). Every field is the client's
+/// reading. Public or private changes no block of this screen, so it is not
+/// an input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelInfoCapabilities {
-    /// This device holds the publisher keys.
-    pub is_publisher: bool,
-    /// This device reads the channel as a subscriber.
-    pub is_subscriber: bool,
-    /// This device has a subscriber count. Only a publisher ever does.
-    pub subscriber_count_known: bool,
+    /// The viewer's role.
+    pub role: ChannelRole,
+    /// The channel holds an `@name` (a lapsed one shows no row).
+    pub has_handle: bool,
+    /// A publisher besides the owner remains: the owner deletes the channel
+    /// only when none does.
+    pub has_other_publishers: bool,
+    /// Members of my groups and channels is on in "Who can find me"
+    /// (`who-can-find-me.md` section 5), under either form.
+    pub members_of_groups_and_channels_on: bool,
 }
 
 impl From<ChannelInfoCapabilities> for RustChannelInfoCapabilities {
     fn from(c: ChannelInfoCapabilities) -> Self {
         Self {
-            is_publisher: c.is_publisher,
-            is_subscriber: c.is_subscriber,
-            subscriber_count_known: c.subscriber_count_known,
+            role: match c.role {
+                ChannelRole::Owner => RustChannelRole::Owner,
+                ChannelRole::Publisher => RustChannelRole::Publisher,
+                ChannelRole::Subscriber => RustChannelRole::Subscriber,
+            },
+            has_handle: c.has_handle,
+            has_other_publishers: c.has_other_publishers,
+            members_of_groups_and_channels_on: c.members_of_groups_and_channels_on,
         }
     }
 }
@@ -548,7 +583,8 @@ pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
         .collect()
 }
 
-/// What a channel's info holds — section 2.3.
+/// What a channel's info holds — UX `group-and-channel-privacy.md` 12.1:
+/// header, actions and detail, exit block, in a group's order.
 #[uniffi::export]
 #[must_use]
 pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> {
@@ -1841,8 +1877,9 @@ impl From<ConversationInfoCapabilities> for RustConversationInfoCapabilities {
 
 /// What a group's or channel's info holds under ADR-0087 (UX
 /// `group-and-channel-privacy.md` sections 4, 10, 11, 12.1 and 15). Replaces
-/// [`group_info_sections`] and [`channel_info_sections`] once the clients
-/// move to it.
+/// [`group_info_sections`] once the clients move to it; a channel is
+/// answered by [`channel_info_sections`], without the "Who can find me"
+/// switch this record does not carry.
 #[uniffi::export]
 #[must_use]
 pub fn conversation_info_sections(caps: ConversationInfoCapabilities) -> Vec<InfoSection> {
@@ -2177,18 +2214,50 @@ mod tests {
             contacts_of_contacts_on: true,
         })
         .contains(&InfoSection::TheirContactsCanFindMe));
-        assert!(channel_info_sections(ChannelInfoCapabilities {
-            is_publisher: false,
-            is_subscriber: true,
-            subscriber_count_known: false,
-        })
-        .contains(&InfoSection::Unsubscribe));
-        assert!(channel_info_sections(ChannelInfoCapabilities {
-            is_publisher: true,
-            is_subscriber: false,
-            subscriber_count_known: true,
-        })
-        .contains(&InfoSection::ChannelMembers));
+        assert_eq!(
+            channel_info_sections(ChannelInfoCapabilities {
+                role: ChannelRole::Subscriber,
+                has_handle: true,
+                has_other_publishers: false,
+                members_of_groups_and_channels_on: true,
+            }),
+            vec![
+                InfoSection::Handle,
+                InfoSection::ChannelDescription,
+                InfoSection::Subscribers,
+                InfoSection::MembersCanFindMe,
+                InfoSection::Unsubscribe,
+            ]
+        );
+        assert_eq!(
+            channel_info_sections(ChannelInfoCapabilities {
+                role: ChannelRole::Owner,
+                has_handle: false,
+                has_other_publishers: false,
+                members_of_groups_and_channels_on: false,
+            }),
+            vec![
+                InfoSection::ChannelDescription,
+                InfoSection::RenameGroup,
+                InfoSection::InvitePeople,
+                InfoSection::InviteLink,
+                InfoSection::Subscribers,
+                InfoSection::Admins,
+                InfoSection::Reactions,
+                InfoSection::GroupType,
+                InfoSection::DeleteGroup,
+            ]
+        );
+        let publisher = channel_info_sections(ChannelInfoCapabilities {
+            role: ChannelRole::Publisher,
+            has_handle: true,
+            has_other_publishers: true,
+            members_of_groups_and_channels_on: false,
+        });
+        assert!(publisher.contains(&InfoSection::InvitePeople));
+        assert!(!publisher.contains(&InfoSection::ManageChannel));
+        assert!(!publisher.contains(&InfoSection::Unsubscribe));
+        assert!(!publisher.contains(&InfoSection::GroupType));
         assert_eq!(info_target(ConversationKind::Chat), InfoTarget::Person);
     }
 

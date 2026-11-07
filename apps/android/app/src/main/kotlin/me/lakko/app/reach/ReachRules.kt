@@ -139,6 +139,9 @@ public data class ReachInputs(
     val contactsOfContacts: Boolean,
     val links: Map<String, Long?>,
     val replies: Map<String, Long>,
+    /** ADR-0060 section 1 — the `contact` versions this device knows to be
+     *  registered on the mailbox: a retired one stays only while it is. */
+    val registeredContactVersions: Set<Int> = emptySet(),
 )
 
 /**
@@ -152,6 +155,18 @@ public data class ReachInputs(
  * on; a link key per live link; a reply key per waiting request. An expired
  * link or reply contributes nothing, so the diff removes its key.
  */
+/** ADR-0060 section 1 — retired `contact` versions kept registered; the
+ *  core's `retiredContactVersionsKept()` (8), here so the pure rules need no
+ *  native library. */
+public const val RETIRED_CONTACT_VERSIONS_KEPT: Int = 8
+
+/** The `contact` versions registered when [current] is the current one:
+ *  [current] first, then each retired one down to
+ *  [RETIRED_CONTACT_VERSIONS_KEPT] below it, never below 0 (the core's
+ *  `contactKeyVersions`). */
+public fun contactKeyVersionWindow(current: Int): List<Int> =
+    (maxOf(0, current - RETIRED_CONTACT_VERSIONS_KEPT)..current).reversed().toList()
+
 public fun desiredReachKeys(inputs: ReachInputs, nowMs: Long): List<DesiredReachKey> {
     fun version(slot: ReachSlot): Int = inputs.versions[slot] ?: 0
     val out = ArrayList<DesiredReachKey>()
@@ -159,7 +174,17 @@ public fun desiredReachKeys(inputs: ReachInputs, nowMs: Long): List<DesiredReach
         val slot = ReachSlot(kind, scopeHex)
         out += DesiredReachKey(slot, version(slot), expiresAtMs)
     }
-    add(ReachKind.CONTACT, "", null)
+    // ADR-0060 section 1 (2026-11-06) — the current `contact` key, and each
+    // retired one in the window that is STILL registered (no expiry): a
+    // contact who has not yet received the new grant can still write; the
+    // receiving device decides. A key rotated away is never registered again,
+    // so a retired version that is not registered stays off (a restore at v1
+    // never brings v0 back); the window only bounds removal.
+    val contactSlot = ReachSlot(ReachKind.CONTACT, "")
+    val currentContact = version(contactSlot)
+    for (v in contactKeyVersionWindow(currentContact)) {
+        if (v == currentContact || v in inputs.registeredContactVersions) out += DesiredReachKey(contactSlot, v, null)
+    }
     if (inputs.contactsOfContacts) add(ReachKind.FOF, "", null)
     if (inputs.joinedGroups.isNotEmpty()) add(ReachKind.MEMBER, "", null)
     if (inputs.visibleGroups.any { it in inputs.joinedGroups }) add(ReachKind.GROUP, "", null)

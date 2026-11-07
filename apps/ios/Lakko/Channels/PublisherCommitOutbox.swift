@@ -45,6 +45,10 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case approve
         case rotation
+        /// ADR-0087 section 15 (phase B) — the owner removes a publisher (or
+        /// applies its step-down): every leaf of the account in one commit.
+        /// `joinerKeyB64` holds the removed account key.
+        case removal
     }
 
     /// The steps of an entry, in the order they run.
@@ -53,6 +57,8 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         case welcome
         case reseal
         case appoint
+        /// Removal: revoke the removed publisher's appointment.
+        case unappoint
     }
 
     /// Random hex id.
@@ -124,6 +130,7 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         switch kind {
         case .approve: return [.journal, .welcome, .reseal, .appoint]
         case .rotation: return [.journal, .reseal]
+        case .removal: return [.journal, .unappoint, .reseal]
         }
     }
 
@@ -177,6 +184,7 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         }
         guard isHex(id, 32), isHex(channelIdHex, 32), isHex(groupIdHex, 64) else { return false }
         if kind == .approve, commitB64 == nil || welcomeB64 == nil || joinerKeyB64 == nil { return false }
+        if kind == .removal, commitB64 == nil || joinerKeyB64 == nil { return false }
         return true
     }
 }
@@ -202,6 +210,8 @@ public struct PublisherCommitPorts {
     public var reseal: @MainActor (_ targetEpoch: UInt32) async throws -> Void
     /// Appoint the joiner's co-publisher key. Never fails the entry.
     public var appoint: @MainActor (_ joinerKey: Data) async throws -> Void
+    /// Revoke a removed publisher's appointment. Never fails the entry.
+    public var unappoint: @MainActor (_ accountKey: Data) async throws -> Void
     /// Durably record `entry` (a step landed).
     public var save: @MainActor (_ entry: PublisherCommitEntry) throws -> Void
     /// The entry is finished: drop it.
@@ -214,6 +224,7 @@ public struct PublisherCommitPorts {
         serverEpoch: @escaping @MainActor () async throws -> UInt32,
         reseal: @escaping @MainActor (UInt32) async throws -> Void,
         appoint: @escaping @MainActor (Data) async throws -> Void,
+        unappoint: @escaping @MainActor (Data) async throws -> Void = { _ in },
         save: @escaping @MainActor (PublisherCommitEntry) throws -> Void,
         finish: @escaping @MainActor (PublisherCommitEntry) -> Void
     ) {
@@ -223,6 +234,7 @@ public struct PublisherCommitPorts {
         self.serverEpoch = serverEpoch
         self.reseal = reseal
         self.appoint = appoint
+        self.unappoint = unappoint
         self.save = save
         self.finish = finish
     }
@@ -285,6 +297,16 @@ public enum PublisherCommitRunner {
                         // An appointment is retried by the next co-publisher
                         // open; it never holds the entry.
                         NSLog("ADR-0059: appointing the co-publisher key after an approve failed")
+                    }
+                }
+            case .unappoint:
+                if let removed = current.joinerKeyB64.flatMap({ Data(base64Encoded: $0) }) {
+                    do {
+                        try await ports.unappoint(removed)
+                    } catch {
+                        // The service's key list is the posting gate; the
+                        // removal itself already took the person's seed.
+                        NSLog("ADR-0087: revoking a removed publisher's appointment failed")
                     }
                 }
             }

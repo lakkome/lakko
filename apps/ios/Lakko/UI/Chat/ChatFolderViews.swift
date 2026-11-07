@@ -339,7 +339,7 @@ struct FolderEditorScreen: View {
         ForEach(draft[keyPath: keyPath], id: \.self) { ref in
             if let row = byId[ChatFolders.rowId(ref)] {
                 HStack(spacing: 10) {
-                    InitialsAvatar(name: row.title, identity: row.id, size: 28)
+                    InitialsAvatar(name: row.title, identity: row.tintIdentity, size: 28)
                     Text(row.title)
                         .foregroundStyle(Color.lakkoText)
                         .lineLimit(1)

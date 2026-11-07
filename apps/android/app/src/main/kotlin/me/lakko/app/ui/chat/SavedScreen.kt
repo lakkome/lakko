@@ -76,6 +76,10 @@ public fun SavedScreen(
     onBack: () -> Unit,
     /** Open [conversationHex] at [messageId]. */
     onOpenMessage: (conversationHex: String, messageId: Long) -> Unit,
+    /** ADR-0087 UX 12 — a saved channel post: the channel's name, by id
+     *  (hex), and opening the channel. */
+    channelTitle: (channelIdHex: String) -> String? = { null },
+    onOpenChannel: ((channelIdHex: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -125,8 +129,13 @@ public fun SavedScreen(
                     val groupHex = remember(row.conversationHex, chatState) {
                         repository.conversationHolding(row.conversationHex)?.groupIdHex ?: row.conversationHex
                     }
+                    val isChannel = row.conversation.kind == uniffi.lakko_ffi_uniffi.FolderConversationKind.CHANNEL
                     val title = remember(groupHex, chatState) {
-                        conversationTitle(context, repository, directory, groupHex)
+                        if (isChannel) {
+                            channelTitle(row.conversationHex) ?: row.author
+                        } else {
+                            conversationTitle(context, repository, directory, groupHex)
+                        }
                     }
                     SavedRowView(
                         row = row,
@@ -134,7 +143,13 @@ public fun SavedScreen(
                         hub = hub,
                         // The jump names the row as the timeline shows it (an
                         // older segment's row has its own local id).
-                        onOpen = { row.held?.let { onOpenMessage(groupHex, it.messageId) } },
+                        onOpen = {
+                            if (isChannel) {
+                                onOpenChannel?.invoke(row.conversationHex)
+                            } else {
+                                row.held?.let { onOpenMessage(groupHex, it.messageId) }
+                            }
+                        },
                         onRemove = {
                             scope.launch {
                                 error = false

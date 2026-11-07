@@ -229,6 +229,8 @@ private data class StoredChannel(
     val sharedTopic: Int = 0,
     val sharedLanguage: String = "",
     val sharedListed: Boolean = false,
+    /** ADR-0087 section 18.2 — the newest record's plaintext; absent on older rows. */
+    val sharedRecordB64: String = "",
 )
 
 @Serializable
@@ -264,6 +266,7 @@ internal fun encodeChannels(channels: List<ChannelHandle>): String =
                 sharedTopic = it.sharedTopic,
                 sharedLanguage = it.sharedLanguage,
                 sharedListed = it.sharedListed,
+                sharedRecordB64 = it.sharedRecordB64,
             )
         },
     )
@@ -289,6 +292,7 @@ internal fun decodeChannels(raw: String): List<ChannelHandle>? =
                 sharedTopic = s.sharedTopic.takeIf { it in 0..255 } ?: 0,
                 sharedLanguage = s.sharedLanguage.takeIf { LANGUAGE_OR_EMPTY.matches(it) } ?: "",
                 sharedListed = s.sharedListed,
+                sharedRecordB64 = s.sharedRecordB64,
             )
         }
     } catch (_: Exception) {

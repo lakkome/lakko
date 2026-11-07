@@ -37,7 +37,7 @@ incremental.
 | Databases | `lakko_test_{auth,ds,discovery,push_gw,channels}`, user `lakko_test` |
 | Blobs | `/var/lib/lakko-test/blobs` |
 | Web client | `/var/www/lakko-test-web` |
-| nginx | `/etc/nginx/sites-available/lakko-test` from `nginx/lakko-test.conf` |
+| nginx | `/etc/nginx/sites-available/lakko-test` from `nginx/lakko-test.conf`; `/etc/nginx/snippets/lakko-test-security-headers.inc` from `nginx/lakko-test-security-headers.inc` |
 | Ports | services on `127.0.0.1:8081-8086,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
 
 Logs: `journalctl -u lakko-test-<service>`.
@@ -76,7 +76,9 @@ Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed b
    ```
    Omit `TURN_URIS` when the server has no coturn; auth then answers 503 on the TURN route.
 3. nginx: copy `infra/nginx/sites-available/lakko-proxy-headers.inc` to
-   `/etc/nginx/snippets/lakko-test-proxy-headers.inc`, install `nginx/lakko-test.conf` as
+   `/etc/nginx/snippets/lakko-test-proxy-headers.inc` and
+   `nginx/lakko-test-security-headers.inc` to
+   `/etc/nginx/snippets/lakko-test-security-headers.inc`, install `nginx/lakko-test.conf` as
    `/etc/nginx/sites-available/lakko-test` with the TLS server block commented out, enable
    it, issue the certificate with
    `certbot certonly --webroot -w /var/www/certbot -d test.lakko.me`, restore the TLS block,

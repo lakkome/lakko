@@ -361,13 +361,9 @@ struct LinkQrSheet: View {
         NavigationStack {
             VStack(spacing: 20) {
                 Spacer(minLength: 0)
-                // A light quiet zone around the code so a camera reads it in
-                // dark mode too.
-                QrTextImageView(text: url, size: 260)
-                    .padding(16)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .accessibilityLabel(l10n.t("common.qr_code"))
+                // The branded code draws its own white card and quiet zone,
+                // so a camera reads it in dark mode too.
+                QrTextImageView(text: url, size: 264)
                 Text(l10n.t("invite.links.qr_hint"))
                     .font(.callout)
                     .foregroundStyle(Color.lakkoTextMuted)

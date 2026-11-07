@@ -334,3 +334,10 @@ path = "fuzz_targets/admission_seed_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_read_key_decode"
+path = "fuzz_targets/channel_read_key_decode.rs"
+test = false
+doc = false
+bench = false

@@ -118,6 +118,13 @@ function blobIdHex(blobId: Uint8Array): string {
   return out;
 }
 
+/** ADR-0087 section 13: the upload header naming a blob's own idle life. */
+export const BLOB_IDLE_DAYS_HEADER = "x-lakko-blob-idle-days";
+
+/** ADR-0087 section 13: a channel file lives 45 days without a read (30 days
+ *  of posts and 15 of margin, chosen in the ADR, not measured). */
+export const CHANNEL_FILE_IDLE_DAYS = 45;
+
 export class StorageClient {
   /** Bearer token attached to per-account backup requests. Set
    *  via [`setSessionToken`] post-construction. `null` is OK for
@@ -126,7 +133,13 @@ export class StorageClient {
    *  the server. */
   private sessionToken: string | null = null;
 
-  constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+  constructor(
+    public readonly baseUrl: string = DEFAULT_BASE_URL,
+    /** ADR-0087 section 13: the idle life an upload asks for, in days
+     *  (`x-lakko-blob-idle-days`, 1..=255); absent = the server's default.
+     *  A channel post's files ask for {@link CHANNEL_FILE_IDLE_DAYS}. */
+    public readonly idleDays?: number,
+  ) {}
 
   /** Bind / rebind the bearer token used for the
    *  `PUT/GET/DELETE /backup` routes (Phase 2a1c). Caller drives
@@ -200,6 +213,7 @@ export class StorageClient {
       const headers: Record<string, string> = { "content-type": "application/octet-stream" };
       if (pass !== null) headers[BLOB_PASS_HEADER] = pass;
       if (deleteKey !== null) headers[BLOB_DELETE_KEY_HEADER] = deleteKey;
+      if (this.idleDays !== undefined) headers[BLOB_IDLE_DAYS_HEADER] = String(this.idleDays);
       if (onProgress === undefined || typeof XMLHttpRequest === "undefined") {
         let response: Response;
         try {

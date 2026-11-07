@@ -322,13 +322,33 @@ export class ReachSession {
     return this.wasm.sealMemberCard(epochSeed, epoch, channelId, subscriberPk, this.accountSeed, profile);
   }
 
+  /**
+   * ADR-0060 section 1 (amended 2026-11-06): what to do with a mailbox row
+   * the DS says was admitted by `provingKey` (`undefined`: a proofless row),
+   * when its verified sender is (`senderIsContact`) or is not a current
+   * contact. The core's one rule (`mailboxRowContactVerdict`).
+   */
+  contactRowVerdict(provingKey: Uint8Array | undefined, senderIsContact: boolean): "process" | "regrant" | "drop" {
+    const v = this.wasm.mailboxRowContactVerdict(
+      this.accountSeed,
+      this.currentVersion("contact"),
+      provingKey ?? null,
+      senderIsContact,
+    );
+    if (v === this.wasm.ContactKeyRowVerdict.Drop) return "drop";
+    if (v === this.wasm.ContactKeyRowVerdict.ProcessAndRegrant) return "regrant";
+    return "process";
+  }
+
   /** The grants a profile carries in a conversation (ADR-0060 section 3 and
    *  the section 6 contact grant): `member` always, `group` when the setting
    *  lets this group's members find the owner, `contact` in a one-to-one. */
-  profileGrants(groupId: Uint8Array, oneToOne: boolean): WasmReachGrant[] {
+  profileGrants(groupId: Uint8Array, oneToOne: boolean, contactGrant: boolean = oneToOne): WasmReachGrant[] {
     const out = [this.grant("member", groupId)];
     if (oneToOne) {
-      out.push(this.grant("contact"));
+      // A removed contact's one-to-one gets no current contact grant (the
+      // removal rotated it away from them, ADR-0060 section 1).
+      if (contactGrant) out.push(this.grant("contact"));
     } else {
       const setting = this.setting();
       if (setting !== null && this.allowsScope(setting, "group", groupId)) {
@@ -346,14 +366,14 @@ export class ReachSession {
    * conversation that never received grants (ADR-0060 is a flag day for
    * profiles already sent).
    */
-  profileGrantSignature(groupId: Uint8Array, oneToOne: boolean): string {
+  profileGrantSignature(groupId: Uint8Array, oneToOne: boolean, contactGrant: boolean = oneToOne): string {
     // ADR-0074 section 3.5a rule 3 - the account key the grants are derived
     // under is part of what was published: after a rotation every version is
     // unchanged and every grant is another key, so every conversation needs
     // the profile again. A prefix of the PUBLIC key; no key material.
     const parts = [`key:${this.accountKeyHex.slice(0, 16)}`, `member:${this.currentVersion("member", groupId)}`];
     if (oneToOne) {
-      parts.push(`contact:${this.currentVersion("contact")}`);
+      if (contactGrant) parts.push(`contact:${this.currentVersion("contact")}`);
     } else {
       const setting = this.setting();
       if (setting !== null && this.allowsScope(setting, "group", groupId)) {
@@ -679,11 +699,17 @@ export class ReachSession {
       allowsContactsOfContacts: setting !== null && this.wasm.allowsContactsOfContacts(setting),
       everyone,
       nowMs: now,
+      contactVersions: (current) => Array.from(this.wasm.contactKeyVersions(current)),
     });
-    const resolved: ResolvedReachKey[] = wanted.map((w) => ({
-      publicKeyHex: this.publicKeyHex(w.cls, w.scopeHex, w.version),
-      expiresAtMs: w.expiresAtMs,
-    }));
+    const resolved: ResolvedReachKey[] = wanted
+      .map((w) => ({
+        publicKeyHex: this.publicKeyHex(w.cls, w.scopeHex, w.version),
+        expiresAtMs: w.expiresAtMs,
+        keepOnly: w.keepOnly === true,
+      }))
+      // A retired contact version stays while registered; it is never added.
+      .filter((r) => !r.keepOnly || r.publicKeyHex in book.registered)
+      .map(({ publicKeyHex, expiresAtMs }) => ({ publicKeyHex, expiresAtMs }));
     // ADR-0078: the ADR-0073 R.4 continuity key is no longer registered on
     // this account's mailbox after a reset. The mailbox address is not
     // derivable from the account id or the identity key any more, so no peer

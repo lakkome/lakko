@@ -532,6 +532,7 @@ public class ChannelsUiState(
                             sharedTopic = next.topic,
                             sharedLanguage = next.language,
                             sharedListed = next.listed,
+                            sharedRecordB64 = next.recordB64,
                         )
                     }
                 } else {
@@ -882,4 +883,7 @@ public data class ChannelHandle(
     /** ADR-0059 metadata v2 — the owner listed the channel in Discover; what
      *  lets a member share it in a group (section 6). */
     public val sharedListed: Boolean = false,
+    /** ADR-0087 section 18.2 — the newest record's own plaintext (base64),
+     *  carrying the @name, photo and reactions setting; "" when none. */
+    public val sharedRecordB64: String = "",
 )

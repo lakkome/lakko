@@ -125,6 +125,11 @@ public final class ChannelsUiState: ObservableObject {
     @Published public private(set)
     var subscribedSeedsByChannel: [String: [UInt32: Data]] = [:]
 
+    /// ADR-0087 — the per-channel facts metadata v3 and the newer routes add
+    /// (``ChannelExtras``): the public flag, the photo, the allowed
+    /// reactions, the ban list, the read key of a public channel.
+    @Published public private(set) var extrasByChannel: [String: ChannelExtras] = [:]
+
     /// **Legacy** `UserDefaults` key — the pre-G-29 plaintext, device-wide
     /// storage location of the subscriber keypairs. Never read; removed by
     /// ``forget(accountIdB64:)``.
@@ -189,6 +194,53 @@ public final class ChannelsUiState: ObservableObject {
             signingSeeds: publisherSigningSeedByChannel
         )
         ownerKeyGenerationByChannel = Self.loadOwnerGenerations(accountIdB64: accountIdB64)
+        extrasByChannel = ChannelExtrasStore.load(accountIdB64)
+        publishChannelPhotos()
+    }
+
+    // MARK: - ADR-0087 channel extras
+
+    /// The extras held for `channelId` (empty when none).
+    public func extras(_ channelId: String) -> ChannelExtras {
+        extrasByChannel[channelId] ?? ChannelExtras()
+    }
+
+    /// Change the extras of `channelId` and write them through.
+    public func updateExtras(_ channelId: String, _ change: (inout ChannelExtras) -> Void) {
+        var next = extras(channelId)
+        change(&next)
+        guard next != extrasByChannel[channelId] else { return }
+        extrasByChannel[channelId] = next
+        persistExtras()
+        publishChannelPhotos()
+    }
+
+    /// Section 13a — keep a ban list when it is strictly newer than the one
+    /// held. Returns `true` when it was kept.
+    @discardableResult
+    public func recordBanList(channelId: String, updatedAtMs: UInt64, authors: [Data]) -> Bool {
+        let held = extras(channelId)
+        guard held.banUpdatedAtMs == 0
+            || banListIsNewer(incomingUpdatedAtMs: updatedAtMs, storedUpdatedAtMs: held.banUpdatedAtMs)
+        else { return false }
+        updateExtras(channelId) {
+            $0.banUpdatedAtMs = updatedAtMs
+            $0.bannedAuthors = authors
+        }
+        return true
+    }
+
+    private func persistExtras() {
+        guard let account = boundAccountIdB64 else { return }
+        ChannelExtrasStore.save(extrasByChannel, account)
+    }
+
+    private func publishChannelPhotos() {
+        var photos: [String: ProfileAvatar] = [:]
+        for (id, extras) in extrasByChannel {
+            if let avatar = extras.avatar { photos[id] = avatar }
+        }
+        ChannelPhotoDirectory.shared.replace(photos)
     }
 
     // MARK: - ADR-0073 phase 2 — channels the old keys owned (UX 16.6)
@@ -267,6 +319,9 @@ public final class ChannelsUiState: ObservableObject {
     /// other devices.
     public var onUnsubscribedHere: ((String) -> Void)?
     public var onSubscribedHere: ((String) -> Void)?
+    /// UX 9.5 — a publisher removed this device from a private channel; the
+    /// name is the notice's, `nil` when the open channel showed a dialog.
+    public var onRemovedHere: ((_ channelId: String, _ name: String?) -> Void)?
     /// A newer shared record (name, description) was accepted for a channel:
     /// the owner's device republishes the channel's public record
     /// (`group-and-channel-privacy.md` 4.5.4).
@@ -281,6 +336,29 @@ public final class ChannelsUiState: ObservableObject {
         persistChannelLog()
     }
 
+    /// ADR-0087 section 15 — this device was removed as a publisher (or
+    /// stepped down) but the account still reads the channel as a
+    /// subscriber: the publisher keys go, the channel and its posts stay.
+    /// The publish counter stays a floor, as in ``removeChannel(_:)``.
+    public func dropPublisherKeys(_ channelId: String) {
+        keysByChannel[channelId] = nil
+        publisherSigningSeedByChannel[channelId] = nil
+        publisherContentSeedByChannel[channelId] = nil
+        persistPublisherKeys()
+    }
+
+    /// ADR-0087 phase B — the channel was deleted (`410 channel-deleted`,
+    /// or this device's owner deleted it): the section 9 end of membership,
+    /// here and, through ``onRemovedHere``, on the account's other devices.
+    public func endDeleted(_ channelId: String) {
+        guard channels.contains(where: { $0.id == channelId }) else { return }
+        let name = channels.first { $0.id == channelId }?.title
+        ChannelMemberCards.forgetUploads(channelId: channelId)
+        clearSubscriberKeys(channelId)
+        removeChannel(channelId)
+        onRemovedHere?(channelId, name)
+    }
+
     public func removeChannel(_ channelId: String) {
         channels.removeAll { $0.id == channelId }
         postsByChannel[channelId] = nil
@@ -288,6 +366,10 @@ public final class ChannelsUiState: ObservableObject {
         subscriberCountByChannel[channelId] = nil
         keysByChannel[channelId] = nil
         persistChannelLog()
+        if extrasByChannel.removeValue(forKey: channelId) != nil {
+            persistExtras()
+            publishChannelPhotos()
+        }
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
         // seed, so a re-add of the same channel_id re-derives the same content
@@ -356,13 +438,23 @@ public final class ChannelsUiState: ObservableObject {
             sharedListed: meta.listed
         )
         persistChannelLog()
+        updateExtras(channelId) {
+            $0.handle = meta.handle.map(StoredConversationHandle.init)
+            $0.avatar = ProfileAvatar(meta.avatar)
+            $0.reactions = meta.reactions.map(StoredAllowedReactions.init)
+        }
         onSharedMetaAccepted?(channelId, meta)
         return true
     }
 
     /// The newest shared record held for `channelId`, or `nil`.
     public func sharedMeta(channelId: String) -> SharedChannelMeta? {
-        channels.first(where: { $0.id == channelId })?.sharedMeta
+        guard let base = channels.first(where: { $0.id == channelId })?.sharedMeta else { return nil }
+        let extras = extras(channelId)
+        return SharedChannelMeta(
+            name: base.name, description: base.description, updatedAtMs: base.updatedAtMs,
+            topic: base.topic, language: base.language, listed: base.listed,
+            handle: extras.handle?.ffi, avatar: extras.avatar?.ffi, reactions: extras.reactions?.ffi)
     }
 
     /// Cache the subscriber count the manage screen or the list refresh
@@ -517,7 +609,10 @@ public final class ChannelsUiState: ObservableObject {
         try? persistPublishCounters()
         if let account = boundAccountIdB64 {
             logStore.delete(accountIdB64: account)
+            ChannelExtrasStore.delete(account)
         }
+        extrasByChannel = [:]
+        publishChannelPhotos()
     }
 
     /// Forget-device: delete everything this device keeps for one account's
@@ -533,6 +628,12 @@ public final class ChannelsUiState: ObservableObject {
         ChannelPublishCounterStore.delete(accountIdB64: accountIdB64)
         ChannelSubscriberKeyStore.delete(accountIdB64: accountIdB64)
         ChannelRotationStateStore.clear(accountIdB64: accountIdB64)
+        ChannelExtrasStore.delete(accountIdB64)
+        ChannelLinkStore.delete(accountIdB64)
+        ChannelAdmissionKeyStore.delete(accountIdB64: accountIdB64)
+        ChannelAdmissionSeedShare.forget(accountIdB64: accountIdB64)
+        ChannelInviteCardStore.shared.delete(accountIdB64: accountIdB64)
+        PendingChannelReactionStore.delete(accountIdB64)
         ChannelPublisherKeyStore.deleteLegacy()
         ChannelPublishCounterStore.deleteLegacy()
         ChannelSubscriberKeyStore.deleteLegacy()

@@ -12,8 +12,9 @@
  * This module is the owner-side glue:
  *
  *   - `openPublisherGroup` — open/create the persistent PublisherGroup handle.
- *   - `createCoPublisherLink` — mint a `/g/<slug>` invite over the
- *     PublisherGroup's MLS `group_id`, uploaded to the group-invite ledger.
+ *   - `mintOneUseCoPublisherLink` — mint a one-use `/g/<slug>` invite over
+ *     the PublisherGroup's MLS `group_id` for one person (UX 15.2: the
+ *     shareable multi-use co-publisher link is gone).
  *   - `pollCoPublisherJournal` — poll the PublisherGroup's DS journal and apply
  *     incoming MLS messages (external-join proposals + co-publisher commits) via
  *     the role-gated path, surfacing pending requests.
@@ -83,9 +84,8 @@ import {
 } from "../ds/access";
 import { openOwnRow, sealRowFor } from "../contacts/mailbox-row";
 import { takeKnockReadSlot } from "../chat/knock-cursor";
-import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode } from "../auth/account-id";
 import type { DiscoveryClient } from "../discovery/client";
-import { rememberMintedLink } from "../contacts/minted-links";
 import { newRevocationKey } from "../contacts/own-links";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { appointCoPublisher, fetchEpoch, rememberPublisherRole } from "./api";
@@ -193,33 +193,39 @@ export function registerPublisherGroupAccess(
   };
 }
 
-/** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
- *  non-member opens it, requests to join, and the owner approves (reusing the
- *  ADR-0027/0028 external-join machinery); `0n` = never expires. The
- *  capability is sealed under a fresh link secret carried in the fragment
- *  (2026-09-28 security pass) and uploaded to the group-invite ledger like any
- *  `/g/` link: `<origin>/g/<id>#<secret>`. It was always the inline form until
- *  2026-10-19, when the inline form was removed; a failed upload mints no link
- *  and throws. This device keeps the link's revocation seed in its record of
- *  minted links (`accountIdB64`), as for a group link. */
-export async function createCoPublisherLink(
+/** What a minted co-publisher link is, for the minting device's record. */
+export interface MintedCoPublisherLink {
+  readonly url: string;
+  readonly ledgerId: Uint8Array;
+  readonly revocationSeed: Uint8Array;
+  /** The plaintext capability wire: a sealed knock carrying it came by this
+   *  link (ADR-0087 section 15, "the owner's device approves that person's
+   *  request without asking, since it named them"). */
+  readonly capabilityWire: Uint8Array;
+  /** The sealed `/g/` blob the ledger holds (for the link register). */
+  readonly sealed: Uint8Array;
+  /** The 12-byte link secret (the URL fragment). SECRET. */
+  readonly linkSecret: Uint8Array;
+}
+
+/**
+ * ADR-0087 section 15 — `Add publisher`: a co-publisher `/g/` link (kind 2)
+ * for one person, one use, uploaded to the group-invite ledger. Its preview
+ * carries the channel id, the name and the knock key the joiner seals its
+ * request to. The caller records it (the capability wire is what its request
+ * is recognised by) and sends the URL in the one-to-one.
+ */
+export async function mintOneUseCoPublisherLink(
   identity: Identity,
   publisherGroup: PublisherGroup,
   origin: string,
   discovery: Pick<DiscoveryClient, "uploadGroupInvite">,
-  accountIdB64: string | null,
-): Promise<string> {
+): Promise<MintedCoPublisherLink> {
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
   const channelId = publisherGroup.channelId();
-  // Sealed-link amendment of ADR-0028 (2026-09-28): the capability is sealed
-  // under a fresh link secret that rides in the fragment. ADR-0078 section 6:
-  // the channel id (and its name) ride the sealed preview; the group id names
-  // no channel.
   const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
-  // ADR-0087 section 5 — the co-publisher's request is a sealed knock row too;
-  // the owner (the only minter of this link) derives the knock key from its
-  // journal root.
+  const inviterName = await ownInviterName(wasm);
   const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
   const knockSeed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
   root.fill(0);
@@ -231,36 +237,93 @@ export async function createCoPublisherLink(
     name === undefined || name.length === 0 ? undefined : name,
     wasm.groupKnockPublicKey(knockSeed),
     INITIAL_KNOCK_VERSION,
+    undefined,
+    inviterName,
   );
   knockSeed.fill(0);
   const sealed = mint.sealed;
   const linkSecret = mint.linkSecret;
   mint.free();
-  // ADR-0078 section 10: the ledger row carries a key minted for this link
-  // alone. No use limit: the owner's approval is the boundary.
+  const cap = wasm.GroupInviteCapability.openLink(sealed, linkSecret);
+  let capabilityWire: Uint8Array;
+  try {
+    capabilityWire = cap.wire;
+  } finally {
+    cap.free();
+  }
   const revocation = await newRevocationKey();
-  const maxUses = 0xff_ff_ff_ff;
-  const blobId = await discovery.uploadGroupInvite({
+  // One use: the person named is the only one meant to ask.
+  const ledgerId = await discovery.uploadGroupInvite({
     sealed,
     revocationPubkey: revocation.publicKey,
     expiryMs: 0n,
-    maxUses,
+    maxUses: 0,
   });
-  if (accountIdB64 !== null) {
-    await rememberMintedLink(accountIdB64, "group", base64UrlEncodeNoPad(blobId), {
-      linkSecret,
-      linkId: new Uint8Array(),
-      revocationSeed: revocation.seed,
-      facts: { label: "", expiryMs: 0, maxUses, bootstrapReferral: false },
-    });
-  }
-  return composeSealedInviteLink({
+  const url = composeSealedInviteLink({
     origin,
     prefix: GROUP_INVITE_URL_PREFIX,
-    blobId,
+    blobId: ledgerId,
     secret: linkSecret,
     widths: inviteLinkWidths(wasm),
   });
+  return { url, ledgerId, revocationSeed: revocation.seed, capabilityWire, sealed, linkSecret };
+}
+
+/** Capability wires read off sealed knock rows, keyed like the bindings
+ *  (`groupIdB64:joinerKeyHex`), base64. In memory: the knock queue is re-read
+ *  from the start every poll. */
+const joinerCapabilities = new Map<string, string>();
+
+/** The 16-byte account id a pending joiner's sealed request carried in its
+ *  profile (its claim), keyed like the bindings. The owner fetches the
+ *  joiner's identity bundle by it and seals the admission seed to the bundle's
+ *  X25519 key only when the bundle's signature key IS the joiner's key. */
+const joinerAccountIds = new Map<string, Uint8Array>();
+
+/** The account id a pending joiner's request named, or `undefined`. */
+export function accountIdOfJoiner(groupId: Uint8Array, joinerKey: Uint8Array): Uint8Array | undefined {
+  return joinerAccountIds.get(bindingKey(base64Encode(groupId), joinerKey));
+}
+
+/** The own profile envelope a sealed request carries (ADR-0087 section 5:
+ *  the request carries the person's name and account id), installed by the
+ *  session (`ChannelPublisherLoops`). */
+let ownProfileEnvelopeSource: (() => Promise<Uint8Array | null>) | null = null;
+
+/** Install where the own profile envelope comes from (or `null`). */
+export function installOwnProfileEnvelopeSource(fn: (() => Promise<Uint8Array | null>) | null): void {
+  ownProfileEnvelopeSource = fn;
+}
+
+/** ADR-0087 phase B — this account's display name for a co-publisher link's
+ *  preview (`inviterName`), read off the own profile envelope; `undefined`
+ *  when there is none or it does not decode. Never throws. */
+async function ownInviterName(wasm: Wasm): Promise<string | undefined> {
+  try {
+    const envelope = await ownProfileEnvelopeSource?.();
+    if (envelope === null || envelope === undefined) return undefined;
+    const profile = wasm.decodeProfileEnvelope(envelope);
+    try {
+      const name = (profile.displayName ?? "").trim();
+      return name.length > 0 ? name : undefined;
+    } finally {
+      profile.free();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** The capability wire (standard base64) a pending joiner's sealed request
+ *  carried, or `undefined`. */
+export function capabilityOfJoiner(groupId: Uint8Array, joinerKey: Uint8Array): string | undefined {
+  return joinerCapabilities.get(bindingKey(base64Encode(groupId), joinerKey));
+}
+
+/** The co-publisher key a joiner bound beside its request (ADR-0059), or
+ *  `undefined` before its binding row was read. */
+export function boundCoPublisherKey(groupId: Uint8Array, joinerKey: Uint8Array): Uint8Array | undefined {
+  return copublisherBindings.get(bindingKey(base64Encode(groupId), joinerKey));
 }
 
 /** Co-publisher keys read off knock queues, keyed `groupIdB64:joinerKeyHex`
@@ -348,15 +411,49 @@ async function appointBound(
  *  `after: 0`, so it re-reads the whole journal every tick and holds no position
  *  that a concurrent poll could wind backward. Rows already merged simply throw
  *  and are skipped, which is the pre-existing (and still correct) behaviour. */
+/** This session's read position in each PublisherGroup journal. */
+const journalCursors = new Map<string, number>();
+
+/** At most this many pages per read (100 rows each on the DS). */
+const MAX_PAGES_PER_READ = 50;
+
+/** Every row after `after`, page by page to the end of the journal. */
+async function readPagesFrom<R extends { readonly id: number }>(
+  after: number,
+  fetchPage: (after: number) => Promise<{ readonly messages: readonly R[]; readonly hasMore?: boolean }>,
+): Promise<R[]> {
+  const rows: R[] = [];
+  let cursor = after;
+  for (let page = 0; page < MAX_PAGES_PER_READ; page++) {
+    const raw = await fetchPage(cursor);
+    rows.push(...raw.messages);
+    const last = raw.messages.at(-1);
+    if (last === undefined || raw.hasMore === false || last.id <= cursor) break;
+    cursor = last.id;
+  }
+  return rows;
+}
+
 export async function pollCoPublisherJournal(
   ds: DsClient,
   identity: Identity,
   publisherGroup: PublisherGroup,
+  /** An application message on the PublisherGroup journal (an admission
+   *  seed, a read key, a step-down; ADR-0087 sections 7 and 15), with the
+   *  account key its MLS sender resolved to at receipt (C-68). Runs inside
+   *  the group's MLS lock: it must not take it again. */
+  onApplication?: (plaintext: Uint8Array, senderAccount: Uint8Array | undefined) => void | Promise<void>,
 ): Promise<number> {
   const groupId = publisherGroup.groupId();
   const groupIdB64 = base64Encode(groupId);
-  // The FETCH — deliberately outside the lock.
-  const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+  // The FETCH — deliberately outside the lock. From this session's cursor,
+  // paged to the end: the DS answers 100 rows a page, and a read from 0 every
+  // pass never reached a commit or an admission seed past the first page once
+  // the journal outgrew it (found on Android, 2026-11-05). The cursor is in
+  // memory: after a reload the journal is read from the start again, which is
+  // safe (an applied commit is skipped) and keeps the cursor from ever leading
+  // the durable group state.
+  const raw = { messages: await readPagesFrom(journalCursors.get(groupIdB64) ?? 0, (after) => ds.fetchGroup(groupId, { after, waitSecs: 0 })) };
   // ADR-0053 contract point 7 — a prospective co-publisher cannot write the
   // journal of a claimed group, so its external-join proposal arrives as a
   // KNOCK. Read from the start every tick, exactly like the journal above and
@@ -371,7 +468,9 @@ export async function pollCoPublisherJournal(
   // group (`KNOCK_READ_MIN_INTERVAL_MS`), the floor every client shares.
   try {
     if (takeKnockReadSlot(groupIdB64, Date.now())) {
-      knocks = await ds.fetchKnocks(groupId, { after: 0, waitSecs: 0 });
+      knocks = { messages: await readPagesFrom(0, (after) => ds.fetchKnocks(groupId, { after, waitSecs: 0 })) } as Awaited<
+        ReturnType<DsClient["fetchKnocks"]>
+      >;
     }
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -380,9 +479,21 @@ export async function pollCoPublisherJournal(
   // The APPLY — inside it.
   return withGroupMlsLock(groupIdB64, async () => {
     const wasm = await loadWasm();
+    const lastRow = raw.messages.at(-1);
+    if (lastRow !== undefined) {
+      journalCursors.set(groupIdB64, Math.max(journalCursors.get(groupIdB64) ?? 0, lastRow.id));
+    }
     for (const m of raw.messages) {
       try {
-        publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
+        const processed = publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
+        try {
+          const data = processed.applicationData;
+          if (processed.kind === "Application" && data !== undefined && onApplication !== undefined) {
+            await onApplication(data, processed.senderAccount);
+          }
+        } finally {
+          processed.free();
+        }
       } catch {
         // A commit we have already merged (epoch mismatch) or a non-MLS entry
         // — skip, the FIFO journal lets the next poll catch up on any
@@ -392,6 +503,10 @@ export async function pollCoPublisherJournal(
     if (knocks !== null) {
       const channelIdHex = bytesToHex(publisherGroup.channelId());
       for (const k of knocks.messages) {
+        // ADR-0087 section 5 — a sealed KeyPackage row (the co-publisher
+        // request since phase B): opened with this owner's knock seed,
+        // retained, and approved later from the retained package.
+        if (await applySealedCoPublisherRow(wasm, identity, publisherGroup, k.payload)) continue;
         // ADR-0059 — a co-publisher binding rides beside the proposal. It is
         // not an MLS message, so it is read here and never processed.
         const bound = recordBinding(wasm, groupIdB64, channelIdHex, k.payload);
@@ -427,6 +542,171 @@ export async function pollCoPublisherJournal(
     // its epoch before publishing.
     return pendingCoPublishers(publisherGroup).length;
   });
+}
+
+/**
+ * One knock row in the ADR-0087 sealed form. `true` when the row was of that
+ * shape (retained or dropped), `false` for any other row. Only the owner
+ * holds the knock seed (its journal root), so a co-publisher's poll opens
+ * nothing here. Never throws.
+ */
+async function applySealedCoPublisherRow(
+  wasm: Wasm,
+  identity: Identity,
+  publisherGroup: PublisherGroup,
+  payload: Uint8Array,
+): Promise<boolean> {
+  try {
+    if (!wasm.isKnockRowLen(payload.length) || wasm.knockRowVersion(payload) === undefined) return false;
+  } catch {
+    return false;
+  }
+  const groupId = publisherGroup.groupId();
+  const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
+  const seed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
+  root.fill(0);
+  let request: ReturnType<typeof wasm.openKnockRow> | undefined;
+  try {
+    request = wasm.openKnockRow(seed, payload);
+  } catch {
+    request = undefined;
+  } finally {
+    seed.fill(0);
+  }
+  if (request === undefined) return true;
+  try {
+    // Only a request that came by one of this group's links is taken.
+    const cap = request.capability;
+    if (cap === undefined || cap.length === 0) return true;
+    try {
+      const c = wasm.GroupInviteCapability.decodeAndVerify(cap);
+      const same = base64Encode(c.groupId) === base64Encode(groupId);
+      c.free();
+      if (!same) return true;
+    } catch {
+      return true;
+    }
+    let joined;
+    try {
+      joined = publisherGroup.retainJoinRequest(identity, request.keyPackage);
+    } catch {
+      return true;
+    }
+    const outcome = joined.outcome;
+    const joinerKey = joined.joinerSignatureKey;
+    joined.free();
+    if (outcome !== "retained" && outcome !== "already-pending") return true;
+    joinerCapabilities.set(bindingKey(base64Encode(groupId), joinerKey), base64Encode(cap));
+    const profile = request.profile;
+    if (profile !== undefined) {
+      try {
+        const accountId = profile.accountId;
+        if (accountId !== undefined && accountId.length === 16) {
+          joinerAccountIds.set(bindingKey(base64Encode(groupId), joinerKey), accountId);
+        }
+      } finally {
+        profile.free();
+      }
+    }
+    const session = reachSession();
+    const reply = request.replyGrant;
+    try {
+      // A co-publisher's leaf key IS its account key.
+      if (session !== null && joinReplyBindingVerifies(reply, joinerKey)) {
+        await rememberJoinReply(groupId, joinerKey, session.encodeGrant(reply));
+      }
+    } finally {
+      reply.free();
+    }
+    return true;
+  } finally {
+    request.free();
+  }
+}
+
+/**
+ * ADR-0087 section 15 — joiner side since phase B: ask to become a publisher
+ * from a co-publisher `/g/` link with a SEALED knock row (a fresh KeyPackage,
+ * the reply grant the Welcome needs, the link's plaintext capability), sealed
+ * to the knock key the link's capability carries; the ADR-0059 binding rides
+ * in the same knock. No epoch is needed (the request survives commits). The
+ * KeyPackage's private key lives in `identity`'s provider and is the only
+ * thing that opens the Welcome, so it is persisted BEFORE the knock.
+ */
+export async function requestToCoPublishSealed(
+  ds: DsClient,
+  identity: Identity,
+  link: string,
+  persistBeforeKnock: () => Promise<void>,
+  discovery: Pick<DiscoveryClient, "fetchGroupInvite">,
+): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
+  const wasm = await loadWasm();
+  const widths = inviteLinkWidths(wasm);
+  const split = splitGroupInviteLink(link, widths);
+  if (split === null) throw new Error("not a /g/ co-publisher link");
+  if (split.fragment.kind !== "secret") throw new InviteLinkDamagedError();
+  const parsed = parseGroupInviteSlug(split.slug, widths);
+  const sealed = await discovery.fetchGroupInvite(parsed.blobId);
+  if (sealed === null) throw new Error("co-publisher link not found or revoked");
+  const cap = openSealedInvite(
+    (b, secret) => wasm.GroupInviteCapability.openLink(b, secret),
+    sealed,
+    split.fragment,
+  );
+  let groupId: Uint8Array;
+  let wire: Uint8Array;
+  let knockKey: Uint8Array | undefined;
+  let knockVersion: number | undefined;
+  let channelIdBytes: Uint8Array | undefined;
+  try {
+    groupId = cap.groupId;
+    wire = cap.wire;
+    knockKey = cap.knockPublicKey;
+    knockVersion = cap.knockVersion;
+    let preview: ReturnType<typeof cap.openPreview> | undefined;
+    try {
+      preview = cap.openPreview(split.fragment.secret);
+    } catch {
+      preview = undefined;
+    }
+    try {
+      channelIdBytes = preview?.channelId;
+    } finally {
+      preview?.free();
+    }
+  } finally {
+    cap.free();
+  }
+  if (channelIdBytes === undefined) {
+    if (isLegacyV1PublisherGroupId(groupId)) throw new LegacyChannelError("invite-link");
+    throw new Error("co-publisher link does not target a channel PublisherGroup");
+  }
+  if (knockKey === undefined || knockVersion === undefined) {
+    throw new Error("co-publisher link carries no knock key");
+  }
+  const channelIdHex = bytesToHex(channelIdBytes);
+  channelsActions.setCoPublisherGroupId(channelIdHex, bytesToHex(groupId));
+  const binding = wasm.composeChannelCoPublisherBinding(identity, channelIdBytes);
+  const session = reachSession();
+  if (session === null) throw new KeyedError("common.error.starting_up");
+  const replyGrant = (await session.newReply("group-join", journalHex(groupId))).grant;
+  let row: Uint8Array;
+  try {
+    // The profile carries the name and the account id the owner seals the
+    // channel's admission seed to (ADR-0087 section 7).
+    let profile: Uint8Array = new Uint8Array();
+    try {
+      profile = (await ownProfileEnvelopeSource?.()) ?? new Uint8Array();
+    } catch {
+      profile = new Uint8Array();
+    }
+    row = wasm.sealKnockRow(knockKey, knockVersion, identity.createKeyPackage(), replyGrant, profile, wire);
+  } finally {
+    replyGrant.free();
+  }
+  await persistBeforeKnock();
+  await ds.knock(groupId, [row, binding]);
+  return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }
 
 /** The pending co-publisher external-join requests — each a 32-byte joiner leaf

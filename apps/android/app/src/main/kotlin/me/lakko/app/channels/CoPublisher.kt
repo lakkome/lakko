@@ -154,6 +154,9 @@ public object CoPublisher {
         identity: Identity,
         publisherGroup: PublisherGroup,
         channelName: String? = null,
+        /** Phase B — who invites, shown on the link page and the card. */
+        inviterName: String? = null,
+        avatar: uniffi.lakko_ffi_uniffi.FfiAvatar? = null,
     ): uniffi.lakko_ffi_uniffi.InviteLinkMint {
         // ADR-0087 section 5 — the link names the PublisherGroup's knock key,
         // derived from the owner's journal root seed (version 0, as for a
@@ -178,6 +181,8 @@ public object CoPublisher {
             channelName?.takeIf { it.isNotBlank() },
             knockPublicKey,
             me.lakko.app.chat.CURRENT_KNOCK_VERSION,
+            avatar,
+            inviterName?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -194,15 +199,27 @@ public object CoPublisher {
         discovery: me.lakko.app.discovery.DiscoveryClient,
         accountIdB64: String?,
         origin: String = DEFAULT_ORIGIN,
+        /** The ledger's use ceiling: `0` one use, `0xFFFFFFFF` none. A
+         *  publisher link ([LinkRecordKind.PUBLISHER]) is always one use,
+         *  whatever is passed: it names one person (UX 15.2). */
+        maxUses: Long = 0L,
+        /** Phase B (item 8) — how the link is filed in the account's synced
+         *  link register, so every device of the account lists and revokes
+         *  it; `null` files nothing there. */
+        register: LinkRegisterEntry? = null,
+        /** Told the ledger id the row got (an invitation card names it). */
+        onUploaded: (blobId: ByteArray) -> Unit = {},
     ): String {
         val (seed, revocationPubkey) = me.lakko.app.contacts.OwnLinks.freshRevocationKey()
+        @Suppress("NAME_SHADOWING")
+        val maxUses = if (register?.kind == uniffi.lakko_ffi_uniffi.LinkRecordKind.PUBLISHER) 0L else maxUses
         try {
             val blobId = discovery.uploadGroupInvite(
                 me.lakko.app.discovery.SealedInviteUpload(
                     sealed = sealed,
                     revocationPubkey = revocationPubkey,
                     expiryMs = 0L,
-                    maxUses = 0xFFFFFFFFL,
+                    maxUses = maxUses,
                 ),
             )
             if (accountIdB64 != null) {
@@ -212,8 +229,19 @@ public object CoPublisher {
                         kind = me.lakko.app.contacts.OwnLink.KIND_GROUP,
                         blobId = blobId,
                         seed = seed,
-                        maxUses = 0xFFFFFFFFL,
+                        maxUses = maxUses,
                     ),
+                )
+            }
+            onUploaded(blobId)
+            register?.let {
+                me.lakko.app.channels.GroupLinkRegister.record(
+                    entry = it,
+                    ledgerId = blobId,
+                    linkSecret = linkSecret,
+                    revocationSeed = seed,
+                    capability = sealed,
+                    maxUses = maxUses,
                 )
             }
             return me.lakko.app.discovery.composeSealedInviteUrl(
@@ -240,62 +268,127 @@ public object CoPublisher {
         ds: DsClient,
         identity: Identity,
         publisherGroup: PublisherGroup,
+        /** ADR-0087 section 7 — a retained request's joiner key and the
+         *  account id its profile carried (for the admission seeds). */
+        onRequest: (joinerKey: ByteArray, accountId: ByteArray?) -> Unit = { _, _ -> },
+        /** The journal row id already read (0 reads from the start). */
+        after: Long = 0L,
+        /** The knock row id already read, or `null` to skip the knocks. */
+        knockAfter: Long? = 0L,
     ): JournalPoll {
         val groupId = publisherGroup.groupId()
         // ADR-0053 — the journal is claimed: every read carries a proof under
         // the current epoch's key. ADR-0057: nobody "heals" a registration on
         // apply any more; the committer (the owner's root) registers.
-        val signerBefore = signerOf(publisherGroup, identity)
-        val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0, signer = signerBefore)
+        //
+        // Read from the caller's cursor and paged to the end: a read that
+        // always started at 0 fetched the whole journal every pass and, with
+        // the DS paging at 100 rows, never saw a row past the first page.
+        var cursor = after
         var applied = 0
-        for (m in raw.messages) {
-            try {
-                publisherGroup.processIncomingVerifyingRoles(identity, m.payload)
-                applied += 1
-            } catch (_: Throwable) {
-                // A commit we have already merged (epoch mismatch) or a non-MLS
-                // row — skip; the FIFO journal catches up on any genuinely-new
-                // commit on the next poll.
-            }
-        }
-        // ADR-0053 client contract point 7 — what prospective co-publishers
-        // knocked: their external-join proposal (and attribution) never enter
-        // the journal. Read from the start: the quarantine de-duplicates, and a
-        // proposal for a past epoch is refused by the epoch check.
-        try {
-            val knocks = ds.fetchKnocks(groupId, after = 0L, waitSecs = 0, signer = signerOf(publisherGroup, identity))
-            // Through the core's knock gate only (see `KnockGate.kt`): a
-            // knock is an unauthenticated write, so a knocked commit or app
-            // message must be refused before it is processed, never applied.
-            // Attribution rows, stale proposals and garbage are refused too.
-            val channelId = publisherGroup.channelId()
-            val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
-                // ADR-0059 — a co-publisher binding rides beside the proposal.
-                // It is not an MLS message: recorded here, then refused like
-                // any other non-proposal row.
-                recordCoPublisherBinding(publisherGroup.groupId(), channelId, bytes)
-                publisherGroup.processKnock(identity, bytes)
-            }
-            // ADR-0060 §6 — keep each joiner's reply key from its attribution.
-            for (row in knocks.messages) {
-                val attr = try {
-                    uniffi.lakko_ffi_uniffi.parseGroupJoinAttribution(row.payload)
+        val applications = ArrayList<ByteArray>()
+        val senders = ArrayList<ByteArray?>()
+        while (true) {
+            val raw = ds.fetchGroup(groupId, after = cursor, waitSecs = 0, signer = signerOf(publisherGroup, identity))
+            for (m in raw.messages) {
+                try {
+                    val processed = publisherGroup.processIncomingVerifyingRoles(identity, m.payload)
+                    if (processed is uniffi.lakko_ffi_uniffi.ProcessedMessage.Application) {
+                        applications += processed.`data`
+                        // The account the MLS sender resolves to at receipt.
+                        senders += processed.senderAccount?.takeIf { it.size == 32 }
+                    }
+                    applied += 1
                 } catch (_: Throwable) {
+                    // A commit we have already merged (epoch mismatch) or a
+                    // non-MLS row — skip.
+                }
+                cursor = maxOf(cursor, m.id)
+            }
+            if (!raw.hasMore || raw.messages.isEmpty()) break
+        }
+        var knockCursor = knockAfter
+        // ADR-0087 section 5 (phase B) — a prospective co-publisher knocks a
+        // SEALED row: a fresh KeyPackage, a reply grant and the /g/
+        // capability, sealed to the PublisherGroup's knock key (the owner's
+        // journal root over the group id, as the link names it). It carries no
+        // epoch, so it survives every commit. The co-publisher key binding
+        // rides beside it in the same knock. Read from the start: retaining a
+        // KeyPackage already pending is idempotent.
+        if (knockAfter != null) try {
+            val knocks = ds.fetchKnocks(groupId, after = knockAfter, waitSecs = 0, signer = signerOf(publisherGroup, identity))
+            val channelId = publisherGroup.channelId()
+            for (row in knocks.messages) {
+                // The cursor moves past every row read, except one the
+                // pending set had no room for (read again once a request is
+                // decided) and one whose keeping failed (read again).
+                knockCursor = maxOf(knockCursor ?: 0L, row.id)
+                val bytes = row.payload
+                val version = uniffi.lakko_ffi_uniffi.knockRowVersion(bytes)
+                if (version == null) {
+                    // ADR-0059 — not a sealed row: perhaps the binding.
+                    recordCoPublisherBinding(groupId, channelId, bytes)
                     continue
                 }
-                if (!attr.groupId.contentEquals(groupId)) continue
-                if (attr.replyGrant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) continue
-                joinerReplyGrants[me.lakko.app.reach.reachHex(attr.joinerSignatureKey)] = attr.replyGrant
-            }
-            applied += drained.accepted.count {
-                it.second is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal
+                val root = uniffi.lakko_ffi_uniffi.dsJournalRootSeed(identity.ed25519Seed(), groupId)
+                val request = try {
+                    val seed = uniffi.lakko_ffi_uniffi.groupKnockSeed(root, version)
+                    try {
+                        uniffi.lakko_ffi_uniffi.openKnockRow(seed, bytes)
+                    } finally {
+                        seed.fill(0)
+                    }
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    root.fill(0)
+                } ?: continue
+                // Only a request that came by a co-publisher link of THIS group.
+                val byLink = request.capability?.let { capBytes ->
+                    try {
+                        GroupInviteCapability.decodeAndVerify(capBytes).use { it.groupId().contentEquals(groupId) }
+                    } catch (_: Throwable) {
+                        false
+                    }
+                } == true
+                if (!byLink) continue
+                val kept = try {
+                    publisherGroup.retainJoinRequest(identity, request.keyPackage)
+                } catch (_: Throwable) {
+                    knockCursor = row.id - 1
+                    break
+                }
+                when (kept.outcome) {
+                    uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.QUEUE_FULL -> {
+                        knockCursor = row.id - 1
+                        break
+                    }
+                    uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.RETAINED -> {
+                        applied += 1
+                        keepCapability(groupId, kept.joinerSignatureKey, request.capability)
+                        keepReplyGrant(kept.joinerSignatureKey, request.replyGrant)
+                        onRequest(kept.joinerSignatureKey, request.profile?.accountId)
+                    }
+                    uniffi.lakko_ffi_uniffi.FfiJoinRequestOutcome.ALREADY_PENDING -> {
+                        keepCapability(groupId, kept.joinerSignatureKey, request.capability)
+                        keepReplyGrant(kept.joinerSignatureKey, request.replyGrant)
+                    }
+                    else -> Unit
+                }
             }
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
         } catch (_: Throwable) {
             // The knock read is best effort; the next poll retries.
         }
-        return JournalPoll(applied = applied, pending = publisherGroup.pendingExternalJoins().size)
+        return JournalPoll(
+            applied = applied,
+            pending = publisherGroup.pendingExternalJoins().size,
+            applications = applications,
+            senders = senders,
+            journalCursor = cursor,
+            knockCursor = knockCursor,
+        )
     }
 
     /** ADR-0053 — the PublisherGroup journal's signer at its current epoch,
@@ -390,6 +483,15 @@ public object CoPublisher {
         val applied: Int,
         /** Pending co-publisher requests after the pass. */
         val pending: Int,
+        /** Application messages read this pass (an owner's admission seed). */
+        val applications: List<ByteArray> = emptyList(),
+        /** The account each of [applications] came from, resolved at receipt
+         *  (`null` when it did not resolve). */
+        val senders: List<ByteArray?> = emptyList(),
+        /** The last journal row id read. */
+        val journalCursor: Long = 0L,
+        /** The knock row id read through, or `null` when knocks were skipped. */
+        val knockCursor: Long? = null,
     )
 
     /** The pending co-publisher external-join requests — each a 32-byte joiner
@@ -451,6 +553,62 @@ public object CoPublisher {
             entry,
             commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
         )
+    }
+
+    /**
+     * ADR-0087 section 15 (phase B) — the owner removes the publisher
+     * [accountKey]: the epoch-N access seed first, then the commit (every leaf
+     * of that account, merged at once), recorded before anything leaves the
+     * device (G-50), then the commit route, the reseal to every subscriber
+     * under the new seed, and the appointment withdrawn.
+     */
+    public suspend fun removePublisher(
+        ds: DsClient,
+        channelsClient: ChannelsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        accountKey: ByteArray,
+        channelIdHex: String,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        persistNow: () -> Unit,
+    ) {
+        val current = channelsClient.fetchEpoch(channelIdHex)
+        if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
+        val serverTarget = (current + 1u).toLong()
+        val entry = recordCommit(identity, accountIdB64, store, persistNow) {
+            val proofEpoch = publisherGroup.epoch().toLong()
+            val proofSeed = publisherGroup.dsAccessSeed(identity)
+            val commit = publisherGroup.removePublisher(identity, accountKey)
+            PublisherCommitEntry(
+                id = PublisherCommitEntry.newId(),
+                kind = PublisherCommitEntry.Kind.REMOVE,
+                channelIdHex = channelIdHex.lowercase(),
+                groupIdHex = DsClient.pseudonymHex(publisherGroup.groupId()),
+                targetEpoch = publisherGroup.epoch().toLong(),
+                serverTargetEpoch = serverTarget,
+                commitB64 = Base64.encodeToString(commit, Base64.NO_WRAP),
+                joinerKeyB64 = Base64.encodeToString(accountKey, Base64.NO_WRAP),
+                proofEpoch = proofEpoch,
+                proofSeedB64 = Base64.encodeToString(proofSeed, Base64.NO_WRAP),
+            ).also { proofSeed.fill(0) }
+        }
+        runPublisherCommit(
+            entry,
+            commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
+        )
+    }
+
+    /**
+     * ADR-0087 section 15 (phase B) — a co-publisher steps down: one
+     * application message on the PublisherGroup journal the owner's device
+     * applies as a removal of the sender's account.
+     */
+    public suspend fun stepDown(ds: DsClient, identity: Identity, publisherGroup: PublisherGroup, persistNow: () -> Unit) {
+        val message = publisherGroup.stepDown(identity)
+        // The sealed message advanced the ratchet: on disk before it leaves.
+        persistNow()
+        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, identity))
     }
 
     /**
@@ -549,12 +707,21 @@ public object CoPublisher {
         override suspend fun appoint(joinerKey: ByteArray) {
             // Only the owner can appoint: a co-publisher approving another
             // gets a 401 here, logged by the runner.
-            val key = coPublisherBindings[bindingSlot(publisherGroup.groupId(), joinerKey)]
+            val key = bindingFor(publisherGroup.groupId(), joinerKey)
             if (key == null) {
                 android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
                 return
             }
             channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+        }
+
+        override suspend fun unappoint(accountKey: ByteArray) {
+            val key = bindingFor(publisherGroup.groupId(), accountKey)
+            if (key == null) {
+                android.util.Log.w("CoPublisher", "ADR-0087: no binding read for the removed publisher; appointment left")
+                return
+            }
+            channelsClient.setCoPublisherAppointment(false, channelIdHex, identity, key)
         }
 
         override fun save(entry: PublisherCommitEntry) = store.put(accountIdB64, entry)
@@ -622,6 +789,20 @@ public object CoPublisher {
      *  every poll, so a restart refills it. */
     private val coPublisherBindings = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
+    /** The capability wire each pending joiner's sealed request carried
+     *  (ADR-0087 section 15: the owner approves without asking a request
+     *  that came by a publisher link it minted). In memory, refilled by the
+     *  knock read after a restart. */
+    private val joinerCapabilities = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    private fun keepCapability(groupId: ByteArray, joinerKey: ByteArray, capability: ByteArray?) {
+        if (capability != null && capability.isNotEmpty()) joinerCapabilities[bindingSlot(groupId, joinerKey)] = capability
+    }
+
+    /** The capability wire a pending joiner's request carried, or `null`. */
+    public fun capabilityOfJoiner(groupId: ByteArray, joinerKey: ByteArray): ByteArray? =
+        joinerCapabilities[bindingSlot(groupId, joinerKey)]
+
     private fun bindingSlot(groupId: ByteArray, joinerKey: ByteArray): String =
         ChannelsComposer.bytesToHex(groupId) + ":" + ChannelsComposer.bytesToHex(joinerKey)
 
@@ -633,7 +814,53 @@ public object CoPublisher {
         }
         if (!binding.channelId.contentEquals(channelId)) return
         coPublisherBindings[bindingSlot(groupId, binding.accountPubkey)] = binding.copublisherPubkey
+        CoPublisherBindingStore.put(groupId, binding.accountPubkey, binding.copublisherPubkey)
     }
+
+    /**
+     * ADR-0087 phase B — a binding a co-publisher posted into the journal:
+     * filed only when it is signed by (and names) the account the MLS sender
+     * resolves to, for this channel. Returns whether it was one.
+     */
+    public fun recordJournalBinding(
+        groupId: ByteArray,
+        channelId: ByteArray,
+        senderAccount: ByteArray,
+        plaintext: ByteArray,
+    ): Boolean {
+        val binding = try {
+            decodeChannelCopublisherBinding(plaintext)
+        } catch (_: Throwable) {
+            return false
+        }
+        if (!binding.channelId.contentEquals(channelId)) return true
+        if (!binding.accountPubkey.contentEquals(senderAccount)) return true
+        coPublisherBindings[bindingSlot(groupId, binding.accountPubkey)] = binding.copublisherPubkey
+        CoPublisherBindingStore.put(groupId, binding.accountPubkey, binding.copublisherPubkey)
+        return true
+    }
+
+    /** ADR-0087 phase B — a co-publisher posts its own binding into the
+     *  PublisherGroup journal, so every owner device can later withdraw its
+     *  appointment, including one that did not approve it. */
+    public suspend fun postBinding(
+        ds: DsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        channelId: ByteArray,
+        persistNow: () -> Unit,
+    ) {
+        val binding = composeChannelCopublisherBinding(identity, channelId)
+        val message = publisherGroup.createApplicationMessage(identity, binding)
+        // The sealed message advanced the ratchet: on disk before it leaves.
+        persistNow()
+        ds.publishGroup(publisherGroup.groupId(), message, signer = signerOf(publisherGroup, identity))
+    }
+
+    /** The co-publisher key appointed for [accountKey] in [groupId]: this
+     *  process's, else the one filed on disk. */
+    private fun bindingFor(groupId: ByteArray, accountKey: ByteArray): ByteArray? =
+        coPublisherBindings[bindingSlot(groupId, accountKey)] ?: CoPublisherBindingStore.get(groupId, accountKey)
 
     /** Reject a pending co-publisher — no commit, no epoch advance, nothing on
      *  the journal. The retained request set lives in the provider's MLS
@@ -696,6 +923,9 @@ public object CoPublisher {
         persistProposalKeys: () -> Unit,
         /** The ledger fetch of a `/g/` row by its id; `null` when it is gone. */
         fetchSealed: suspend (blobId: ByteArray) -> ByteArray?,
+        /** ADR-0087 section 7 — this account's profile envelope with its
+         *  account id, so the owner can seal the admission seeds to it. */
+        profileEnvelope: ByteArray = ByteArray(0),
     ): CoPublishRequest {
         val idx = link.lastIndexOf(URL_PREFIX)
         if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
@@ -720,10 +950,12 @@ public object CoPublisher {
         val groupId: ByteArray
         val wire: ByteArray
         val previewChannelId: ByteArray?
+        val knockKey: uniffi.lakko_ffi_uniffi.FfiGroupKnockKey?
         try {
             groupId = cap.groupId()
-            // The attribution is computed over the PLAINTEXT capability.
+            // The knock row carries the PLAINTEXT capability.
             wire = cap.wire()
+            knockKey = cap.knock()
             previewChannelId = try {
                 cap.openPreview(secret)?.channelId
             } catch (_: Throwable) {
@@ -748,34 +980,28 @@ public object CoPublisher {
         // ADR-0078 section 6: with the channel, since this account cannot
         // derive the owner's group id.
         coPublished.markChannel(DsClient.pseudonymHex(groupId), channelIdHex)
-        // ADR-0053 client contract point 6 — the PublisherGroup journal is
-        // claimed, so a prospective co-publisher never reads it: an empty knock
-        // learns the epoch, a second knock carries the self-signed attribution
-        // (OQ2, advisory) and the proposal built for that epoch. The Welcome
-        // arrives in this identity's own mailbox ([pollForCoPublishWelcome]).
-        // A group whose owner has not claimed it yet refuses with
-        // [GroupNotAcceptingRequests]; nothing was stored.
+        // ADR-0087 section 5 (phase B) — the request is ONE sealed knock row:
+        // a fresh KeyPackage of this identity, a reply grant on its own
+        // mailbox and the capability, sealed to the knock key the link names.
+        // It carries no epoch, so it waits through any number of commits.
         // ADR-0059 section 1 — this account's co-publisher key for the
-        // channel, signed by its account identity key (the key the owner
-        // approves), rides beside the proposal. Not on the empty probe.
+        // channel, signed by its account identity key, rides beside it.
+        val key = knockKey ?: throw CoPublisherException.NotAChannelGroup
         val binding = composeChannelCopublisherBinding(identity, channelIdBytes)
         val replyGrant = registerReplyKey(ds, identity)
-        runLinkJoinKnock(
-            knock = { payloads ->
-                ds.knock(groupId, if (payloads.isEmpty()) payloads else payloads + listOf(binding)).epoch
-            },
-            buildProposal = { epoch ->
-                val proposal = identity.createExternalJoinProposal(groupId, epoch)
-                // The proposal's KeyPackage private key is what opens the
-                // owner's Welcome: on disk before the knock, fail-closed, so
-                // a request never goes out that a restart could not finish.
-                persistProposalKeys()
-                proposal
-            },
-            // ADR-0060 §6 — the reply key the owner writes the Welcome with,
-            // registered on this identity's own mailbox before the knock.
-            buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire, replyGrant) },
+        val keyPackage = identity.createKeyPackage()
+        // The KeyPackage's private key is what opens the owner's Welcome: on
+        // disk before the knock, fail-closed.
+        persistProposalKeys()
+        val row = uniffi.lakko_ffi_uniffi.sealKnockRow(
+            key.publicKey,
+            key.version,
+            keyPackage,
+            replyGrant,
+            profileEnvelope,
+            wire,
         )
+        ds.knock(groupId, listOf(row, binding))
         lastCoPublishRequestMs = System.currentTimeMillis()
         return CoPublishRequest(
             groupId = groupId,
@@ -867,6 +1093,11 @@ public object CoPublisher {
     // -----------------------------------------------------------------
     // ADR-0060 §6 — reply keys
     // -----------------------------------------------------------------
+
+    private fun keepReplyGrant(joinerKey: ByteArray, grant: uniffi.lakko_ffi_uniffi.FfiReachGrant) {
+        if (grant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) return
+        joinerReplyGrants[me.lakko.app.reach.reachHex(joinerKey)] = grant
+    }
 
     /** Each pending joiner's reply grant, by its leaf key (hex). SECRET;
      *  process memory only — a restart re-reads the retained knocks. */

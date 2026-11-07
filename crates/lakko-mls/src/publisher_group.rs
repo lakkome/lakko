@@ -98,8 +98,54 @@
 //! → the channel seed survives.
 
 use crate::error::{Error, Result};
-use crate::group::{Group, JoinRequest, MemberAddition, GROUP_ID_LEN};
+use crate::group::{Group, JoinRequest, MemberAddition, MemberRecord, GROUP_ID_LEN};
 use crate::identity::Identity;
+use openmls::prelude::LeafNodeIndex;
+
+/// Domain separator of the step-down plaintext a publisher sends on the
+/// PublisherGroup journal ([ADR-0087] section 15, note of 2026-11-05).
+/// Frozen; the trailing NUL keeps it apart from every other `lakko/` domain.
+///
+/// [ADR-0087]: ../../../docs/adr/0087-group-and-channel-handles-and-privacy.md
+pub const PUBLISHER_STEP_DOWN_DOMAIN_V1: &[u8] = b"lakko/publisher-step-down/v1\0";
+
+/// Version byte of the step-down plaintext.
+pub const PUBLISHER_STEP_DOWN_VERSION_V1: u8 = 0x01;
+
+/// The one length of a step-down plaintext: domain, version, channel id.
+pub const PUBLISHER_STEP_DOWN_LEN: usize = PUBLISHER_STEP_DOWN_DOMAIN_V1.len() + 1 + CHANNEL_ID_LEN;
+
+/// The step-down plaintext for `channel_id`:
+/// `"lakko/publisher-step-down/v1\0" ‖ 0x01 ‖ channel_id(16)`. It carries no
+/// identity: who steps down is the MLS-authenticated sender of the message
+/// it rides in, resolved to an account key at receipt (C-68).
+#[must_use]
+pub fn compose_publisher_step_down(channel_id: &ChannelId) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PUBLISHER_STEP_DOWN_LEN);
+    out.extend_from_slice(PUBLISHER_STEP_DOWN_DOMAIN_V1);
+    out.push(PUBLISHER_STEP_DOWN_VERSION_V1);
+    out.extend_from_slice(channel_id.as_bytes());
+    out
+}
+
+/// `true` when `plaintext` is exactly the step-down plaintext for
+/// `channel_id`. Exact length, the version and the channel are checked, so a
+/// step-down carried into another channel's PublisherGroup does nothing.
+#[must_use]
+pub fn is_publisher_step_down(plaintext: &[u8], channel_id: &ChannelId) -> bool {
+    plaintext.len() == PUBLISHER_STEP_DOWN_LEN
+        && plaintext == compose_publisher_step_down(channel_id)
+}
+
+/// `true` when `plaintext` has the shape of a step-down plaintext for any
+/// channel (domain, version, length): the cheap recognition a background
+/// filter needs to keep it out of a notification.
+#[must_use]
+pub fn is_publisher_step_down_envelope(plaintext: &[u8]) -> bool {
+    plaintext.len() == PUBLISHER_STEP_DOWN_LEN
+        && plaintext.starts_with(PUBLISHER_STEP_DOWN_DOMAIN_V1)
+        && plaintext[PUBLISHER_STEP_DOWN_DOMAIN_V1.len()] == PUBLISHER_STEP_DOWN_VERSION_V1
+}
 
 /// MLS-exporter domain-separation label for channel content
 /// seeds. Mirrors the value
@@ -519,6 +565,107 @@ impl PublisherGroup {
         key_package: &[u8],
     ) -> Result<JoinRequest> {
         self.inner.retain_join_request(identity, key_package)
+    }
+
+    /// `true` when `identity` is the channel's owner: the account whose seed
+    /// derives this group's id ([`publisher_group_id_for`]). A co-publisher
+    /// cannot derive it, so this is a local fact a device can check about
+    /// itself and no one else can claim (a PublisherGroup carries no role
+    /// table, ADR-0087 section 15).
+    #[must_use]
+    pub fn is_owned_by(&self, identity: &Identity) -> bool {
+        publisher_group_id_bytes(identity, &self.channel_id).as_slice()
+            == self.group_id().as_slice()
+    }
+
+    /// Every leaf at the current epoch with its account key (ADR-0050): the
+    /// publishers list (ADR-0087 section 15). One person may hold several
+    /// leaves; the caller groups by `account_key`.
+    #[must_use]
+    pub fn members(&self) -> Vec<MemberRecord> {
+        self.inner.members()
+    }
+
+    /// `false` once this device applied a commit that removed its own leaf
+    /// (a publisher removed by the owner, or one whose step-down the owner
+    /// applied). Nothing can be derived or decrypted after that.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
+    /// Remove the publisher whose account key is `account_key` (ADR-0087
+    /// section 15, note of 2026-11-05): every leaf of that account in ONE
+    /// commit, merged before returning. Returns the commit to publish on the
+    /// PublisherGroup journal (through the ADR-0081 commit route) and to
+    /// follow with the subscriber reseal at the new epoch.
+    ///
+    /// The commit advances the epoch, and the removed leaves are not in the
+    /// new one, so the removed person cannot derive the next channel seed
+    /// (RFC 9420 section 12.4). Owner only, and the owner is never removed:
+    /// both are checked here, locally. A PublisherGroup has no role table, so
+    /// peers do not enforce either rule (ADR-0087 section 15's stated limit).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when `identity` is not the owner
+    /// ([`Self::is_owned_by`]), when `account_key` is the owner's, when no
+    /// leaf of the group belongs to it, or on any failure of the commit.
+    pub fn remove_publisher(&mut self, identity: &Identity, account_key: &[u8]) -> Result<Vec<u8>> {
+        if !self.is_owned_by(identity) {
+            return Err(Error::Group(
+                "remove_publisher: only the channel owner removes a publisher".into(),
+            ));
+        }
+        let members = self.inner.members();
+        let own_key = identity.signature_public_key();
+        let owner_accounts: Vec<&[u8]> = members
+            .iter()
+            .filter(|m| m.signature_public_key == own_key)
+            .map(|m| m.account_key.as_slice())
+            .collect();
+        if account_key == own_key || owner_accounts.contains(&account_key) {
+            return Err(Error::Group(
+                "remove_publisher: the owner is never removed".into(),
+            ));
+        }
+        let leaves: Vec<LeafNodeIndex> = members
+            .iter()
+            .filter(|m| !m.account_key.is_empty() && m.account_key == account_key)
+            .filter(|m| m.signature_public_key != own_key)
+            .map(|m| LeafNodeIndex::new(m.leaf_index))
+            .collect();
+        if leaves.is_empty() {
+            return Err(Error::Group(
+                "remove_publisher: no publisher with this account key".into(),
+            ));
+        }
+        self.inner.remove_leaves_directly(identity, &leaves)
+    }
+
+    /// Step down as a publisher (ADR-0087 section 15, note of 2026-11-05):
+    /// the MLS application message to publish on the PublisherGroup journal,
+    /// carrying [`compose_publisher_step_down`]. A member cannot commit its
+    /// own removal (OpenMLS `CannotRemoveSelf`), and a group with no role
+    /// table keeps no proposal, so the owner's device applies the step-down
+    /// as a [`Self::remove_publisher`] of the sender's account. Nothing in
+    /// this group changes until then; the owner can still rotate.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when `identity` is the owner (an owner deletes the
+    /// channel instead), or when MLS refuses to encrypt.
+    pub fn step_down(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        if self.is_owned_by(identity) {
+            return Err(Error::Group(
+                "step_down: the owner does not step down".into(),
+            ));
+        }
+        let plaintext = compose_publisher_step_down(&self.channel_id);
+        let msg = self
+            .inner
+            .create_application_message(identity, &plaintext)?;
+        crate::group::encode_message(&msg)
     }
 
     /// Borrow the underlying [`Group`] for the rare caller

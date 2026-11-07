@@ -34,7 +34,9 @@ use sqlx::Row;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
-use crate::feedback::{Label, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN};
+use crate::feedback::{
+    CommentReactionCounts, Label, PostReactionCounts, StoredComment, WriterKey, WRITE_NONCE_LEN,
+};
 use crate::feedback_sql;
 use crate::storage::{
     ChannelId, ChannelStore, DirectoryQuery, InviteKeyRow, ModerationAction, PublicSeedOutcome,
@@ -266,6 +268,9 @@ impl ChannelStore for SqlChannelStore {
         owner_pubkey: [u8; OWNER_PUBKEY_LEN],
         private: bool,
     ) -> Result<(), StorageError> {
+        if self.is_deleted(channel).await? {
+            return Err(StorageError::ChannelDeleted);
+        }
         // INSERT IGNORE keeps the call idempotent; the owner key of the row
         // that won is then compared, so a second create with another key
         // changes nothing and is refused (ADR-0059 section 1). The flag is
@@ -1985,6 +1990,94 @@ impl ChannelStore for SqlChannelStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
+        Ok(row.is_some())
+    }
+
+    async fn comment_counts(
+        &self,
+        channel: ChannelId,
+        post_cursors: &[u64],
+    ) -> Result<Vec<(u64, u64)>, StorageError> {
+        feedback_sql::comment_counts(&self.pool, channel, post_cursors).await
+    }
+
+    async fn add_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::add_comment_reaction(
+            &self.pool,
+            channel,
+            post_cursor,
+            comment_cursor,
+            writer_key,
+            label,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn delete_comment_reaction(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursor: u64,
+        writer_key: WriterKey,
+        label: Label,
+    ) -> Result<bool, StorageError> {
+        feedback_sql::delete_comment_reaction(
+            &self.pool,
+            channel,
+            post_cursor,
+            comment_cursor,
+            writer_key,
+            label,
+        )
+        .await
+    }
+
+    async fn comment_reaction_counts(
+        &self,
+        channel: ChannelId,
+        post_cursor: u64,
+        comment_cursors: &[u64],
+    ) -> Result<Vec<CommentReactionCounts>, StorageError> {
+        feedback_sql::comment_reaction_counts(&self.pool, channel, post_cursor, comment_cursors)
+            .await
+    }
+
+    async fn delete_channel(&self, channel: ChannelId, now_ms: u64) -> Result<bool, StorageError> {
+        // The tombstone and the delete in one transaction: no moment where the
+        // id is free and unmarked. Everything else cascades from `channels`
+        // (one statement, proportional to what the channel held).
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query("INSERT IGNORE INTO channel_deleted (channel_id, deleted_at_ms) VALUES (?, ?)")
+            .bind(channel.as_bytes().as_slice())
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let res = sqlx::query("DELETE FROM channels WHERE id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn is_deleted(&self, channel: ChannelId) -> Result<bool, StorageError> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channel_deleted WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
         Ok(row.is_some())
     }
 }

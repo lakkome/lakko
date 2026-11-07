@@ -225,53 +225,56 @@ final class ConversationInfoTests: XCTestCase {
 
     // MARK: - The second defect this closes: a channel could not be unfollowed
 
-    /// `Unsubscribe` was built on web and on neither native, while both
-    /// natives already held the two functions it is made of.
-    func testASubscriberCanStopFollowingAChannel() {
-        let sections = channelInfoSections(
-            caps: ChannelInfoCapabilities(
-                isPublisher: false, isSubscriber: true, subscriberCountKnown: false))
+    private func channel(
+        _ role: ChannelRole, handle: Bool = true, others: Bool = false, membersOn: Bool = false
+    ) -> [InfoSection] {
+        channelInfoSections(caps: ChannelInfoCapabilities(
+            role: role, hasHandle: handle, hasOtherPublishers: others, membersOfGroupsAndChannelsOn: membersOn))
+    }
+
+    /// ADR-0087 section 15 — a subscriber unsubscribes, sees the subscriber
+    /// list and nothing a publisher does.
+    func testASubscriberCanUnsubscribeAndDoesNothingAPublisherDoes() {
+        let sections = channel(.subscriber)
         XCTAssertTrue(sections.contains(.unsubscribe))
-        XCTAssertFalse(sections.contains(.manageChannel))
-        XCTAssertFalse(
-            sections.contains(.subscriberCount),
-            "a reader cannot know a subscriber count, so it must not show one")
-    }
-
-    /// A publisher reads its own channel from its own keys, so there is no
-    /// subscription to end and a control offering to end one would end
-    /// nothing.
-    func testAPublisherIsNotOfferedAWayToStopFollowing() {
-        let sections = channelInfoSections(
-            caps: ChannelInfoCapabilities(
-                isPublisher: true, isSubscriber: true, subscriberCountKnown: true))
-        XCTAssertFalse(sections.contains(.unsubscribe))
-        XCTAssertTrue(sections.contains(.manageChannel))
-        XCTAssertTrue(sections.contains(.subscriberCount))
-    }
-
-    /// A channel found by handle and not yet subscribed to: what it is, and
-    /// nothing to act on.
-    func testAChannelNobodyHereReadsYetShowsWhatItIsAndNoActions() {
-        let sections = channelInfoSections(
-            caps: ChannelInfoCapabilities(
-                isPublisher: false, isSubscriber: false, subscriberCountKnown: false))
-        XCTAssertEqual(sections, [.channelHandle, .channelDescription])
-    }
-
-    /// Every channel says what it is, whoever is reading.
-    func testEveryChannelShowsItsHandleAndDescription() {
-        for isPublisher in [false, true] {
-            for isSubscriber in [false, true] {
-                let sections = channelInfoSections(
-                    caps: ChannelInfoCapabilities(
-                        isPublisher: isPublisher,
-                        isSubscriber: isSubscriber,
-                        subscriberCountKnown: isPublisher))
-                XCTAssertTrue(sections.contains(.channelHandle))
-                XCTAssertTrue(sections.contains(.channelDescription))
-            }
+        XCTAssertTrue(sections.contains(.subscribers))
+        for block in [InfoSection.invitePeople, .inviteLink, .admins, .groupType, .reactions, .renameGroup, .deleteGroup] {
+            XCTAssertFalse(sections.contains(block))
         }
+        XCTAssertFalse(sections.contains(.manageChannel), "the Manage page is gone")
+    }
+
+    /// A publisher invites and sees the publishers; only the owner renames,
+    /// changes the type and the reactions, and nobody publishing unsubscribes.
+    func testAPublisherInvitesAndTheOwnerAloneChangesTheChannel() {
+        let publisher = channel(.publisher)
+        XCTAssertTrue(publisher.contains(.invitePeople))
+        XCTAssertTrue(publisher.contains(.inviteLink))
+        XCTAssertTrue(publisher.contains(.admins))
+        XCTAssertFalse(publisher.contains(.groupType))
+        XCTAssertFalse(publisher.contains(.unsubscribe))
+        let owner = channel(.owner)
+        for block in [InfoSection.renameGroup, .groupType, .reactions, .admins] {
+            XCTAssertTrue(owner.contains(block))
+        }
+        XCTAssertFalse(owner.contains(.unsubscribe))
+    }
+
+    /// Delete channel only for an owner with no other publisher.
+    func testDeleteChannelOnlyForAnOwnerAlone() {
+        XCTAssertTrue(channel(.owner, others: false).contains(.deleteGroup))
+        XCTAssertFalse(channel(.owner, others: true).contains(.deleteGroup))
+        XCTAssertFalse(channel(.publisher).contains(.deleteGroup))
+    }
+
+    /// The `@name` row only when there is one; `Members can find me` only
+    /// while the setting includes groups and channels.
+    func testTheHandleAndTheFindMeRowFollowTheirInputs() {
+        XCTAssertTrue(channel(.subscriber, handle: true).contains(.handle))
+        XCTAssertFalse(channel(.subscriber, handle: false).contains(.handle))
+        XCTAssertTrue(channel(.subscriber, membersOn: true).contains(.membersCanFindMe))
+        XCTAssertFalse(channel(.subscriber, membersOn: false).contains(.membersCanFindMe))
+        XCTAssertTrue(channel(.owner).contains(.channelDescription))
     }
 
     // MARK: - The three read as one product
@@ -285,9 +288,7 @@ final class ConversationInfoTests: XCTestCase {
             caps: GroupInfoCapabilities(
                 canManageMembers: false, canRename: false, canMintInvite: false,
                 isOwner: false, canLeave: true, membershipEnded: false))
-        let channelSections = channelInfoSections(
-            caps: ChannelInfoCapabilities(
-                isPublisher: false, isSubscriber: true, subscriberCountKnown: false))
+        let channelSections = channel(.subscriber)
         XCTAssertNotEqual(personSections, groupSections)
         XCTAssertNotEqual(personSections, channelSections)
         XCTAssertNotEqual(groupSections, channelSections)

@@ -56,7 +56,9 @@
  */
 
 /** Which commit an entry records. */
-export type PublisherCommitKind = "approve" | "rotation";
+/** `removal` (ADR-0087 phase B): the owner removed a publisher; its commit
+ *  moves the epoch like a rotation and is followed by the same reseal. */
+export type PublisherCommitKind = "approve" | "rotation" | "removal";
 
 /** The steps of an entry, in the order they run. */
 export type PublisherCommitStep = "journal" | "welcome" | "reseal" | "appoint";
@@ -155,7 +157,7 @@ export function parsePublisherCommitEntry(raw: unknown): PublisherCommitEntry | 
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
   if (!isHex(r.id, 32)) return null;
-  if (r.kind !== "approve" && r.kind !== "rotation") return null;
+  if (r.kind !== "approve" && r.kind !== "rotation" && r.kind !== "removal") return null;
   if (!isHex(r.channelIdHex, 32) || !isHex(r.groupIdHex, 64)) return null;
   if (typeof r.targetEpoch !== "string" || !/^\d+$/.test(r.targetEpoch)) return null;
   if (typeof r.serverTargetEpoch !== "number" || !Number.isInteger(r.serverTargetEpoch) || r.serverTargetEpoch < 0) {
@@ -268,7 +270,7 @@ export async function runPublisherCommit(entry: PublisherCommitEntry, ports: Pub
             current = { ...current, journalLost: true };
             break;
           }
-          if (current.kind === "rotation") {
+          if (current.kind !== "approve") {
             // The subscribers' reseal does not wait on the DS: the journal
             // step stays owed and the entry is kept for it.
             console.warn("ds: PublisherGroup rotation commit deferred", err instanceof Error ? err.name : "");

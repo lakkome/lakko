@@ -142,7 +142,6 @@ function record(over: Partial<EndRecord> = {}): EndRecord {
 describe("the stored row", () => {
   const row: MembershipEndRow = {
     records: [record()],
-    notices: [{ key: "2:aa", title: "Book club", routeIdsB64: ["qg=="], draft: "half a sentence", atMs: 1 }],
     welcomes: [{ messageId: 9, groupIdB64: "qg==", welcomeB64: "AQ==", heldAtMs: 2 }],
   };
 
@@ -178,13 +177,13 @@ function backend(): MembershipEndBackend & { saved: MembershipEndRow | null; fai
 }
 
 describe("the store", () => {
-  it("writes the record and its notice in one row write", async () => {
+  it("writes the record, and no notice (UX section 9: nothing is kept for later)", async () => {
     const b = backend();
     const store = new MembershipEndStore(b);
     await store.open("acct");
-    await store.begin(record(), { key: "2:aa", title: "t", routeIdsB64: [], draft: null, atMs: 1 });
+    await store.begin(record());
     expect(b.saved?.records).toHaveLength(1);
-    expect(b.saved?.notices).toHaveLength(1);
+    expect(Object.keys(b.saved ?? {})).toEqual(["records", "welcomes"]);
   });
 
   it("rejects when the row could not be written, so nothing goes on", async () => {
@@ -192,30 +191,18 @@ describe("the store", () => {
     const store = new MembershipEndStore(b);
     await store.open("acct");
     b.fail = true;
-    await expect(store.begin(record(), null)).rejects.toThrow("disk full");
+    await expect(store.begin(record())).rejects.toThrow("disk full");
   });
 
   it("survives a reload: what was on disk is what is owed", async () => {
     const b = backend();
     const first = new MembershipEndStore(b);
     await first.open("acct");
-    await first.begin(record(), null);
+    await first.begin(record());
     await first.update(record({ stage: "published" }));
     const second = new MembershipEndStore(b);
     await second.open("acct");
     expect(second.records().map((r) => r.stage)).toEqual(["published"]);
-  });
-
-  it("keeps the notice when the record finishes, until it is dismissed", async () => {
-    const b = backend();
-    const store = new MembershipEndStore(b);
-    await store.open("acct");
-    await store.begin(record(), { key: "2:aa", title: "t", routeIdsB64: [], draft: null, atMs: 1 });
-    await store.finish("2:aa");
-    expect(store.records()).toEqual([]);
-    expect(store.notices()).toHaveLength(1);
-    await store.dismiss("2:aa");
-    expect(b.saved?.notices).toEqual([]);
   });
 
   it("holds a Welcome once, and past the bound drops the oldest", async () => {
@@ -233,7 +220,7 @@ describe("the store", () => {
 
   it("refuses a change with no account bound", async () => {
     const store = new MembershipEndStore(backend());
-    await expect(store.begin(record(), null)).rejects.toThrow("not bound");
+    await expect(store.begin(record())).rejects.toThrow("not bound");
   });
 
   it("starts empty when the row is unreadable", async () => {

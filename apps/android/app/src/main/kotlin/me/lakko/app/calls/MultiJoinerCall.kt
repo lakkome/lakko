@@ -698,6 +698,9 @@ class MultiJoinerCall private constructor(
             // where the chat receive loop checks the sender's role. A relay
             // payload binds the name to nobody, so it is dropped, never stored.
             FfiIncomingEnvelopeKind.GROUP_NAME -> Unit
+            // ADR-0087 section 15 — a channel read key rides the PublisherGroup
+            // journal, sealed to one co-publisher; never a call relay.
+            FfiIncomingEnvelopeKind.CHANNEL_READ_KEY -> Unit
             // ADR-0048 trigger 4 — a profile REQUEST likewise rides the GROUP
             // JOURNAL, where the chat receive loop answers it with a profile
             // sealed into the group. A relay payload names no member to answer

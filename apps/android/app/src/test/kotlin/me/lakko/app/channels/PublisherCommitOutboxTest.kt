@@ -75,6 +75,7 @@ class PublisherCommitOutboxTest {
         }
         override suspend fun reseal(targetEpoch: Long) = step("reseal:$targetEpoch")
         override suspend fun appoint(joinerKey: ByteArray) = step("appoint")
+        override suspend fun unappoint(accountKey: ByteArray) = step("unappoint")
         override fun save(entry: PublisherCommitEntry) {
             saved += entry
         }
@@ -119,7 +120,10 @@ class PublisherCommitOutboxTest {
         val second = Recorder()
         runPublisherCommit(recorded, second, quiet)
         assertEquals(listOf("server-epoch", "reseal:8", "appoint"), second.calls)
-        assertEquals(PublisherCommitEntry.Step.entries.toList(), second.finished?.done)
+        assertEquals(
+            PublisherCommitEntry.Step.entries.filterNot { it == PublisherCommitEntry.Step.UNAPPOINT },
+            second.finished?.done,
+        )
     }
 
     @Test
@@ -228,5 +232,27 @@ class PublisherCommitOutboxTest {
         assertFalse(approve.copy(groupIdHex = "zz").isWellFormed)
         assertFalse(approve.copy(commitB64 = null).isWellFormed)
         assertTrue(rotation.isWellFormed)
+    }
+
+    private val removal = approve.copy(
+        id = "0c".repeat(16),
+        kind = PublisherCommitEntry.Kind.REMOVE,
+        commitB64 = b64("remove"),
+        welcomeB64 = null,
+    )
+
+    @Test
+    fun `a removal commits, reseals and then withdraws the appointment`() = runTest {
+        val r = Recorder()
+        runPublisherCommit(removal, r, quiet)
+        assertEquals(listOf("commit:remove", "server-epoch", "reseal:8", "unappoint"), r.calls)
+        assertEquals(removal.id, r.finished?.id)
+    }
+
+    @Test
+    fun `a failed withdrawal does not keep the removal owed`() = runTest {
+        val r = Recorder(failAt = "unappoint")
+        runPublisherCommit(removal, r, quiet)
+        assertEquals(removal.id, r.finished?.id)
     }
 }

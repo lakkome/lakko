@@ -110,6 +110,11 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// Own, not deleted (ADR-0023). Destructive.
     case delete
 
+    /// ADR-0087 section 13.3 — a publisher bans a comment's writer from the
+    /// channel's comments. Offered on channel comments only, never by
+    /// ``offered(canReply:canForward:canEditOrDelete:hasText:pin:canSelect:save:translate:)``.
+    case ban
+
     public var id: String { rawValue }
 
     public var title: String {
@@ -126,6 +131,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .select: return Localization.text("chat.message.select")
         case .edit: return Localization.text("chat.message.edit")
         case .delete: return Localization.text("common.delete")
+        case .ban: return Localization.text("channels.moderation.ban")
         }
     }
 
@@ -143,13 +149,14 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .select: return "checkmark.circle"
         case .edit: return "pencil"
         case .delete: return "trash"
+        case .ban: return "nosign"
         }
     }
 
     /// Whether the platform's destructive colour applies, and whether the card
     /// separates this row from the ones above it (section 2, "the destructive
     /// one, separated").
-    public var isDestructive: Bool { self == .delete }
+    public var isDestructive: Bool { self == .delete || self == .ban }
 
     /// The actions this message offers, in section 2's order.
     ///
@@ -788,7 +795,8 @@ struct MessageActionCard: View {
                 // every pair, so adding Reply and Forward above does not produce
                 // a card of hairlines.
                 .overlay(alignment: .top) {
-                    if action.isDestructive, index > 0 {
+                    // Once, above the first destructive row.
+                    if action.isDestructive, index > 0, !actions[index - 1].isDestructive {
                         Rectangle()
                             .fill(Color.lakkoBorder)
                             .frame(height: 0.5)

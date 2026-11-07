@@ -71,6 +71,15 @@ const commitRotation = vi.fn(async () => ({ epoch: 2 }));
 vi.mock("./api", () => ({
   fetchEpoch: (...a: unknown[]) => fetchEpoch(...(a as [])),
   listSubscribers: (...a: unknown[]) => listSubscribers(...(a as [])),
+  // ADR-0087 phase B — the reseal pages the list (one page here).
+  listSubscriberPage: async () => {
+    const list = await listSubscribers();
+    return {
+      entries: list.subscribers.map((id, i) => ({ seq: i + 1, subscriberId: id, sealedTicket: null })),
+      nextAfter: list.subscribers.length,
+    };
+  },
+  putPublicSeed: async () => {},
   stageRotation: (...a: unknown[]) => stageRotation(...(a as [])),
   commitRotation: (...a: unknown[]) => commitRotation(...(a as [])),
   MAX_STAGE_CHUNK_ENTRIES: 5000,
@@ -86,6 +95,8 @@ vi.mock("../state/channels-state", () => ({
     savePublisherCommit: async () => {},
     finishPublisherCommit: async () => {},
     coPublisherGroupIdOf: () => undefined,
+    // A channel from before phase B: no flag, every row resealed.
+    accessOf: () => ({ visibility: null, readKeyB64: null, admittedThroughSeq: 0, admissionSeeds: [] }),
   },
   channelsState: { metaByChannel: () => new Map() },
 }));

@@ -92,7 +92,8 @@ final class InviteLinkEditTests: XCTestCase {
             kind: kind, ledgerId: Data(repeating: id, count: 6),
             revocationSeed: Data(repeating: 9, count: 32),
             expiryMs: 0, maxUses: 0, uses: uses, revoked: false,
-            mintedAtMs: 1, label: "", answered: answered, shared: shared, editable: editable)
+            mintedAtMs: 1, label: "", answered: answered, shared: shared, editable: editable,
+            targetId: Data(), inviteSeed: Data(), capability: Data())
     }
 
     func testEditIsOfferedOnlyWhenTheRecordSaysSo() {

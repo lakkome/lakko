@@ -95,6 +95,8 @@ const SECTION_NAMES = [
   "admins",
   /* reactions-and-emoji.md section 9: group owner and admins, channel owner. */
   "reactions",
+  /* who-can-find-me.md section 5: a channel's info, every role. */
+  "members-can-find-me",
 ] as const;
 
 /**
@@ -148,16 +150,16 @@ export interface PersonInfoCapabilities {
   readonly contactsOfContactsOn?: boolean;
 }
 
-/** What the viewer is to a channel. */
+/** What the viewer is to a channel (ADR-0087 section 15): one role. */
 export interface ChannelInfoCapabilities {
-  /** This device holds the publisher keys. */
-  readonly isPublisher: boolean;
-  /** This device reads the channel as a subscriber. */
-  readonly isSubscriber: boolean;
-  /** This device has actually counted the subscribers. Only a publisher ever
-   *  does, and a reader inventing a number it cannot know is worse than
-   *  showing none. */
-  readonly subscriberCountKnown: boolean;
+  readonly role: "owner" | "publisher" | "subscriber";
+  /** The channel holds an `@name` (a lapsed one shows no row). */
+  readonly hasHandle: boolean;
+  /** A publisher besides the owner remains (the owner deletes the channel
+   *  only when none does). */
+  readonly hasOtherPublishers: boolean;
+  /** Members of my groups and channels is on in "Who can find me". */
+  readonly membersOfGroupsAndChannelsOn: boolean;
 }
 
 /**
@@ -326,14 +328,16 @@ export function channelInfoSections(
   caps: ChannelInfoCapabilities,
 ): readonly InfoSection[] {
   if (rules === null) return [];
+  // The core's `ChannelRole`: owner 0, publisher 1, subscriber 2.
+  const role = caps.role === "owner" ? 0 : caps.role === "publisher" ? 1 : 2;
+  const Caps = rules.ChannelInfoCapabilities as unknown as new (
+    role: number,
+    hasHandle: boolean,
+    hasOtherPublishers: boolean,
+    membersOfGroupsAndChannelsOn: boolean,
+  ) => Parameters<UiRules["channelInfoSections"]>[0];
   return known(
-    rules.channelInfoSections(
-      new rules.ChannelInfoCapabilities(
-        caps.isPublisher,
-        caps.isSubscriber,
-        caps.subscriberCountKnown,
-      ),
-    ),
+    rules.channelInfoSections(new Caps(role, caps.hasHandle, caps.hasOtherPublishers, caps.membersOfGroupsAndChannelsOn)),
   );
 }
 

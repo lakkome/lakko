@@ -76,7 +76,8 @@ export interface EndRecord {
   readonly atMs: number;
 }
 
-/** "You are no longer in {name}.": held only until it closes. */
+/** "You are no longer in {name}.": in memory only (UX section 9, 2026-11-06:
+ *  nothing is kept for later), until its dialog or notice has been shown. */
 export interface EndNotice {
   readonly key: string;
   readonly title: string;
@@ -231,11 +232,10 @@ export const MEMBERSHIP_END_ROW_VERSION = 1;
 
 export interface MembershipEndRow {
   readonly records: readonly EndRecord[];
-  readonly notices: readonly EndNotice[];
   readonly welcomes: readonly HeldWelcome[];
 }
 
-export const EMPTY_MEMBERSHIP_END_ROW: MembershipEndRow = { records: [], notices: [], welcomes: [] };
+export const EMPTY_MEMBERSHIP_END_ROW: MembershipEndRow = { records: [], welcomes: [] };
 
 export function encodeMembershipEndRow(row: MembershipEndRow): string {
   return JSON.stringify({ v: MEMBERSHIP_END_ROW_VERSION, ...row });
@@ -266,19 +266,6 @@ function isRecord(raw: unknown): raw is EndRecord {
   );
 }
 
-function isNotice(raw: unknown): raw is EndNotice {
-  if (typeof raw !== "object" || raw === null) return false;
-  const n = raw as Partial<EndNotice>;
-  return (
-    typeof n.key === "string" &&
-    typeof n.title === "string" &&
-    Array.isArray(n.routeIdsB64) &&
-    n.routeIdsB64.every((s) => typeof s === "string") &&
-    (n.draft === null || typeof n.draft === "string") &&
-    typeof n.atMs === "number"
-  );
-}
-
 function isWelcome(raw: unknown): raw is HeldWelcome {
   if (typeof raw !== "object" || raw === null) return false;
   const w = raw as Partial<HeldWelcome>;
@@ -300,11 +287,10 @@ export function decodeMembershipEndRow(json: string): MembershipEndRow | null {
     return null;
   }
   if (typeof raw !== "object" || raw === null) return null;
-  const r = raw as { v?: unknown; records?: unknown; notices?: unknown; welcomes?: unknown };
+  const r = raw as { v?: unknown; records?: unknown; welcomes?: unknown };
   if (r.v !== MEMBERSHIP_END_ROW_VERSION) return null;
   return {
     records: Array.isArray(r.records) ? r.records.filter(isRecord) : [],
-    notices: Array.isArray(r.notices) ? r.notices.filter(isNotice) : [],
     welcomes: Array.isArray(r.welcomes) ? r.welcomes.filter(isWelcome) : [],
   };
 }
@@ -368,10 +354,6 @@ export class MembershipEndStore {
     return this.row.records.find((r) => r.key === key);
   }
 
-  notices(): readonly EndNotice[] {
-    return this.row.notices;
-  }
-
   welcomes(): readonly HeldWelcome[] {
     return this.row.welcomes;
   }
@@ -384,16 +366,11 @@ export class MembershipEndStore {
     };
   }
 
-  /** Write a record, and its notice when it carries one, in ONE row write: a
-   *  crash leaves both or neither. */
-  begin(record: EndRecord, notice: EndNotice | null): Promise<void> {
+  /** Write a record. */
+  begin(record: EndRecord): Promise<void> {
     return this.change((row) => ({
       ...row,
       records: [...row.records.filter((r) => r.key !== record.key), record],
-      notices:
-        notice === null
-          ? row.notices
-          : [...row.notices.filter((n) => n.key !== notice.key), notice],
     }));
   }
 
@@ -405,14 +382,9 @@ export class MembershipEndStore {
     }));
   }
 
-  /** The end is carried out: the record goes, the notice stays. */
+  /** The end is carried out: the record goes. */
   finish(key: string): Promise<void> {
     return this.change((row) => ({ ...row, records: row.records.filter((r) => r.key !== key) }));
-  }
-
-  /** The notice closed: its name goes with it. */
-  dismiss(key: string): Promise<void> {
-    return this.change((row) => ({ ...row, notices: row.notices.filter((n) => n.key !== key) }));
   }
 
   /** Keep a Welcome. A row already held is not held twice; past

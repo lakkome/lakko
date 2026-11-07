@@ -237,7 +237,8 @@ final class PendingContactsTests: XCTestCase {
             kind: .contact, ledgerId: ledger ? Data(repeating: id, count: 6) : Data(),
             revocationSeed: ledger ? Data(repeating: 9, count: 32) : Data(),
             expiryMs: expiry, maxUses: maxUses, uses: uses, revoked: revoked,
-            mintedAtMs: minted, label: "", answered: [])
+            mintedAtMs: minted, label: "", answered: [],
+            targetId: Data(), inviteSeed: Data(), capability: Data())
     }
 
     func testTheListShowsLiveContactLinksNewestFirst() {

@@ -7,7 +7,10 @@
 //! |---|---|---|---|
 //! | `POST` | `/v1/channels/:id/posts/:cursor/reactions` | write proof by the reaction's key, then one `channel-react` token | Add the row `{writer_key_hex, label_hex}`. `201 {"added": true}`, or `200 {"added": false}` when the row was there. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key | Take the reaction off. `204` whether or not it was there. |
-//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}]}]}`, at most 64 labels a post, the most counted first. `Cache-Control: public, max-age=15`. |
+//! | `GET` | `/v1/channels/:id/reactions?posts=<c1>,<c2>,...` | none | Label counts and the comment count of up to 50 posts, `{"posts": [{"cursor", "labels": [{"label_hex", "count"}], "comments"}]}`, at most 64 labels a post, the most counted first; `comments` is the post's maintained comment count (2026-11-05). `Cache-Control: public, max-age=15`. |
+//! | `POST` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions` | write proof by the reaction's key (op `0x05`), then one `channel-react` token | Add a reaction on the comment `{writer_key_hex, label_hex}` (a `CommentReactionKey` label). `201 {"added": true}` / `200 {"added": false}`; `404 unknown-comment`. |
+//! | `DELETE` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions/:writer_key_hex/:label_hex` | write proof by that key (op `0x06`) | Take it off. `204`. |
+//! | `GET` | `/v1/channels/:id/posts/:cursor/comment-reactions?comments=<c1>,...` | none | Label counts of up to 50 comments under the post, `{"comments": [{"cursor", "labels": [{"label_hex", "count"}]}]}`. `Cache-Control: public, max-age=15`. |
 //! | `POST` | `/v1/channels/:id/posts/:cursor/comments` | write proof by the comment's key, then one `channel-comment` token | Add `{writer_key_hex, sealed_b64}`. `201 {"cursor": n}`. |
 //! | `GET` | `/v1/channels/:id/posts/:cursor/comments?after=&limit=` | none | A page of comments, cursor ascending, at most 20: `{"comments": [{"cursor", "writer_key_hex", "sealed_b64", "server_ts_ms"}], "next_after"}`. |
 //! | `DELETE` | `/v1/channels/:id/posts/:cursor/comments/:comment_cursor` | write proof by the comment's key, or a publisher proof | Delete the comment. `204`; `404 unknown-comment`. |
@@ -65,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::{err, unix_ms, AppState};
 use crate::feedback::{
     Label, WriterKey, COMMENT_PAGE_LEN, COMMENT_SEALED_MAX_LEN, COMMENT_SEALED_MIN_LEN,
-    MAX_COUNT_POSTS,
+    MAX_COUNT_COMMENTS, MAX_COUNT_POSTS,
 };
 use crate::owner_auth::require_publisher;
 use crate::storage::{ChannelId, StorageError};
@@ -133,6 +136,32 @@ pub struct PostCountsView {
     pub cursor: u64,
     /// Most counted first, at most 64.
     pub labels: Vec<LabelCountView>,
+    /// How many comments the post has (the maintained count).
+    pub comments: u64,
+}
+
+/// The reaction counts of one comment.
+#[derive(Serialize)]
+pub struct CommentCountsView {
+    /// The comment cursor.
+    pub cursor: u64,
+    /// Most counted first, at most 64.
+    pub labels: Vec<LabelCountView>,
+}
+
+/// Answer of `GET .../comment-reactions`.
+#[derive(Serialize)]
+pub struct CommentCountsResponse {
+    /// One entry per requested comment, in the order asked.
+    pub comments: Vec<CommentCountsView>,
+}
+
+/// Query of `GET .../comment-reactions`.
+#[derive(Deserialize)]
+pub struct CommentCountsQuery {
+    /// Comma-separated comment cursors, 1 to 50.
+    #[serde(default)]
+    pub comments: String,
 }
 
 /// Answer of `GET .../reactions`.
@@ -368,33 +397,226 @@ async fn reaction_counts(
         Ok(c) => c,
         Err(r) => return *r,
     };
-    let mut cursors: Vec<u64> = Vec::new();
-    for part in q.posts.split(',') {
-        let Ok(c) = part.trim().parse::<u64>() else {
-            return bad("bad-posts", "posts must be comma-separated post cursors");
-        };
-        if !cursors.contains(&c) {
-            cursors.push(c);
-        }
-        if cursors.len() > MAX_COUNT_POSTS {
-            return bad("too-many-posts", "at most 50 posts per read");
-        }
-    }
+    let cursors = match parse_cursor_list(&q.posts, MAX_COUNT_POSTS) {
+        Ok(c) => c,
+        Err(CursorListError::Malformed) => {
+            return bad("bad-posts", "posts must be comma-separated post cursors")
+        },
+        Err(CursorListError::TooMany) => return bad("too-many-posts", "at most 50 posts per read"),
+    };
+    let comment_counts = match state.store.comment_counts(channel, &cursors).await {
+        Ok(c) => c,
+        Err(e) => return internal(&e),
+    };
     match state.store.reaction_counts(channel, &cursors).await {
         Ok(counts) => {
             let body = CountsResponse {
                 posts: counts
                     .into_iter()
-                    .map(|p| PostCountsView {
+                    .zip(comment_counts)
+                    .map(|(p, (_, comments))| PostCountsView {
                         cursor: p.post_cursor,
-                        labels: p
-                            .labels
-                            .into_iter()
-                            .map(|(label, count)| LabelCountView {
-                                label_hex: hex::encode(label),
-                                count,
-                            })
-                            .collect(),
+                        labels: label_views(p.labels),
+                        comments,
+                    })
+                    .collect(),
+            };
+            let mut resp = Json(body).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static(REACTION_COUNTS_CACHE_CONTROL),
+            );
+            resp
+        },
+        Err(e) => internal(&e),
+    }
+}
+
+/// Why a cursor list was refused.
+enum CursorListError {
+    Malformed,
+    TooMany,
+}
+
+/// Parse `a,b,c` into at most `max` distinct cursors, in order.
+fn parse_cursor_list(list: &str, max: usize) -> Result<Vec<u64>, CursorListError> {
+    let mut cursors: Vec<u64> = Vec::new();
+    for part in list.split(',') {
+        let c = part
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| CursorListError::Malformed)?;
+        if !cursors.contains(&c) {
+            cursors.push(c);
+        }
+        if cursors.len() > max {
+            return Err(CursorListError::TooMany);
+        }
+    }
+    Ok(cursors)
+}
+
+fn label_views(labels: Vec<(Label, u64)>) -> Vec<LabelCountView> {
+    labels
+        .into_iter()
+        .map(|(label, count)| LabelCountView {
+            label_hex: hex::encode(label),
+            count,
+        })
+        .collect()
+}
+
+/// `POST /v1/channels/:id/posts/:cursor/comments/:comment_cursor/reactions`.
+async fn add_comment_reaction(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, post_cursor, comment_cursor)): Path<(String, u64, u64)>,
+    headers: HeaderMap,
+    Json(req): Json<AddReactionRequest>,
+) -> Response {
+    let channel = match parse_channel(&channel_id) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    let writer_key = match parse_writer_key(&req.writer_key_hex) {
+        Ok(k) => k,
+        Err(r) => return *r,
+    };
+    let label = match parse_label(&req.label_hex) {
+        Ok(l) => l,
+        Err(r) => return *r,
+    };
+    let statement = WriteStatement {
+        channel_id: channel.as_bytes(),
+        post_cursor,
+        writer_key: &writer_key,
+        write: SubscriberWrite::AddCommentReaction {
+            comment_cursor,
+            label,
+        },
+    };
+    if let Err(r) = check_write_proof(&state, &headers, &statement).await {
+        return r;
+    }
+    // The comment exists before a token is spent.
+    match state
+        .store
+        .comment_writer(channel, post_cursor, comment_cursor)
+        .await
+    {
+        Ok(Some(_)) => {},
+        Ok(None) => return unknown_comment(),
+        Err(e) => return internal(&e),
+    }
+    if let Err(refused) = state
+        .anon_tokens
+        .spend_header(&headers, TokenContext::ChannelReact)
+        .await
+    {
+        return refused.into_response();
+    }
+    match state
+        .store
+        .add_comment_reaction(
+            channel,
+            post_cursor,
+            comment_cursor,
+            writer_key,
+            label,
+            unix_ms(),
+        )
+        .await
+    {
+        Ok(true) => (
+            StatusCode::CREATED,
+            Json(AddReactionResponse { added: true }),
+        )
+            .into_response(),
+        Ok(false) => (StatusCode::OK, Json(AddReactionResponse { added: false })).into_response(),
+        Err(StorageError::UnknownComment) => unknown_comment(),
+        Err(e) => internal(&e),
+    }
+}
+
+/// `DELETE .../comments/:comment_cursor/reactions/:writer_key_hex/:label_hex`.
+async fn delete_comment_reaction(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, post_cursor, comment_cursor, writer_key_hex, label_hex)): Path<(
+        String,
+        u64,
+        u64,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Response {
+    let channel = match parse_channel(&channel_id) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    let writer_key = match parse_writer_key(&writer_key_hex) {
+        Ok(k) => k,
+        Err(r) => return *r,
+    };
+    let label = match parse_label(&label_hex) {
+        Ok(l) => l,
+        Err(r) => return *r,
+    };
+    let statement = WriteStatement {
+        channel_id: channel.as_bytes(),
+        post_cursor,
+        writer_key: &writer_key,
+        write: SubscriberWrite::DeleteCommentReaction {
+            comment_cursor,
+            label,
+        },
+    };
+    if let Err(r) = check_write_proof(&state, &headers, &statement).await {
+        return r;
+    }
+    match state
+        .store
+        .delete_comment_reaction(channel, post_cursor, comment_cursor, writer_key, label)
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(&e),
+    }
+}
+
+/// `GET /v1/channels/:id/posts/:cursor/comment-reactions?comments=`.
+async fn comment_reaction_counts(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, post_cursor)): Path<(String, u64)>,
+    Query(q): Query<CommentCountsQuery>,
+) -> Response {
+    let channel = match parse_channel(&channel_id) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    let cursors = match parse_cursor_list(&q.comments, MAX_COUNT_COMMENTS) {
+        Ok(c) => c,
+        Err(CursorListError::Malformed) => {
+            return bad(
+                "bad-comments",
+                "comments must be comma-separated comment cursors",
+            )
+        },
+        Err(CursorListError::TooMany) => {
+            return bad("too-many-comments", "at most 50 comments per read")
+        },
+    };
+    match state
+        .store
+        .comment_reaction_counts(channel, post_cursor, &cursors)
+        .await
+    {
+        Ok(counts) => {
+            let body = CommentCountsResponse {
+                comments: counts
+                    .into_iter()
+                    .map(|c| CommentCountsView {
+                        cursor: c.comment_cursor,
+                        labels: label_views(c.labels),
                     })
                     .collect(),
             };
@@ -579,5 +801,17 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/channels/{channel_id}/posts/{post_cursor}/comments/{comment_cursor}",
             delete(delete_comment),
+        )
+        .route(
+            "/v1/channels/{channel_id}/posts/{post_cursor}/comments/{comment_cursor}/reactions",
+            post(add_comment_reaction),
+        )
+        .route(
+            "/v1/channels/{channel_id}/posts/{post_cursor}/comments/{comment_cursor}/reactions/{writer_key_hex}/{label_hex}",
+            delete(delete_comment_reaction),
+        )
+        .route(
+            "/v1/channels/{channel_id}/posts/{post_cursor}/comment-reactions",
+            get(comment_reaction_counts),
         )
 }

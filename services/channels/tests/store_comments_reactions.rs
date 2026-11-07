@@ -162,9 +162,127 @@ async fn exercise(s: &dyn ChannelStore) {
         .is_empty());
 }
 
+/// 2026-11-05: comment counts, reactions on comments, and deleting a
+/// channel, the same scenario against both stores.
+async fn exercise_phase_b(s: &dyn ChannelStore) {
+    let c = channel_with_posts(s).await;
+    let now = now_ms();
+    let (k1, k2) = (random::<32>(), random::<32>());
+    let (thumbs, heart) = ([1u8; 16], [2u8; 16]);
+
+    assert_eq!(
+        s.comment_counts(c, &[1, 2, 99]).await.unwrap(),
+        vec![(1, 0), (2, 0), (99, 0)]
+    );
+    let a = s.add_comment(c, 1, k1, vec![1; 200], now).await.unwrap();
+    let b = s.add_comment(c, 1, k2, vec![2; 200], now).await.unwrap();
+    let other = s.add_comment(c, 2, k2, vec![3; 200], now).await.unwrap();
+    assert_eq!(
+        s.comment_counts(c, &[1, 2]).await.unwrap(),
+        vec![(1, 2), (2, 1)]
+    );
+
+    // Reactions on a comment: a row per (comment, key, label).
+    assert!(s
+        .add_comment_reaction(c, 1, a, k1, thumbs, now)
+        .await
+        .unwrap());
+    assert!(!s
+        .add_comment_reaction(c, 1, a, k1, thumbs, now)
+        .await
+        .unwrap());
+    assert!(s
+        .add_comment_reaction(c, 1, a, k2, thumbs, now)
+        .await
+        .unwrap());
+    assert!(s
+        .add_comment_reaction(c, 1, b, k1, heart, now)
+        .await
+        .unwrap());
+    // A comment of another post, or none at all, is not there.
+    assert!(matches!(
+        s.add_comment_reaction(c, 1, other, k1, thumbs, now).await,
+        Err(StorageError::UnknownComment)
+    ));
+    assert!(matches!(
+        s.add_comment_reaction(c, 1, 999_999_999, k1, thumbs, now)
+            .await,
+        Err(StorageError::UnknownComment)
+    ));
+    let counts = s
+        .comment_reaction_counts(c, 1, &[a, b, other])
+        .await
+        .unwrap();
+    assert_eq!(counts[0].comment_cursor, a);
+    assert_eq!(counts[0].labels, vec![(thumbs, 2)]);
+    assert_eq!(counts[1].labels, vec![(heart, 1)]);
+    assert!(
+        counts[2].labels.is_empty(),
+        "another post's comment counts nothing here"
+    );
+    // Taking one off; a row of another post's comment is not touched.
+    assert!(s
+        .delete_comment_reaction(c, 1, a, k2, thumbs)
+        .await
+        .unwrap());
+    assert!(!s
+        .delete_comment_reaction(c, 1, a, k2, thumbs)
+        .await
+        .unwrap());
+    assert!(!s
+        .delete_comment_reaction(c, 2, a, k1, thumbs)
+        .await
+        .unwrap());
+    assert_eq!(
+        s.comment_reaction_counts(c, 1, &[a]).await.unwrap()[0].labels,
+        vec![(thumbs, 1)]
+    );
+    // Deleting a comment takes its reactions and lowers the count.
+    assert!(s.delete_comment(c, 1, a).await.unwrap());
+    assert!(s.comment_reaction_counts(c, 1, &[a]).await.unwrap()[0]
+        .labels
+        .is_empty());
+    assert_eq!(s.comment_counts(c, &[1]).await.unwrap(), vec![(1, 1)]);
+
+    // Deleting the channel: everything goes, the id is never registered
+    // again, a second delete finds nothing, another channel is untouched.
+    let keep = channel_with_posts(s).await;
+    assert!(!s.is_deleted(c).await.unwrap());
+    assert!(s.delete_channel(c, now).await.unwrap());
+    assert!(s.is_deleted(c).await.unwrap());
+    assert!(!s.exists(c).await);
+    assert!(!s.post_exists(c, 1).await.unwrap());
+    assert_eq!(s.comment_counts(c, &[1]).await.unwrap(), vec![(1, 0)]);
+    assert!(matches!(
+        s.fetch(c, 0, 10).await,
+        Err(StorageError::UnknownChannel)
+    ));
+    assert!(matches!(
+        s.create(c, random::<32>()).await,
+        Err(StorageError::ChannelDeleted)
+    ));
+    assert!(!s.delete_channel(c, now).await.unwrap());
+    assert!(s.is_deleted(c).await.unwrap());
+    assert!(!s.is_deleted(keep).await.unwrap());
+    assert!(s.post_exists(keep, 1).await.unwrap());
+}
+
 #[tokio::test]
 async fn the_in_memory_store() {
     exercise(&InMemoryChannelStore::new()).await;
+}
+
+#[tokio::test]
+async fn the_in_memory_store_phase_b() {
+    exercise_phase_b(&InMemoryChannelStore::new()).await;
+}
+
+#[tokio::test]
+async fn the_sql_store_phase_b() {
+    let Some(s) = sql_store().await else {
+        return;
+    };
+    exercise_phase_b(&s).await;
 }
 
 #[tokio::test]

@@ -169,12 +169,11 @@ class MembershipEndTest {
     }
 
     @Test
-    fun `a removed person keeps a notice row with the name and nothing else owed`() {
+    fun `a finished end keeps no row, the notice is never stored`() {
+        // UX 9 (2026-11-06): the notice is shown live and not kept for later.
         val store = MemStore()
         run(applied(), store, Ports())
-        val row = store.rows.getValue("aa")
-        assertEquals(EndStage.NOTICE_ONLY, row.stage)
-        assertEquals(listOf(MembershipEndNotice("aa", "Team")), endNoticesOf(store.load("acct")))
+        assertTrue(store.rows.isEmpty())
         assertTrue("nothing is ending any more", endingIdsOf(store.load("acct")).isEmpty())
     }
 
@@ -182,18 +181,19 @@ class MembershipEndTest {
     fun `a person who left gets no notice and no row stays`() {
         val store = MemStore()
         store.save("acct", applied(left = true))
-        assertTrue(endNoticesOf(store.load("acct")).isEmpty())
+        assertFalse(store.rows.getValue("aa").noticeOwed)
         run(applied(left = true), store, Ports())
         assertTrue(store.rows.isEmpty())
     }
 
     @Test
-    fun `a device that heard the register does not publish it and shows the notice`() {
+    fun `a device that heard the register does not publish it and owes the notice`() {
         val store = MemStore()
         val ports = Ports()
+        assertTrue(heardEnd("aa", "Team", 7u).noticeOwed)
         assertEquals(EndRun.DONE, run(heardEnd("aa", "Team", 7u), store, ports))
         assertEquals(listOf("stop", "wipe", "delete", "persist", "drop"), ports.steps)
-        assertEquals(1, endNoticesOf(store.load("acct")).size)
+        assertTrue(store.rows.isEmpty())
     }
 
     @Test
@@ -209,7 +209,7 @@ class MembershipEndTest {
     fun `a closed notice stays closed while the steps finish`() {
         val store = MemStore()
         val row = heardEnd("aa", "Team", 7u).copy(noticeClosed = true)
-        assertTrue(endNoticesOf(listOf(row)).isEmpty())
+        assertFalse(row.noticeOwed)
         run(row, store, Ports())
         assertTrue(store.rows.isEmpty())
     }
@@ -252,7 +252,7 @@ class MembershipEndTest {
             ports.steps.clear()
             assertEquals(crash, EndRun.DONE, run(resumed, store, ports))
             assertEquals(crash, "drop", ports.steps.last())
-            assertEquals(crash, EndStage.NOTICE_ONLY, store.rows.getValue("aa").stage)
+            assertTrue(crash, store.rows.isEmpty())
         }
     }
 
@@ -322,6 +322,27 @@ class MembershipEndTest {
     }
 
     // ---- the notice ------------------------------------------------------
+
+    @Test
+    fun `one removal reads by its name, several by the newest and a count`() {
+        assertNull(endNoticeText(emptyList(), "Group"))
+        val one = endNoticeText(listOf(MembershipEndNotice("aa", "Team", 1)), "Group")
+        assertEquals("chat.ended.notice", one?.key)
+        assertEquals("Team", one?.texts?.get("name"))
+        val many = endNoticeText(
+            listOf(
+                MembershipEndNotice("aa", "Team", 1),
+                MembershipEndNotice("bb", "", 3),
+                MembershipEndNotice("cc", "News", 2),
+                MembershipEndNotice("aa", "Team", 1),
+            ),
+            "Group",
+        )
+        assertEquals("chat.ended.notice_more", many?.key)
+        // The newest, its blank name read by the catalog word, and two more.
+        assertEquals("Group", many?.texts?.get("name"))
+        assertEquals(2uL, many?.counts?.get("n"))
+    }
 
     @Test
     fun `the banner's name falls back to the catalog word`() {
@@ -586,20 +607,14 @@ class MembershipEndTest {
     }
 
     @Test
-    fun `a new removal gets its own banner on top while an older one is still open`() {
-        // Base walk 2026-11-04: the banner kept the older group's sentence and
-        // the new removal said nothing.
-        val older = heardEnd("aa", "QA Phase A Walk", 3u, nowMs = 1_000L).copy(stage = EndStage.NOTICE_ONLY)
-        val newer = heardEnd("bb", "QA Base Alone", 5u, nowMs = 2_000L).copy(stage = EndStage.NOTICE_ONLY)
-        // The store hands rows back in no order.
-        val banner = bannerNotices(endNoticesOf(listOf(newer, older)))
-        assertEquals(listOf("QA Base Alone", "QA Phase A Walk"), banner.map { it.name })
-        assertEquals(banner, bannerNotices(endNoticesOf(listOf(older, newer))))
-        // Each banner closes on its own: closing the newer leaves the older.
-        assertEquals(listOf("QA Phase A Walk"), bannerNotices(endNoticesOf(listOf(older))).map { it.name })
-        // A closed notice is not in it; a person who chose to go gets none.
-        val closed = older.copy(noticeClosed = true)
-        assertEquals(listOf("bb"), bannerNotices(endNoticesOf(listOf(closed, newer))).map { it.idHex })
-        assertTrue(bannerNotices(endNoticesOf(listOf(chosenEnd("cc", 0u)))).isEmpty())
+    fun `a removal noticed while the notice is up gives the combined text, in either order`() {
+        // UX 9 (2026-11-06): one notice at a time, never a pile of banners.
+        val older = MembershipEndNotice("aa", "QA Phase A Walk", 1_000L)
+        val newer = MembershipEndNotice("bb", "QA Base Alone", 2_000L)
+        val combined = endNoticeText(listOf(newer, older), "Group")
+        assertEquals(combined, endNoticeText(listOf(older, newer), "Group"))
+        assertEquals("chat.ended.notice_more", combined?.key)
+        assertEquals("QA Base Alone", combined?.texts?.get("name"))
+        assertEquals(1uL, combined?.counts?.get("n"))
     }
 }

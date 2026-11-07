@@ -1,6 +1,5 @@
 {
   "format": 1,
-  "language": "hi",
   "messages": {
     "account.keys_changed.finishing": {
       "text": "आपके अकाउंट को नई कुंजियाँ मिल गई हैं। हम बदलाव पूरा कर रहे हैं।",
@@ -1238,8 +1237,136 @@
       "text": "इस प्रतिभागी की आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते",
       "status": "machine"
     },
+    "channel_reactions.all_sub": {
+      "text": "सदस्य किसी भी इमोजी से प्रतिक्रिया दे सकते हैं।",
+      "status": "machine"
+    },
+    "channel_reactions.none_sub": {
+      "text": "सदस्य पोस्ट पर प्रतिक्रिया नहीं दे सकते।",
+      "status": "machine"
+    },
+    "channel_reactions.some_sub": {
+      "text": "सदस्य केवल आपके चुने इमोजी से प्रतिक्रिया दे सकते हैं।",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.body": {
+      "text": "यह खोज और डिस्कवर से हट जाएगा। लोग तभी सदस्यता ले सकेंगे जब आप उन्हें आमंत्रित करें। सभी सदस्य बने रहेंगे।",
+      "status": "machine"
+    },
+    "channel_type.confirm.private.title": {
+      "text": "इस चैनल को निजी करें?",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.body": {
+      "text": "कोई भी इसे ढूँढकर पढ़ सकेगा और Lakko इसे डिस्कवर में सुझा सकता है। इसका नाम, फ़ोटो और विवरण सबको दिखेगा। पहले की पोस्ट केवल मौजूदा सदस्य ही पढ़ सकेंगे।",
+      "status": "machine"
+    },
+    "channel_type.confirm.public.title": {
+      "text": "इस चैनल को सार्वजनिक करें?",
+      "status": "machine"
+    },
+    "channel_type.confirm.rename.body": {
+      "text": "पुराना @नाम अभी से काम करना बंद कर देगा। यह 30 दिनों तक इस चैनल के लिए आरक्षित रहेगा।",
+      "status": "machine"
+    },
+    "channel_type.handle_private": {
+      "text": "इसे केवल सदस्य देखते हैं।",
+      "status": "machine"
+    },
+    "channel_type.handle_public": {
+      "text": "कोई भी इस नाम से यह चैनल ढूँढ सकता है।",
+      "status": "machine"
+    },
+    "channel_type.private_desc": {
+      "text": "केवल वही लोग सदस्यता ले सकते हैं जिन्हें आप आमंत्रित करें। यह खोज में नहीं दिखता।",
+      "status": "machine"
+    },
+    "channel_type.public_desc": {
+      "text": "कोई भी इस चैनल को ढूँढकर सदस्यता ले सकता है। Lakko इसे डिस्कवर में सुझा सकता है।",
+      "status": "machine"
+    },
+    "channel_type.title": {
+      "text": "चैनल का प्रकार",
+      "status": "machine"
+    },
+    "channel_type.updating": {
+      "text": "सदस्य अपडेट हो रहे हैं... {total} में से {done}",
+      "status": "machine"
+    },
+    "channel_type.who_can_subscribe": {
+      "text": "कौन सदस्यता ले सकता है",
+      "status": "machine"
+    },
     "channels.back": {
       "text": "चैनलों पर वापस जाएँ",
+      "status": "machine"
+    },
+    "channels.ban.action": {
+      "text": "टिप्पणियों से प्रतिबंधित करें",
+      "status": "machine"
+    },
+    "channels.ban.empty": {
+      "text": "कोई प्रतिबंधित नहीं है।",
+      "status": "machine"
+    },
+    "channels.ban.failed": {
+      "text": "सहेजा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.ban.title": {
+      "text": "प्रतिबंधित",
+      "status": "machine"
+    },
+    "channels.ban.unban": {
+      "text": "प्रतिबंध हटाएँ",
+      "status": "machine"
+    },
+    "channels.ban.unknown_name": {
+      "text": "कोई",
+      "status": "machine"
+    },
+    "channels.comments.actions": {
+      "text": "टिप्पणी की कार्रवाइयाँ",
+      "status": "machine"
+    },
+    "channels.comments.comment": {
+      "text": "टिप्पणी",
+      "status": "machine"
+    },
+    "channels.comments.delete_failed": {
+      "text": "टिप्पणी हटाई नहीं जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.comments.failed": {
+      "text": "टिप्पणियाँ लोड नहीं हुईं।",
+      "status": "machine"
+    },
+    "channels.comments.hide": {
+      "text": "टिप्पणियाँ छिपाएँ",
+      "status": "machine"
+    },
+    "channels.comments.invalid": {
+      "text": "यह टिप्पणी बहुत लंबी है या इसमें ऐसे अक्षर हैं जो भेजे नहीं जा सकते।",
+      "status": "machine"
+    },
+    "channels.comments.more": {
+      "text": "और दिखाएँ",
+      "status": "machine"
+    },
+    "channels.comments.new": {
+      "text": "{count, plural, one {# नई टिप्पणी} other {# नई टिप्पणियाँ}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more": {
+      "text": "{count, plural, one {# और टिप्पणी दिखाएँ} other {# और टिप्पणियाँ दिखाएँ}}",
+      "status": "machine"
+    },
+    "channels.comments.show_more_unknown": {
+      "text": "और टिप्पणियाँ दिखाएँ",
+      "status": "machine"
+    },
+    "channels.comments.write": {
+      "text": "टिप्पणी लिखें",
       "status": "machine"
     },
     "channels.compose.label": {
@@ -1290,12 +1417,36 @@
       "text": "सह-प्रकाशक",
       "status": "machine"
     },
+    "channels.delete.body": {
+      "text": "चैनल और उसकी पोस्ट आपके सभी डिवाइस से हट जाएँगी और @{name} 30 दिनों में मुक्त हो जाएगा। इसे पूर्ववत नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "channels.delete.body_no_handle": {
+      "text": "चैनल और उसकी पोस्ट आपके सभी डिवाइस से हट जाएँगी। इसे पूर्ववत नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "channels.delete.control": {
+      "text": "चैनल हटाएँ",
+      "status": "machine"
+    },
+    "channels.delete.failed": {
+      "text": "चैनल हटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.delete.title": {
+      "text": "यह चैनल हटाएँ?",
+      "status": "machine"
+    },
     "channels.empty.action": {
       "text": "चैनल बनाएँ",
       "status": "machine"
     },
     "channels.empty.title": {
       "text": "अभी कोई चैनल नहीं है",
+      "status": "machine"
+    },
+    "channels.ended.notice_body": {
+      "text": "चैनल और उसकी पोस्ट अब आपके डिवाइस पर नहीं हैं।",
       "status": "machine"
     },
     "channels.error.empty_post": {
@@ -1350,12 +1501,40 @@
       "text": "{handle} के लिए कोई चैनल नहीं मिला।",
       "status": "machine"
     },
+    "channels.header.private": {
+      "text": "निजी चैनल",
+      "status": "machine"
+    },
+    "channels.header.public": {
+      "text": "सार्वजनिक चैनल",
+      "status": "machine"
+    },
+    "channels.header.public_count": {
+      "text": "सार्वजनिक चैनल · {band} सदस्य",
+      "status": "machine"
+    },
     "channels.index_hint": {
       "text": "कोई चैनल चुनें, या नया बनाएँ",
       "status": "machine"
     },
+    "channels.info.handle_lapsed": {
+      "text": "इस चैनल का कोई @name नहीं है। एक चुनें।",
+      "status": "machine"
+    },
+    "channels.info.invite": {
+      "text": "आमंत्रित करें",
+      "status": "machine"
+    },
+    "channels.info.invite_people": {
+      "text": "लोगों को आमंत्रित करें",
+      "status": "machine"
+    },
     "channels.info.manage_sub": {
       "text": "इसका नाम और विवरण, इसे कौन पढ़ता है, और कौन और इसमें पोस्ट कर सकता है।",
+      "status": "machine"
+    },
+    "channels.info.publishers": {
+      "text": "प्रकाशक",
       "status": "machine"
     },
     "channels.info.subscribers": {
@@ -1364,6 +1543,10 @@
     },
     "channels.info.unsubscribe_sub": {
       "text": "चैनल को आपकी सूची से हटाता है और उसकी पोस्ट आपके सभी डिवाइस से हटा देता है। आप बाद में फिर से सदस्यता ले सकते हैं।",
+      "status": "machine"
+    },
+    "channels.invite.failed": {
+      "text": "{names} को आमंत्रित नहीं किया जा सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "channels.join.default_name": {
@@ -1420,6 +1603,30 @@
     },
     "channels.legacy.copublisher_link": {
       "text": "यह सह-प्रकाशक इनवाइट लिंक Lakko के पुराने वर्ज़न से बनाया गया था और अब काम नहीं करता। चैनल के मालिक से नया इनवाइट लिंक भेजने को कहें।",
+      "status": "machine"
+    },
+    "channels.link_page.needs_account": {
+      "text": "सदस्यता लेने के लिए खाता चाहिए। खाता बनाएँ या लॉग इन करें।",
+      "status": "machine"
+    },
+    "channels.link_page.title": {
+      "text": "चैनल से जुड़ें",
+      "status": "machine"
+    },
+    "channels.link_page.waiting": {
+      "text": "सदस्यता ली गई। पोस्ट तब दिखेंगी जब मालिक या कोई एडमिन अगली बार Lakko खोलेगा।",
+      "status": "machine"
+    },
+    "channels.links.failed": {
+      "text": "लिंक नहीं बन सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.links.needs_owner": {
+      "text": "यह डिवाइस अभी इस चैनल के लिए लिंक नहीं बना सकता। मालिक का डिवाइस Lakko खोलने के बाद बना सकेगा।",
+      "status": "machine"
+    },
+    "channels.links.revoke_failed": {
+      "text": "लिंक रद्द नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "channels.manage.back": {
@@ -1534,8 +1741,24 @@
       "text": "चैनल",
       "status": "machine"
     },
+    "channels.moderation.ban": {
+      "text": "टिप्पणियों से प्रतिबंधित करें",
+      "status": "machine"
+    },
+    "channels.moderation.banned": {
+      "text": "प्रतिबंधित",
+      "status": "machine"
+    },
+    "channels.moderation.unban": {
+      "text": "प्रतिबंध हटाएँ",
+      "status": "machine"
+    },
     "channels.new.create": {
       "text": "बनाएँ",
+      "status": "machine"
+    },
+    "channels.new.description_label": {
+      "text": "विवरण",
       "status": "machine"
     },
     "channels.new.error.create": {
@@ -1562,6 +1785,10 @@
       "text": "चैनल बनाने के लिए फिर से साइन इन करें।",
       "status": "machine"
     },
+    "channels.new.failed": {
+      "text": "यह चैनल नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "channels.new.handle_hint": {
       "text": "इसकी मदद से दूसरे लोग चैनल ढूँढ़कर उसे सब्सक्राइब कर सकते हैं।",
       "status": "machine"
@@ -1574,6 +1801,10 @@
       "text": "@my_channel",
       "status": "machine"
     },
+    "channels.new.name_label": {
+      "text": "चैनल का नाम",
+      "status": "machine"
+    },
     "channels.new.subtitle": {
       "text": "सब्सक्राइबर नाम और विवरण देखते हैं।",
       "status": "machine"
@@ -1582,20 +1813,48 @@
       "text": "नया चैनल",
       "status": "machine"
     },
+    "channels.new.too_many": {
+      "text": "आपने आज बहुत सारे चैनल बनाए हैं। कल फिर कोशिश करें।",
+      "status": "machine"
+    },
     "channels.new_menu": {
       "text": "नया चैनल या किसी चैनल से जुड़ें",
+      "status": "machine"
+    },
+    "channels.photo.only_owner": {
+      "text": "केवल मालिक फ़ोटो बदल सकता है।",
+      "status": "machine"
+    },
+    "channels.photo.remove_body": {
+      "text": "सदस्य इसकी जगह आद्याक्षर देखेंगे।",
+      "status": "machine"
+    },
+    "channels.photo.remove_title": {
+      "text": "चैनल की फ़ोटो हटाएँ?",
       "status": "machine"
     },
     "channels.post.not_available": {
       "text": "उपलब्ध नहीं",
       "status": "machine"
     },
+    "channels.post.not_publisher": {
+      "text": "यहाँ केवल मालिक और प्रकाशक पोस्ट कर सकते हैं।",
+      "status": "machine"
+    },
     "channels.post.older_key": {
       "text": "यह पोस्ट इतनी पुरानी है कि यह डिवाइस इसे नहीं पढ़ सकता।",
       "status": "machine"
     },
+    "channels.post.unavailable": {
+      "text": "यह पोस्ट उपलब्ध नहीं है।",
+      "status": "machine"
+    },
     "channels.post.unreadable": {
       "text": "यह पोस्ट इस डिवाइस पर नहीं खुल सकी।",
+      "status": "machine"
+    },
+    "channels.posts.earlier_unavailable": {
+      "text": "पिछली पोस्ट उपलब्ध नहीं हैं।",
       "status": "machine"
     },
     "channels.posts.empty": {
@@ -1624,6 +1883,70 @@
     },
     "channels.publish.error.sign_in": {
       "text": "इस चैनल में पोस्ट करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "channels.publishers.accept": {
+      "text": "स्वीकार करें",
+      "status": "machine"
+    },
+    "channels.publishers.add": {
+      "text": "प्रकाशक जोड़ें",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page": {
+      "text": "आपको {channel} का प्रकाशक बनने के लिए आमंत्रित किया गया है।",
+      "status": "machine"
+    },
+    "channels.publishers.invite_page_from": {
+      "text": "{name} आपको {channel} का प्रकाशक बनने के लिए आमंत्रित कर रहे हैं।",
+      "status": "machine"
+    },
+    "channels.publishers.remove": {
+      "text": "प्रकाशक हटाएँ",
+      "status": "machine"
+    },
+    "channels.publishers.remove_body": {
+      "text": "{name} को प्रकाशक से हटाएँ? वे अब पोस्ट या आमंत्रित नहीं कर पाएँगे।",
+      "status": "machine"
+    },
+    "channels.publishers.remove_failed": {
+      "text": "प्रकाशक को हटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.publishers.requests": {
+      "text": "{count, plural, one {प्रकाशित करने का # अनुरोध} other {प्रकाशित करने के # अनुरोध}}",
+      "status": "machine"
+    },
+    "channels.publishers.role_owner": {
+      "text": "मालिक",
+      "status": "machine"
+    },
+    "channels.publishers.role_publisher": {
+      "text": "प्रकाशक",
+      "status": "machine"
+    },
+    "channels.publishers.step_down": {
+      "text": "पद छोड़ें",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_body": {
+      "text": "आप अब इस चैनल में पोस्ट या आमंत्रित नहीं करेंगे। मालिक का डिवाइस अगली बार Lakko खोलने पर इसे लागू करेगा।",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_failed": {
+      "text": "पद छोड़ा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.publishers.step_down_sent": {
+      "text": "हो गया। मालिक का डिवाइस अगली बार Lakko खोलने पर इसे लागू करेगा।",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous": {
+      "text": "चैनल में प्रतिक्रियाएँ गुमनाम होती हैं। कोई नहीं देख सकता कि किसने प्रतिक्रिया दी, चैनल का मालिक भी नहीं।",
+      "status": "machine"
+    },
+    "channels.reactions.anonymous_note": {
+      "text": "चैनल में प्रतिक्रियाएँ गुमनाम होती हैं। कोई नहीं देख सकता कि किसने प्रतिक्रिया दी, चैनल का मालिक भी नहीं।",
       "status": "machine"
     },
     "channels.rotation.desc": {
@@ -1746,6 +2069,38 @@
       "text": "सब्सक्राइबर लोड नहीं हो सके। फिर से कोशिश करें।",
       "status": "machine"
     },
+    "channels.subscribers.from_invitation": {
+      "text": "आमंत्रण से",
+      "status": "machine"
+    },
+    "channels.subscribers.from_link": {
+      "text": "लिंक \"{label}\" से",
+      "status": "machine"
+    },
+    "channels.subscribers.load_failed": {
+      "text": "सदस्य लोड नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.subscribers.more": {
+      "text": "और दिखाएँ",
+      "status": "machine"
+    },
+    "channels.subscribers.none": {
+      "text": "अभी कोई सदस्य नहीं।",
+      "status": "machine"
+    },
+    "channels.subscribers.others": {
+      "text": "{count, plural, one {# अन्य।} other {# अन्य।}}",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_body": {
+      "text": "उन्हें नई पोस्ट मिलनी बंद हो जाएँगी।",
+      "status": "machine"
+    },
+    "channels.subscribers.remove_title": {
+      "text": "इस सदस्य को हटाएँ?",
+      "status": "machine"
+    },
     "channels.subscribers.retrying": {
       "text": "फिर से कोशिश हो रही है...",
       "status": "machine"
@@ -1770,8 +2125,12 @@
       "text": "सब्सक्राइबर",
       "status": "machine"
     },
+    "channels.subscribers.title_count": {
+      "text": "सदस्य ({count})",
+      "status": "machine"
+    },
     "channels.unsubscribe.action": {
-      "text": "फ़ॉलो करना बंद करें",
+      "text": "सदस्यता छोड़ें",
       "status": "machine"
     },
     "channels.unsubscribe.body": {
@@ -1779,11 +2138,11 @@
       "status": "machine"
     },
     "channels.unsubscribe.title": {
-      "text": "इस चैनल को फ़ॉलो करना बंद करें?",
+      "text": "इस चैनल की सदस्यता छोड़ें?",
       "status": "machine"
     },
     "channels.unsubscribe.title_named": {
-      "text": "{name} को फ़ॉलो करना बंद करें?",
+      "text": "{name} की सदस्यता छोड़ें?",
       "status": "machine"
     },
     "chat.attachment.error.attach": {
@@ -2100,6 +2459,10 @@
     },
     "chat.ended.notice_body": {
       "text": "ग्रुप और उसके मैसेज आपके डिवाइस से हटा दिए गए हैं।",
+      "status": "machine"
+    },
+    "chat.ended.notice_more": {
+      "text": "{count, plural, one {आप अब {name} और # अन्य में नहीं हैं।} other {आप अब {name} और # अन्य में नहीं हैं।}}",
       "status": "machine"
     },
     "chat.ended.unsent_draft": {
@@ -6594,6 +6957,22 @@
       "text": "कभी नहीं",
       "status": "machine"
     },
+    "invite.links.group_title": {
+      "text": "समूह और चैनल लिंक",
+      "status": "machine"
+    },
+    "invite.links.kind_channel": {
+      "text": "चैनल लिंक",
+      "status": "machine"
+    },
+    "invite.links.kind_group": {
+      "text": "समूह लिंक",
+      "status": "machine"
+    },
+    "invite.links.kind_publisher": {
+      "text": "सह-प्रकाशक लिंक",
+      "status": "machine"
+    },
     "invite.links.label_field": {
       "text": "लेबल (वैकल्पिक)",
       "status": "machine"
@@ -9318,5 +9697,6 @@
       "text": "मुझे कौन ढूँढ सकता है",
       "status": "machine"
     }
-  }
+  },
+  "language": "hi"
 }

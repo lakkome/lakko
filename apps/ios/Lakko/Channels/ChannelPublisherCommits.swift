@@ -132,7 +132,32 @@ public enum ChannelPublisherCommits {
                 try await context.channelsClient.setCoPublisherAppointment(
                     appoint: true, channelIdHex: context.channelIdHex,
                     accountIdentity: try context.ownerIdentity(), copublisherKey: key)
+                CoPublisherKeyBook.noteAppointed(
+                    channelIdHex: context.channelIdHex, accountKey: joinerKey, copublisherKey: key,
+                    accountIdB64: account)
                 await CoPublisherKeyBook.shared.forget(groupId: groupId, joinerKey: joinerKey, accountIdB64: account)
+            },
+            unappoint: { accountKey in
+                // The key this device appointed, else the one the publisher's
+                // own binding named (sent in the group, or read off the knock
+                // queue): a device that did not approve the publisher still
+                // revokes the appointment.
+                var known = CoPublisherKeyBook.appointedKey(
+                    channelIdHex: context.channelIdHex, accountKey: accountKey, accountIdB64: account)
+                if known == nil, let groupId = try? context.open().1.groupId() {
+                    known = await CoPublisherKeyBook.shared.key(
+                        groupId: groupId, joinerKey: accountKey, accountIdB64: account)
+                }
+                guard let key = known else {
+                    NSLog("ADR-0087: no appointment recorded for a removed publisher on this device")
+                    return
+                }
+                try await context.channelsClient.setCoPublisherAppointment(
+                    appoint: false, channelIdHex: context.channelIdHex,
+                    accountIdentity: try context.ownerIdentity(), copublisherKey: key)
+                CoPublisherKeyBook.noteAppointed(
+                    channelIdHex: context.channelIdHex, accountKey: accountKey, copublisherKey: nil,
+                    accountIdB64: account)
             },
             save: { entry in try PublisherCommitStore.shared.put(accountIdB64: account, entry) },
             finish: { entry in PublisherCommitStore.shared.remove(accountIdB64: account, id: entry.id) }

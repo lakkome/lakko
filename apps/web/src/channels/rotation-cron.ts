@@ -75,7 +75,7 @@ import { DsClient } from "../ds/client";
 import { commitWithNextEpoch, takeSigner, type ProofSigner } from "../ds/access";
 import { isCommitConflict } from "../ds/ownership";
 import { isBackoffRefusal } from "../chat/sweep-backoff";
-import { channelsActions } from "../state/channels-state";
+import { channelsActions, channelsState } from "../state/channels-state";
 import {
   newEntryId,
   runPublisherCommit,
@@ -91,7 +91,8 @@ type ChannelRotationState = ReturnType<Wasm["channelRotationStateNew"]>;
 import {
   commitRotation,
   fetchEpoch,
-  listSubscribers,
+  listSubscriberPage,
+  putPublicSeed,
   stageRotation,
   MAX_STAGE_CHUNK_ENTRIES,
   type ChannelEpoch,
@@ -215,6 +216,48 @@ export async function runRotationOnce(
   return { rotated: true, newState, newEpoch: newServerEpoch };
 }
 
+/**
+ * ADR-0087 section 15 (phase B) — the owner removes a publisher: every leaf
+ * of `accountKey` in one commit, merged at once by the core. The commit moves
+ * the epoch, so it is recorded and run exactly like a rotation (the journal
+ * step, then the reseal of the new seed to every subscriber); the removed
+ * person cannot derive the new seed. The server epoch is read before the
+ * merge, as for a rotation (G-50). Returns the new server epoch.
+ */
+export async function runPublisherRemoval(ctx: RotationContext, accountKey: Uint8Array): Promise<number> {
+  const current = await fetchEpoch(ctx.channelIdHex, ctx.apiBase);
+  const newServerEpoch = current.epoch + 1;
+  if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
+    throw new Error(`unexpected server epoch ${current.epoch}; cannot derive new epoch`);
+  }
+  const proofEpoch = ctx.publisherGroup.epoch();
+  const proofSeed = ctx.publisherGroup.dsAccessSeed(ctx.identity);
+  const commit = ctx.publisherGroup.removePublisher(ctx.identity, accountKey);
+  const entry: PublisherCommitEntry = {
+    id: newEntryId(),
+    kind: "removal",
+    channelIdHex: ctx.channelIdHex,
+    groupIdHex: hexOf(ctx.publisherGroup.groupId()),
+    targetEpoch: ctx.publisherGroup.epoch().toString(),
+    serverTargetEpoch: newServerEpoch,
+    commitB64: b64Of(commit),
+    welcomeB64: null,
+    joinerKeyB64: null,
+    replyGrantB64: null,
+    proofEpoch: proofEpoch.toString(),
+    proofSeedB64: b64Of(proofSeed),
+    journalLost: false,
+    done: [],
+  };
+  proofSeed.fill(0);
+  await channelsActions.recordPublisherCommit(entry);
+  await runPublisherCommit(entry, publisherCommitPorts(ctx));
+  const wasm = await loadWasm();
+  await ctx.saveState(wasm.channelRotationStateAfterRotation(BigInt(Date.now())));
+  ctx.onRotated?.(newServerEpoch);
+  return newServerEpoch;
+}
+
 /** What a PublisherGroup commit's steps run against. */
 export interface PublisherCommitContext {
   readonly publisherGroup: PublisherGroup;
@@ -274,11 +317,23 @@ export function publisherCommitPorts(
 }
 
 /**
- * Reseal the PublisherGroup's CURRENT seed to every subscriber, bound to
- * the channels-service epoch `targetEpoch`, and commit it there with the
- * ADR-0030 chunked fanout. A subscriber key the core refuses to seal to (a
- * pre-ADR-0060 X25519 key) is skipped; any other seal failure aborts the
- * whole batch.
+ * Reseal the PublisherGroup's CURRENT seed for the channels-service epoch
+ * `targetEpoch`, and commit it there with the ADR-0030 chunked fanout.
+ *
+ * ADR-0087 sections 6 and 7 decide who gets what:
+ *
+ * - a PUBLIC channel files one public seed envelope for the epoch, sealed
+ *   under its read key, BEFORE the commit (the service takes the next epoch);
+ *   no subscriber list is read for the readers who came by the read key.
+ * - per-key envelopes go only to the rows this device let in
+ *   (`admittedThroughSeq` of the channel's access record): every admitted row
+ *   of a private channel, and the rows of the time a now-public channel was
+ *   private. A row above it is the admission pass's to judge first.
+ * - a public channel whose read key this device does not hold (a co-publisher
+ *   that never learned it) reseals per key to every row instead.
+ *
+ * A subscriber key the core refuses to seal to (a pre-ADR-0060 X25519 key)
+ * is skipped; any other seal failure aborts the whole batch.
  */
 export async function resealToSubscribers(
   publisherGroup: PublisherGroup,
@@ -286,26 +341,48 @@ export async function resealToSubscribers(
   channelIdHex: string,
   targetEpoch: number,
   apiBase?: string,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<ChannelEpoch> {
   const wasm = await loadWasm();
   const newSeed = publisherGroup.channelSeed(identity);
   const channelIdBytes = publisherGroup.channelId();
-  const subscribers = await listSubscribers(channelIdHex, identity, apiBase);
+  const plan = resealPlan(channelIdHex);
+  if (plan.readKey !== null) {
+    const envelope = wasm.sealPublicSeedEnvelope(plan.readKey, channelIdBytes, targetEpoch, newSeed);
+    await putPublicSeed(channelIdHex, targetEpoch, envelope, identity, apiBase);
+  }
+  const keys: string[] = [];
+  if (plan.perKeyThroughSeq === "all" || plan.perKeyThroughSeq > 0) {
+    let after = 0;
+    for (;;) {
+      const page = await listSubscriberPage(channelIdHex, identity, after, undefined, apiBase);
+      let past = false;
+      for (const e of page.entries) {
+        if (plan.perKeyThroughSeq !== "all" && e.seq > plan.perKeyThroughSeq) {
+          past = true;
+          break;
+        }
+        keys.push(e.subscriberId);
+      }
+      if (past || page.entries.length === 0 || page.nextAfter <= after) break;
+      after = page.nextAfter;
+    }
+  }
   const bytesByHex = new Map<string, Uint8Array>();
-  for (const subscriberHex of subscribers.subscribers) {
+  for (const subscriberHex of keys) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
       // Malformed subscriber hex from the server: refuse to post a partial
       // batch (the step stays owed and is retried).
-      throw new Error(`subscriber pubkey hex is not valid: ${subscriberHex}`);
+      throw new Error("subscriber pubkey hex is not valid");
     }
     bytesByHex.set(subscriberHex, subscriberBytes);
   }
+  onProgress?.(0, bytesByHex.size);
   // ADR-0060: a subscriber key is Ed25519 now. A key registered before the
   // flag day (an X25519 key) may not be a valid Ed25519 point, and the core
   // refuses to seal to it; that subscriber could not open the envelope
-  // anyway, so it is skipped rather than aborting the whole rotation. Its
-  // device re-registers a fresh key on its next open of the channel.
+  // anyway, so it is skipped rather than aborting the whole rotation.
   const { sealed, skipped } = sealEachSkippingInvalid([...bytesByHex.keys()], (hex) =>
     wasm.sealSubscriberSeedEnvelope(bytesByHex.get(hex) ?? new Uint8Array(0), channelIdBytes, targetEpoch, newSeed),
   );
@@ -317,7 +394,42 @@ export async function resealToSubscribers(
     subscriber_pubkey_hex: s.subscriberHex,
     envelope_b64: base64Encode(s.value),
   }));
-  return stageAndCommitRotation(channelIdHex, targetEpoch, batch, identity, apiBase);
+  const committed = await stageAndCommitRotation(channelIdHex, targetEpoch, batch, identity, apiBase);
+  onProgress?.(batch.length, batch.length);
+  return committed;
+}
+
+/** What a reseal of `channelIdHex` sends: the read key a public seed is
+ *  sealed under (or `null`), and the rows that get a per-key envelope. */
+export function resealPlan(channelIdHex: string): {
+  readonly readKey: Uint8Array | null;
+  readonly perKeyThroughSeq: number | "all";
+} {
+  const access = channelsActions.accessOf(channelIdHex);
+  const meta = channelsState.metaByChannel().get(channelIdHex);
+  const visibility =
+    access.visibility ?? (meta?.listed === undefined ? null : meta.listed ? "public" : "private");
+  // Only a device that set the flag and runs the ticket check knows which
+  // rows it let in; any other (a channel from before phase B, a co-publisher
+  // that holds no admission seed) reseals per key to every row, as before.
+  const checks =
+    access.visibility !== null && (access.visibility === "public" || access.admissionSeeds.length > 0);
+  const perKeyThroughSeq: number | "all" = checks ? access.admittedThroughSeq : "all";
+  if (visibility !== "public") return { readKey: null, perKeyThroughSeq };
+  const readKey = access.readKeyB64 === null ? null : b64ToBytesStd(access.readKeyB64);
+  if (readKey === null || readKey.length !== 32) return { readKey: null, perKeyThroughSeq: "all" };
+  return { readKey, perKeyThroughSeq };
+}
+
+function b64ToBytesStd(b64: string): Uint8Array | null {
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function hexOf(bytes: Uint8Array): string {

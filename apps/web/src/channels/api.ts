@@ -18,6 +18,7 @@
  *   GET  /v1/channels/:id/subscribers/:pk/envelope
  *   POST /v1/channels/:id/rotate            (publisher-signed; also rotate/stage, rotate/commit)
  *   GET  /v1/channels/:id/epoch
+ *   DELETE /v1/channels/:id                 (owner-signed; afterwards every route is 410 channel-deleted)
  *
  * The web client treats every response body as JSON and
  * the on-wire `payload_b64` / `envelope_b64` fields as
@@ -159,9 +160,10 @@ async function parseError(resp: Response): Promise<ChannelApiError> {
   // 4xx / 5xx. Anything else (a proxy's HTML error page, the SPA fallback, a
   // 502 with no body) is the service not being there, and says so.
   if (!isJsonResponse(resp)) return unreachable(resp.status);
+  let parsed: ChannelApiError;
   try {
     const body = (await resp.json()) as { code?: string; detail?: string };
-    return {
+    parsed = {
       status: resp.status,
       code: body.code ?? "unknown",
       detail: body.detail ?? resp.statusText,
@@ -169,6 +171,70 @@ async function parseError(resp: Response): Promise<ChannelApiError> {
   } catch {
     return unreachable(resp.status);
   }
+  noteIfChannelDeleted(parsed.status, parsed.code, resp.url);
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// A deleted channel (ADR-0087 section 9, phase B)
+// ---------------------------------------------------------------------------
+
+/** The code every channels route answers once the owner deleted the channel
+ *  (`410`). */
+export const CHANNEL_DELETED = "channel-deleted";
+
+/** What happens on this device when the service says a channel is deleted:
+ *  `MembershipEndContext` installs the end-of-membership wipe. */
+type ChannelDeletedHandler = (channelIdHex: string) => void | Promise<void>;
+let onChannelDeleted: ChannelDeletedHandler | null = null;
+/** Channels whose deletion was already handed to the handler (or deleted
+ *  here by the owner), so a burst of `410`s ends the channel once. */
+const deletedHandled = new Set<string>();
+
+/** Install (or remove) what a deleted channel does on this device. */
+export function installChannelDeletedHandler(fn: ChannelDeletedHandler | null): void {
+  onChannelDeleted = fn;
+}
+
+/** The 32-hex channel id a channels URL names, or `null`. Pure. */
+export function channelIdOfUrl(url: string): string | null {
+  const m = /\/v1\/channels\/([0-9a-fA-F]{32})(?:[/?#]|$)/.exec(url);
+  return m === null ? null : (m[1] ?? "").toLowerCase();
+}
+
+/** Whether a channels error says the channel was deleted. Pure. */
+export function isChannelDeletedError(status: number, code: string): boolean {
+  return status === 410 && code === CHANNEL_DELETED;
+}
+
+/** The owner deleted the channel on this device: its own later `410`s are
+ *  not a second end (the caller runs the wipe itself). */
+export function markChannelDeletedHere(channelIdHex: string): void {
+  deletedHandled.add(channelIdHex.toLowerCase());
+}
+
+/** Hand a channel the service reports deleted to the installed handler,
+ *  once per channel per page. Never throws. */
+export function noteChannelDeleted(channelIdHex: string): void {
+  const id = channelIdHex.toLowerCase();
+  if (onChannelDeleted === null || deletedHandled.has(id)) return;
+  deletedHandled.add(id);
+  const handler = onChannelDeleted;
+  void Promise.resolve()
+    .then(() => handler(id))
+    .catch((err: unknown) => {
+      deletedHandled.delete(id);
+      // eslint-disable-next-line no-console
+      console.warn("[channels] ending a deleted channel failed", err instanceof Error ? err.name : "");
+    });
+}
+
+/** For every channels error path (also the feedback client's): a `410
+ *  channel-deleted` on a URL that names a channel ends that channel here. */
+export function noteIfChannelDeleted(status: number, code: string, url: string): void {
+  if (!isChannelDeletedError(status, code)) return;
+  const id = channelIdOfUrl(url);
+  if (id !== null) noteChannelDeleted(id);
 }
 
 /** Decode a base64url-no-pad string to raw bytes. The server
@@ -390,7 +456,7 @@ function exactBody(bytes: Uint8Array): ArrayBuffer {
  *  forgets the role, so the next call re-learns it, and surfaces. With the
  *  role unknown: the owner proof first, and on a 401 the co-publisher proof;
  *  whichever is accepted is remembered. */
-async function sendAsPublisher(
+export async function sendAsPublisher(
   accountIdentity: Identity,
   channelIdHex: string,
   req: {
@@ -459,14 +525,17 @@ export async function createChannel(
   channelIdHex: string,
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
+  isPrivate: boolean = false,
 ): Promise<{ readonly channelId: string }> {
   const signer = await ownerSigner(accountIdentity, channelIdHex);
   const ownerPubkeyHex = bytesToHexLower(signer.verifyingKey());
   signer.free();
+  // ADR-0087 section 7: the flag is applied only at creation (a later change
+  // is `PUT .../access`).
   const body = await fetchJson<{ channel_id: string }>(`${base}/v1/channels`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ channel_id: channelIdHex, owner_pubkey_hex: ownerPubkeyHex }),
+    body: JSON.stringify({ channel_id: channelIdHex, owner_pubkey_hex: ownerPubkeyHex, private: isPrivate }),
   });
   roleByOwnerKey.set(ownerPubkeyHex, "owner");
   return { channelId: body.channel_id };
@@ -594,14 +663,283 @@ export async function listSubscribers(
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelSubscribers> {
+  // ADR-0087 section 7: the list is paged; every page, in row order.
+  const all: string[] = [];
+  let after = 0;
+  for (;;) {
+    const page = await listSubscriberPage(channelIdHex, accountIdentity, after, SUBSCRIBER_PAGE_LIMIT, base);
+    for (const e of page.entries) all.push(e.subscriberId);
+    if (page.entries.length < SUBSCRIBER_PAGE_LIMIT || page.nextAfter <= after) break;
+    after = page.nextAfter;
+  }
+  return { subscribers: all };
+}
+
+/** The page size this client asks for (the server's maximum). */
+export const SUBSCRIBER_PAGE_LIMIT = 5000;
+
+/** One subscriber row with its row number and sealed admission ticket. */
+export interface SubscriberRowEntry {
+  readonly seq: number;
+  readonly subscriberId: string;
+  /** The sealed admission ticket (ADR-0087 section 7), or `null`. */
+  readonly sealedTicket: Uint8Array | null;
+}
+
+/** `GET /v1/channels/:id/subscribers?after=&limit=` — one page of rows in
+ *  insertion order, publisher-signed. */
+export async function listSubscriberPage(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  after: number,
+  limit: number = SUBSCRIBER_PAGE_LIMIT,
+  base: string = DEFAULT_BASE,
+): Promise<{ readonly entries: readonly SubscriberRowEntry[]; readonly nextAfter: number }> {
+  const query = `after=${Math.max(0, Math.floor(after))}&limit=${Math.max(1, Math.floor(limit))}`;
   const resp = await sendAsPublisher(
     accountIdentity,
     channelIdHex,
-    { method: "GET", path: `/v1/channels/${channelIdHex}/subscribers`, query: "", body: new Uint8Array() },
+    { method: "GET", path: `/v1/channels/${channelIdHex}/subscribers`, query, body: new Uint8Array() },
     base,
   );
-  return jsonOf<ChannelSubscribers>(resp);
+  const body = await jsonOf<{
+    entries?: ReadonlyArray<{ seq: number; subscriber_id: string; sealed_ticket_b64: string | null }>;
+    subscribers?: ReadonlyArray<string>;
+    next_after: number;
+  }>(resp);
+  const entries: SubscriberRowEntry[] =
+    body.entries !== undefined
+      ? body.entries.map((e) => ({
+          seq: e.seq,
+          subscriberId: e.subscriber_id,
+          sealedTicket: e.sealed_ticket_b64 === null ? null : base64UrlDecode(e.sealed_ticket_b64),
+        }))
+      : (body.subscribers ?? []).map((id, i) => ({ seq: after + i + 1, subscriberId: id, sealedTicket: null }));
+  return { entries, nextAfter: body.next_after };
 }
+
+/** `GET /v1/channels/:id/subscribers/count` — the maintained count,
+ *  publisher-signed (ADR-0087 section 15). */
+export async function fetchSubscriberCount(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<number> {
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    { method: "GET", path: `/v1/channels/${channelIdHex}/subscribers/count`, query: "", body: new Uint8Array() },
+    base,
+  );
+  const body = await jsonOf<{ count: number }>(resp);
+  return body.count;
+}
+
+/** A publisher removes a subscriber of a private channel (ADR-0087 section
+ *  7): publisher-signed `DELETE`. `409 channel-public` on a public channel. */
+export async function removeSubscriberAsPublisher(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "DELETE",
+      path: `/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}`,
+      query: "",
+      body: new Uint8Array(),
+    },
+    base,
+  );
+}
+
+/** `PUT /v1/channels/:id/access` — the owner sets the private flag. */
+export async function putChannelAccess(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  isPrivate: boolean,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const path = `/v1/channels/${channelIdHex}/access`;
+  const body = utf8.encode(JSON.stringify({ private: isPrivate }));
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  let proof: string;
+  try {
+    proof = signer.sign("PUT", path, "", body);
+  } finally {
+    signer.free();
+  }
+  await fetchJson<void>(`${base}${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", [wasm.channelOwnerProofHeaderName()]: proof },
+    body: exactBody(body),
+  });
+}
+
+/** `PUT /v1/channels/:id/public-seed/:epoch` — file a public channel's seed
+ *  envelope (ADR-0087 section 6), publisher-signed over the 64 bytes. A
+ *  `409 public-seed-exists` for the identical envelope does not happen (the
+ *  server answers 204); another envelope is refused. */
+export async function putPublicSeed(
+  channelIdHex: string,
+  epoch: number,
+  envelope: Uint8Array,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "PUT",
+      path: `/v1/channels/${channelIdHex}/public-seed/${epoch}`,
+      query: "",
+      body: envelope,
+      contentType: "application/octet-stream",
+    },
+    base,
+  );
+}
+
+/** `GET /v1/channels/:id/public-seed/:epoch` — the raw 64-byte envelope, or
+ *  `null` when none is filed (a private channel, an epoch not filed yet). */
+export async function fetchPublicSeed(
+  channelIdHex: string,
+  epoch: number,
+  base: string = DEFAULT_BASE,
+): Promise<Uint8Array | null> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/v1/channels/${channelIdHex}/public-seed/${epoch}`);
+  } catch {
+    throw unreachable(0);
+  }
+  if (resp.status === 404) {
+    if (!isJsonResponse(resp)) throw unreachable(404);
+    return null;
+  }
+  if (!resp.ok) throw await parseError(resp);
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+/** One registered invite key (ADR-0087 section 7). */
+export interface InviteKeyView {
+  readonly invitePkHex: string;
+  readonly expiryMs: number;
+  readonly maxUses: number;
+  readonly usedCount: number;
+}
+
+/** `GET /v1/channels/:id/invite-keys`, publisher-signed. */
+export async function listInviteKeys(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<readonly InviteKeyView[]> {
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    { method: "GET", path: `/v1/channels/${channelIdHex}/invite-keys`, query: "", body: new Uint8Array() },
+    base,
+  );
+  const body = await jsonOf<{
+    invite_keys: ReadonlyArray<{ invite_pk_hex: string; expiry_ms: number; max_uses: number; used_count: number }>;
+  }>(resp);
+  return body.invite_keys.map((k) => ({
+    invitePkHex: k.invite_pk_hex,
+    expiryMs: k.expiry_ms,
+    maxUses: k.max_uses,
+    usedCount: k.used_count,
+  }));
+}
+
+/** `PUT /v1/channels/:id/invite-keys/:pk` — register a link's invite key,
+ *  publisher-signed over `{expiry_ms, max_uses}`. */
+export async function putInviteKey(
+  channelIdHex: string,
+  invitePkHex: string,
+  expiryMs: number,
+  maxUses: number,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const body = utf8.encode(JSON.stringify({ expiry_ms: Math.max(0, Math.floor(expiryMs)), max_uses: maxUses >>> 0 }));
+  await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "PUT",
+      path: `/v1/channels/${channelIdHex}/invite-keys/${invitePkHex}`,
+      query: "",
+      body,
+      contentType: "application/json",
+    },
+    base,
+  );
+}
+
+/** `DELETE /v1/channels/:id/invite-keys/:pk` — revoke, idempotent. */
+export async function deleteInviteKey(
+  channelIdHex: string,
+  invitePkHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "DELETE",
+      path: `/v1/channels/${channelIdHex}/invite-keys/${invitePkHex}`,
+      query: "",
+      body: new Uint8Array(),
+    },
+    base,
+  );
+}
+
+/** Register a subscriber key on a channel with an optional sealed admission
+ *  ticket and invite proof (a private channel, ADR-0087 section 7). Spends one
+ *  `channel-subscribe` token. `inviteProof` is called once per attempt: a
+ *  proof is good for one request. */
+export async function subscribeWithAccess(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  access: {
+    readonly sealedTicketB64Url?: string;
+    readonly inviteProof?: () => { readonly headerName: string; readonly value: string };
+  },
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const url = `${base}/v1/channels/${channelIdHex}/subscribers`;
+  const json = JSON.stringify({
+    subscriber_pubkey_hex: subscriberPubkeyHex,
+    ...(access.sealedTicketB64Url === undefined ? {} : { sealed_ticket_b64: access.sealedTicketB64Url }),
+  });
+  let resp: Response;
+  try {
+    resp = await anonTokens.spend("channel-subscribe", (headerName, headerValue) => {
+      const headers: Record<string, string> = { "content-type": "application/json", [headerName]: headerValue };
+      if (access.inviteProof !== undefined) {
+        const p = access.inviteProof();
+        headers[p.headerName] = p.value;
+      }
+      return fetch(url, anonymousFetchInit({ method: "POST", headers, body: json }));
+    });
+  } catch (err) {
+    if (err instanceof TypeError) throw unreachable(0);
+    throw err;
+  }
+  if (!resp.ok) throw await parseError(resp);
+}
+
+/** `GET .../subscribers/:pk/envelopes` answered `410 subscriber-removed`:
+ *  a publisher removed this key from a private channel. */
+export const SUBSCRIBER_REMOVED = "subscriber-removed";
 
 /** Appoint (`PUT`) or revoke (`DELETE`) a co-publisher key for a channel
  *  (owner-signed, ADR-0059 section 1). Idempotent both ways; 409
@@ -985,6 +1323,37 @@ export async function deleteListing(
     method: "DELETE",
     headers: { [wasm.channelOwnerProofHeaderName()]: proof },
   });
+}
+
+/** ADR-0087 phase B — the owner deletes the channel on the service
+ *  (`DELETE /v1/channels/{id}`, owner proof over the empty body, 204). A
+ *  channel already deleted (`410 channel-deleted`) counts as done. */
+export async function deleteChannelOnService(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const path = `/v1/channels/${channelIdHex}`;
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  let proof: string;
+  try {
+    proof = signer.sign("DELETE", path, "", new Uint8Array());
+  } finally {
+    signer.free();
+  }
+  // This device runs the wipe itself; its own later 410s are not a second end.
+  markChannelDeletedHere(channelIdHex);
+  try {
+    await fetchJson<void>(`${base}${path}`, {
+      method: "DELETE",
+      headers: { [wasm.channelOwnerProofHeaderName()]: proof },
+    });
+  } catch (err) {
+    if (isChannelApiError(err) && isChannelDeletedError(err.status, err.code)) return;
+    deletedHandled.delete(channelIdHex.toLowerCase());
+    throw err;
+  }
 }
 
 /** One channel's listing, or `null` when it is not listed (404). Tells the

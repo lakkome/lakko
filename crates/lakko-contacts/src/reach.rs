@@ -28,6 +28,18 @@
 //! A **shared** key per class and scope, never one per contact: a per-contact
 //! key would tell the server how many contacts a person has (ADR-0060 §1).
 //!
+//! **Retired `contact` keys (maintainer decision, 2026-11-06).** Removing a
+//! contact rotates the shared `contact` key (version + 1) and republishes the
+//! profile with the new grant in every remaining contact's one-to-one. A
+//! contact offline across a rotation still holds an old grant, so the owner
+//! keeps the last [`RETIRED_CONTACT_VERSIONS_KEPT`] versions registered
+//! ([`contact_key_versions`]). The Delivery Service reports which key admitted
+//! each mailbox row; [`classify_contact_key`] places it, and
+//! [`contact_key_row_verdict`] is the one rule: a row under a retired key from
+//! a current contact is processed and answered with the current grant, from
+//! anyone else it is dropped. A key older than the window is unregistered, so
+//! its writer is refused at the sender.
+//!
 //! ## The scope shape is checked
 //!
 //! `contact`, `group`, `member`, `channel` and `fof` are account-wide and
@@ -333,6 +345,113 @@ pub fn continuity_reach_seed(
 #[must_use]
 pub fn reach_verifying_key(seed: &[u8; REACH_SEED_LEN]) -> [u8; REACH_SEED_LEN] {
     SigningKey::from_seed(seed).verifying_key().to_bytes()
+}
+
+// =============================================================================
+// Retired contact keys (maintainer decision, 2026-11-06)
+// =============================================================================
+
+/// How many retired `contact` key versions an owner keeps registered beside
+/// the current one: 8. Chosen, not measured. Removing a contact rotates the
+/// shared `contact` key; a contact offline across up to this many rotations
+/// still writes under the grant it holds, and the owner's device then sends it
+/// the current grant. A key older than that is no longer registered, so a
+/// write under it is refused at the sender (the Delivery Service's uniform
+/// `401`).
+pub const RETIRED_CONTACT_VERSIONS_KEPT: u32 = 8;
+
+/// The `contact` key versions the owner keeps registered at the Delivery
+/// Service when the current version is `current`: `current` first, then each
+/// retired one down to [`RETIRED_CONTACT_VERSIONS_KEPT`] below it (never
+/// below 0). Register the public key of each (no expiry) and remove any
+/// other `contact` version; every device of the owner computes the same set.
+#[must_use]
+pub fn contact_key_versions(current: u32) -> Vec<u32> {
+    let oldest = current.saturating_sub(RETIRED_CONTACT_VERSIONS_KEPT);
+    (oldest..=current).rev().collect()
+}
+
+/// What a mailbox row's proving key is, as far as the `contact` class goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactKeyStanding {
+    /// The current `contact` key.
+    Current,
+    /// A retired `contact` key the owner still keeps registered.
+    Retired {
+        /// Its version.
+        version: u32,
+    },
+    /// Not a `contact` key in the kept window (another class, or none): the
+    /// rules of that class apply, this one does not.
+    NotContactKey,
+}
+
+/// Classify `proving_key`, the reach public key the Delivery Service reports
+/// for a mailbox row (`reach_pk_b64`), against the owner's `contact` keys of
+/// [`contact_key_versions`]`(current_version)`.
+#[must_use]
+pub fn classify_contact_key(
+    account_seed: &[u8; REACH_SEED_LEN],
+    current_version: u32,
+    proving_key: &[u8; REACH_SEED_LEN],
+) -> ContactKeyStanding {
+    for version in contact_key_versions(current_version) {
+        let Ok(seed) = reach_seed(account_seed, ReachClass::Contact, &[], version) else {
+            continue;
+        };
+        if &reach_verifying_key(seed.as_bytes()) == proving_key {
+            return if version == current_version {
+                ContactKeyStanding::Current
+            } else {
+                ContactKeyStanding::Retired { version }
+            };
+        }
+    }
+    ContactKeyStanding::NotContactKey
+}
+
+/// What the receiving device does with a mailbox row, by its proving key's
+/// standing and its sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactKeyRowVerdict {
+    /// Process the row as before.
+    Process,
+    /// Process the row, and send its sender the current `contact` grant in
+    /// the one-to-one (republish the profile there), without anything shown.
+    ProcessAndRegrant,
+    /// Drop the row without anything shown; log nothing that names anyone.
+    Drop,
+}
+
+/// The one rule for a row written under a retired `contact` key (maintainer
+/// decision, 2026-11-06), so no client re-implements it. `sender_is_contact`
+/// is whether the account the row's verified content names as its sender (a
+/// contact request's from-key, a Welcome's founder binding, and so on) is a
+/// CURRENT contact of the owner.
+///
+/// * a row under the current key, or under no `contact` key: [`ContactKeyRowVerdict::Process`];
+/// * a row under a retired key from a current contact:
+///   [`ContactKeyRowVerdict::ProcessAndRegrant`] (the contact was offline
+///   across a rotation and holds an old grant);
+/// * a row under a retired key from anyone else: [`ContactKeyRowVerdict::Drop`]
+///   (a removed contact, or someone a contact passed the old key to).
+///
+/// No resend is asked of the sender: the Delivery Service accepted the row,
+/// so the owner already holds it.
+#[must_use]
+pub const fn contact_key_row_verdict(
+    standing: ContactKeyStanding,
+    sender_is_contact: bool,
+) -> ContactKeyRowVerdict {
+    match standing {
+        ContactKeyStanding::Current | ContactKeyStanding::NotContactKey => {
+            ContactKeyRowVerdict::Process
+        },
+        ContactKeyStanding::Retired { .. } if sender_is_contact => {
+            ContactKeyRowVerdict::ProcessAndRegrant
+        },
+        ContactKeyStanding::Retired { .. } => ContactKeyRowVerdict::Drop,
+    }
 }
 
 /// A reach key handed to someone: its class, its version, the seed, and the
@@ -643,6 +762,80 @@ mod tests {
         }
         assert!(reach_seed(&ACCOUNT, ReachClass::Contact, b"", 0).is_ok());
         assert!(reach_seed(&ACCOUNT, ReachClass::Fof, b"", u32::MAX).is_ok());
+    }
+
+    /// 2026-11-06: the kept window is the current version and up to eight
+    /// below it, every device computes the same one, and a row's key is
+    /// classified within it.
+    #[test]
+    fn retired_contact_keys_are_kept_classified_and_judged() {
+        assert_eq!(contact_key_versions(0), vec![0]);
+        assert_eq!(contact_key_versions(3), vec![3, 2, 1, 0]);
+        assert_eq!(
+            contact_key_versions(20),
+            (12..=20).rev().collect::<Vec<u32>>()
+        );
+        assert_eq!(
+            contact_key_versions(u32::MAX).len(),
+            usize::try_from(RETIRED_CONTACT_VERSIONS_KEPT).unwrap() + 1
+        );
+        let pk = |v: u32| {
+            reach_verifying_key(
+                reach_seed(&ACCOUNT, ReachClass::Contact, b"", v)
+                    .unwrap()
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(
+            classify_contact_key(&ACCOUNT, 20, &pk(20)),
+            ContactKeyStanding::Current
+        );
+        assert_eq!(
+            classify_contact_key(&ACCOUNT, 20, &pk(12)),
+            ContactKeyStanding::Retired { version: 12 }
+        );
+        // Past the window, and a key of another class or account.
+        assert_eq!(
+            classify_contact_key(&ACCOUNT, 20, &pk(11)),
+            ContactKeyStanding::NotContactKey
+        );
+        assert_eq!(
+            classify_contact_key(&ACCOUNT, 20, &pk(21)),
+            ContactKeyStanding::NotContactKey
+        );
+        let fof = reach_verifying_key(
+            reach_seed(&ACCOUNT, ReachClass::Fof, b"", 20)
+                .unwrap()
+                .as_bytes(),
+        );
+        assert_eq!(
+            classify_contact_key(&ACCOUNT, 20, &fof),
+            ContactKeyStanding::NotContactKey
+        );
+        assert_eq!(
+            classify_contact_key(&[0x43; 32], 20, &pk(20)),
+            ContactKeyStanding::NotContactKey
+        );
+
+        let retired = ContactKeyStanding::Retired { version: 3 };
+        for sender_is_contact in [true, false] {
+            assert_eq!(
+                contact_key_row_verdict(ContactKeyStanding::Current, sender_is_contact),
+                ContactKeyRowVerdict::Process
+            );
+            assert_eq!(
+                contact_key_row_verdict(ContactKeyStanding::NotContactKey, sender_is_contact),
+                ContactKeyRowVerdict::Process
+            );
+        }
+        assert_eq!(
+            contact_key_row_verdict(retired, true),
+            ContactKeyRowVerdict::ProcessAndRegrant
+        );
+        assert_eq!(
+            contact_key_row_verdict(retired, false),
+            ContactKeyRowVerdict::Drop
+        );
     }
 
     #[test]

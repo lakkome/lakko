@@ -36,7 +36,13 @@ final class GroupPhotoDirectory: ObservableObject {
     @Published private(set) var revision: UInt64 = 0
     private var photos: [String: ProfileAvatar] = [:]
 
-    func avatar(groupIdHex: String) -> ProfileAvatar? { photos[groupIdHex.lowercased()] }
+    func avatar(groupIdHex: String) -> ProfileAvatar? {
+        let key = groupIdHex.lowercased()
+        return photos[key] ?? ChannelPhotoDirectory.shared.photos[key]
+    }
+
+    /// A channel's photo arrived or changed (``ChannelPhotoDirectory``).
+    func channelPhotosChanged() { revision &+= 1 }
 
     /// Replace the whole map (the store is small: one row per group).
     func replace(_ next: [String: ProfileAvatar]) {

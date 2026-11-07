@@ -71,7 +71,11 @@ public fun LakkoAvatar(
      *  group's photo when this device holds it. */
     groupIdHex: String? = null,
 ) {
-    val tint = avatarTintFor(seed, isLakkoDark())
+    // One person, one colour on every screen: a person's circle is tinted by
+    // their key whenever the caller passes it, not by whatever id the screen
+    // has (a one-to-one's group id in Chats, a route key in a picker, an
+    // account id in Contacts), which gave one person different colours.
+    val tint = avatarTintFor(avatarTintSeed(seed, personKey, group), isLakkoDark())
     val inspection = LocalInspectionMode.current
     val refs = when {
         inspection -> avatar
@@ -271,3 +275,13 @@ public fun personKeyBytes(encoded: String?): ByteArray? {
     }
     return bytes.takeIf { it.size == 32 }
 }
+
+/** The input of a circle's colour: a person's key (hex) when known, so every
+ *  screen agrees; else the caller's seed (groups, channels, a person with no
+ *  key known). */
+internal fun avatarTintSeed(seed: String, personKey: ByteArray?, group: Boolean): String =
+    if (!group && personKey != null && personKey.size == 32) {
+        personKey.joinToString("") { "%02x".format(it) }
+    } else {
+        seed
+    }

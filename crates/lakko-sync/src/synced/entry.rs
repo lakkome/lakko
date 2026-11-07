@@ -255,6 +255,11 @@ pub enum BoundsError {
     /// A link record's revocation seed was not 32 bytes.
     #[error("link record revocation seed length is out of bounds")]
     LinkRecordRevocationSeedLength,
+    /// A link record's group or channel fields (target, invite seed,
+    /// admission version, capability, register id) break the rule of its
+    /// kind (ADR-0087 phase B).
+    #[error("link record target fields do not fit its kind")]
+    LinkRecordTarget,
     /// A conversation-end register named a state this build does not know
     /// (including the unspecified `0`).
     #[error("unknown conversation end state")]
@@ -266,6 +271,15 @@ pub enum BoundsError {
     /// An own channel reaction's state byte was neither reacted nor removed.
     #[error("unknown channel reaction state")]
     ChannelReactionState,
+    /// An own channel reaction's target byte was neither the post nor a
+    /// comment, or a post target carried a comment cursor (phase B).
+    #[error("unknown channel reaction target")]
+    ChannelReactionTarget,
+    /// The account already gives the most reactions one person gives one
+    /// comment ([`super::channel_reaction::CHANNEL_REACTIONS_PER_POST_MAX`],
+    /// the same 3). A writer-side rule, never a decode bound.
+    #[error("at most 3 reactions per comment")]
+    TooManyCommentReactions,
     /// An own channel comment's state byte was neither live nor deleted.
     #[error("unknown channel comment state")]
     ChannelCommentState,
@@ -1053,10 +1067,12 @@ pub enum RegisterKey {
     ConversationEnd(ConversationRef),
     /// The acknowledgement register of this device key.
     DeviceAck([u8; super::device_ack::DEVICE_ACK_KEY_LEN]),
-    /// The own-reaction register of this emoji under this channel post.
+    /// The own-reaction register of this emoji on this channel post, or on
+    /// one of its comments (the comment cursor).
     ChannelReaction(
         [u8; super::channel_reaction::CHANNEL_REACTION_CHANNEL_ID_LEN],
         u64,
+        Option<u64>,
         String,
     ),
     /// The own-comment register of this comment nonce under this channel
@@ -1126,9 +1142,12 @@ impl SyncEntry {
             Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
             Self::ConversationEnd(e) => RegisterKey::ConversationEnd(e.conversation.clone()),
             Self::DeviceAck(a) => RegisterKey::DeviceAck(a.device_key),
-            Self::ChannelReaction(r) => {
-                RegisterKey::ChannelReaction(r.channel_id, r.post_cursor, r.emoji.clone())
-            },
+            Self::ChannelReaction(r) => RegisterKey::ChannelReaction(
+                r.channel_id,
+                r.post_cursor,
+                r.comment_cursor,
+                r.emoji.clone(),
+            ),
             Self::ChannelComment(c) => {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },

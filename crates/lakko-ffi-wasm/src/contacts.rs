@@ -2558,6 +2558,11 @@ pub enum WasmIncomingEnvelopeKind {
     /// setting and hands the returned request to the ordinary
     /// incoming-request flow.
     GroupContactRequest = 27,
+    /// A channel's read key sealed to one co-publisher (ADR-0087 section 7,
+    /// phase B). `payload` is the whole envelope; open it with
+    /// `openChannelReadKeyEnvelope` after checking the MLS sender is the
+    /// channel's owner. Never render it.
+    ChannelReadKey = 28,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2918,6 +2923,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::GroupReactions(value) => WasmIncomingEnvelope {
             group_reactions: Some(value.into()),
             ..WasmIncomingEnvelope::of(K::GroupReactions)
+        },
+        IncomingEnvelope::ChannelReadKey(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelReadKey)
         },
         IncomingEnvelope::GroupContactRequest(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
@@ -4013,8 +4022,9 @@ pub fn compose_group_invite_capability_with_preview(
 /// channel's PublisherGroup `groupId`, its sealed preview carrying the
 /// 16-byte `channelId` and the channel's name (optional). Since ADR-0078 the
 /// PublisherGroup id is derived from the owner's seed, so nothing inverts it,
-/// and the plaintext capability must not name the channel. Returns an
-/// `InviteLinkMint`.
+/// and the plaintext capability must not name the channel. `inviterName`
+/// (optional, last, ADR-0087 phase B) is the name of the publisher making
+/// the link, shown on the invitation. Returns an `InviteLinkMint`.
 ///
 /// # Errors
 ///
@@ -4030,6 +4040,7 @@ pub fn compose_co_publisher_invite_capability(
     knock_public_key: &[u8],
     knock_version: u16,
     avatar: Option<ProfileAvatar>,
+    inviter_name: Option<String>,
 ) -> Result<WasmInviteLinkMint, JsError> {
     let knock = group_knock_key(knock_public_key, knock_version)?;
     let seed: [u8; 32] = issuer_signing_seed
@@ -4047,7 +4058,8 @@ pub fn compose_co_publisher_invite_capability(
     let preview = RustGroupInvitePreview {
         group_name: rust_normalize_display_name(channel_name.as_deref().unwrap_or(""))
             .map_err(|e: DisplayNameError| JsError::new(&format!("{e}")))?,
-        inviter_name: None,
+        inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))
+            .map_err(|e: DisplayNameError| JsError::new(&format!("{e}")))?,
         member_count: 0,
         channel_id: Some(channel),
         subscriber: None,
@@ -4279,7 +4291,8 @@ impl WasmOpenedChannelInviteCard {
         self.capability_wire.clone()
     }
 
-    /// The preview: always a subscriber invitation.
+    /// The preview: a subscriber invitation, or (ADR-0087 phase B) a
+    /// co-publisher invitation with `inviterName` set and no `subscriber`.
     #[wasm_bindgen(getter)]
     pub fn preview(&self) -> WasmGroupInvitePreview {
         self.preview.clone()
@@ -4310,12 +4323,12 @@ pub fn compose_channel_invite_card(
 }
 
 /// Decode a channel invitation card, open its link and check it carries a
-/// subscriber invitation. Does NOT check expiry.
+/// channel invitation (subscriber or co-publisher). Does NOT check expiry.
 ///
 /// # Errors
 ///
 /// Throws when the card is malformed, the link does not open, or it is not
-/// a subscriber invitation.
+/// a channel invitation.
 #[wasm_bindgen(js_name = openChannelInviteCard)]
 pub fn open_channel_invite_card(card: &[u8]) -> Result<WasmOpenedChannelInviteCard, JsValue> {
     let card = lakko_contacts::group_invite::ChannelInviteCard::decode(card)

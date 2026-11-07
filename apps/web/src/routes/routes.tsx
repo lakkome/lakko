@@ -13,7 +13,7 @@
  *      `<RequireAnonymous>` so a signed-in user gets bounced home
  *      instead of landing on a login form they cannot use.
  *
- *   2. **Protected** (`/`, `/chat/:id`, `/groups`, `/contacts`, `/channels`,
+ *   2. **Protected** (`/`, `/chat/:id`, `/channel/:id`, `/groups`, `/contacts`,
  *      `/settings`, `/devices`, `/dev`) — wrapped in `<RequireSession>` and rendered inside the
  *      `<AppShell>` layout. The wrapper short-circuits to `/login`
  *      when the user is anonymous.
@@ -40,8 +40,8 @@ import Call from "./Call";
 import Calls from "./Calls";
 import Feed from "./Feed";
 import FeedImport from "./FeedImport";
-import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
-import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
+import ChannelConversation from "./ChannelConversation";
+import NewChannel from "./NewChannel";
 import Chat from "./Chat";
 import PendingChat from "./PendingChat";
 import DevProbe from "./DevProbe";
@@ -53,6 +53,7 @@ import NotFound from "./NotFound";
 import {
   callJoinRoutePattern,
   callRoutePattern,
+  channelRoutePattern,
   chatRoutePattern,
   contactRoutePattern,
   groupChatRoutePattern,
@@ -130,6 +131,10 @@ export const routes: RouteDefinition[] = [
           { path: chatRoutePattern, component: () => <Chat backTo={paths.home} /> },
           // ADR-0079 — the chat with an inviter whose app has not answered.
           { path: pendingChatRoutePattern, component: PendingChat },
+          // ADR-0087 section 12 — a channel opens beside the same list; the
+          // create form too. `/channel/new` precedes the id pattern.
+          { path: paths.channelNew, component: NewChannel },
+          { path: channelRoutePattern, component: ChannelConversation },
         ],
       },
       // Groups: the same chat view, beside the group list; Back returns to it.
@@ -169,20 +174,6 @@ export const routes: RouteDefinition[] = [
       // section 3.2, and neither is a route), so the design route seeds its own
       // mock call and the parameter is gone.
       { path: callRoutePattern, component: () => <Call /> },
-      // Channels: the list pane stays mounted across every /channels route.
-      {
-        path: paths.channels,
-        component: ChannelsLayout,
-        children: [
-          { path: "/", component: ChannelsIndex },
-          { path: "/new", component: NewChannel },
-          { path: "/join", component: JoinCoPublisher },
-          // Subscribe route MUST be matched BEFORE the generic `/:id`
-          // pattern so `:id` does not swallow the trailing `/subscribe`.
-          { path: "/:id/subscribe", component: ChannelSubscribe },
-          { path: "/:id", component: ChannelView },
-        ],
-      },
       { path: paths.dev, component: DevProbe },
       { path: paths.devices, component: Devices },
     ],

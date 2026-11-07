@@ -21,8 +21,50 @@
  */
 import type { SyncedState as WasmSyncedState } from "../../../wasm/lakko_ffi_wasm";
 
-/** Which ledger a link lives in. */
-export type LinkRecordKind = "contact" | "call";
+/** Which ledger a link lives in, and for a `/g/` link what it invites to
+ *  (ADR-0087 phase B: group, channel subscriber, channel publisher). */
+export type LinkRecordKind = "contact" | "call" | "group" | "channel" | "publisher";
+
+/** The `/g/` kinds: their register key is `groupLinkRecordId(ledgerId)`. */
+export function isGroupLinkKind(kind: LinkRecordKind): kind is "group" | "channel" | "publisher" {
+  return kind === "group" || kind === "channel" || kind === "publisher";
+}
+
+/** The wasm `LinkRecordKind` numbers (frozen in `lakko-sync`). */
+export interface LinkRecordKindNumbers {
+  readonly Contact: number;
+  readonly Call: number;
+  readonly Group: number;
+  readonly Channel: number;
+  readonly Publisher: number;
+}
+
+/** The model kind of a wasm kind number; `null` for one this client does not
+ *  know. Pure. */
+export function kindOfNumber(n: number, kinds: LinkRecordKindNumbers): LinkRecordKind | null {
+  if (n === kinds.Contact) return "contact";
+  if (n === kinds.Call) return "call";
+  if (n === kinds.Group) return "group";
+  if (n === kinds.Channel) return "channel";
+  if (n === kinds.Publisher) return "publisher";
+  return null;
+}
+
+/** The wasm kind number of a model kind. Pure. */
+export function numberOfKind(kind: LinkRecordKind, kinds: LinkRecordKindNumbers): number {
+  switch (kind) {
+    case "contact":
+      return kinds.Contact;
+    case "call":
+      return kinds.Call;
+    case "group":
+      return kinds.Group;
+    case "channel":
+      return kinds.Channel;
+    case "publisher":
+      return kinds.Publisher;
+  }
+}
 
 /** One invite link of the account, as the screens read it. */
 export interface LinkRecordModel {
@@ -52,6 +94,16 @@ export interface LinkRecordModel {
   readonly editable: boolean;
   readonly mintedAtMs: number;
   readonly label: string;
+  /** `/g/` links: the 32-byte group id or the 16-byte channel id; empty
+   *  otherwise. */
+  readonly targetId: Uint8Array;
+  /** A private channel subscriber link's 32-byte invite seed, else empty.
+   *  SECRET. */
+  readonly inviteSeed: Uint8Array;
+  /** The admission-key version `inviteSeed` names (0 when none). */
+  readonly admissionVersion: number;
+  /** The sealed `/g/` blob the ledger holds, else empty. */
+  readonly capability: Uint8Array;
 }
 
 /** What a device does with a contact request carrying a link answer. */
@@ -69,6 +121,11 @@ export interface NewLinkRecord {
   readonly maxUses: number;
   readonly mintedAtMs: number;
   readonly label: string;
+  /** `/g/` links only (see {@link LinkRecordModel}). */
+  readonly targetId?: Uint8Array;
+  readonly inviteSeed?: Uint8Array;
+  readonly admissionVersion?: number;
+  readonly capability?: Uint8Array;
 }
 
 export function hexOf(bytes: Uint8Array): string {
@@ -79,7 +136,7 @@ export function hexOf(bytes: Uint8Array): string {
 
 /** The fold's link records as plain values; an unreadable fold reads as
  *  none. */
-export function readLinkRecords(synced: WasmSyncedState, contactKind: number): LinkRecordModel[] {
+export function readLinkRecords(synced: WasmSyncedState, kinds: LinkRecordKindNumbers): LinkRecordModel[] {
   let records;
   try {
     records = synced.allLinkRecords();
@@ -89,12 +146,14 @@ export function readLinkRecords(synced: WasmSyncedState, contactKind: number): L
   const out: LinkRecordModel[] = [];
   for (const r of records) {
     try {
+      const kind = kindOfNumber(r.kind, kinds);
+      if (kind === null) continue;
       const linkId = r.linkId.slice();
       out.push({
         linkIdHex: hexOf(linkId),
         linkId,
         linkSecret: r.linkSecret.slice(),
-        kind: r.kind === contactKind ? "contact" : "call",
+        kind,
         ledgerId: r.ledgerId.slice(),
         revocationSeed: r.revocationSeed.slice(),
         expiryMs: Number(r.expiryMs),
@@ -105,6 +164,10 @@ export function readLinkRecords(synced: WasmSyncedState, contactKind: number): L
         editable: r.editable,
         mintedAtMs: Number(r.mintedAtMs),
         label: r.label,
+        targetId: r.targetId.slice(),
+        inviteSeed: r.inviteSeed.slice(),
+        admissionVersion: r.admissionVersion,
+        capability: r.capability.slice(),
       });
     } finally {
       r.free();
@@ -136,5 +199,19 @@ export function isLinkLive(r: LinkRecordModel, nowMs: number): boolean {
 export function listedContactLinks(records: readonly LinkRecordModel[], nowMs: number): LinkRecordModel[] {
   return records
     .filter((r) => r.kind === "contact" && isLinkLive(r, nowMs))
+    .sort((a, b) => b.mintedAtMs - a.mintedAtMs);
+}
+
+/** The live `/g/` links of one target (a group or a channel) of one kind,
+ *  every device's, newest first. Pure. */
+export function listedTargetLinks(
+  records: readonly LinkRecordModel[],
+  kind: "group" | "channel" | "publisher",
+  targetIdHex: string,
+  nowMs: number,
+): LinkRecordModel[] {
+  const target = targetIdHex.toLowerCase();
+  return records
+    .filter((r) => r.kind === kind && hexOf(r.targetId) === target && isLinkLive(r, nowMs))
     .sort((a, b) => b.mintedAtMs - a.mintedAtMs);
 }

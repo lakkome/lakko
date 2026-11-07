@@ -486,7 +486,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const chatLabelOf = (c: AcceptedContact): string =>
     c.displayName.trim().length > 0
       ? c.displayName.trim()
-      : memberNameOf(profiles.resolve(c.signaturePubkeyB64));
+      : memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contacts screen");
 
   /**
    * ADR-0045 UX §6.2.4 — `Delete this chat`, for an ended one-to-one. The
@@ -593,7 +593,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
           const name = profiles.resolve(c.signaturePubkeyB64);
           recordSentRequest(account, {
             recipientUsername: name.username ?? "",
-            recipientName: memberNameOf(name),
+            recipientName: memberNameOf(name, "a contact's sent request"),
             recipientAccountIdHex: accountIdHex,
             sentAtMs: Date.now(),
             recipientKeyB64: c.signaturePubkeyB64,
@@ -624,7 +624,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
           contactsErrorText(
             err,
             "contacts.error.start_chat",
-            memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
+            memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contacts screen list"),
           ),
         );
       },
@@ -656,7 +656,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [messageNote, setMessageNote] = createSignal<{ readonly key: string; readonly note: MessageNote } | null>(null);
   function messageLineFor(c: AcceptedContact): string | null {
     if (chatWith(c) !== null) return null;
-    const name = memberNameOf(profiles.resolve(c.signaturePubkeyB64));
+    const name = memberNameOf(profiles.resolve(c.signaturePubkeyB64), "a contact action");
     if (sentRequestTo(c) !== undefined) return t("contacts.detail.request_sent", { name });
     const held = messageNote();
     if (held === null || held.key !== c.signaturePubkeyB64) return null;

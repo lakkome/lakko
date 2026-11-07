@@ -5,7 +5,8 @@
 //! group journal: the group photo (section 18.1), the group's allowed
 //! reactions (section 13a), the conversation handle (section 3), the
 //! knock-seed envelope (section 5) and, in a channel's PublisherGroup, the
-//! admission-seed envelope (section 7).
+//! admission-seed envelope (section 7), the read-key envelope (section 7,
+//! phase B) and a co-publisher's step-down (section 15, phase B).
 //!
 //! ## Why the NSE needs this
 //!
@@ -23,6 +24,7 @@
 //! separator answers `false`, and the chain falls through.
 
 use lakko_contacts::admission_seed::{decode_admission_seed, ADMISSION_SEED_ENVELOPE_LEN};
+use lakko_contacts::channel_read_key::{decode_channel_read_key, CHANNEL_READ_KEY_ENVELOPE_LEN};
 use lakko_contacts::conversation_handle::{
     decode_conversation_handle, CONVERSATION_HANDLE_ENVELOPE_MAX_LEN,
     CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
@@ -133,11 +135,41 @@ pub fn admission_seed_envelope_len() -> u32 {
     len_u32(ADMISSION_SEED_ENVELOPE_LEN)
 }
 
+/// Whether `plaintext` is a well-formed channel read-key envelope (the key
+/// stays sealed).
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_read_key_envelope(plaintext: Vec<u8>) -> bool {
+    decode_channel_read_key(&plaintext).is_ok()
+}
+
+/// The one length of a channel read-key envelope.
+#[uniffi::export]
+#[must_use]
+pub fn channel_read_key_envelope_len() -> u32 {
+    len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
+}
+
+/// Whether `plaintext` is a co-publisher's step-down envelope (any channel).
+#[uniffi::export]
+#[must_use]
+pub fn is_publisher_step_down_envelope(plaintext: Vec<u8>) -> bool {
+    lakko_mls::is_publisher_step_down_envelope(&plaintext)
+}
+
+/// The one length of a step-down envelope.
+#[uniffi::export]
+#[must_use]
+pub fn publisher_step_down_envelope_len() -> u32 {
+    len_u32(lakko_mls::PUBLISHER_STEP_DOWN_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lakko_contacts::admission_seed::compose_admission_seed;
     use lakko_contacts::allowed_reactions::AllowedReactions;
+    use lakko_contacts::channel_read_key::compose_channel_read_key;
     use lakko_contacts::conversation_handle::{compose_conversation_handle, ConversationHandle};
     use lakko_contacts::group_photo::{compose_group_photo, GroupPhoto};
     use lakko_contacts::group_reactions::{compose_group_reactions, GroupReactions};
@@ -176,6 +208,16 @@ mod tests {
         compose_admission_seed(&[0x0C; 16], &[0x4B; 32], &pk, 1, &[0x11; 32]).unwrap()
     }
 
+    fn read_key() -> Vec<u8> {
+        let pk = SecretKey::from_bytes([0x33; 32]).public_key();
+        compose_channel_read_key(&[0x0C; 16], &[0x4B; 32], &pk, &[0x11; 32]).unwrap()
+    }
+
+    fn step_down() -> Vec<u8> {
+        let channel = lakko_mls::ChannelId::try_from_slice(&[0x0C; 16]).unwrap();
+        lakko_mls::compose_publisher_step_down(&channel)
+    }
+
     #[test]
     fn recognises_each_envelope_and_refuses_chat() {
         assert!(is_group_photo_envelope(photo()));
@@ -183,12 +225,16 @@ mod tests {
         assert!(is_conversation_handle_envelope(handle()));
         assert!(is_knock_seed_envelope(knock_seed()));
         assert!(is_admission_seed_envelope(admission_seed()));
+        assert!(is_channel_read_key_envelope(read_key()));
+        assert!(is_publisher_step_down_envelope(step_down()));
         let chat = lakko_attachments::compose("hello", Vec::new()).unwrap();
         assert!(!is_group_photo_envelope(chat.clone()));
         assert!(!is_group_reactions_envelope(chat.clone()));
         assert!(!is_conversation_handle_envelope(chat.clone()));
         assert!(!is_knock_seed_envelope(chat.clone()));
-        assert!(!is_admission_seed_envelope(chat));
+        assert!(!is_admission_seed_envelope(chat.clone()));
+        assert!(!is_channel_read_key_envelope(chat.clone()));
+        assert!(!is_publisher_step_down_envelope(chat));
     }
 
     #[test]
@@ -199,6 +245,8 @@ mod tests {
             handle(),
             knock_seed(),
             admission_seed(),
+            read_key(),
+            step_down(),
         ] {
             assert_eq!(
                 lakko_attachments::parse_body(&w),
@@ -220,6 +268,8 @@ mod tests {
         assert_eq!(conversation_handle_envelope_max_len(), 305);
         assert_eq!(knock_seed_envelope_len(), 205);
         assert_eq!(admission_seed_envelope_len(), 195);
+        assert_eq!(channel_read_key_envelope_len(), 155);
+        assert_eq!(publisher_step_down_envelope_len(), 46);
         let p = photo();
         assert_eq!(&p[..21], b"lakko/group-photo/v1\x00");
         assert_eq!(p.len(), 31);
@@ -235,7 +285,13 @@ mod tests {
         let a = admission_seed();
         assert_eq!(&a[..32], b"lakko/channel-admission-seed/v1\x00");
         assert_eq!(a.len(), 195);
-        for w in [p, r, h, k, a] {
+        let c = read_key();
+        assert_eq!(&c[..26], b"lakko/channel-read-key/v1\x00");
+        assert_eq!(c.len(), 155);
+        let d = step_down();
+        assert_eq!(&d[..29], b"lakko/publisher-step-down/v1\x00");
+        assert_eq!(d.len(), 46);
+        for w in [p, r, h, k, a, c, d] {
             assert_eq!(w[0], 0x6c);
         }
     }
@@ -248,13 +304,17 @@ mod tests {
             handle(),
             knock_seed(),
             admission_seed(),
+            read_key(),
+            step_down(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 5] = [
+        let tests: [fn(Vec<u8>) -> bool; 7] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
             is_knock_seed_envelope,
             is_admission_seed_envelope,
+            is_channel_read_key_envelope,
+            is_publisher_step_down_envelope,
         ];
         for (i, w) in all.iter().enumerate() {
             for (j, t) in tests.iter().enumerate() {

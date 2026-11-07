@@ -118,7 +118,7 @@ final class SyncedStateSupportTests: XCTestCase {
     /// device that wrote the previous encoding holds.
     private func downgraded(_ state: SyncedState) throws -> Data {
         var bytes = try state.toBytes()
-        XCTAssertEqual(bytes.first, 0x0A, "the encoding this build writes is version 10")
+        XCTAssertEqual(bytes.first, 0x0C, "the encoding this build writes is version 12")
         bytes[bytes.startIndex] = 0x01
         return bytes
     }
@@ -155,7 +155,7 @@ final class SyncedStateSupportTests: XCTestCase {
             _ = try loaded.applyPayload(payload: flagsPayload(hlc: 20, pinned: true))
             SyncedStateStore.save(loaded, accountIdB64: account)
             let replaced = try XCTUnwrap(SyncedStateStore.bytes(accountIdB64: account))
-            XCTAssertEqual(replaced.first, 0x0A)
+            XCTAssertEqual(replaced.first, 0x0C)
             XCTAssertEqual(
                 try SyncedStateStore.load(accountIdB64: account).flags(groupId: gid)?.pinned, true)
         }
@@ -180,7 +180,7 @@ final class SyncedStateSupportTests: XCTestCase {
 
         _ = try loaded.applyPayload(payload: flagsPayload(hlc: 20, pinned: true))
         SyncedStateStore.save(loaded, accountIdB64: account)
-        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account)?.first, 0x0A)
+        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account)?.first, 0x0C)
     }
 
     func testABackupStateInVersionOneIsNoneHeldAndLeavesTheStoreAlone() throws {
@@ -215,7 +215,7 @@ final class SyncedStateSupportTests: XCTestCase {
         XCTAssertEqual(
             SyncedStateStore.mergeIntoStored(bytes: try backup.toBytes(), accountIdB64: account),
             .merged(changed: true))
-        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account)?.first, 0x0A)
+        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account)?.first, 0x0C)
         XCTAssertEqual(
             try SyncedStateStore.load(accountIdB64: account).flags(groupId: gid)?.pinned, true)
     }
