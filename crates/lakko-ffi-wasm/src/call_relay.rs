@@ -228,6 +228,7 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::CallChat(message) => CallRelayPayload {
             kind: "call-chat",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name: Vec::new(),
