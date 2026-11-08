@@ -736,10 +736,23 @@ occupies the most valuable line on the screen.
 
 - On the call, encryption is one chip: a lock and the word `Encrypted`.
 - Tapping the chip opens the **encryption sheet**: a title `This call is encrypted`, one
-  sentence in plain words (`Only you and Anna can hear this call.`), the safety number in
-  four groups of four digits, large and grouped for reading aloud, and one line telling
-  the user what it is for (`Read these numbers aloud. If they match on both phones, no
-  one is listening.`). Buttons: **Copy** and **Done**.
+  sentence in plain words, the safety number in four groups of four digits, large and
+  grouped for reading aloud, and one line telling the user what it is for. Buttons:
+  **Copy** and **Done**.
+- The sentence and the line depend on the kind of call, never on who happens to be
+  first in the roster:
+
+  | Call | Sentence | Line under the number |
+  |---|---|---|
+  | One-to-one, the other person has a name on this device | `Only you and Anna can hear this call.` | `Read the number aloud to each other. If it matches on both devices, no one else is listening.` |
+  | One-to-one, no name for the other person | `Only the people on this call can hear it.` | the one-to-one line above |
+  | Group call or call from a link, whatever the number of people in it | `Only the people on this call can hear it.` | `Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening.` |
+
+  A group or link call never names one person: every participant compares the same
+  number, and naming one of them claims the call has two people. A call is treated as
+  a group call as soon as more than one other person is in it, even if it was placed as
+  a one-to-one. The copy says "device", not "phone": people join from computers and
+  browsers too.
 - The same number is reachable outside a call from the contact screen as
   **Verify security code**, which is where the design system already puts it.
 - The chip is absent when the call's encryption is not armed, and the call refuses to

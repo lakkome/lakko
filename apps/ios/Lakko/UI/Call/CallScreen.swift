@@ -123,6 +123,10 @@ private struct EncryptionChip: View {
 private struct EncryptionSheet: View {
     @ObservedObject var l10n = Localization.shared
     let peerName: String?
+    /// A group call or a call from a link: the sheet names nobody.
+    let groupCall: Bool
+    /// The other people in the call now.
+    let othersInCall: Int
     let safetyNumber: String?
     let onDone: () -> Void
 
@@ -138,7 +142,8 @@ private struct EncryptionSheet: View {
                     .font(.title3)
                     .fontWeight(.semibold)
                     .foregroundColor(Color.lakkoText)
-                Text(CallPeerName.encryptionSentence(peerName: peerName))
+                Text(CallPeerName.encryptionSentence(
+                    peerName: peerName, groupCall: groupCall, othersInCall: othersInCall))
                     .font(.subheadline)
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -159,7 +164,7 @@ private struct EncryptionSheet: View {
                         texts: ["groups": Localization.joinList(
                             safetyNumber.split(separator: " ").map(String.init))]))
 
-                Text(l10n.t("call.encryption.compare_hint"))
+                Text(CallPeerName.encryptionHint(groupCall: groupCall, othersInCall: othersInCall))
                     .font(.footnote)
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -1569,7 +1574,8 @@ public struct CallScreen: View {
     /// The two sheets every call has: the safety number, only when asked for
     /// (section 5), and the call's settings (section 4.1).
     private var encryptionSheet: some ViewModifier {
-        CallSheetsModifier(state: state, settingsOpen: $settingsOpen)
+        CallSheetsModifier(
+            state: state, groupCall: externallyDriven, settingsOpen: $settingsOpen)
     }
 
     // MARK: - A group call
@@ -2205,6 +2211,8 @@ private struct InviteScope<Content: View>: View {
 /// group one present the same two sheets.
 private struct CallSheetsModifier: ViewModifier {
     @ObservedObject var state: CallUiState
+    /// A group call or a call from a link (section 5: the sheet names nobody).
+    let groupCall: Bool
     @Binding var settingsOpen: Bool
 
     func body(content: Content) -> some View {
@@ -2216,6 +2224,8 @@ private struct CallSheetsModifier: ViewModifier {
             ) {
                 EncryptionSheet(
                     peerName: state.peerName,
+                    groupCall: groupCall,
+                    othersInCall: state.participants.filter { !$0.isLocal }.count,
                     safetyNumber: state.e2ee.shortFingerprint,
                     onDone: { state.setEncryptionSheetOpen(false) })
             }

@@ -183,6 +183,14 @@ final class SfuCallSession {
         /// Defaulted so existing memberwise callers keep their shorter
         /// initialiser.
         var onRemoteMediaState: ((_ from: String, _ cameraOn: Bool) -> Void)? = nil
+        /// A remote peer said whether its microphone is on (`false` = muted),
+        /// in the same sealed media-state envelope as the camera
+        /// (`lakko_contacts::media_state` version 2). Fired with every opened
+        /// media state, after ``onRemoteMediaState``. `from` is the sender's
+        /// SFU peer id. Drives the mute mark on that person's tile
+        /// (`docs/ux/group-call-grid.md` 7.2). Defaulted so existing
+        /// memberwise callers keep their shorter initialiser.
+        var onRemoteMicrophoneState: ((_ from: String, _ microphoneOn: Bool) -> Void)? = nil
         /// A remote receiver's SFrame decryptor could not be armed, so nothing
         /// that receiver carries will ever decode. `streamId` is the MSID
         /// stream group (== the source peer id on an SFU-routed call, so the
@@ -230,7 +238,9 @@ final class SfuCallSession {
     }
 
     private let config: Config
-    private let callbacks: Callbacks
+    /// Internal (not private) so a unit test can drive the adapter's
+    /// callbacks without an SFU.
+    let callbacks: Callbacks
     /// Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts
     /// at `config.seed` (or `nil` on the ADR-0032 deferred-publish path,
     /// set later by ``publish(seed:localLeaf:)``) and advances on
@@ -248,6 +258,12 @@ final class SfuCallSession {
     /// learn every change from the broadcast, since a mute (track
     /// `isEnabled` toggle) fires no track event.
     private var localCameraOn: Bool
+    /// The person's microphone choice (`false` = muted), broadcast beside
+    /// the camera state so the other tiles show the mute mark
+    /// (`docs/ux/group-call-grid.md` 7.2). Recorded by
+    /// ``setMicrophoneEnabled(_:)`` even before capture, and applied to the
+    /// captured microphone, so what is announced is what is sent.
+    private var localMicOn: Bool
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
     /// Whose audio each receiving audio track carries: track id -> SFU peer
@@ -433,24 +449,37 @@ final class SfuCallSession {
         if let seed = config.seed { relay.setSeed(seed) }
         self.publishLeaf = config.localLeaf ?? 0
         self.localCameraOn = config.video
+        self.localMicOn = config.audio
         self.nowMs = nowMs
     }
 
-    /// Broadcast our current camera state to every other peer over the
-    /// opaque SFU `signal-relay` (camera-off-cleanup). Best-effort — a no-op
+    /// Broadcast our current camera and microphone state to every other peer
+    /// over the opaque SFU `signal-relay` (camera-off-cleanup; the microphone
+    /// since 2026-11-07, `lakko_contacts::media_state` version 2). Best-effort — a no-op
     /// if signaling is not open. `sendSignalRelayToCall` base64s the
     /// `composeMediaState` bytes into the relay payload; the SFU forwards it
     /// verbatim without inspection (invariant #2). Called on every local
     /// camera transition, once when the call connects, and again whenever a
     /// new peer joins (so a newcomer is initial-synced deterministically).
-    private func broadcastMediaState() {
-        guard signaling != nil else { return }
+    func broadcastMediaState() {
+        guard signaling != nil || mediaStateSendSeam != nil else { return }
         // Sealed under the call's relay key (ADR-0078 section 2): the SFU
         // relays ciphertext only. No key yet (a link joiner before its
         // Welcome) means nothing is said.
-        guard let sealed = relay.seal(composeMediaState(cameraOn: localCameraOn)) else { return }
+        guard let sealed = relay.seal(
+            composeMediaState(cameraOn: localCameraOn, microphoneOn: localMicOn))
+        else { return }
+        if let seam = mediaStateSendSeam {
+            seam(sealed)
+            return
+        }
         sendSignalRelayToCall(payload: sealed)
     }
+
+    /// Test seam: when set, a sealed media-state envelope goes here instead
+    /// of onto the signaling socket (a unit test has no SFU). `nil` in the
+    /// app.
+    var mediaStateSendSeam: ((Data) -> Void)?
 
     /// Broadcast this device's sealed peer announcement (ADR-0078 section 2).
     /// Best-effort: without an announcer, a self peer id, a relay key or an
@@ -743,10 +772,19 @@ final class SfuCallSession {
         signaling?.sendSignalRelayToCall(payload: payload)
     }
 
-    /// Mute / unmute the local microphone (local-only track gate).
+    /// Mute / unmute the local microphone (local-only track gate). The
+    /// choice is recorded even before capture (a mute chosen in the prejoin
+    /// or before the Welcome holds for the captured microphone), and a
+    /// change is announced so the other tiles show the mute mark.
     func setMicrophoneEnabled(_ on: Bool) {
+        let changed = localMicOn != on
+        localMicOn = on
         pc?.setMicrophoneEnabled(on)
+        if changed { broadcastMediaState() }
     }
+
+    /// The microphone choice this session announces and applies (test seam).
+    var microphoneEnabled: Bool { localMicOn }
 
     // MARK: - Signaling keepalive
 
@@ -901,7 +939,10 @@ final class SfuCallSession {
         // path). So order is: add audio -> (add video) -> arm SFrame ->
         // offer, guaranteeing the SFU never sees a plaintext frame on
         // either track (invariant #2/#4).
-        connection.addLocalAudioTrack(enabled: config.audio)
+        // A mute chosen before the capture (the person's choice reaches
+        // `setMicrophoneEnabled` as soon as the call exists) holds for the
+        // captured microphone: what is announced is what is sent.
+        connection.addLocalAudioTrack(enabled: localMicOn)
         if config.video {
             startLocalCameraCapture(on: connection)
         }
@@ -1308,7 +1349,7 @@ final class SfuCallSession {
     /// multi-joiner handshake dispatcher, which re-classifies it). A malformed
     /// payload is dropped, never fatal (mirror of the web `onSignalRelayFrame`,
     /// which uses the same `sfuDecodePayload`).
-    private func dispatchSignalRelay(from: String, payloadB64: String) {
+    func dispatchSignalRelay(from: String, payloadB64: String) {
         guard let payload = try? sfuDecodePayload(payloadB64: payloadB64) else { return }
         // ADR-0078 section 2: a payload sealed under the call's relay key is
         // consumed here (the camera media state, a peer announcement); an
@@ -1316,8 +1357,9 @@ final class SfuCallSession {
         // to `onSignalRelay` unchanged.
         if let opened = relay.open(payload) {
             switch opened {
-            case .mediaState(let cameraOn):
+            case .mediaState(let cameraOn, let microphoneOn):
                 callbacks.onRemoteMediaState?(from, cameraOn)
+                callbacks.onRemoteMicrophoneState?(from, microphoneOn)
             case .announcement(let announcement):
                 if let identity = config.peerAnnouncer?.verify(from, announcement) {
                     if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }

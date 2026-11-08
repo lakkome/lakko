@@ -554,9 +554,14 @@
       "comment": "Accessible name of the Encrypted chip on the call screen.",
       "security_critical": true
     },
-    "call.encryption.compare_hint": {
-      "text": "Read these numbers aloud. If they match on both phones, no one is listening.",
-      "comment": "Under the call's safety number: how to compare it with the other person.",
+    "call.encryption.compare_hint_group": {
+      "text": "Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening.",
+      "comment": "Under the safety number in a group call or a call from a link, whatever the number of people in it: every participant compares the same number. Never names one person.",
+      "security_critical": true
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Read the number aloud to each other. If it matches on both devices, no one else is listening.",
+      "comment": "Under the safety number in a one-to-one call: how the two people compare it. Says devices, not phones: people call from computers too.",
       "security_critical": true
     },
     "call.encryption.copy_a11y": {

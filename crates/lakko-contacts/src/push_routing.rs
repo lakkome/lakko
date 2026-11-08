@@ -1051,7 +1051,7 @@ mod tests {
         assert!(try_unwrap_push_routing_secret(&welcome).unwrap().is_none());
         let kp = wrap_call_kp_forward(&vec![0xCDu8; 512]);
         assert!(try_unwrap_push_routing_secret(&kp).unwrap().is_none());
-        let media = compose_media_state(true);
+        let media = compose_media_state(true, true);
         assert!(try_unwrap_push_routing_secret(&media).unwrap().is_none());
     }
 

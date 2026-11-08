@@ -7,10 +7,11 @@
  * A share's tracks arrive in the remote stream the browser built for their
  * stream id, and that stream is not the share: the SFU names every share of
  * a peer `<peer>~screen`, so when the peer stops and shares again the new
- * picture is added to the SAME browser stream beside the old one. The old
- * track is never ended (the SFU keeps the line it was forwarded on), so the
- * stream holds two live video tracks and a `<video>` element plays the first:
- * the old, silent one. The share tile then waits for a picture forever.
+ * picture is added to the SAME browser stream beside the old one. The SFU
+ * ends the old line when the share stops (`retire_track_out`), but a browser
+ * may keep the ended track in the stream for a while, and a `<video>` element
+ * given that stream plays the first video track: the old one. The share tile
+ * then waits for a picture forever.
  *
  * So the share is shown from a stream of its own: per sharer, the newest
  * video track and the newest audio track that came with it. A video track

@@ -143,11 +143,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import me.lakko.app.calls.CALL_ENCRYPTION_CHIP_LABEL
-import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_HINT
 import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_TITLE
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.callEncryptionHint
 import me.lakko.app.calls.callEncryptionSentence
 import me.lakko.app.calls.callClockOrigin
 import me.lakko.app.calls.callElapsedSecs
@@ -1112,6 +1112,8 @@ private fun InCallView(
             CallEncryptionSheet(
                 safetyNumber = e2ee.shortFingerprint,
                 otherName = remoteName,
+                groupCall = groupCall,
+                othersInCall = remotes.size,
                 onDismiss = { encryptionSheetOpen = false },
             )
         }
@@ -1572,6 +1574,8 @@ private fun CallEncryptionChip(onClick: () -> Unit) {
 private fun CallEncryptionSheet(
     safetyNumber: String?,
     otherName: String?,
+    groupCall: Boolean,
+    othersInCall: Int,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1600,7 +1604,7 @@ private fun CallEncryptionSheet(
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                callEncryptionSentence(otherName).text(),
+                callEncryptionSentence(otherName, groupCall, othersInCall).text(),
                 color = LakkoDark.textMuted,
                 fontSize = 14.sp,
             )
@@ -1623,7 +1627,7 @@ private fun CallEncryptionSheet(
                 }
             }
             Text(
-                CALL_ENCRYPTION_SHEET_HINT.text(),
+                callEncryptionHint(groupCall, othersInCall).text(),
                 color = LakkoDark.textMuted,
                 fontSize = 13.sp,
             )

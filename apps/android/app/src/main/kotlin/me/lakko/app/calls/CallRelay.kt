@@ -25,7 +25,7 @@ import uniffi.lakko_ffi_uniffi.verifyCallScreenShare
  * seed (`CallRelayKey`), and every receiver checks the signature against the
  * leaf in the call's MLS roster (`verifyCallPeerAnnouncement`). The leaf is
  * account-bound (ADR-0050), so a verified announcement names the person. The
- * camera on/off media state, the screen-share state and the name a person
+ * camera and microphone media state, the screen-share state and the name a person
  * typed for the call (`CallName.kt`) ride the same sealed channel.
  *
  * The relay key changes with the call seed (every MLS epoch, ADR-0029); the
@@ -36,7 +36,8 @@ public class CallRelay {
     /** What an opened relay payload carries. */
     public sealed interface Opened {
         public class Announcement(public val bytes: ByteArray) : Opened
-        public data class MediaState(val cameraOn: Boolean) : Opened
+        /** A peer's camera and microphone state (version 2, 2026-11-07). */
+        public data class MediaState(val cameraOn: Boolean, val microphoneOn: Boolean) : Opened
 
         /** A signed screen-share state (ADR-0083); verify it before use. */
         public class ScreenShare(public val state: ByteArray) : Opened
@@ -87,7 +88,7 @@ public class CallRelay {
             }
             return when (val payload = classifyCallRelayPlaintext(plaintext)) {
                 is CallRelayPayload.PeerAnnouncement -> Opened.Announcement(payload.announcement)
-                is CallRelayPayload.MediaState -> Opened.MediaState(payload.cameraOn)
+                is CallRelayPayload.MediaState -> Opened.MediaState(payload.cameraOn, payload.microphoneOn)
                 is CallRelayPayload.ScreenShare -> Opened.ScreenShare(payload.state)
                 is CallRelayPayload.CallName -> Opened.CallName(payload.name)
                 CallRelayPayload.Unknown -> Opened.Unknown

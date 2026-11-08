@@ -15,7 +15,7 @@
 //! The roster leaf is account-bound (ADR-0050), so the binding
 //! `peer id -> person` stays spoof-proof, and the SFU never sees it: the
 //! announcement, and every other relay payload the clients agree on (today
-//! the camera on/off media state, the ADR-0083 screen-share state and the
+//! the camera and microphone media state, the ADR-0083 screen-share state and the
 //! name a participant gives themself for the call, [`crate::call_name`]), is
 //! sealed under a key only members hold.
 //!
@@ -260,10 +260,13 @@ pub enum RelayPayload {
     /// A peer announcement (the whole plaintext; verify it with
     /// [`verify_peer_announcement`]).
     PeerAnnouncement(Vec<u8>),
-    /// The camera on/off media state (`lakko_contacts::media_state`).
+    /// The camera and microphone media state
+    /// (`lakko_contacts::media_state`).
     MediaState {
         /// Whether the sender's camera is on.
         camera_on: bool,
+        /// Whether the sender's microphone is on (`false` = muted).
+        microphone_on: bool,
     },
     /// A screen-share state (the whole plaintext; verify it with
     /// [`crate::screen_share::verify_screen_share`], ADR-0083).
@@ -292,6 +295,7 @@ pub fn classify_relay_plaintext(plaintext: &[u8]) -> RelayPayload {
     match lakko_contacts::media_state::try_unwrap_media_state(plaintext) {
         Ok(Some(state)) => RelayPayload::MediaState {
             camera_on: state.camera_on,
+            microphone_on: state.microphone_on,
         },
         Ok(None) | Err(_) => RelayPayload::Unknown,
     }
@@ -526,10 +530,13 @@ mod tests {
             classify_relay_plaintext(&ann),
             RelayPayload::PeerAnnouncement(ann.clone())
         );
-        let on = lakko_contacts::media_state::compose_media_state(true);
+        let on = lakko_contacts::media_state::compose_media_state(true, false);
         assert_eq!(
             classify_relay_plaintext(&on),
-            RelayPayload::MediaState { camera_on: true }
+            RelayPayload::MediaState {
+                camera_on: true,
+                microphone_on: false
+            }
         );
         let share = crate::screen_share::compose_screen_share(
             &alice,

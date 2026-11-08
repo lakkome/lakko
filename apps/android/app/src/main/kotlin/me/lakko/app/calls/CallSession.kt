@@ -271,6 +271,23 @@ public class CallSession(
      */
     private val mutableMicEnabled: MutableStateFlow<Boolean> = MutableStateFlow(true)
     public val micEnabled: StateFlow<Boolean> = mutableMicEnabled.asStateFlow()
+
+    /**
+     * What the other person last said about its microphone and camera (the
+     * `mediaState` call signal, 2026-11-07): unmuted and on until the first
+     * one arrives, and again after the call. A mute is
+     * `track.setEnabled(false)`, which the receiving track never reports, so
+     * their tile's mute mark and camera-off picture come from this.
+     * `CallUiState.driveFrom` maps them onto the remote participant.
+     */
+    private val mutableRemoteMicOn: MutableStateFlow<Boolean> = MutableStateFlow(true)
+    public val remoteMicOn: StateFlow<Boolean> = mutableRemoteMicOn.asStateFlow()
+    private val mutableRemoteCameraOn: MutableStateFlow<Boolean> = MutableStateFlow(true)
+    public val remoteCameraOn: StateFlow<Boolean> = mutableRemoteCameraOn.asStateFlow()
+
+    /** The camera and microphone state last told to the other person. Main
+     *  thread only. */
+    private val mediaAnnouncer = OneToOneMediaStateAnnouncer()
     private val mutableCameraEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val cameraEnabled: StateFlow<Boolean> = mutableCameraEnabled.asStateFlow()
 
@@ -432,6 +449,7 @@ public class CallSession(
             is FfiCallSignalingBody.IceCandidate -> body.callId
             is FfiCallSignalingBody.End -> body.callId
             is FfiCallSignalingBody.ScreenShare -> body.callId
+            is FfiCallSignalingBody.MediaState -> body.callId
             is FfiCallSignalingBody.GroupStart -> body.callId
             is FfiCallSignalingBody.GroupJoin -> body.callId
             is FfiCallSignalingBody.GroupLeave -> body.callId
@@ -469,7 +487,12 @@ public class CallSession(
                 return@launch
             }
             installDelegate(rtc)
-            rtc.addLocalAudioTrack(enabled = audio)
+            // A mute chosen before the capture holds for the captured
+            // microphone, and a dial without audio starts muted: what the
+            // other person is told is what is sent.
+            val micOn = audio && mutableMicEnabled.value
+            mutableMicEnabled.value = micOn
+            rtc.addLocalAudioTrack(enabled = micOn)
 
             // G3-2-video-ui — local video track + camera
             // capture. MUST land BEFORE createOffer: the SDP
@@ -526,10 +549,13 @@ public class CallSession(
 
     /** G3-2-call-controls — mute / unmute the local mic. Drives
      *  the real `AudioTrack.setEnabled` via the pod and publishes
-     *  the new state so the in-call control reflects it. */
+     *  the new state so the in-call control reflects it. Recorded
+     *  even before capture (the captured microphone starts as
+     *  chosen), and told to the other person once connected. */
     public fun setMicrophoneEnabled(on: Boolean) {
         rtc?.setMicrophoneEnabled(on)
         mutableMicEnabled.value = on
+        announceMediaStateIfChanged()
     }
 
     /** G3-2-call-controls — start / stop the local camera track
@@ -538,6 +564,36 @@ public class CallSession(
     public fun setCameraEnabled(on: Boolean) {
         rtc?.setCameraEnabled(on)
         mutableCameraEnabled.value = on
+        announceMediaStateIfChanged()
+    }
+
+    /**
+     * Tell the other person this device's camera and microphone state (the
+     * one-to-one `mediaState` call signal, 2026-11-07) when it differs from
+     * what was last told: their tile shows the mute mark and the camera-off
+     * picture from it (`docs/ux/group-call-grid.md` 7.2). Only on a connected
+     * call; the transition to `Connected` sends the first one. Never a wake.
+     * Best-effort: a compose failure is swallowed, it is a UI hint and never
+     * on the media path. Main thread only.
+     */
+    private fun announceMediaStateIfChanged() {
+        val flags = mediaAnnouncer.next(
+            connected = mutableState.value == WebCallState.Connected,
+            camera = mutableCameraEnabled.value && mutableLocalVideoTrack.value != null,
+            microphone = mutableMicEnabled.value,
+        ) ?: return
+        try {
+            val bytes = composeCallSignaling(
+                FfiCallSignalingBody.MediaState(
+                    callId = callId,
+                    cameraOn = flags.cameraOn,
+                    microphoneOn = flags.microphoneOn,
+                ),
+            )
+            onOutboundSignaling(bytes, CallSignalingWake.NONE)
+        } catch (cause: Throwable) {
+            android.util.Log.w("CallSession", "media state compose failed", cause)
+        }
     }
 
     /**
@@ -567,10 +623,12 @@ public class CallSession(
         val connection = rtc
         if (connection == null) {
             mutableCameraEnabled.value = false
+            announceMediaStateIfChanged()
             return
         }
         connection.setCameraEnabled(false)
         mutableCameraEnabled.value = false
+        announceMediaStateIfChanged()
         if (connection.setLocalVideoSending(false)) {
             driveRenegotiationOffer(video = false)
         }
@@ -673,6 +731,7 @@ public class CallSession(
             mutableLocalVideoTrack.value = connection.currentLocalVideoTrack()
             mutableCameraEnabled.value = true
             mutableVideoPublishState.value = VideoPublishState.Live
+            announceMediaStateIfChanged()
             // The sender, its track and its SFrame encryptor are all still the
             // ones negotiated the first time, so nothing is re-armed and the
             // encryptor's counter carries on where it left off. What DOES need
@@ -770,6 +829,7 @@ public class CallSession(
                 mutableLocalVideoTrack.value = connection2.currentLocalVideoTrack()
                 mutableCameraEnabled.value = true
                 mutableVideoPublishState.value = VideoPublishState.Live
+                announceMediaStateIfChanged()
                 // The sender may be parked at `recvOnly` by an earlier
                 // camera-off; say that video flows again, as the re-enable
                 // path above does.
@@ -801,6 +861,7 @@ public class CallSession(
             // Live: the camera is published + sealed; the spinner clears (the
             // UI shows it only while Starting).
             mutableVideoPublishState.value = VideoPublishState.Live
+            announceMediaStateIfChanged()
 
             // 6. Renegotiate so the peer learns about the new (sealed) video
             //    m-line. Stated explicitly rather than left to the default: the
@@ -906,7 +967,9 @@ public class CallSession(
                 return@launch
             }
             installDelegate(rtc)
-            rtc.addLocalAudioTrack(enabled = true)
+            // A mute chosen before the capture holds for the captured
+            // microphone.
+            rtc.addLocalAudioTrack(enabled = mutableMicEnabled.value)
 
             // G3-2-video-ui — symmetric video wire-up on
             // accept path. Same pre-SDP-build ordering as
@@ -1058,6 +1121,15 @@ public class CallSession(
             // ([applyScreenShare]); the raw body carries no sender and is
             // never applied here.
             is FfiCallSignalingBody.ScreenShare -> Unit
+            // The other person's camera and microphone state (2026-11-07):
+            // the MLS sender's word about its own devices, so it only ever
+            // names the remote tile.
+            is FfiCallSignalingBody.MediaState -> {
+                if (mutableState.value == WebCallState.Done) return
+                if (!body.callId.contentEquals(callId)) return
+                mutableRemoteMicOn.value = body.microphoneOn
+                mutableRemoteCameraOn.value = body.cameraOn
+            }
             is FfiCallSignalingBody.GroupStart,
             is FfiCallSignalingBody.GroupJoin,
             is FfiCallSignalingBody.GroupLeave -> {
@@ -1208,6 +1280,8 @@ public class CallSession(
                 ) {
                     mutableState.value = WebCallState.Connected
                     wakes.markConnected()
+                    // The first camera and microphone state of the call.
+                    announceMediaStateIfChanged()
                 }
                 // A recovery after a blip is what cancels the grace.
                 cancelIceGrace()
@@ -1582,6 +1656,10 @@ public class CallSession(
         // ADR-0032 piece B2a — no camera-on in flight once the media pipeline
         // is torn down.
         mutableVideoPublishState.value = VideoPublishState.Off
+        // The other person's last words about its media go with the call.
+        mutableRemoteMicOn.value = true
+        mutableRemoteCameraOn.value = true
+        mediaAnnouncer.reset()
     }
 
     /** G3-2-conn-quality — start the connection-stats poll loop

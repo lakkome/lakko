@@ -31,12 +31,16 @@ describe("CallRelay", () => {
     const seedB = new Uint8Array(32).fill(2);
     sender.setSeed(seedA);
     receiver.setSeed(seedA);
-    const state = wasmNs.composeMediaState(true);
+    const state = wasmNs.composeMediaState(true, false);
     const sealedA = sender.seal(state);
     expect(sealedA).not.toBeNull();
 
     receiver.setSeed(seedB);
-    expect(receiver.open(sealedA!)).toEqual({ kind: "media-state", cameraOn: true });
+    expect(receiver.open(sealedA!)).toEqual({
+      kind: "media-state",
+      cameraOn: true,
+      microphoneOn: false,
+    });
     expect(receiver.open(state)).toBeNull();
 
     receiver.setSeed(new Uint8Array(32).fill(3));

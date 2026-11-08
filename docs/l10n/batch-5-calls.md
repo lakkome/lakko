@@ -94,13 +94,16 @@ Every other key applies to all three clients.
 |---|---|---|
 | `call.encryption.chip` | Encrypted | yes |
 | `call.encryption.chip_a11y` | This call is encrypted. Show the safety number | yes |
-| `call.encryption.compare_hint` | Read these numbers aloud. If they match on both phones, no one is listening. | yes |
+| `call.encryption.compare_hint_group` | Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening. | yes |
+| `call.encryption.compare_hint_one_to_one` | Read the number aloud to each other. If it matches on both devices, no one else is listening. | yes |
 | `call.encryption.number_a11y` | Safety number: {groups} | yes |
 | `call.encryption.number_unavailable` | Safety number unavailable | yes |
 | `call.encryption.sentence_group` | Only the people on this call can hear it. | yes |
 | `call.encryption.sentence_named` | Only you and {name} can hear this call. | yes |
 | `call.encryption.setting_up` | Setting up... | yes |
 | `call.encryption.title` | This call is encrypted | yes |
+
+2026-11-07: `call.encryption.compare_hint` ("... both phones, no one is listening.") was replaced by the two lines above, chosen by the kind of call (`docs/ux/calls.md` 5): the old line spoke of two phones on every call, group and link calls included, and people join from computers too. The sheet's sentence names the other person on a one-to-one call only; a group or link call always reads `call.encryption.sentence_group`.
 
 ## The call bar (a call put away, docs/ux/calls.md 4.5)
 

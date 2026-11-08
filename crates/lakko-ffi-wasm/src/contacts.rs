@@ -2591,6 +2591,7 @@ pub struct WasmIncomingEnvelope {
     link_founded: Option<crate::link_founded::WasmLinkFounded>,
     group_photo: Option<crate::conversation_meta::WasmGroupPhoto>,
     group_reactions: Option<crate::conversation_meta::WasmGroupReactions>,
+    microphone_on: Option<bool>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2618,6 +2619,7 @@ impl WasmIncomingEnvelope {
             link_founded: None,
             group_photo: None,
             group_reactions: None,
+            microphone_on: None,
         }
     }
 }
@@ -2646,6 +2648,13 @@ impl WasmIncomingEnvelope {
     #[wasm_bindgen(getter, js_name = cameraOn)]
     pub fn camera_on(&self) -> Option<bool> {
         self.camera_on
+    }
+
+    /// Set only for `MediaState`: whether the sender's microphone is on
+    /// (`false` = muted). `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = microphoneOn)]
+    pub fn microphone_on(&self) -> Option<bool> {
+        self.microphone_on
     }
 
     /// Set only for `PushRoutingSecret` (ADR-0044): the minter's
@@ -2827,8 +2836,12 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
             payload: p.to_vec(),
             ..WasmIncomingEnvelope::of(K::CallKeyPackage)
         },
-        IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
+        IncomingEnvelope::MediaState {
+            camera_on,
+            microphone_on,
+        } => WasmIncomingEnvelope {
             camera_on: Some(camera_on),
+            microphone_on: Some(microphone_on),
             ..WasmIncomingEnvelope::of(K::MediaState)
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
@@ -2939,38 +2952,60 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
     })
 }
 
-/// Compose a camera on/off media-state envelope
-/// (camera-off-cleanup). The sender broadcasts the returned
-/// bytes over the opaque SFU `signal-relay` payload; receivers
-/// classify them (via `dispatchIncomingEnvelope` or
-/// `decodeMediaState`) and reset the sender's tile `camOn`
-/// state.
-///
-/// See [`lakko_contacts::media_state`] for the wire format and
-/// threat-model rationale (the SFU never parses the payload —
-/// invariant #2).
+/// Compose a media-state envelope: whether this device's camera is on and
+/// whether its microphone is on (`false` = muted). Sent on every change, on
+/// connect and when a peer joins; seal it under the call's relay key before
+/// relaying it. See [`lakko_contacts::media_state`] (version `0x02` only
+/// since 2026-11-07).
 #[wasm_bindgen(js_name = composeMediaState)]
 #[must_use]
-pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
-    rust_compose_media_state(camera_on)
+pub fn compose_media_state(camera_on: bool, microphone_on: bool) -> Vec<u8> {
+    rust_compose_media_state(camera_on, microphone_on)
 }
 
-/// Strictly decode a media-state envelope, returning the
-/// camera flag (camera-off-cleanup). Fail-closed: rejects a
-/// plaintext that does not carry the media-state domain
-/// separator or whose payload is malformed. Use
-/// `dispatchIncomingEnvelope` instead when the plaintext might
-/// be any relay-payload kind.
+/// A decoded media state.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct CallMediaState {
+    camera_on: bool,
+    microphone_on: bool,
+}
+
+#[wasm_bindgen]
+impl CallMediaState {
+    /// Whether the sender's camera is on.
+    #[wasm_bindgen(getter, js_name = cameraOn)]
+    #[must_use]
+    pub fn camera_on(&self) -> bool {
+        self.camera_on
+    }
+
+    /// Whether the sender's microphone is on (`false` = muted).
+    #[wasm_bindgen(getter, js_name = microphoneOn)]
+    #[must_use]
+    pub fn microphone_on(&self) -> bool {
+        self.microphone_on
+    }
+}
+
+/// Strictly decode a media-state envelope, returning the camera and the
+/// microphone. Fail-closed: rejects a plaintext that does not carry the
+/// media-state domain separator or whose payload is malformed (the
+/// camera-only version `0x01` included). Use `dispatchIncomingEnvelope`
+/// instead when the plaintext might be any relay-payload kind; the relay
+/// classifier (`classifyCallRelayPlaintext`) carries both flags too.
 ///
 /// # Errors
 ///
-/// `JsError` when `plaintext` is not a valid media-state
-/// envelope (wrong domain / bad length / unknown version /
-/// out-of-range flag byte).
-#[wasm_bindgen(js_name = decodeMediaState)]
-pub fn decode_media_state(plaintext: &[u8]) -> Result<bool, JsError> {
+/// `JsError` when `plaintext` is not a valid media-state envelope (wrong
+/// domain / bad length / unknown version / unknown flag bit).
+#[wasm_bindgen(js_name = decodeCallMediaState)]
+pub fn decode_call_media_state(plaintext: &[u8]) -> Result<CallMediaState, JsError> {
     rust_decode_media_state(plaintext)
-        .map(|state| state.camera_on)
+        .map(|state| CallMediaState {
+            camera_on: state.camera_on,
+            microphone_on: state.microphone_on,
+        })
         .map_err(|err| JsError::new(&err.to_string()))
 }
 
@@ -5017,11 +5052,26 @@ mod tests {
     }
 
     #[test]
+    fn media_state_carries_the_camera_and_the_microphone() {
+        let wrapped = compose_media_state(true, false);
+        let env = dispatch_incoming_envelope(&wrapped).unwrap();
+        assert_eq!(env.kind(), WasmIncomingEnvelopeKind::MediaState);
+        assert_eq!(env.camera_on(), Some(true));
+        assert_eq!(env.microphone_on(), Some(false));
+        let state = decode_call_media_state(&wrapped).unwrap();
+        assert!(state.camera_on());
+        assert!(!state.microphone_on());
+
+        let intro = dispatch_incoming_envelope(b"hello alice").unwrap();
+        assert_eq!(intro.microphone_on(), None);
+    }
+
+    #[test]
     fn dispatch_mint_epoch_field_is_none_for_other_kinds() {
         // `mintEpoch` is meaningful ONLY on `PushRoutingSecret`, so
         // a JS reader must see `undefined` on any other kind rather
         // than a stale or defaulted stamp.
-        let media = compose_media_state(true);
+        let media = compose_media_state(true, true);
         let result = dispatch_incoming_envelope(&media).unwrap();
         assert_eq!(result.kind(), WasmIncomingEnvelopeKind::MediaState);
         assert_eq!(result.mint_epoch(), None);

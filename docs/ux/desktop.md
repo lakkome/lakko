@@ -232,7 +232,7 @@ messenger or anywhere else, clicks it, and lands on the screen it opens.
 - **Everywhere else the click opens the page in the browser**, and the invite,
   call-link and group-invite pages offer **Open in the app** under the card. It
   opens the desktop app on the same screen, through the `lakko://` scheme, with
-  the whole link. Phones and tablets get the same button, section 7.1.
+  the whole link. Phones and tablets get no button, section 7.1.
 - On macOS in Chrome and Firefox the page also tries the app by itself, once per
   link, when it opens, as a meeting link does: the browser asks whether to open
   Lakko. Safari is left out, as is any browser not named here: with no app
@@ -249,25 +249,12 @@ messenger or anywhere else, clicks it, and lands on the screen it opens.
 
 ### 7.1 On a phone or tablet
 
-Android and iOS hand a tapped link to the installed app when the tap comes
-from another app. They do not when the person opens the link inside the
-browser itself (typed, pasted, or followed from a page of the same site):
-Chrome keeps it, Safari keeps it. So the same pages, and a shared feed
-(`/feed/import#<rule>`, [`feed.md`](feed.md)), show the same **Open in the app**
-button, at the bottom of the screen, clear of the page's own buttons.
-
-- **Android:** the button opens an `intent:` address that names the app's
-  package (`me.lakko.dev`, the one package every Android build has today; a
-  build sets another with `VITE_LAKKO_ANDROID_PACKAGE`) and carries the whole
-  `https` link, secret included. With no app installed the browser stays on
-  the same page.
-- **iOS and iPadOS:** the button opens the app's own `lakko://` scheme, the
-  same form the desktop app takes. iOS asks once whether to open Lakko. With
-  no app installed Safari shows its own "address is invalid" message, as it
-  does on a Mac; the page cannot know beforehand.
-- The page never tries the app by itself on a phone: a phone browser only
-  opens an app after a tap, and an unasked prompt would cover the page.
-- The button is hidden while a call from the link is on screen.
+No button (decided 2026-11-07, maintainer). Android and iOS hand a link tapped
+in another app to the installed app; a link opened inside the browser itself
+stays in the browser. A page cannot tell whether the app is installed (iOS has
+no way to ask; Android only through `getInstalledRelatedApps`), and a button
+that did nothing confused people who had no app. The iOS app keeps its
+`lakko://` scheme registered; nothing on the web uses it.
 
 ## 8. Updates
 

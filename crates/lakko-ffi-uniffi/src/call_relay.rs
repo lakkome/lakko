@@ -113,10 +113,12 @@ pub enum CallRelayPayload {
         /// The whole announcement.
         announcement: Vec<u8>,
     },
-    /// The sender's camera on/off state.
+    /// The sender's camera and microphone state.
     MediaState {
         /// Whether the camera is on.
         camera_on: bool,
+        /// Whether the microphone is on (`false` = muted).
+        microphone_on: bool,
     },
     /// Anything else: drop it.
     Unknown,
@@ -143,7 +145,13 @@ pub fn classify_call_relay_plaintext(plaintext: Vec<u8>) -> CallRelayPayload {
         RelayPayload::PeerAnnouncement(announcement) => {
             CallRelayPayload::PeerAnnouncement { announcement }
         },
-        RelayPayload::MediaState { camera_on } => CallRelayPayload::MediaState { camera_on },
+        RelayPayload::MediaState {
+            camera_on,
+            microphone_on,
+        } => CallRelayPayload::MediaState {
+            camera_on,
+            microphone_on,
+        },
         RelayPayload::ScreenShare(state) => CallRelayPayload::ScreenShare { state },
         RelayPayload::CallName(name) => CallRelayPayload::CallName { name },
         RelayPayload::Unknown => CallRelayPayload::Unknown,
@@ -530,12 +538,15 @@ mod tests {
     #[test]
     fn a_relay_payload_round_trips_and_classifies() {
         let key = CallRelayKey::from_call_seed(vec![7; 32]).expect("key");
-        let state = lakko_contacts::media_state::compose_media_state(false);
+        let state = lakko_contacts::media_state::compose_media_state(false, false);
         let sealed = key.seal(state).expect("seal");
         let opened = key.open(sealed).expect("open");
         assert_eq!(
             classify_call_relay_plaintext(opened),
-            CallRelayPayload::MediaState { camera_on: false }
+            CallRelayPayload::MediaState {
+                camera_on: false,
+                microphone_on: false
+            }
         );
         assert!(CallRelayKey::from_call_seed(vec![7; 31]).is_err());
     }

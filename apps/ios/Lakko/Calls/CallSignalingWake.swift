@@ -80,6 +80,9 @@ enum CallSignalingWake {
         case groupJoin
         case groupLeave
         case screenShare
+        /// A one-to-one's camera and microphone state (2026-11-07): sent
+        /// only once the call is connected, never a wake.
+        case mediaState
     }
 
     /// Leading wire tag of an embedded `CallSignalingPayload.body` oneof field
@@ -93,6 +96,7 @@ enum CallSignalingWake {
     ///   * field 15 (group_join)  -> 0x7A
     ///   * field 16 (group_leave) -> 0x82 0x01 (tag 130, a two-byte varint)
     ///   * field 17 (screen_share) -> 0x8A 0x01 (tag 138, ADR-0083)
+    ///   * field 18 (media_state) -> 0x92 0x01 (tag 146)
     ///
     /// A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...`
     /// service envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -122,6 +126,10 @@ enum CallSignalingWake {
             guard bytes.count >= 2, bytes[bytes.startIndex + 1] == 0x01,
                   ChatClient.isFramedGroupCallBody(bytes, tagLength: 2) else { return nil }
             return .screenShare
+        case 0x92:
+            guard bytes.count >= 2, bytes[bytes.startIndex + 1] == 0x01,
+                  ChatClient.isFramedGroupCallBody(bytes, tagLength: 2) else { return nil }
+            return .mediaState
         default: return nil
         }
     }
@@ -153,6 +161,8 @@ enum CallSignalingWake {
         case answer
         case candidate
         case end
+        /// The camera and microphone state of a connected call.
+        case mediaState
     }
 
     /// Does the session ask for a call wake for this frame? The dial does,
@@ -161,7 +171,7 @@ enum CallSignalingWake {
         switch frame {
         case .dialOffer: return true
         case .end: return !everConnected
-        case .renegotiationOffer, .answer, .candidate: return false
+        case .renegotiationOffer, .answer, .candidate, .mediaState: return false
         }
     }
 

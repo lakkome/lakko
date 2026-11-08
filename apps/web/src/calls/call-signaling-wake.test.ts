@@ -52,6 +52,8 @@ describe("callSignalingBodyKind", () => {
     // ADR-0083 one-to-one screen-share state (field 17): seen live as a garbage
     // bubble on 2026-10-29 while this table did not know it.
     expect(callSignalingBodyKind(new Uint8Array([0x8a, 0x01, 0x00]))).toBe("screenShare");
+    // One-to-one camera and microphone state (field 18, 2026-11-07).
+    expect(callSignalingBodyKind(new Uint8Array([0x92, 0x01, 0x00]))).toBe("mediaState");
   });
 
   it("is null for anything that is not call signaling", () => {
@@ -64,6 +66,7 @@ describe("callSignalingBodyKind", () => {
     expect(callSignalingBodyKind(new Uint8Array([0x82]))).toBeNull();
     expect(callSignalingBodyKind(new Uint8Array([0x82, 0x02]))).toBeNull();
     expect(callSignalingBodyKind(new Uint8Array([0x8a]))).toBeNull();
+    expect(callSignalingBodyKind(new Uint8Array([0x92]))).toBeNull();
   });
 
   it("agrees with looksLikeCallSignaling", () => {

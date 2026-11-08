@@ -670,6 +670,16 @@ public class CallUiState(
         patch(id) { it.copy(camOn = on) }
     }
 
+    /**
+     * Flip a specific participant's microphone flag, the tile's mute mark
+     * (`docs/ux/group-call-grid.md` 7.2): set for a REMOTE peer from the media
+     * state it said (2026-11-07). Distinct from [setMic], which only ever
+     * touches the local participant. No-op if [id] is unknown.
+     */
+    public fun setParticipantMic(id: String, on: Boolean) {
+        patch(id) { it.copy(micOn = on) }
+    }
+
     /** The id of the only remote participant, when exactly one
      *  exists (the 1×1 case); `null` when alone or in an N-way
      *  call. `CallScreen` gates remote-video rendering on
@@ -740,6 +750,8 @@ public class CallUiState(
             launch { session.localVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.remoteVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.micEnabled.collect { rebuildFromSession(session) } }
+            launch { session.remoteMicOn.collect { rebuildFromSession(session) } }
+            launch { session.remoteCameraOn.collect { rebuildFromSession(session) } }
             launch { session.cameraEnabled.collect { rebuildFromSession(session) } }
             launch { session.e2eeActive.collect { rebuildFromSession(session) } }
             launch { session.rttMs.collect { rebuildFromSession(session) } }
@@ -792,13 +804,20 @@ public class CallUiState(
             ),
         )
         if (connected || remoteTrack != null) {
+            // The mute mark and the camera-off picture from what the other
+            // person said (the `mediaState` call signal, 2026-11-07).
+            val remoteMedia = oneToOneRemoteMedia(
+                remoteHasVideo = remoteTrack != null,
+                remoteCameraOn = session.remoteCameraOn.value,
+                remoteMicOn = session.remoteMicOn.value,
+            )
             roster.add(
                 Participant(
                     id = ONE_TO_ONE_REMOTE_ID,
                     displayName = remoteName,
                     isLocal = false,
-                    micOn = true,
-                    camOn = remoteTrack != null,
+                    micOn = remoteMedia.microphoneOn,
+                    camOn = remoteMedia.cameraOn,
                     quality = QualityTier.Good,
                     speaking = false,
                 ),

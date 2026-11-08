@@ -984,6 +984,9 @@ public final class ChatClient {
     ///     `(16 << 3) | 2 = 130` no longer fits one varint byte;
     ///   * 0x8A 0x01 — `ScreenShareSignal` (17, ADR-0083), framed like a group
     ///     body (it opens with the 16-byte `call_id` too). It never rings.
+    ///   * 0x92 0x01 — `CallMediaState` (18, 2026-11-07): the other side's
+    ///     camera and microphone in a one-to-one call, framed the same way.
+    ///     It never rings.
     ///
     /// The group tags were missing, so a group-call body fell through to
     /// `parseBodyEnvelope`'s lossy-UTF-8 fallback and rendered as a garbage
@@ -1002,7 +1005,7 @@ public final class ChatClient {
             return true
         case 0x72, 0x7A:
             return isFramedGroupCallBody(bytes, tagLength: 1)
-        case 0x82, 0x8A:
+        case 0x82, 0x8A, 0x92:
             return bytes.count >= 2
                 && bytes[bytes.startIndex + 1] == 0x01
                 && isFramedGroupCallBody(bytes, tagLength: 2)

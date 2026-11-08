@@ -1830,7 +1830,7 @@ mod tests {
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),
             wrap_call_kp_forward(&[0xCD; 512]),
-            compose_media_state(true),
+            compose_media_state(true, true),
             compose_push_routing_secret(7, &[0x11; 32]),
             compose_committer_beacon(),
         ] {

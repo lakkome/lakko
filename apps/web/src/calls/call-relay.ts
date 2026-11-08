@@ -48,7 +48,12 @@ export type CallRelayWasm = Pick<
 /** What an opened relay payload carries. */
 export type OpenedRelay =
   | { readonly kind: "announcement"; readonly bytes: Uint8Array }
-  | { readonly kind: "media-state"; readonly cameraOn: boolean }
+  /** The sender's camera and microphone (`false` = muted). */
+  | {
+      readonly kind: "media-state";
+      readonly cameraOn: boolean;
+      readonly microphoneOn: boolean;
+    }
   /** A signed screen-share state (ADR-0083), to verify against the sender's
    *  verified announcement. */
   | { readonly kind: "screen-share"; readonly state: Uint8Array }
@@ -113,7 +118,11 @@ export class CallRelay {
           case "peer-announcement":
             return { kind: "announcement", bytes: classified.announcement };
           case "media-state":
-            return { kind: "media-state", cameraOn: classified.cameraOn };
+            return {
+              kind: "media-state",
+              cameraOn: classified.cameraOn,
+              microphoneOn: classified.microphoneOn,
+            };
           case "screen-share":
             return { kind: "screen-share", state: classified.state };
           case "call-name":

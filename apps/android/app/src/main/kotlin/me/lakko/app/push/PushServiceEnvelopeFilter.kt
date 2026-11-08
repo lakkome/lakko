@@ -193,8 +193,9 @@ internal fun classifyBackgroundPayload(
     registrarSeedEnvelopeLen: Int = -1,
 ): BackgroundPayloadKind {
     // Cheap unambiguous discriminator: the CallSignalingPayload oneof
-    // body tags, fields 10..16 (0x52/0x5A/0x62/0x6A, the group-control
-    // 0x72/0x7A, and the two-byte 0x82 0x01 for field 16 — see
+    // body tags, fields 10..18 (0x52/0x5A/0x62/0x6A, the group-control
+    // 0x72/0x7A, and the two-byte 0x82 0x01 / 0x8A 0x01 / 0x92 0x01 for
+    // fields 16..18, the last a 1x1 media state that never notifies — see
     // `looksLikeCallSignaling` for why the group tags also check the
     // `call_id` header). Disjoint from both the chat `{` (0x7B) and the
     // `l` (0x6C) both in-group envelope domains open with.

@@ -397,6 +397,24 @@ class OneToOneCallHostTest {
         assertEquals(1, h.session()!!.shares.size)
     }
 
+    /** The other person's camera and microphone state (2026-11-07) goes to
+     *  the call in the slot, and only there: never a ring, never a group
+     *  record. */
+    @Test
+    fun `a media state reaches the call in the slot only`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        h.host.deliver(groupA, 2, FfiCallSignalingBody.MediaState(call1, cameraOn = false, microphoneOn = false), iso(t0))
+        h.host.deliver(groupA, 3, FfiCallSignalingBody.MediaState(call2, cameraOn = true, microphoneOn = true), iso(t0))
+        h.host.deliver(groupB, 4, FfiCallSignalingBody.MediaState(call1, cameraOn = true, microphoneOn = true), iso(t0))
+        runCurrent()
+        val applied = h.session()!!.applied
+        assertEquals(2, applied.size)
+        val state = applied[1] as FfiCallSignalingBody.MediaState
+        assertFalse(state.microphoneOn)
+        assertFalse(state.cameraOn)
+    }
+
     @Test
     fun `a raw share body never reaches the session`() = runTest {
         val h = harness()
@@ -783,6 +801,15 @@ class OneToOneCallHostTest {
         assertEquals(
             OneToOneRoute.DROP,
             route(FfiCallSignalingBody.GroupJoin(call1, 1u, 1uL)),
+        )
+        // A media state applies to the call in the slot and never rings.
+        val media = FfiCallSignalingBody.MediaState(call1, cameraOn = true, microphoneOn = false)
+        assertEquals(OneToOneRoute.APPLY, route(media))
+        assertEquals(OneToOneRoute.DROP, route(media, group = groupB))
+        assertEquals(OneToOneRoute.DROP, route(media, occupied = null))
+        assertEquals(
+            OneToOneRoute.DROP,
+            route(FfiCallSignalingBody.MediaState(call2, cameraOn = true, microphoneOn = true)),
         )
     }
 

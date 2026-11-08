@@ -533,8 +533,12 @@
       "text": "यह कॉल एन्क्रिप्टेड है। सुरक्षा नंबर दिखाएँ",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "ये नंबर ज़ोर से पढ़ें। अगर दोनों फ़ोन पर ये एक जैसे हैं, तो कोई नहीं सुन रहा।",
+    "call.encryption.compare_hint_group": {
+      "text": "इस कॉल में सभी को एक ही नंबर दिखता है। इसे ज़ोर से पढ़ें। अगर हर डिवाइस पर यह एक जैसा है, तो कोई और नहीं सुन रहा।",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "यह नंबर एक-दूसरे को ज़ोर से पढ़कर सुनाएँ। अगर दोनों डिवाइस पर यह एक जैसा है, तो कोई और नहीं सुन रहा।",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

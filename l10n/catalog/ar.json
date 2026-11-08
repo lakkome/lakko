@@ -533,8 +533,12 @@
       "text": "هذه المكالمة مشفّرة. عرض رقم الأمان",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "اقرأ هذه الأرقام بصوت عالٍ. إذا تطابقت على الهاتفين، فلا أحد يستمع.",
+    "call.encryption.compare_hint_group": {
+      "text": "يرى كل من في هذه المكالمة الرقم نفسه. اقرأه بصوت عالٍ. إذا تطابق على كل جهاز، فلا أحد غيركم يستمع.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "اقرأ الرقم بصوت عالٍ لبعضكما. إذا تطابق على الجهازين، فلا أحد غيركما يستمع.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

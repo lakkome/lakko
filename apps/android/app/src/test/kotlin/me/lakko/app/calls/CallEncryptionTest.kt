@@ -52,20 +52,53 @@ class CallEncryptionTest {
     }
 
     @Test
-    fun `the sheet names the other person`() {
-        assertEquals(
-            "Only you and Anna can hear this call.",
-            callEncryptionSentence("Anna").en,
-        )
+    fun `the sheet names the other person on a one-to-one call`() {
+        for (others in listOf(0, 1)) {
+            assertEquals(
+                "Only you and Anna can hear this call.",
+                callEncryptionSentence("Anna", groupCall = false, othersInCall = others).en,
+            )
+        }
     }
 
     @Test
     fun `an unnamed peer gets a sentence that is still true`() {
         // No invented "Someone": that would read as a claim about a person.
-        val generic = "Only the people on this call can hear it."
-        assertEquals(generic, callEncryptionSentence(null).en)
-        assertEquals(generic, callEncryptionSentence("").en)
-        assertEquals(generic, callEncryptionSentence("   ").en)
+        for (missing in listOf(null, "", "   ")) {
+            assertEquals(GROUP_SENTENCE, callEncryptionSentence(missing, groupCall = false, othersInCall = 1).en)
+        }
+    }
+
+    @Test
+    fun `a group or link call never names one person, whatever its size`() {
+        // The 2026-11-07 defect: the sheet read "Only you and <one participant>"
+        // on a call with several people in it.
+        for (others in listOf(0, 1, 2, 7)) {
+            assertEquals(GROUP_SENTENCE, callEncryptionSentence("Anna", groupCall = true, othersInCall = others).en)
+        }
+        assertEquals(GROUP_SENTENCE, callEncryptionSentence("Anna", groupCall = false, othersInCall = 2).en)
+    }
+
+    @Test
+    fun `the line under the number follows the kind of call`() {
+        assertEquals(ONE_TO_ONE_HINT, callEncryptionHint(groupCall = false, othersInCall = 1).en)
+        assertEquals(ONE_TO_ONE_HINT, callEncryptionHint(groupCall = false, othersInCall = 0).en)
+        for (others in listOf(0, 1, 4)) {
+            assertEquals(GROUP_HINT, callEncryptionHint(groupCall = true, othersInCall = others).en)
+        }
+        assertEquals(GROUP_HINT, callEncryptionHint(groupCall = false, othersInCall = 3).en)
+        for (hint in listOf(ONE_TO_ONE_HINT, GROUP_HINT)) {
+            assertFalse(hint.contains("phone", ignoreCase = true))
+        }
+    }
+
+    private companion object {
+        const val GROUP_SENTENCE = "Only the people on this call can hear it."
+        const val ONE_TO_ONE_HINT =
+            "Read the number aloud to each other. If it matches on both devices, no one else is listening."
+        const val GROUP_HINT =
+            "Everyone in this call sees the same number. Read it aloud. If it matches on every device, " +
+                "no one else is listening."
     }
 
     @Test
@@ -101,11 +134,11 @@ class CallEncryptionTest {
     @Test
     fun `the sheet explains what the number is for without naming a protocol`() {
         val banned = listOf("MLS", "SFrame", "exporter", "epoch", "E2EE", "key")
-        for (word in banned) {
-            assertFalse(
-                "$word must not appear in `${CALL_ENCRYPTION_SHEET_HINT.en}`",
-                CALL_ENCRYPTION_SHEET_HINT.en.contains(word, ignoreCase = true),
-            )
+        for (groupCall in listOf(false, true)) {
+            val hint = callEncryptionHint(groupCall, othersInCall = 1).en
+            for (word in banned) {
+                assertFalse("$word must not appear in `$hint`", hint.contains(word, ignoreCase = true))
+            }
         }
         assertEquals("This call is encrypted", CALL_ENCRYPTION_SHEET_TITLE.en)
     }

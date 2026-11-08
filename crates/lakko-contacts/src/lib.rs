@@ -342,7 +342,8 @@ pub use mailbox::{
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
-    MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
+    MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_FLAG_CAMERA, MEDIA_STATE_FLAG_MICROPHONE,
+    MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V2,
 };
 pub use pin::{
     compose_pin, decode_pin, pin_is_newer, try_unwrap_pin, PinAction, PinError, PinOp,

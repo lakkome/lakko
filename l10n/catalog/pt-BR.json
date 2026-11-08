@@ -533,8 +533,12 @@
       "text": "Esta chamada é criptografada. Mostrar o número de segurança",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "Leiam estes números em voz alta. Se forem iguais nos dois celulares, ninguém está ouvindo.",
+    "call.encryption.compare_hint_group": {
+      "text": "Todos nesta chamada veem o mesmo número. Leiam em voz alta. Se for igual em todos os dispositivos, mais ninguém está ouvindo.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Leiam o número em voz alta um para o outro. Se for igual nos dois dispositivos, mais ninguém está ouvindo.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

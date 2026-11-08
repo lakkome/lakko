@@ -5103,7 +5103,7 @@ call: each participant sends a peer announcement (its SFU peer id, signed with
 its MLS leaf key) sealed under `BLAKE3-derive-key("lakko/call/relay/v1",
 call_seed)`, and a receiver accepts it only when the relay sender is the
 announced peer and the signer is an account-bound leaf of the call's roster.
-The camera media state is sealed under the same key.
+The camera and microphone media state is sealed under the same key.
 
 **Why it is indexed.** Before this auth saw `(account_id, call_id)` at every
 admission and stored it for the ADR-0033 throttle, the token's `sub` reached

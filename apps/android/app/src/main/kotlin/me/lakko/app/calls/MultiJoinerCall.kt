@@ -224,6 +224,10 @@ class MultiJoinerCall private constructor(
      *  scope, so no extra synchronisation is needed. */
     private val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+    /** What each remote peer last said about its microphone (keyed on
+     *  "peer-<peerId>", 2026-11-07), as [SfuCallUi]. */
+    private val remoteMics = RemoteMicStates()
+
     /** The call id, lower-case hex: the key of [RememberedCallNames]. */
     private val callIdHex: String = hexKey(opts.callId)
 
@@ -288,6 +292,11 @@ class MultiJoinerCall private constructor(
                     val id = "$PEER_PREFIX$peerId"
                     lastKnownCameraOn[id] = cameraOn
                     ui.setParticipantCamera(id, cameraOn)
+                },
+                onRemoteMicrophoneState = { peerId, microphoneOn ->
+                    // The peer's mute mark (group-call-grid 7.2), from the
+                    // same sealed media state. Mirrors SfuCallUi.
+                    remoteMics.record(ui, "$PEER_PREFIX$peerId", microphoneOn)
                 },
                 onLocalVideoTrack = { track -> ui.setLocalVideoTrack(track) },
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
@@ -446,6 +455,7 @@ class MultiJoinerCall private constructor(
         clearRebroadcast()
         clearOwnerProbe()
         lastKnownCameraOn.clear()
+        remoteMics.clear()
         ui.setCallNameControl(null, own = "", default = "")
         session.hangUp()
     }
@@ -666,6 +676,7 @@ class MultiJoinerCall private constructor(
         opts.names.forget(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
         lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
+        remoteMics.forget("$PEER_PREFIX$peerId")
         // The committer may have left -> the next inbound KP is evaluated
         // against the fresh election (this client might now be it).
     }
@@ -1152,7 +1163,7 @@ class MultiJoinerCall private constructor(
             id = "$PEER_PREFIX$peerId",
             displayName = displayName,
             isLocal = false,
-            micOn = true,
+            micOn = remoteMics.micOn("$PEER_PREFIX$peerId"),
             camOn = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,
