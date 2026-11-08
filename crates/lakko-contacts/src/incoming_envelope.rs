@@ -123,9 +123,13 @@ use thiserror::Error;
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::channel_epoch_seeds::{
+    try_unwrap_channel_epoch_seeds, ChannelEpochSeedsEnvelope, ChannelEpochSeedsError,
+};
 use crate::channel_read_key::{
     try_unwrap_channel_read_key, ChannelReadKeyEnvelope, ChannelReadKeyError,
 };
+use crate::channel_rotate_request::{try_unwrap_channel_rotate_request, ChannelRotateRequestError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
@@ -436,6 +440,20 @@ pub enum IncomingEnvelope<'a> {
     /// contact, and otherwise hands the request to the ordinary
     /// incoming-request flow.
     GroupContactRequest(GroupContactRequest),
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). Never a chat bubble. Kept
+    /// only under the rule in [`crate::channel_epoch_seeds`]: on the
+    /// channel's PublisherGroup journal, addressed to this account, sent by
+    /// the channel's owner resolved at receipt; a seed is added only for an
+    /// epoch the device holds none of.
+    ChannelEpochSeeds(ChannelEpochSeedsEnvelope),
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08), carrying the 16-byte channel id. Never a chat
+    /// bubble. Only the owner's device acts on it, under the rule in
+    /// [`crate::channel_rotate_request`]: on the channel's PublisherGroup
+    /// journal, sent by a current publisher resolved at receipt; requests
+    /// before the next rotation collapse into it.
+    ChannelRotateRequest([u8; 16]),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -543,6 +561,14 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     GroupContactRequest(#[from] GroupContactRequestError),
+    /// The channel epoch-seeds domain (ADR-0087, 2026-11-08) with a
+    /// malformed payload.
+    #[error(transparent)]
+    ChannelEpochSeeds(#[from] ChannelEpochSeedsError),
+    /// The channel rotate-request domain (ADR-0087, 2026-11-08) with a
+    /// malformed payload.
+    #[error(transparent)]
+    ChannelRotateRequest(#[from] ChannelRotateRequestError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -664,6 +690,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n2. Channel read key — ADR-0087 phase B.
     if let Some(key) = try_unwrap_channel_read_key(plaintext)? {
         return Ok(IncomingEnvelope::ChannelReadKey(key));
+    }
+    // 7n3. Earlier channel seeds to a new publisher — ADR-0087, 2026-11-08.
+    if let Some(seeds) = try_unwrap_channel_epoch_seeds(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelEpochSeeds(seeds));
+    }
+    // 7n4. A publisher asks the owner to rotate — ADR-0087, 2026-11-08.
+    if let Some(channel) = try_unwrap_channel_rotate_request(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelRotateRequest(channel));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {

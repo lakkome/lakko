@@ -336,6 +336,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "channel_epoch_seeds_decode"
+path = "fuzz_targets/channel_epoch_seeds_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_rotate_request_decode"
+path = "fuzz_targets/channel_rotate_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "channel_read_key_decode"
 path = "fuzz_targets/channel_read_key_decode.rs"
 test = false

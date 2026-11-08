@@ -2563,6 +2563,19 @@ pub enum WasmIncomingEnvelopeKind {
     /// `openChannelReadKeyEnvelope` after checking the MLS sender is the
     /// channel's owner. Never render it.
     ChannelReadKey = 28,
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). `payload` is the whole
+    /// envelope; open it with `openChannelEpochSeedsEnvelope` after checking
+    /// it came on this channel's PublisherGroup and the MLS sender is the
+    /// channel's owner, then add only the seeds of epochs not held. Never
+    /// render it.
+    ChannelEpochSeeds = 29,
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08). `payload` is the 16-byte channel id. Only the
+    /// owner's device acts on it, when it came on that channel's
+    /// PublisherGroup and the MLS sender is a current publisher; requests
+    /// before the next rotation collapse into it. Never render it.
+    ChannelRotateRequest = 30,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2940,6 +2953,14 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::ChannelReadKey(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),
             ..WasmIncomingEnvelope::of(K::ChannelReadKey)
+        },
+        IncomingEnvelope::ChannelEpochSeeds(_) => WasmIncomingEnvelope {
+            payload: plaintext.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelEpochSeeds)
+        },
+        IncomingEnvelope::ChannelRotateRequest(channel) => WasmIncomingEnvelope {
+            payload: channel.to_vec(),
+            ..WasmIncomingEnvelope::of(K::ChannelRotateRequest)
         },
         IncomingEnvelope::GroupContactRequest(_) => WasmIncomingEnvelope {
             payload: plaintext.to_vec(),

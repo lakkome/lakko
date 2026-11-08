@@ -449,8 +449,11 @@ public object ChannelMemberCards {
         client: ChannelsClient,
         channelIdHex: String,
     ) {
-        val epoch = state.epochByChannel.value[channelIdHex] ?: return
-        val seed = state.keysByChannel.value[channelIdHex]?.seed ?: return
+        val current = state.epochByChannel.value[channelIdHex] ?: return
+        // Section 15 — sealed under an epoch the channel service has reached.
+        val sealing = state.sealingSeed(channelIdHex, current) ?: return
+        val epoch = sealing.epoch
+        val seed = sealing.seed
         if (state.subscriberKeysByChannel.value[channelIdHex] == null) {
             val fresh = ChannelsComposer.freshSubscriberKeys()
             state.setSubscriberKeys(channelIdHex, fresh)
@@ -466,14 +469,11 @@ public object ChannelMemberCards {
         keepOwnCardCurrent(ReachManager.get(context), client, input)
     }
 
-    /** The seed a member card of [epoch] opens with: the publisher's current
-     *  seed for the current epoch, else a subscriber seed this device holds. */
-    public fun seedForEpoch(state: ChannelsUiState, channelIdHex: String, epoch: UInt): ByteArray? {
-        val current = state.epochByChannel.value[channelIdHex]
-        val publisherSeed = state.keysByChannel.value[channelIdHex]?.seed
-        if (publisherSeed != null && epoch == current) return publisherSeed
-        return state.subscribedSeeds(channelIdHex)[epoch]
-    }
+    /** The seed a member card of [epoch] opens with: the publisher's
+     *  composer seed for the epoch it serves, else a seed this device holds
+     *  for [epoch] ([ChannelsUiState.readSeed]). */
+    public fun seedForEpoch(state: ChannelsUiState, channelIdHex: String, epoch: UInt): ByteArray? =
+        state.readSeed(channelIdHex, epoch)
 
     /** Forget what this process uploaded for [channelIdHex]: the server
      *  removed the card with the subscription, so a later subscription

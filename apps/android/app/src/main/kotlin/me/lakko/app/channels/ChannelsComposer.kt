@@ -38,17 +38,26 @@ public data class ChannelPublisherKeys(
     public val seed: ByteArray,
     /** 32-byte Ed25519 signing-key seed. */
     public val signingKeySeed: ByteArray,
+    /**
+     * ADR-0087 section 15 — the channel epoch [seed] serves: the
+     * PublisherGroup epoch it was read at (a co-publisher), or the epoch the
+     * owner's own reseal landed at. Never stored, re-derived on every open.
+     * `null`: unknown, the channel's current epoch is assumed.
+     */
+    public val seedEpoch: UInt? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ChannelPublisherKeys) return false
         return seed.contentEquals(other.seed) &&
-            signingKeySeed.contentEquals(other.signingKeySeed)
+            signingKeySeed.contentEquals(other.signingKeySeed) &&
+            seedEpoch == other.seedEpoch
     }
 
     override fun hashCode(): Int {
         var result = seed.contentHashCode()
         result = 31 * result + signingKeySeed.contentHashCode()
+        result = 31 * result + (seedEpoch?.hashCode() ?: 0)
         return result
     }
 }
@@ -174,6 +183,7 @@ public object ChannelsComposer {
         // closeout). See
         // `crates/lakko-mls/src/publisher_group.rs` for the
         // Rust-core invariant.
+        var seedEpoch: UInt? = null
         val seed: ByteArray = try {
             val publisher = if (joinedGroupId != null) {
                 uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined(identity, joinedGroupId, channelId)
@@ -182,6 +192,9 @@ public object ChannelsComposer {
                 uniffiPublisherGroupOpenOrCreate(identity, channelId)
             }
             try {
+                // The PublisherGroup epoch the seed serves (both the group and
+                // the channel start at 0; each commit moves both by one).
+                seedEpoch = publisher.epoch().coerceAtMost(UInt.MAX_VALUE.toULong()).toUInt()
                 publisher.channelSeed(identity)
             } finally {
                 publisher.close()
@@ -209,6 +222,7 @@ public object ChannelsComposer {
             return ChannelPublisherKeys(
                 seed = seed,
                 signingKeySeed = signer.toSeed(),
+                seedEpoch = seedEpoch,
             )
         } finally {
             signer.close()

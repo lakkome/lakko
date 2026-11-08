@@ -449,12 +449,17 @@ private fun ChannelTimelineView(
 
     suspend fun publish(plaintext: ByteArray) {
         val keys = state.keysByChannel.value[channelId] ?: throw IllegalStateException("not a publisher")
-        val epoch = state.epochByChannel.value[channelId]
+        val current = state.epochByChannel.value[channelId]
             ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
+        // Section 15 — sealed under an epoch the channel service has reached;
+        // with no seed of one on this device the post is refused (a retry
+        // goes out once the owner's reseal lands).
+        val sealing = state.sealingSeed(channelId, current)
+            ?: throw IllegalStateException("no seed of an epoch the channel has reached")
         val wire = ChannelsComposer.compose(
-            keys = keys,
+            keys = keys.copy(seed = sealing.seed),
             channelIdHex = channelId,
-            epochId = epoch,
+            epochId = sealing.epoch,
             messageCounter = state.nextCounter(channelId),
             plaintext = plaintext,
         )

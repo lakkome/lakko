@@ -94,8 +94,9 @@ public object ChannelSubscriberRows {
         return keep
     }
 
-    /** Section 7.3 — `Remove`: the row goes and a rotation follows at once, so
-     *  the removed key gets no seed of the next epoch. */
+    /** Section 7.3 — `Remove`: the row goes and a rotation follows, so the
+     *  removed key gets no seed of the next epoch: at once on the owner's
+     *  device; a publisher asks the owner's device to rotate (section 15). */
     public suspend fun remove(state: ChannelsUiState, client: ChannelsClient, channelId: String, pubkeyHex: String) {
         val pub = state.publisher ?: throw IllegalStateException("no publisher identity")
         ChannelPublisherSigners.derive(pub, channelId).use { client.removeSubscriber(channelId, pubkeyHex, it) }

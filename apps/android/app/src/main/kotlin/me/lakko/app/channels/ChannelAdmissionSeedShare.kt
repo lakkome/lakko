@@ -98,8 +98,15 @@ public object ChannelAdmissionSeedShare {
     }
 
     /** Whether any publisher of [channelId] still lacks an admission seed
-     *  version or the read key (no network, no decryption). */
-    public fun anyOwed(context: Context, account: String, channelId: String): Boolean {
+     *  version, the read key, or one of the channel's earlier seeds
+     *  ([epochs], the owner's epoch map) (no network, no decryption). */
+    public fun anyOwed(
+        context: Context,
+        account: String,
+        channelId: String,
+        epochs: Set<UInt> = emptySet(),
+        maxSeeds: Int = EPOCH_SEEDS_MAX,
+    ): Boolean {
         val versions = ChannelAdmissionKeys.all(context, account, channelId).let { all ->
             try {
                 all.map { it.first.toString() }
@@ -109,7 +116,8 @@ public object ChannelAdmissionSeedShare {
         }
         return publishers(context, account, channelId).any { (keyHex, _) ->
             val already = sent(context, account, channelId, keyHex)
-            READ_KEY_MARK !in already || versions.any { it !in already }
+            READ_KEY_MARK !in already || versions.any { it !in already } ||
+                epochSeedEpochsToSend(epochs, already, maxSeeds).isNotEmpty()
         }
     }
 
@@ -127,14 +135,24 @@ public object ChannelAdmissionSeedShare {
          *  crash between the two never reuses a ratchet generation (G-34
          *  class); a failure publishes nothing. */
         persistNow: () -> Unit,
+        /** ADR-0087 section 15 (2026-11-08) — the owner's epoch map, every
+         *  channel seed this device holds by epoch: the newest
+         *  [EPOCH_SEEDS_MAX] a publisher lacks go to it in one envelope. */
+        epochSeeds: Map<UInt, ByteArray> = emptyMap(),
     ) {
         val seeds = ChannelAdmissionKeys.all(context, account, channelId)
+        val maxSeeds = try {
+            uniffi.lakko_ffi_uniffi.channelEpochSeedsMax().toInt()
+        } catch (_: Throwable) {
+            EPOCH_SEEDS_MAX
+        }
         try {
             for ((keyHex, accountIdHex) in publishers(context, account, channelId)) {
                 val already = sent(context, account, channelId, keyHex)
                 val owed = seeds.filter { it.first.toString() !in already }
                 val readKeyOwed = READ_KEY_MARK !in already
-                if (owed.isEmpty() && !readKeyOwed) continue
+                val epochsOwed = epochSeedEpochsToSend(epochSeeds.keys, already, maxSeeds)
+                if (owed.isEmpty() && !readKeyOwed && epochsOwed.isEmpty()) continue
                 val accountId = ByteArray(16) { i -> accountIdHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
                 val bundle = try {
                     me.lakko.app.discovery.DiscoveryClient().use { d ->
@@ -185,6 +203,21 @@ public object ChannelAdmissionSeedShare {
                         readKey.fill(0)
                     }
                     marks = marks + READ_KEY_MARK
+                    prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
+                }
+                if (epochsOwed.isNotEmpty()) {
+                    // ADR-0087 section 15 (2026-11-08) — the channel's earlier
+                    // seeds, so a new publisher reads what came before it.
+                    val envelope = uniffi.lakko_ffi_uniffi.composeChannelEpochSeedsEnvelope(
+                        group.channelId(),
+                        accountKey,
+                        x,
+                        epochsOwed.map { e -> uniffi.lakko_ffi_uniffi.FfiChannelEpochSeed(e, epochSeeds.getValue(e)) },
+                    )
+                    val message = group.createApplicationMessage(identity, envelope)
+                    persistNow()
+                    ds.publishGroup(group.groupId(), message, signer = CoPublisher.signerOf(group, identity))
+                    marks = marks + epochsOwed.map(::epochSeedMark)
                     prefs(context).edit().putStringSet("sent|$account|$channelId|$keyHex", marks).apply()
                 }
             }
@@ -241,6 +274,39 @@ public object ChannelAdmissionSeedShare {
         }
     }
 
+    /**
+     * A publisher's side (ADR-0087 section 15, 2026-11-08): the channel's
+     * earlier seeds the owner sealed to this account. The caller has checked
+     * that it came on [channelId]'s PublisherGroup journal from the owner
+     * (resolved at receipt) and that this device publishes the channel.
+     * Kept only when it names this channel and this account and opens; a
+     * seed is added only for an epoch with none held, never overwriting.
+     * Returns how many seeds were added.
+     */
+    public fun receiveEpochSeeds(
+        state: ChannelsUiState,
+        channelId: String,
+        identity: Identity,
+        plaintext: ByteArray,
+    ): Int {
+        val env = try {
+            uniffi.lakko_ffi_uniffi.decodeChannelEpochSeedsEnvelope(plaintext)
+        } catch (_: Throwable) {
+            return 0
+        }
+        if (!env.channelId.contentEquals(ChannelsComposer.channelIdFromHex(channelId))) return 0
+        if (!env.memberAccountKey.contentEquals(identity.signaturePublicKey())) return 0
+        val opened = try {
+            uniffi.lakko_ffi_uniffi.openChannelEpochSeedsEnvelope(plaintext, identity)
+        } catch (_: Throwable) {
+            return 0
+        }
+        val keep = epochSeedsToKeep(opened.map { it.epoch to it.seed }, state.subscribedSeeds(channelId).keys)
+        for ((epoch, seed) in keep) state.setSubscribedSeed(channelId, epoch, seed)
+        opened.forEach { it.seed.fill(0) }
+        return keep.size
+    }
+
     /** Forget device / Delete account. */
     public fun forgetAccount(context: Context, account: String) {
         val p = prefs(context)
@@ -248,4 +314,25 @@ public object ChannelAdmissionSeedShare {
         p.all.keys.filter { it.contains("|$account|") }.forEach(editor::remove)
         editor.apply()
     }
+}
+
+/** The most seeds one earlier-seeds envelope carries (`channelEpochSeedsMax`). */
+internal const val EPOCH_SEEDS_MAX: Int = 64
+
+/** The sent mark of the seed of [epoch]. */
+internal fun epochSeedMark(epoch: UInt): String = "e:$epoch"
+
+/**
+ * ADR-0087 section 15 (2026-11-08) — the epochs whose seeds go to a
+ * publisher now: of the owner's [held] epochs, the newest [max], less those
+ * already marked sent to it ([sent]); ascending.
+ */
+internal fun epochSeedEpochsToSend(held: Set<UInt>, sent: Set<String>, max: Int = EPOCH_SEEDS_MAX): List<UInt> =
+    held.sortedDescending().take(max).filter { epochSeedMark(it) !in sent }.sorted()
+
+/** The opened seeds to add: only epochs with no seed held, never an overwrite
+ *  (the first one filed for an epoch wins). */
+internal fun epochSeedsToKeep(opened: List<Pair<UInt, ByteArray>>, held: Set<UInt>): List<Pair<UInt, ByteArray>> {
+    val seen = HashSet<UInt>(held)
+    return opened.filter { (epoch, _) -> seen.add(epoch) }.map { (e, s) -> e to s.copyOf() }
 }

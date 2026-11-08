@@ -261,6 +261,7 @@ public object AccountLocalWipe {
             me.lakko.app.contacts.SharedPrefsProvenLinkStore(ctx).clearForOwner(acct)
         },
         Step("orphaned-channels") { ctx, acct -> me.lakko.app.channels.OrphanedChannelsStore.onDevice(ctx).deleteAccount(acct) },
+        Step("channel-owed-marks") { ctx, acct -> me.lakko.app.channels.PrefsOwedMarks.deleteAccount(ctx, acct) },
         Step("pins") { ctx, acct -> me.lakko.app.chat.PinStore.deleteAccount(ctx, acct) },
         Step("read-watermarks") { ctx, acct ->
             me.lakko.app.chat.SharedPreferencesReadWatermarkStore(ctx).deleteAccount(acct)

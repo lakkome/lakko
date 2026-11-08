@@ -1201,6 +1201,11 @@ function isServiceEnvelope(wasm, bytes) {
   if (isDispatchKind(wasm, bytes, ["GroupPhoto", "GroupReactions", "ConversationHandle", "KnockSeed", "AdmissionSeed"])) {
     return true;
   }
+  // 12b. ADR-0087 sections 7 and 15 (amended 2026-11-08) — the earlier
+  //      channel seeds handed to a new publisher and a publisher's rotate
+  //      request. They belong on a PublisherGroup journal only; here they are
+  //      classified and never opened, kept or shown (C-59).
+  if (isDispatchKind(wasm, bytes, ["ChannelEpochSeeds", "ChannelRotateRequest"])) return true;
   // 13. A contact request sealed to one member of the group
   //     (`docs/ux/who-can-find-me.md` section 6.4). Suppressed, never opened:
   //     only the app tries it, and only the device it is sealed to can.

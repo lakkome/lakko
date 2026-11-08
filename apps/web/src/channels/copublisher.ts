@@ -735,7 +735,9 @@ export function pendingCoPublishers(publisherGroup: PublisherGroup): Uint8Array[
  *  A refused registration throws before anything is published. There is no
  *  durable rollback for a PublisherGroup commit (it has no ADR-0040 outbox),
  *  so the in-memory group stays at the unpublished epoch until the page is
- *  reloaded from the last channel-log snapshot; the caller shows the error. */
+ *  reloaded from the last channel-log snapshot; the caller shows the error.
+ *  Resolves to the channel epoch the reseal landed at, which the caller
+ *  hands the new seed to (`notePublisherCommitLanded`). */
 export async function approveCoPublisher(
   ds: DsClient,
   identity: Identity,
@@ -743,8 +745,9 @@ export async function approveCoPublisher(
   proposalRef: Uint8Array,
   channelIdHex: string,
   apiBase?: string,
-): Promise<void> {
+): Promise<number> {
   const groupId = publisherGroup.groupId();
+  let landedAt = 0;
   // G-38 residual 3 — SERIALIZED per group against the 5 s interval poll above.
   // `approveExternalJoin` eagerly merges the Add into the shared provider, so
   // it must not run while a poll is mid-apply on the same group; and the reseal
@@ -782,9 +785,11 @@ export async function approveCoPublisher(
     // refused write publishes nothing.
     await channelsActions.recordPublisherCommit(entry);
     await runPublisherCommit(entry, approvePorts(ds, identity, publisherGroup, channelIdHex, apiBase));
+    landedAt = entry.serverTargetEpoch;
     // The grant stays until it expires (7 days): a replayed approve may need
     // to write the Welcome again.
   });
+  return landedAt;
 }
 
 /** A joiner's kept reply grant, once the account's grants are loaded. */
@@ -842,14 +847,20 @@ function approvePorts(
  * every PublisherGroup commit whose steps had not all landed. An entry whose
  * group is below its target epoch never became durable with its record (a
  * torn write) and is dropped; every other entry runs its remaining steps.
- * Never throws: an entry that fails stays for the next hydration.
+ * Never throws: an entry that fails stays for the next hydration. Returns
+ * the entries whose steps all landed, for what follows a commit
+ * (`afterReplayedPublisherCommits`).
  */
-export async function replayPublisherCommits(identity: Identity, apiBase?: string): Promise<void> {
+export async function replayPublisherCommits(identity: Identity, apiBase?: string): Promise<LandedPublisherCommit[]> {
   const pending = channelsActions.pendingPublisherCommits();
-  if (pending.length === 0) return;
+  const landed: LandedPublisherCommit[] = [];
+  if (pending.length === 0) return landed;
   const ds = new DsClient();
   for (const entry of pending) {
     if (remainingSteps(entry).length === 0) {
+      // Every step landed before the reload; what follows a commit (the new
+      // seed, the record) may not have.
+      landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
       await channelsActions.finishPublisherCommit(entry.id).catch(() => undefined);
       continue;
     }
@@ -873,6 +884,7 @@ export async function replayPublisherCommits(identity: Identity, apiBase?: strin
                 ds,
               });
         await runPublisherCommit(entry, ports);
+        landed.push({ channelIdHex: entry.channelIdHex, kind: entry.kind, serverTargetEpoch: entry.serverTargetEpoch });
       });
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -881,6 +893,15 @@ export async function replayPublisherCommits(identity: Identity, apiBase?: strin
       group?.free();
     }
   }
+  return landed;
+}
+
+/** A recorded PublisherGroup commit whose steps a replay ran to the end (its
+ *  reseal landed the channel at `serverTargetEpoch`). */
+export interface LandedPublisherCommit {
+  readonly channelIdHex: string;
+  readonly kind: PublisherCommitEntry["kind"];
+  readonly serverTargetEpoch: number;
 }
 
 /** Open the PublisherGroup of a channel without founding one: `null` when the

@@ -879,6 +879,71 @@ channel's cannot, since a million people are not a roster, so publishers have th
   or invite."; they stay subscribed if they were.
 - A copy-paste link for admins and the `Join as co-publisher` menu item go.
 - A publisher's own row offers `Step down`, the same action on themselves.
+- **Only the owner's device renews the channel's keys** (maintainer, 2026-11-08): the
+  daily renewal and the one after a publisher is added or removed. A publisher's device
+  never does it and shows nothing about it. A channel whose owner does not open Lakko is
+  not renewed until the owner returns; nobody is told, and posting goes on as before.
+- **A subscriber a publisher removes stops reading new posts once the owner's device next
+  opens Lakko.** The removal itself is immediate on the service (the person is off the
+  list at once), but the keys are renewed only by the owner's device, which the
+  publisher's device asks to do so. Until then the removed person can still read what is
+  posted. The publisher sees the person leave the list and nothing more; a removal by the
+  owner renews the keys at once.
+
+#### 15.2.1 A new publisher reads the earlier posts
+
+Maintainer decision, 2026-11-08. A person who becomes a publisher reads the channel's
+earlier posts, as far back as the owner's device can still read them. When the owner's
+device approves the request, it hands the new publisher the keys it holds for the channel's
+earlier posts, with the read key it already sends. The person sees the posts appear; there
+is no step and no message about it.
+
+- An empty new channel shows "No posts yet. Write the first one below.", never "Earlier
+  posts aren't available.": the channel's own name and description, written when it was
+  made, open on the new publisher's device too.
+- "Earlier posts aren't available." shows at the top of the timeline only when a post
+  older than the readable ones exists and this device cannot open it: posts older than
+  the owner's device can read, or ones from before the owner's device holds keys (the
+  newest 64 key periods are handed over, chosen; at the default of one change a day that is
+  about two months, longer than posts are kept).
+- If the keys arrive after the person opened the channel (the owner's device sends them on
+  its next run when a send failed), the posts appear in place and the line goes.
+- A publisher who stepped down or was removed and is added again gets the same hand-over.
+
+What it never shows: a count of keys, a "syncing history" line, or a retry.
+
+#### 15.2.2 Waiting for the owner
+
+Maintainer decision, 2026-11-08: a publisher request the owner refused or never answered
+follows a group request (section 6.2). The waiting lives on the invitation card in the
+one-to-one, where it was accepted; it is not listed in `Requests sent`, which holds the
+requests to join that a person sent from search.
+
+| State | Card shows | Control |
+|---|---|---|
+| Sending | The button, disabled, reads "Waiting for the channel owner to approve..." | none |
+| Sent, under 7 days | "Waiting for the channel owner to approve..." | none |
+| Sent 7 days ago or more | "No answer yet." | `Ask again` |
+| Asking again | The button, disabled, reads "Waiting for the channel owner to approve..." | none |
+| The link no longer works | "This invite link is invalid or has expired." | none |
+| Approved | `Open`; the channel is in Chats | `Open` |
+
+- **The person is never told of a refusal.** An owner who rejects a request sends nothing;
+  the request goes unanswered, and "No answer yet." is true either way.
+- **`Ask again`** sends the same request again through the same link the card carries:
+  the card fetches the link again, and when it still works the device asks the owner's
+  device once more, as on the first `Accept`. The link counts the person once, so asking
+  again does not use up a link meant for one person. The 7 days start again from the new
+  request. A device asks again at most once per channel per 7 days; `Ask again` is not
+  shown before that.
+- **When the link no longer works** (the owner revoked it, it expired, or the channel is
+  gone), `Ask again` shows "This invite link is invalid or has expired." in place of the
+  button, and the card keeps that line. The earlier request is not withdrawn: if the
+  owner's device approves it later, the channel still arrives. To be asked again, the
+  person needs a new invitation from the owner.
+- No network on `Ask again`: "Could not reach Lakko. Check your connection and try again."
+  under the card, and `Ask again` stays.
+- A request is never withdrawn, and the card offers no Cancel.
 
 ## 16. Copy, the short list
 
@@ -893,6 +958,7 @@ channel's cannot, since a million people are not a roster, so publishers have th
 | Request sent | Request sent. An admin will see it when they next open Lakko. |
 | Waiting | Waiting for an admin. |
 | Past 7 days | No answer yet. |
+| Publisher request, waiting (section 15.2.2) | Waiting for the channel owner to approve... / No answer yet. / Ask again |
 | Removed | You are no longer in {name}. |
 | Comments | Comment / Show {n} more comments / Write a comment / {n} new comments |
 | Comments failed | Comments didn't load. |
@@ -917,6 +983,11 @@ privacy.
 - Per device: the list of requests sent (group, name, `@name`, sent at), kept until joined
   or dismissed.
 - Per admin: the retained requests with the carried profile, a count, whether more wait.
+- Per device, per publisher request (section 15.2.2, 2026-11-08): the channel, the link the
+  card carries, and when it was last sent; kept until the channel is joined or gone.
+- Per owner device (section 15.2.1, 2026-11-08): which channel key periods it has handed to
+  which publisher, so a failed hand-over is sent again on the next run; the hand-over
+  itself is an envelope sealed to the publisher (ADR-0087 amendment of 2026-11-08).
 - Per private channel: invite keys, their use limits, a list of links.
 - A durable "ended" record per conversation, the left-or-removed reason, the title for the
   notice, and a synced register so other devices follow.

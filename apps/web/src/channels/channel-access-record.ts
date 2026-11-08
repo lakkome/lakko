@@ -88,6 +88,18 @@ export interface ChannelAccessRecord {
   /** Publisher account key -> its appointed co-publisher key (standard
    *  base64), for revoking the appointment. */
   readonly publisherKeys: readonly PublisherEntry[];
+  /** A PublisherGroup commit of this device moved the channel to a new
+   *  epoch and the channel record has not been posted again under it yet
+   *  (ADR-0051 section 4: every epoch holds a record a late reader can
+   *  open). Set with the commit's own record, cleared once the record
+   *  landed; the publisher pass retries it until then. */
+  readonly recordOwed?: boolean;
+  /** A co-publisher removed a subscriber and its rotate request to the
+   *  owner's device has not gone out yet (ADR-0087 section 15, amended
+   *  2026-11-08). Written before the publish, cleared once it went out; the
+   *  publisher pass retries it until then, so the removed device does not
+   *  keep reading until the owner's next scheduled rotation. */
+  readonly rotateRequestOwed?: boolean;
 }
 
 /** One publisher the owner approved here. */
@@ -103,6 +115,10 @@ export interface PublisherEntry {
   /** ADR-0087 phase B: the channel's read key was sent to this publisher
    *  (it never changes, so once is enough). */
   readonly readKeySent?: boolean;
+  /** ADR-0087 section 7 (amended 2026-11-08): the channel epochs whose seeds
+   *  were handed to this publisher. A removed publisher's entry goes, so one
+   *  added again gets a fresh hand-over. */
+  readonly sentEpochs?: readonly number[];
 }
 
 /** The admission-seed versions a publisher still needs, ascending (ADR-0087
@@ -235,6 +251,8 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
       typeof r.admittedThroughSeq === "number" && Number.isInteger(r.admittedThroughSeq) && r.admittedThroughSeq >= 0
         ? r.admittedThroughSeq
         : 0,
+    ...(r.recordOwed === true ? { recordOwed: true } : {}),
+    ...(r.rotateRequestOwed === true ? { rotateRequestOwed: true } : {}),
     publisherKeys: (Array.isArray(r.publisherKeys) ? r.publisherKeys : []).flatMap((e: unknown) => {
       if (typeof e !== "object" || e === null) return [];
       const p = e as Record<string, unknown>;
@@ -249,6 +267,17 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
           accountIdHex: typeof p.accountIdHex === "string" && /^([0-9a-f]{32})?$/.test(p.accountIdHex) ? p.accountIdHex : "",
           sentVersions: [...new Set(sent)],
           ...(p.readKeySent === true ? { readKeySent: true } : {}),
+          ...(Array.isArray(p.sentEpochs)
+            ? {
+                sentEpochs: [
+                  ...new Set(
+                    (p.sentEpochs as unknown[]).filter(
+                      (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0,
+                    ),
+                  ),
+                ],
+              }
+            : {}),
         },
       ];
     }),

@@ -42,6 +42,8 @@ import { admitNewSubscribers } from "./subscriber-admission";
 import { runPublisherRemoval, runRotationOnce, type RotationContext } from "./rotation-cron";
 import { loadRotationState, saveRotationState, type ChannelRotationState } from "./rotation-state-store";
 import { republishChannelMeta } from "./channel-meta";
+import { settleOwedRecord } from "./owed-record";
+import { epochSeedsToAdd, epochSeedsToSend, keepsEpochSeeds, takesRotateRequest } from "./publisher-handover";
 import {
   accountIdOfJoiner,
   approveCoPublisher,
@@ -63,8 +65,13 @@ import {
   ensurePublicSeed,
   installChannelRemovedHandler,
   installChannelRotateNow,
+  installChannelRotateRequest,
+  settleOwedRotateRequest,
   installChannelStop,
-  noteChannelRotated,
+  notePublisherCommitLanded,
+  notePublisherSeedAt,
+  channelRotatesHere,
+  channelSeedFor,
   runOwedChannelType,
 } from "./channel-access";
 import {
@@ -135,10 +142,7 @@ function rotationContext(
     saveState: (next) => saveRotationState(idHex, next),
     onRotated: (newEpoch) => {
       try {
-        const prev = channelsState.keysByChannel().get(idHex);
-        const seed = group.channelSeed(identity);
-        if (prev !== undefined) channelsActions.setKeys(idHex, { seed, signingKeySeed: prev.signingKeySeed });
-        noteChannelRotated(idHex, newEpoch, seed);
+        notePublisherCommitLanded(idHex, newEpoch, group.channelSeed(identity));
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[channels] post-rotation seed refresh failed", err instanceof Error ? err.name : "");
@@ -155,6 +159,10 @@ export async function rotateChannel(
   force: boolean,
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
+  // Only the channel owner's device rotates the channel key (maintainer,
+  // 2026-11-08): a co-publisher's commit is refused by the journal, yet its
+  // device had merged it and resealed, forking from the owner's group.
+  if (!channelRotatesHere(idHex)) return;
   const wasm = await loadWasm();
   let rotated = false;
   await withPublisherGroup(identity, idHex, async (group) => {
@@ -166,12 +174,7 @@ export async function rotateChannel(
     if (onProgress !== undefined) onProgress(0, 0);
     await runRotationOnce(ctx, policy, state);
   });
-  if (rotated) {
-    await republishChannelMeta(idHex, identity).catch((err: unknown) => {
-      // eslint-disable-next-line no-console
-      console.warn("[channels] post-rotation metadata re-issue failed", err instanceof Error ? err.name : "");
-    });
-  }
+  if (rotated) await settleOwedRecord(idHex, () => republishChannelMeta(idHex, identity));
 }
 
 /** Runtime shape of a `PublisherGroup.members()` element. */
@@ -219,12 +222,23 @@ export async function removePublisherNow(identity: WasmIdentity, idHex: string, 
     );
     notePublisherGroupMembers(idHex, group);
   });
-  if (removed) {
-    await republishChannelMeta(idHex, identity).catch((err: unknown) => {
-      // eslint-disable-next-line no-console
-      console.warn("[channels] post-removal metadata re-issue failed", err instanceof Error ? err.name : "");
-    });
-  }
+  if (removed) await settleOwedRecord(idHex, () => republishChannelMeta(idHex, identity));
+}
+
+/**
+ * A co-publisher's composer follows the PublisherGroup: after the owner's
+ * commits were applied, the seed of the group's epoch serves that channel
+ * epoch (`notePublisherSeedAt`). A no-op when nothing moved.
+ */
+export async function refreshCoPublisherSeed(identity: WasmIdentity, idHex: string): Promise<void> {
+  await withPublisherGroup(identity, idHex, async (g) => {
+    if (!g.isActive()) return;
+    const epoch = Number(g.epoch());
+    const held = channelsState.keysByChannel().get(idHex);
+    if (held === undefined || held.seedEpoch === epoch) return;
+    notePublisherSeedAt(idHex, epoch, g.channelSeed(identity));
+    channelsActions.notePublisherGroupChanged();
+  });
 }
 
 /** Base64url without padding (the local link records' ledger id form). */
@@ -280,7 +294,19 @@ async function approveAndRecord(
   const ds = new DsClient();
   const group = await sharedPublisherGroup(identity, idHex);
   const groupId = group.groupId();
-  await approveCoPublisher(ds, identity, group, joiner, idHex);
+  const landedAt = await approveCoPublisher(ds, identity, group, joiner, idHex);
+  // The Add moved the content seed: the composer takes the new one, the old
+  // one stays under its epoch, and the record is issued again under the new
+  // epoch so the new publisher (and every reader let in later) finds the
+  // channel's name it can open.
+  try {
+    notePublisherCommitLanded(idHex, landedAt, group.channelSeed(identity));
+    channelsActions.notePublisherGroupChanged();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[channels] post-approve seed refresh failed", err instanceof Error ? err.name : "");
+  }
+  await settleOwedRecord(idHex, () => republishChannelMeta(idHex, identity));
   // A publisher link is for one person: once used it is revoked on every
   // device of the account, and its ledger row goes.
   if (link?.record != null) {
@@ -469,6 +495,85 @@ async function sendReadKeys(wasm: Wasm, identity: WasmIdentity, idHex: string): 
   }
 }
 
+/** The two 2026-11-08 PublisherGroup application messages, told apart by
+ *  the core's dispatcher; anything else is "other". */
+function applicationKind(wasm: Wasm, plaintext: Uint8Array): "epoch-seeds" | "rotate-request" | "other" {
+  if (plaintext.length === 0 || plaintext[0] !== 0x6c) return "other";
+  let env: ReturnType<Wasm["dispatchIncomingEnvelope"]>;
+  try {
+    env = wasm.dispatchIncomingEnvelope(plaintext);
+  } catch {
+    return "other";
+  }
+  const kind = env.kind;
+  env.free();
+  if (kind === wasm.IncomingEnvelopeKind.ChannelEpochSeeds) return "epoch-seeds";
+  if (kind === wasm.IncomingEnvelopeKind.ChannelRotateRequest) return "rotate-request";
+  return "other";
+}
+
+/** The seeds this owner device holds for a channel, by epoch: the kept
+ *  per-epoch seeds and the composer's own. */
+function heldChannelSeeds(idHex: string): Map<number, Uint8Array> {
+  const out = new Map<number, Uint8Array>(channelsState.subscribedSeedsByChannel().get(idHex) ?? []);
+  const keys = channelsState.keysByChannel().get(idHex);
+  if (keys?.seedEpoch !== undefined && !out.has(keys.seedEpoch)) out.set(keys.seedEpoch, keys.seed);
+  return out;
+}
+
+/**
+ * ADR-0087 section 7 (amended 2026-11-08), UX 15.2.1 — the owner hands each
+ * publisher the seeds of the channel's earlier epochs it holds (the newest
+ * 64 not yet sent), sealed to the person's ACCOUNT X25519 key exactly as the
+ * read key, as one PublisherGroup application message. Recorded per epoch
+ * after the publish; a failure is retried by the next pass. Owner only.
+ */
+async function sendEpochSeeds(wasm: Wasm, identity: WasmIdentity, idHex: string): Promise<void> {
+  const held = heldChannelSeeds(idHex);
+  const pending = channelsActions
+    .accessOf(idHex)
+    .publisherKeys.filter((p) => p.accountIdHex !== "" && epochSeedsToSend([...held.keys()], p.sentEpochs ?? []).length > 0);
+  if (pending.length === 0) return;
+  const discovery = new DiscoveryClient(undefined, { sessionToken: () => sessionTokens.peek() });
+  for (const p of pending) {
+    const epochs = epochSeedsToSend([...held.keys()], p.sentEpochs ?? []);
+    const bundle = await discovery.identityFetch(hexToBytes(p.accountIdHex)).catch(() => null);
+    if (bundle === null || bundle.signature_pubkey !== p.accountKeyB64) continue;
+    const x = b64ToBytes(bundle.x25519_pubkey);
+    if (x.length !== 32) continue;
+    const flat = new Uint8Array(32 * epochs.length);
+    epochs.forEach((e, i) => flat.set(held.get(e) ?? new Uint8Array(32), 32 * i));
+    const ds = new DsClient();
+    await withPublisherGroup(identity, idHex, async (group) => {
+      let message: Uint8Array;
+      try {
+        const envelope = wasm.composeChannelEpochSeedsEnvelope(
+          group.channelId(),
+          b64ToBytes(p.accountKeyB64),
+          x,
+          Uint32Array.from(epochs),
+          flat,
+        );
+        message = group.createApplicationMessage(identity, envelope);
+      } finally {
+        flat.fill(0);
+      }
+      await persistThenPublish(
+        () => channelsActions.persistPublisherGroupDurable(),
+        () => ds.publishGroup(group.groupId(), message).then(() => undefined),
+      );
+    });
+    await channelsActions.updateAccessDurable(idHex, (r) => ({
+      ...r,
+      publisherKeys: r.publisherKeys.map((x2) =>
+        x2.accountKeyB64 === p.accountKeyB64
+          ? { ...x2, sentEpochs: [...new Set([...(x2.sentEpochs ?? []), ...epochs])] }
+          : x2,
+      ),
+    }));
+  }
+}
+
 export const ChannelPublisherLoops: Component = () => {
   const chats = useChats();
   const membershipEnd = useMembershipEnd();
@@ -530,6 +635,23 @@ export const ChannelPublisherLoops: Component = () => {
   });
   onCleanup(() => installChannelRotateNow(null));
 
+  // A co-publisher removed a subscriber: it asks the owner's device to rotate
+  // (ADR-0087 section 15, amended 2026-11-08). Persisted before published.
+  installChannelRotateRequest(async (idHex) => {
+    const identity = chats.conversationAccountIdentity();
+    if (identity === null) throw new Error("signed out");
+    const wasm = await loadWasm();
+    await withPublisherGroup(identity, idHex, async (group) => {
+      if (!group.isActive() || group.isOwnedBy(identity)) return;
+      const message = group.createApplicationMessage(identity, wasm.composeChannelRotateRequestEnvelope(group.channelId()));
+      await persistThenPublish(
+        () => channelsActions.persistPublisherGroupDurable(),
+        () => new DsClient().publishGroup(group.groupId(), message).then(() => undefined),
+      );
+    });
+  });
+  onCleanup(() => installChannelRotateRequest(null));
+
   createEffect(() => {
     const identity = chats.conversationAccountIdentity();
     installSelfPublisherKey(identity === null ? null : base64Encode(identity.signaturePublicKey));
@@ -566,6 +688,11 @@ export const ChannelPublisherLoops: Component = () => {
    *  runs inside the group's MLS lock, which a removal takes again). */
   const stepDowns = new Map<string, Set<string>>();
 
+  /** Channels a current publisher asked the owner to rotate (read this
+   *  session; a request read again after a reload rotates once more, which
+   *  costs a reseal and loses nothing). */
+  const rotateRequested = new Set<string>();
+
   async function onApplication(
     wasm: Wasm,
     identities: readonly WasmIdentity[],
@@ -574,7 +701,38 @@ export const ChannelPublisherLoops: Component = () => {
     sender: Uint8Array | undefined,
     ownerKeyB64: string | null,
     isOwner: boolean,
+    memberKeys: readonly string[] = [],
   ): Promise<void> {
+    const kind = applicationKind(wasm, plaintext);
+    // ADR-0087 section 15 (amended 2026-11-08): a publisher asks the owner
+    // to rotate after removing a subscriber.
+    if (kind === "rotate-request") {
+      let requestChannel: Uint8Array;
+      try {
+        requestChannel = wasm.decodeChannelRotateRequestEnvelope(plaintext);
+      } catch {
+        return;
+      }
+      if (
+        takesRotateRequest({
+          deviceIsOwner: isOwner,
+          channelIdHex: idHex,
+          requestChannelHex: hexOf(requestChannel),
+          senderB64: sender === undefined ? undefined : base64Encode(sender),
+          ownerKeyB64,
+          memberKeysB64: memberKeys,
+        })
+      ) {
+        rotateRequested.add(idHex);
+      }
+      return;
+    }
+    // ADR-0087 section 7 (amended 2026-11-08), UX 15.2.1: the seeds of the
+    // channel's earlier epochs, from the owner, to this new publisher.
+    if (kind === "epoch-seeds") {
+      await keepEpochSeeds(wasm, identities, idHex, plaintext, sender, ownerKeyB64, isOwner);
+      return;
+    }
     // ADR-0087 section 15: a publisher steps down; the owner's device
     // removes the account the MLS sender resolved to at receipt (C-68).
     if (wasm.isPublisherStepDownEnvelope(plaintext)) {
@@ -685,6 +843,61 @@ export const ChannelPublisherLoops: Component = () => {
     );
   }
 
+  async function keepEpochSeeds(
+    wasm: Wasm,
+    identities: readonly WasmIdentity[],
+    idHex: string,
+    plaintext: Uint8Array,
+    sender: Uint8Array | undefined,
+    ownerKeyB64: string | null,
+    isOwner: boolean,
+  ): Promise<void> {
+    let env: ReturnType<Wasm["decodeChannelEpochSeedsEnvelope"]>;
+    try {
+      env = wasm.decodeChannelEpochSeedsEnvelope(plaintext);
+    } catch {
+      return;
+    }
+    let keep: boolean;
+    try {
+      keep = keepsEpochSeeds({
+        deviceIsOwner: isOwner,
+        channelIdHex: idHex,
+        envelopeChannelHex: hexOf(env.channelId),
+        memberAccountKeyB64: base64Encode(env.memberAccountKey),
+        ownAccountKeysB64: identities.map((i) => base64Encode(i.signaturePublicKey)),
+        senderB64: sender === undefined ? undefined : base64Encode(sender),
+        ownerKeyB64,
+      });
+    } finally {
+      env.free();
+    }
+    if (!keep) return;
+    // Sealed to the account key the directory lists: the current identity
+    // after a rotation, the lineage one before.
+    for (const identity of identities) {
+      let opened: ReturnType<Wasm["openChannelEpochSeedsEnvelope"]>;
+      try {
+        opened = wasm.openChannelEpochSeedsEnvelope(plaintext, identity);
+      } catch {
+        continue;
+      }
+      try {
+        const epochs = Array.from(opened.epochs);
+        const flat = opened.seeds;
+        const seeds = epochs.map((epoch, i) => ({ epoch, seed: flat.slice(32 * i, 32 * (i + 1)) }));
+        flat.fill(0);
+        for (const add of epochSeedsToAdd(seeds, (e) => channelSeedFor(idHex, e) !== undefined)) {
+          channelsActions.setSubscribedSeedForEpoch(idHex, add.epoch, add.seed);
+        }
+        await channelsActions.persistPublisherGroupDurable().catch(() => undefined);
+      } finally {
+        opened.free();
+      }
+      return;
+    }
+  }
+
   async function pass(): Promise<void> {
     const lineage = chats.conversationAccountIdentity();
     const current = chats.accountIdentity();
@@ -700,10 +913,13 @@ export const ChannelPublisherLoops: Component = () => {
           await runOwedChannelType(lineage, current, idHex).catch(() => undefined);
         }
         const now = Date.now();
-        if (now - (lastRotationCheck.get(idHex) ?? 0) >= ROTATION_CHECK_MS) {
+        if (owner && now - (lastRotationCheck.get(idHex) ?? 0) >= ROTATION_CHECK_MS) {
           lastRotationCheck.set(idHex, now);
           await rotateChannel(lineage, idHex, false);
         }
+        // A channel record owed after a commit (a re-post that failed, or a
+        // reload before it): retried every pass until it lands.
+        await settleOwedRecord(idHex, () => republishChannelMeta(idHex, lineage));
         const epoch = channelsState.epochByChannel().get(idHex);
         if (epoch !== undefined && publicSeedFiled.get(idHex) !== epoch) {
           await ensurePublicSeed(lineage, idHex);
@@ -711,12 +927,13 @@ export const ChannelPublisherLoops: Component = () => {
         }
         await admitNewSubscribers(idHex, lineage);
         // The owner's account key: the PublisherGroup's lowest leaf.
-        const ownerKeyB64 = await withPublisherGroup(lineage, idHex, async (g) => {
+        const memberKeys = await withPublisherGroup(lineage, idHex, async (g) => {
           notePublisherGroupMembers(idHex, g);
-          return memberAccounts(g)[0] ?? null;
+          return memberAccounts(g);
         });
+        const ownerKeyB64 = memberKeys[0] ?? null;
         const app = (b: Uint8Array, sender: Uint8Array | undefined): Promise<void> =>
-          onApplication(wasm, current === lineage ? [lineage] : [current, lineage], idHex, b, sender, ownerKeyB64, owner);
+          onApplication(wasm, current === lineage ? [lineage] : [current, lineage], idHex, b, sender, ownerKeyB64, owner, memberKeys);
         if (owner) {
           await ownerKnocks(lineage, idHex, app);
           for (const key of stepDowns.get(idHex) ?? []) {
@@ -724,7 +941,15 @@ export const ChannelPublisherLoops: Component = () => {
             await afterPublisherRemoved(lineage, idHex, key);
             stepDowns.get(idHex)?.delete(key);
           }
+          // ADR-0087 section 15 (amended 2026-11-08): a publisher removed a
+          // subscriber and asked for a rotation; every request read before
+          // it is this one rotation.
+          if (rotateRequested.delete(idHex)) {
+            await rotateChannel(lineage, idHex, true);
+            lastRotationCheck.set(idHex, Date.now());
+          }
           await sendReadKeys(wasm, lineage, idHex);
+          await sendEpochSeeds(wasm, lineage, idHex);
           await sendAdmissionSeeds(wasm, lineage, idHex);
         } else {
           await pollCoPublisherJournal(new DsClient(), lineage, await sharedPublisherGroup(lineage, idHex), app);
@@ -752,6 +977,13 @@ export const ChannelPublisherLoops: Component = () => {
             }
             continue;
           }
+          // A rotate request owed after this device removed a subscriber.
+          await settleOwedRotateRequest(idHex);
+          // The owner's commits this poll applied (a rotation, an approve, a
+          // removal) moved the content seed: the composer takes it now, the
+          // old one stays under its epoch, and posts keep going out under the
+          // committed epoch until the owner's reseal moves the channel there.
+          await refreshCoPublisherSeed(lineage, idHex);
         }
         await withPublisherGroup(lineage, idHex, async (g) => {
           notePublisherGroupMembers(idHex, g);

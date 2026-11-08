@@ -53,6 +53,18 @@ public class ChannelPublisherLoop private constructor(
     private val lastKnockMs = HashMap<String, Long>()
     private val lastCountMs = HashMap<String, Long>()
 
+    /** Channels a current publisher asked to rotate, read on their
+     *  PublisherGroup (the owner's device; collapsed into one rotation). */
+    private val rotateRequested = HashSet<String>()
+
+    /** Rotate requests this co-publisher has yet to send, on disk: the
+     *  subscriber row is already gone, so a lost request would leave the
+     *  removed key reading until the owner's next scheduled rotation. */
+    private val rotateRequestOwed: OwedRecordMarks = PrefsOwedRotateRequests(context) { state.boundAccount }
+
+    /** Channel records a re-issue after a commit still owes, per account. */
+    private val recordOwed: OwedRecordMarks = PrefsOwedRecordMarks(context) { state.boundAccount }
+
     private val _pending = MutableStateFlow<Map<String, List<ByteArray>>>(emptyMap())
 
     /** Per channel, the co-publisher requests waiting (each a 32-byte joiner
@@ -115,6 +127,7 @@ public class ChannelPublisherLoop private constructor(
         val name = state.channels.value.firstOrNull { it.id == channelId }
             ?.let { it.sharedName.ifBlank { it.localName } }.orEmpty()
         dropGroup(channelId)
+        rotateRequestOwed.clear(channelId)
         _publishers.update { it - channelId }
         _pending.update { it - channelId }
         ChannelRemovalWatch.endEverywhere(state, channelId, name, onChannelEnded)
@@ -138,6 +151,24 @@ public class ChannelPublisherLoop private constructor(
             )
         }
         _publishers.update { it + (channelId to seen) }
+    }
+
+    /** A co-publisher's composer follows the PublisherGroup: after the
+     *  owner's commits were applied, the seed of the group's epoch serves that
+     *  channel epoch ([ChannelsUiState.notePublisherSeedAt]). No-op when
+     *  nothing moved. */
+    private suspend fun refreshCoPublisherSeed(pub: ChannelPublisherIdentity, pg: PublisherGroup, channelId: String) {
+        if (runCatching { pg.isActive() }.getOrDefault(false) != true) return
+        val epoch = runCatching { pg.epoch() }.getOrNull()?.takeIf { it <= UInt.MAX_VALUE.toULong() }?.toUInt() ?: return
+        val held = state.keysByChannel.value[channelId] ?: return
+        if (held.seedEpoch == epoch) return
+        try {
+            val seed = pub.withIdentity(persist = false) { id -> pg.channelSeed(id) }
+            state.notePublisherSeedAt(channelId, epoch, seed)
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "co-publisher seed not refreshed: ${e.javaClass.simpleName}")
+        }
     }
 
     /** Whether this account OWNS [channelId] (a co-published one carries the
@@ -215,6 +246,12 @@ public class ChannelPublisherLoop private constructor(
             CoPublisher.JournalPoll(applied = 0, pending = 0)
         }
         if (poll.applied > 0) pub.persist()
+        // Section 15 — the owner's commits this poll applied (a rotation, an
+        // approve, a removal) moved the content seed: the composer takes it,
+        // the old one stays under its epoch, and posts keep going out under
+        // the epoch the channel service has reached until the owner's reseal
+        // moves it there.
+        if (!owner && poll.applied > 0) refreshCoPublisherSeed(pub, pg, channelId)
         val ownKey = pub.withIdentity(persist = false) { it.signaturePublicKey() }
         readPublishers(channelId, pg, ownKey)
         val channelBytes = ChannelsComposer.channelIdFromHex(channelId)
@@ -229,6 +266,11 @@ public class ChannelPublisherLoop private constructor(
                     if (ownerKey == null || sender == null || !sender.contentEquals(ownerKey)) return@forEachIndexed
                     ChannelAdmissionSeedShare.receive(context, account, channelId, id, plaintext)
                     ChannelAdmissionSeedShare.receiveReadKey(context, account, channelId, id, plaintext)
+                    // ADR-0087 section 15 (2026-11-08) — the channel's earlier
+                    // seeds, kept only while this device publishes it.
+                    if (state.keysByChannel.value.containsKey(channelId)) {
+                        ChannelAdmissionSeedShare.receiveEpochSeeds(state, channelId, id, plaintext)
+                    }
                 }
             }
         }
@@ -258,6 +300,22 @@ public class ChannelPublisherLoop private constructor(
                 ) {
                     return@forEachIndexed
                 }
+                // ADR-0087 section 15 (2026-11-08) — a co-publisher asks the
+                // owner to rotate (it removed a subscriber); honoured only
+                // from a current publisher of this channel, at most one
+                // rotation for any number of requests.
+                val requested = try {
+                    uniffi.lakko_ffi_uniffi.decodeChannelRotateRequestEnvelope(plaintext)
+                } catch (_: Throwable) {
+                    null
+                }
+                if (requested != null) {
+                    val current = _publishers.value[channelId].orEmpty().map { it.accountKey }
+                    if (honoursRotateRequest(owner, requested, channelBytes, sender, ownKey, current)) {
+                        rotateRequested += channelId
+                    }
+                    return@forEachIndexed
+                }
                 val stepDown = runCatching { uniffi.lakko_ffi_uniffi.isPublisherStepDown(plaintext, channelBytes) }
                     .getOrDefault(false)
                 if (!stepDown || sender.contentEquals(ownKey)) return@forEachIndexed
@@ -270,11 +328,16 @@ public class ChannelPublisherLoop private constructor(
                 }
             }
         }
-        if (owner && ChannelAdmissionSeedShare.anyOwed(context, account, channelId)) {
-            pub.withIdentityPersistingFirst { id, persistNow ->
-                ChannelAdmissionSeedShare.sendOwed(context, account, channelId, id, pg, ds, persistNow)
+        if (owner) {
+            val epochSeeds = state.heldEpochSeeds(channelId)
+            if (ChannelAdmissionSeedShare.anyOwed(context, account, channelId, epochSeeds.keys)) {
+                pub.withIdentityPersistingFirst { id, persistNow ->
+                    ChannelAdmissionSeedShare.sendOwed(context, account, channelId, id, pg, ds, persistNow, epochSeeds)
+                }
             }
         }
+        // A rotate request this co-publisher could not send yet.
+        if (!owner && rotateRequestOwed.isOwed(channelId)) sendRotateRequestLocked(channelId)
         if (owner) {
             approveNamed(channelId, pg)
             val waiting = pub.withIdentity(persist = false) { CoPublisher.pending(groupFor(pub, channelId)) }
@@ -288,17 +351,49 @@ public class ChannelPublisherLoop private constructor(
             }
             if (finished.isNotEmpty()) {
                 dropGroup(channelId)
-                for (id in finished) state.refreshPublisherKey(id)
+                for (id in finished) {
+                    // What a live approve, removal or rotation does after
+                    // its reseal: the composer's seed under the landed epoch
+                    // and the channel record issued again under it.
+                    val landed = try {
+                        client.fetchEpoch(id)
+                    } catch (e: Throwable) {
+                        me.lakko.app.rethrowIfCancelled(e)
+                        null
+                    }
+                    state.refreshPublisherKey(id, landed)
+                    recordOwed.mark(id)
+                }
             }
+        }
+        if (state.takeReplayedCommit(channelId)) recordOwed.mark(channelId)
+        // The channel record a re-issue after a commit still owes (a failed
+        // send is retried here until it lands).
+        if (recordOwed.isOwed(channelId)) {
+            reissueRecordOwed(recordOwed, channelId) { ChannelMetaPublisher.reissue(state, client, channelId) }
         }
         val channel = state.channels.value.firstOrNull { it.id == channelId }
         if (owner && channel != null) {
             ChannelDiscovery.sendOwedRekeyIfAny(context, state, client, account, channel)
             ChannelDiscovery.sendOwedRecordIfAny(context, pub, account, channel)
         }
-        // The rotation heartbeat.
+        // A co-publisher's rotate request read on this channel: the owner's
+        // device rotates now, once for every request read before it.
+        if (rotatesChannelKeyHere(owner) && rotateRequested.remove(channelId)) {
+            try {
+                rotateUnscheduled(pub, channelId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Asked again at the next pass.
+                rotateRequested += channelId
+                Log.w(TAG, "a requested rotation did not run yet: ${e.javaClass.simpleName}")
+            }
+        }
+        // The rotation heartbeat: only the channel owner's device rotates the
+        // channel key (maintainer, 2026-11-08).
         val now = System.currentTimeMillis()
-        if (now - (lastRotationCheckMs[channelId] ?: 0L) >= ROTATION_HEARTBEAT_MS) {
+        if (rotatesChannelKeyHere(owner) && now - (lastRotationCheckMs[channelId] ?: 0L) >= ROTATION_HEARTBEAT_MS) {
             lastRotationCheckMs[channelId] = now
             val stored = state.rotationState(channelId)?.let {
                 ChannelRotationState(lastRotationMs = it.lastRotationMs, postsSinceRotation = it.postsSinceRotation)
@@ -365,18 +460,22 @@ public class ChannelPublisherLoop private constructor(
         }
     }
 
-    /** A rotation landed: the composer's key, the epoch, the record re-issued
-     *  under the new key (verbatim), the public seed of the new epoch. */
+    /** A commit of this (the owner's) device landed, its reseal included:
+     *  the composer's key under the epoch the reseal landed at, that epoch
+     *  current, the record re-issued under the new key (verbatim, owed until
+     *  it lands), the public seed of the new epoch. */
     private suspend fun afterRotation(channelId: String) {
-        state.refreshPublisherKey(channelId)
-        try {
-            state.setEpoch(channelId, client.fetchEpoch(channelId))
+        val landed = try {
+            client.fetchEpoch(channelId)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Throwable) {
-            // The next read learns it.
+            // Unknown: the composer serves the group's epoch, the channel's
+            // current epoch stays until the next read learns it.
+            null
         }
-        ChannelMetaPublisher.reissue(state, client, channelId)
+        state.refreshPublisherKey(channelId, landed)
+        reissueRecordOwed(recordOwed, channelId) { ChannelMetaPublisher.reissue(state, client, channelId) }
         state.publisher?.let { if (isOwner(channelId)) filePublicSeedIfDue(it, channelId) }
     }
 
@@ -388,9 +487,12 @@ public class ChannelPublisherLoop private constructor(
     private suspend fun filePublicSeedIfDue(pub: ChannelPublisherIdentity, channelId: String) {
         val channel = state.channels.value.firstOrNull { it.id == channelId } ?: return
         if (!channel.sharedListed) return
-        val keys = state.keysByChannel.value[channelId] ?: return
-        val epoch = state.epochByChannel.value[channelId]
+        if (!state.keysByChannel.value.containsKey(channelId)) return
+        val current = state.epochByChannel.value[channelId]
             ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
+        // Section 15 — only an epoch the service has reached, with its seed.
+        val sealing = state.sealingSeed(channelId, current) ?: return
+        val epoch = sealing.epoch
         if (publicSeedFiled[channelId] == epoch) return
         val envelope = pub.withIdentity(persist = false) { id ->
             val readKey = ChannelDiscovery.readKey(id, channelId)
@@ -399,7 +501,7 @@ public class ChannelPublisherLoop private constructor(
                     readKey,
                     ChannelsComposer.channelIdFromHex(channelId),
                     epoch,
-                    keys.seed,
+                    sealing.seed,
                 )
             } finally {
                 readKey.fill(0)
@@ -432,7 +534,6 @@ public class ChannelPublisherLoop private constructor(
                 throw e
             }
             ChannelAdmissionSeedShare.notePublisher(context, account, channelId, joinerKey)
-            state.refreshPublisherKey(channelId)
             afterRotation(channelId)
             val waiting = pub.withIdentity(persist = false) { CoPublisher.pending(groupFor(pub, channelId)) }
             _pending.update { it + (channelId to waiting) }
@@ -515,7 +616,6 @@ public class ChannelPublisherLoop private constructor(
                 }
             }
         }
-        state.refreshPublisherKey(channelId)
         afterRotation(channelId)
         val ownKey = pub.withIdentity(persist = false) { it.signaturePublicKey() }
         readPublishers(channelId, groupFor(pub, channelId), ownKey)
@@ -560,20 +660,59 @@ public class ChannelPublisherLoop private constructor(
      * the next epoch. Runs regardless of the policy's schedule.
      */
     public suspend fun rotateNow(channelId: String) {
+        // Only the channel owner's device rotates the channel key (maintainer,
+        // 2026-11-08); a co-publisher asks the owner to, on the PublisherGroup.
+        if (!rotatesChannelKeyHere(isOwner(channelId))) {
+            mutex.withLock { sendRotateRequestLocked(channelId) }
+            return
+        }
         mutex.withLock {
             val pub = state.publisher ?: return
-            val result = try {
-                rotate(pub, groupFor(pub, channelId), channelId, ChannelRotationState(0uL, 0u))
-            } catch (e: Throwable) {
-                dropGroup(channelId)
+            rotateUnscheduled(pub, channelId)
+        }
+    }
+
+    /** The owner's rotation regardless of the policy's schedule. */
+    private suspend fun rotateUnscheduled(pub: ChannelPublisherIdentity, channelId: String) {
+        val result = try {
+            rotate(pub, groupFor(pub, channelId), channelId, ChannelRotationState(0uL, 0u))
+        } catch (e: Throwable) {
+            dropGroup(channelId)
+            throw e
+        }
+        state.saveRotationState(
+            channelId,
+            StoredRotationState(result.newState.lastRotationMs, result.newState.postsSinceRotation),
+        )
+        lastRotationCheckMs[channelId] = System.currentTimeMillis()
+        if (result.rotated) afterRotation(channelId)
+    }
+
+    /** A co-publisher's rotate request (ADR-0087 section 15, 2026-11-08):
+     *  one application message on the PublisherGroup; a failure stays owed
+     *  and the next pass sends it. */
+    private suspend fun sendRotateRequestLocked(channelId: String) {
+        val pub = state.publisher ?: return
+        // Owed on disk before the attempt; cleared only once it published.
+        reissueRecordOwed(rotateRequestOwed, channelId) {
+            try {
+                val pg = groupFor(pub, channelId)
+                val envelope = uniffi.lakko_ffi_uniffi.composeChannelRotateRequestEnvelope(
+                    ChannelsComposer.channelIdFromHex(channelId),
+                )
+                pub.withIdentityPersistingFirst { id, persistNow ->
+                    val message = pg.createApplicationMessage(id, envelope)
+                    // On disk before it leaves (G-34 class).
+                    persistNow()
+                    ds.publishGroup(pg.groupId(), message, signer = CoPublisher.signerOf(pg, id))
+                }
+                true
+            } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "the rotate request was not sent yet: ${e.javaClass.simpleName}")
+                false
             }
-            state.saveRotationState(
-                channelId,
-                StoredRotationState(result.newState.lastRotationMs, result.newState.postsSinceRotation),
-            )
-            lastRotationCheckMs[channelId] = System.currentTimeMillis()
-            if (result.rotated) afterRotation(channelId)
         }
     }
 
@@ -584,6 +723,7 @@ public class ChannelPublisherLoop private constructor(
         claimed.clear()
         lastRotationCheckMs.clear()
         publicSeedFiled.clear()
+        rotateRequested.clear()
         _pending.value = emptyMap()
         _subscriberCounts.value = emptyMap()
     }
@@ -620,3 +760,22 @@ public class ChannelPublisherLoop private constructor(
         public fun peek(state: ChannelsUiState): ChannelPublisherLoop? = synchronized(shared) { shared[state] }
     }
 }
+
+/**
+ * ADR-0087 section 15 (2026-11-08) — whether the owner's device rotates on a
+ * rotate request it read on the channel's PublisherGroup: only the owner
+ * acts, only on a request naming this channel, only from a current publisher
+ * other than this account (the sender resolved at receipt).
+ */
+internal fun honoursRotateRequest(
+    isOwner: Boolean,
+    requestedChannelId: ByteArray,
+    channelId: ByteArray,
+    sender: ByteArray,
+    ownAccountKey: ByteArray,
+    currentPublishers: List<ByteArray>,
+): Boolean =
+    isOwner &&
+        requestedChannelId.contentEquals(channelId) &&
+        !sender.contentEquals(ownAccountKey) &&
+        currentPublishers.any { it.contentEquals(sender) }

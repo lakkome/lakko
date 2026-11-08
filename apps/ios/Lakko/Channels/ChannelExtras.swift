@@ -33,6 +33,17 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     /// ADR-0087 section 7 — this device subscribed through a private
     /// invitation and has not been admitted yet: the 7.2 waiting line.
     public var waitingForAdmission: Bool = false
+    /// ADR-0051 section 4 — after a commit moved the channel's epoch (an
+    /// approve, a removal, a rotation), the record and ban list must be
+    /// re-posted under it; `true` until that landed, retried by every
+    /// publisher pass. Optional so a row written before it decodes.
+    public var recordOwed: Bool?
+    /// ADR-0087 section 15 — a co-publisher removed a subscriber of this
+    /// private channel and its rotate request to the owner's device has not
+    /// gone out yet: `true` until it publishes, retried by every publisher
+    /// pass, so the removed person does not keep reading until the owner's
+    /// next scheduled rotation. Written before the publish.
+    public var rotateRequestOwed: Bool?
 
     public init() {}
 

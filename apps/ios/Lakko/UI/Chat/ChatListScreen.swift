@@ -389,7 +389,8 @@ public struct ChatListScreen: View {
     /// the bottom of a long list until a fetch lands.
     static func channelRows(
         channels: ChannelsUiState, channelUnread: [String: Int],
-        lastPosts: [String: PersistedChannelPost] = [:]
+        lastPosts: [String: PersistedChannelPost] = [:],
+        coPublished: (String) -> Bool = { CoPublishedJournals.shared.journalIdHex(channelIdHex: $0) != nil }
     ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
@@ -401,7 +402,8 @@ public struct ChatListScreen: View {
                 sharedName: channel.sharedName,
                 name: channel.localName,
                 handle: channel.handle,
-                isOwner: channels.keysByChannel[channel.id] != nil,
+                role: ChannelRowRole.of(
+                    publishes: channels.keysByChannel[channel.id] != nil, coPublished: coPublished(channel.id)),
                 subscriberCount: channels.subscriberCountByChannel[channel.id],
                 newestPostMs: lastPostMs,
                 nowMs: nowMs,

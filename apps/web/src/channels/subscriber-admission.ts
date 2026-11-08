@@ -33,6 +33,7 @@ import { rowsToAdmit, ticketKeyAdmits } from "./channel-access-record";
 import { loadWasm } from "../wasm";
 import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { rememberSubscriberCount } from "./ui-cache";
+import { composerSeedFor } from "./publisher-seed";
 import { channelsActions, channelsState } from "../state/channels-state";
 
 /** How one subscriber's envelope stands on this device. */
@@ -87,9 +88,15 @@ export async function admitSubscriber(
 ): Promise<void> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
   if (keys === undefined) throw new Error("This device cannot post to this channel.");
-  const epoch = await currentEpoch(channelIdHex);
+  const current = await currentEpoch(channelIdHex);
+  // The seed of an epoch the channel has reached, never the composer's seed
+  // under an epoch it does not serve (a co-publisher that applied the
+  // owner's commit before the owner's reseal landed).
+  const sealing = composerSeedFor(keys, current, (e) => channelsActions.currentSeed(channelIdHex, e));
+  if (sealing === null) throw new Error("This device cannot post to this channel.");
+  const epoch = sealing.epoch;
   try {
-    const wire = await sealSubscriberSeedEnvelope(hexToBytes(pubkeyHex), channelIdHex, epoch, keys.seed);
+    const wire = await sealSubscriberSeedEnvelope(hexToBytes(pubkeyHex), channelIdHex, epoch, sealing.seed);
     // ADR-0031: filed under the epoch it was sealed for.
     await deliverEnvelope(channelIdHex, pubkeyHex, wire, identity, undefined, epoch);
     update(channelIdHex, (a) => ({

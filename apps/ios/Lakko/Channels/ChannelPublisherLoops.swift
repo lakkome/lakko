@@ -34,6 +34,9 @@ final class ChannelPublisherLoops {
     private var publicSeedEpoch: [String: UInt32] = [:]
     private var knockCursor: [String: Int64] = [:]
     private var journalCursor: [String: Int64] = [:]
+    /// Channels a current publisher asked this owner's device to rotate
+    /// (ADR-0087 section 15, the rotate request); several collapse into one.
+    private var rotateRequested: Set<String> = []
     private var running = false
 
     /// A channel created on this device: its group is open and claimed.
@@ -44,6 +47,7 @@ final class ChannelPublisherLoops {
         publicSeedEpoch = [:]
         knockCursor = [:]
         journalCursor = [:]
+        rotateRequested = []
     }
 
     func runLoop(
@@ -67,9 +71,23 @@ final class ChannelPublisherLoops {
             if Task.isCancelled { return }
             if channels.orphanedByReset(channelId: channelId) { continue }
             await openOnce(channelId: channelId, accountIdB64: accountIdB64, seed: seed)
+            refreshPublisherSeed(channelId: channelId, channels: channels, seed: seed)
+            if rotateRequested.contains(channelId) {
+                await rotateRequestedNow(channelId: channelId, channels: channels, client: client, seed: seed)
+            }
             await rotateIfDue(channelId: channelId, channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
+            await reissueOwedRecord(channelId: channelId, channels: channels, client: client, seed: seed)
+            if !Self.rotates(channelId: channelId, channels: channels) {
+                await sendOwedRotateRequest(channelId: channelId, channels: channels, seed: seed)
+            }
             await publishPublicSeed(channelId: channelId, channels: channels, client: client, seed: seed)
             await pollJournal(channelId: channelId, seed: seed)
+            // The owner's commits the poll applied (a rotation, an approve, a
+            // removal) moved a co-publisher's content seed: the composer takes
+            // it now, the old one stays under its epoch, and posts keep going
+            // out under the committed epoch until the owner's reseal moves the
+            // channel there (``ChannelPublisherSeed``).
+            refreshPublisherSeed(channelId: channelId, channels: channels, seed: seed)
         }
     }
 
@@ -92,10 +110,29 @@ final class ChannelPublisherLoops {
         }
     }
 
+    /// The composer's seed and the epoch it serves, from the PublisherGroup.
+    /// A co-publisher follows the group every pass (the owner's commits move
+    /// it). The owner's commits set it themselves at the epoch their reseal
+    /// landed, so the owner's is read from the group only when not known
+    /// yet (keys rebuilt at sign-in).
+    private func refreshPublisherSeed(channelId: String, channels: ChannelsUiState, seed: Data) {
+        guard opened.contains(channelId), let held = channels.keysByChannel[channelId] else { return }
+        let owner = ChannelOwnership.isOwner(channelId: channelId, state: channels)
+        guard !owner || held.seedEpoch == nil,
+              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
+              let group = try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId),
+              (try? group.isActive()) != false,
+              let epoch = try? group.epoch(),
+              let groupSeed = try? group.channelSeed(identity: identity) else { return }
+        channels.notePublisherSeedAt(channelId: channelId, epoch: UInt32(clamping: epoch), seed: groupSeed)
+    }
+
     private func rotateIfDue(
         channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String
     ) async {
-        guard opened.contains(channelId) else { return }
+        // Maintainer, 2026-11-08: only the channel's owner rotates its key; a
+        // co-publisher's device never runs the rotation policy.
+        guard opened.contains(channelId), Self.rotates(channelId: channelId, channels: channels) else { return }
         let cron = RotationCron(context: RotationCron.Context(
             commits: ChannelPublisherCommits.Context(
                 channelIdHex: channelId, currentSeed: seed, accountIdB64: accountIdB64, channelsClient: client),
@@ -117,10 +154,134 @@ final class ChannelPublisherLoops {
         }
     }
 
+    /// A subscriber of a private channel was removed (section 7.3): the
+    /// owner's device rotates now; a co-publisher's never rotates and asks
+    /// the owner's device instead with a rotate request on the
+    /// PublisherGroup, which the owner acts on at its next pass.
+    func rotateAfterSubscriberRemoval(
+        channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data
+    ) async {
+        if Self.rotates(channelId: channelId, channels: channels) {
+            try? await rotateNow(channelId: channelId, channels: channels, client: client, seed: seed)
+        } else if channels.keysByChannel[channelId] != nil {
+            // Owed before it is published: a failed or killed send is retried
+            // by every pass until it goes out.
+            channels.updateExtras(channelId) { $0.rotateRequestOwed = true }
+            await sendOwedRotateRequest(channelId: channelId, channels: channels, seed: seed)
+        }
+    }
+
+    /// The owed rotate request, when owed, sent; the mark goes once it
+    /// published.
+    func sendOwedRotateRequest(channelId: String, channels: ChannelsUiState, seed: Data) async {
+        await Self.sendOwedRotateRequest(channelId: channelId, channels: channels) {
+            await self.sendRotateRequest(channelId: channelId, seed: seed)
+        }
+    }
+
+    /// The rule over its port: nothing is sent unless owed; the mark is
+    /// cleared only after a send that published.
+    static func sendOwedRotateRequest(
+        channelId: String, channels: ChannelsUiState, send: () async -> Bool
+    ) async {
+        guard channels.extras(channelId).rotateRequestOwed == true else { return }
+        if await send() {
+            channels.updateExtras(channelId) { $0.rotateRequestOwed = nil }
+        } else {
+            NSLog("[channels] the rotate request was not sent yet; the next pass tries again")
+        }
+    }
+
+    /// A co-publisher's rotate request, as an application message on the
+    /// channel's PublisherGroup journal. Returns whether it published.
+    private func sendRotateRequest(channelId: String, seed: Data) async -> Bool {
+        guard let channelBytes = ChannelsClient.hexToData(channelId),
+              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
+              let group = try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId),
+              let groupId = try? group.groupId() else { return false }
+        let ds = DsClient()
+        do {
+            let envelope = try composeChannelRotateRequestEnvelope(channelId: channelBytes)
+            let message = try group.createApplicationMessage(identity: identity, plaintext: envelope)
+            // The send ratchet moved: on disk before the message leaves, so a
+            // crash never reuses a generation (the G-34 rule).
+            try ChannelPublisherIdentity.shared.persistOrThrow()
+            _ = try await ds.publishGroup(
+                groupId: groupId, payload: message,
+                auth: CoPublisher.auth(ds: ds, identity: identity, publisherGroup: group))
+            return true
+        } catch {
+            NSLog("[channels] the rotate request was not sent")
+            return false
+        }
+    }
+
+    /// Whether the owner's device acts on a rotate request: it names this
+    /// channel, its sender resolved at receipt to a current publisher (a
+    /// member of the PublisherGroup other than the owner), and it was sent
+    /// after this channel's last rotation (a request already answered, read
+    /// again after a restart, does nothing).
+    nonisolated static func honorsRotateRequest(
+        requestChannelId: Data?, channelId: Data, sender: Data?, ownerAccountKey: Data?,
+        publisherAccountKeys: Set<Data>, sentAtMs: Int64?, lastRotationMs: UInt64?
+    ) -> Bool {
+        guard let requestChannelId, requestChannelId == channelId,
+              let sender, sender != ownerAccountKey, publisherAccountKeys.contains(sender) else { return false }
+        guard let lastRotationMs, lastRotationMs > 0 else { return true }
+        guard let sentAtMs else { return false }
+        return sentAtMs > Int64(clamping: lastRotationMs)
+    }
+
+    /// The owner reads the rotate requests a poll carried.
+    private func noteRotateRequests(_ outcome: CoPublisher.PollOutcome, channelId: String, group: PublisherGroup) {
+        guard let channelBytes = ChannelsClient.hexToData(channelId) else { return }
+        let members = Set(((try? group.members()) ?? []).map {
+            $0.accountKey.isEmpty ? $0.signaturePublicKey : $0.accountKey
+        })
+        let last = ChannelRotationStateStore.load(
+            accountIdB64: AcceptedContactsStore.boundAccountIdB64, channelId: channelId)?.lastRotationMs
+        for app in outcome.applications where Self.honorsRotateRequest(
+            requestChannelId: try? decodeChannelRotateRequestEnvelope(plaintext: app.data),
+            channelId: channelBytes, sender: app.senderAccount, ownerAccountKey: outcome.ownerAccountKey,
+            publisherAccountKeys: members, sentAtMs: app.createdAtMs, lastRotationMs: last) {
+            rotateRequested.insert(channelId)
+        }
+    }
+
+    /// The owner rotates for a rotate request; the mark goes once it did.
+    private func rotateRequestedNow(
+        channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data
+    ) async {
+        guard Self.rotates(channelId: channelId, channels: channels) else {
+            rotateRequested.remove(channelId)
+            return
+        }
+        do {
+            try await rotateNow(channelId: channelId, channels: channels, client: client, seed: seed)
+            rotateRequested.remove(channelId)
+        } catch {
+            NSLog("[channels] a requested rotation did not complete; tried again next pass")
+        }
+    }
+
+    /// Whether this device rotates `channelId`: only the owner's does.
+    static func rotates(channelId: String, channels: ChannelsUiState) -> Bool {
+        rotates(
+            publishes: channels.keysByChannel[channelId] != nil,
+            coPublished: CoPublishedJournals.shared.journalIdHex(channelIdHex: channelId) != nil)
+    }
+
+    /// The rule: a device that publishes the channel and did not join its
+    /// PublisherGroup as a co-publisher is the owner's, and only it rotates.
+    nonisolated static func rotates(publishes: Bool, coPublished: Bool) -> Bool {
+        ChannelRowRole.of(publishes: publishes, coPublished: coPublished) == .owner
+    }
+
     /// Rotate now, outside the schedule: a subscriber of a private channel was
     /// removed (section 7.3), the only rotation a person ever causes.
     func rotateNow(channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data) async throws {
-        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
+        guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64,
+              Self.rotates(channelId: channelId, channels: channels) else { return }
         await openOnce(channelId: channelId, accountIdB64: accountIdB64, seed: seed)
         let cron = RotationCron(context: RotationCron.Context(
             commits: ChannelPublisherCommits.Context(
@@ -139,26 +300,81 @@ final class ChannelPublisherLoops {
     }
 
     /// ADR-0051 section 4 and ADR-0087 section 13a — the newest epoch holds
-    /// the stored metadata record and ban list, carried verbatim.
-    private func afterRotation(
+    /// the stored metadata record and ban list, carried verbatim. Run after
+    /// every commit that moved the channel's epoch: a rotation, and an
+    /// approve or a removal of a publisher (a new publisher holds only the
+    /// new epoch's seed, so the record must be there to be read).
+    func afterRotation(
         channelId: String, epoch: UInt32, channels: ChannelsUiState, client: ChannelsClient, seed: Data
     ) async {
         channels.setEpoch(channelId: channelId, epoch: epoch)
-        guard let identity = try? Identity.fromSeed(seed: seed) else { return }
-        if let record = channels.sharedMeta(channelId: channelId) {
-            try? await ChannelMetaRecord.post(
-                state: channels, client: client, channelId: channelId, meta: record, accountIdentity: identity)
-        }
-        let extras = channels.extras(channelId)
-        if extras.banUpdatedAtMs > 0, let keys = channels.keysByChannel[channelId],
-           let bytes = try? composeBanList(list: FfiBanList(
-               updatedAtMs: extras.banUpdatedAtMs, authors: extras.bannedAuthors)),
-           let counter = try? channels.nextCounter(channelId: channelId),
-           let wire = try? ChannelsComposer.compose(
-               keys: keys, channelIdHex: channelId, epochId: epoch, messageCounter: counter, plaintext: bytes) {
-            _ = try? await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: identity)
-        }
+        // Owed until it lands: a failed re-post is retried by every pass
+        // (``reissueOwedRecord``), so the new epoch always carries the record.
+        channels.updateExtras(channelId) { $0.recordOwed = true }
+        await reissueOwedRecord(channelId: channelId, channels: channels, client: client, seed: seed)
         await publishPublicSeed(channelId: channelId, channels: channels, client: client, seed: seed)
+    }
+
+    /// The record and ban list re-post a commit made owed, when owed. Both
+    /// are sealed under an epoch the channel service has reached
+    /// (``ChannelPublisherSeed``). Cleared only once every part landed.
+    func reissueOwedRecord(
+        channelId: String, channels: ChannelsUiState, client: ChannelsClient, seed: Data
+    ) async {
+        guard channels.extras(channelId).recordOwed == true,
+              let identity = try? Identity.fromSeed(seed: seed) else { return }
+        let landed = await Self.reissueRecord(
+            meta: channels.sharedMeta(channelId: channelId),
+            banList: banListPlaintext(channels.extras(channelId)),
+            post: { plaintext in
+                guard let keys = channels.keysByChannel[channelId],
+                      let sealing = channels.composerSeed(channelId: channelId) else {
+                    throw ChannelPublisherSeedUnavailable()
+                }
+                let counter = try channels.nextCounter(channelId: channelId)
+                let wire = try ChannelsComposer.compose(
+                    keys: ChannelPublisherKeys(seed: sealing.seed, signingKeySeed: keys.signingKeySeed),
+                    channelIdHex: channelId, epochId: sealing.epoch, messageCounter: counter, plaintext: plaintext)
+                _ = try await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: identity)
+            },
+            postMeta: { meta in
+                try await ChannelMetaRecord.post(
+                    state: channels, client: client, channelId: channelId, meta: meta, accountIdentity: identity)
+            })
+        if landed {
+            channels.updateExtras(channelId) { $0.recordOwed = nil }
+        } else {
+            NSLog("[channels] the channel record was not re-posted yet; the next pass tries again")
+        }
+    }
+
+    /// One attempt at the owed re-post: the record, then the ban list. True
+    /// when every part that exists landed. Pure over its ports.
+    static func reissueRecord(
+        meta: SharedChannelMeta?, banList: Data?,
+        post: (Data) async throws -> Void,
+        postMeta: (SharedChannelMeta) async throws -> Void
+    ) async -> Bool {
+        do {
+            if let meta { try await postMeta(meta) }
+            if let banList { try await post(banList) }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func banListPlaintext(_ extras: ChannelExtras) -> Data? {
+        guard extras.banUpdatedAtMs > 0 else { return nil }
+        return try? composeBanList(list: FfiBanList(
+            updatedAtMs: extras.banUpdatedAtMs, authors: extras.bannedAuthors))
+    }
+
+    /// The epoch a publisher files its public seed under: the one its
+    /// composer seed serves, never one the channel has not reached (`nil`).
+    nonisolated static func publicSeedEpoch(keys: ChannelPublisherKeys, channelEpoch: UInt32) -> UInt32? {
+        let epoch = keys.seedEpoch ?? channelEpoch
+        return epoch > channelEpoch ? nil : epoch
     }
 
     /// Section 6 — a public channel's seed for the current epoch, sealed under
@@ -179,15 +395,19 @@ final class ChannelPublisherLoops {
             if let readKey { channels.updateExtras(channelId) { $0.readKey = readKey } }
         }
         guard let readKey, let identity = try? Identity.fromSeed(seed: seed) else { return }
-        let epoch: UInt32
+        let current: UInt32
         if let held = channels.epochByChannel[channelId] {
-            epoch = held
+            current = held
         } else if let fetched = try? await client.fetchEpoch(channelIdHex: channelId) {
             channels.setEpoch(channelId: channelId, epoch: fetched)
-            epoch = fetched
+            current = fetched
         } else {
             return
         }
+        // ADR-0087 section 15 — the composer's seed under the epoch it serves,
+        // and only once the channel reached that epoch (the owner's reseal
+        // files the next one).
+        guard let epoch = Self.publicSeedEpoch(keys: keys, channelEpoch: current) else { return }
         guard publicSeedEpoch[channelId] != epoch else { return }
         do {
             let envelope = try sealPublicSeedEnvelope(
@@ -225,6 +445,7 @@ final class ChannelPublisherLoops {
                 CoPublisherKeyBook.noteBindings(
                     outcome.applications, ownerAccountKey: outcome.ownerAccountKey, channelIdHex: channelId)
                 await applyStepDowns(outcome, channelId: channelId, seed: seed)
+                noteRotateRequests(outcome, channelId: channelId, group: group)
             } else {
                 ChannelAdmissionSeedShare.receive(
                     outcome.applications, ownerAccountKey: outcome.ownerAccountKey,
@@ -253,7 +474,8 @@ final class ChannelPublisherLoops {
             let extras = channelsRef?.extras(channelId)
             let readKey = extras?.isPublic == true ? extras?.readKey : nil
             await ChannelAdmissionSeedShare.sendOwed(
-                channelId: channelId, identity: identity, group: current, ds: ds, readKey: readKey)
+                channelId: channelId, identity: identity, group: current, ds: ds, readKey: readKey,
+                epochSeeds: channelsRef?.readSeeds(channelId: channelId) ?? [:])
         }
     }
 

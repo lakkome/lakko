@@ -42,9 +42,14 @@ public interface ChannelInviteActions {
     /** The link's facts when it is a channel's, else `null`. */
     public suspend fun inspect(link: me.lakko.app.contacts.LakkoLink.Group): ChannelInviteFacts?
     public fun isFollowed(channelIdHex: String): Boolean
-    /** ADR-0087 section 15 — a publisher request this account sent for the
-     *  channel is waiting for the owner's device (it lands by itself). */
-    public fun isPublisherRequestPending(channelIdHex: String): Boolean = false
+    /** This account already publishes in the channel (holds its publisher
+     *  keys). A subscriber invited to publish is not one yet: its card keeps
+     *  `Accept` (UX section 15.2). */
+    public fun isPublisherOf(channelIdHex: String): Boolean = false
+    /** ADR-0087 section 15 — when the publisher request this account sent
+     *  for the channel was sent, `null` when none waits for the owner's
+     *  device (a pending one lands by itself). */
+    public fun publisherRequestSentAtMs(channelIdHex: String): Long? = null
     public suspend fun subscribe(facts: ChannelInviteFacts)
     public fun openChannel(channelIdHex: String)
     /** A publisher invitation's `Accept` (UX section 15.2): asks to join and
@@ -200,8 +205,8 @@ internal fun ChannelInviteBubbleCard(
     val link = fromCard?.link ?: textLink ?: return
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
-    var acceptStatus by remember(key) { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
     var acceptError by remember(key) { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
+    var linkDead by remember(key) { mutableStateOf(false) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -220,60 +225,73 @@ internal fun ChannelInviteBubbleCard(
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
-            when {
-                f.publisherInvite && actions.isFollowed(f.channelIdHex) && acceptStatus == null ->
-                    CardButton(t("common.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
-                // The request is sent and waits for the owner's device; it
-                // lands by itself (no deadline), so there is nothing to press.
-                f.publisherInvite && !busy && acceptStatus == null && actions.isPublisherRequestPending(f.channelIdHex) ->
-                    Text(
-                        t("channels.join.waiting"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = contentColor?.copy(alpha = 0.8f) ?: MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                f.publisherInvite -> {
-                    CardButton(
-                        label = if (busy) t("channels.join.requesting") else t("channels.publishers.accept"),
-                        enabled = !busy,
-                        bubbleColor = bubbleColor,
-                        contentColor = contentColor,
-                        onClick = {
-                            busy = true
-                            acceptError = null
-                            scope.launch {
-                                try {
-                                    val joined = actions.acceptPublisher(f, link) { acceptStatus = it }
-                                    acceptStatus = null
-                                    // `null`: not approved yet; the request
-                                    // stays and lands by itself (the waiting
-                                    // line above, from the pending record).
-                                    if (joined != null) actions.openChannel(joined)
-                                } catch (e: kotlinx.coroutines.CancellationException) {
-                                    throw e
-                                } catch (e: me.lakko.app.channels.LegacyChannelException) {
-                                    acceptStatus = null
-                                    acceptError = e.text
-                                } catch (e: Throwable) {
-                                    android.util.Log.w("ChannelInviteBubble", "publisher accept failed: ${e.javaClass.simpleName}")
-                                    acceptStatus = null
-                                    acceptError = me.lakko.app.chat.joinFailureCopy(e)
-                                } finally {
-                                    busy = false
-                                }
-                            }
-                        },
-                    )
-                    acceptStatus?.let { line: me.lakko.app.l10n.UiText ->
-                        Text(
-                            line.text(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = contentColor?.copy(alpha = 0.8f) ?: MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    acceptError?.let { line: me.lakko.app.l10n.UiText ->
-                        Text(line.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            val publisherControl = if (f.publisherInvite) {
+                publisherInviteControl(
+                    isPublisher = actions.isPublisherOf(f.channelIdHex),
+                    pendingSentAtMs = actions.publisherRequestSentAtMs(f.channelIdHex),
+                    nowMs = System.currentTimeMillis(),
+                    sending = busy,
+                    linkDead = linkDead,
+                )
+            } else {
+                null
+            }
+            val lineColor = contentColor?.copy(alpha = 0.8f) ?: MaterialTheme.colorScheme.onSurfaceVariant
+            // Accept and Ask again send the same request (UX 15.2.2): the
+            // link fetched again, a knock exactly as the first, the pending
+            // record replaced; a refusal is never told.
+            val sendRequest: () -> Unit = {
+                busy = true
+                acceptError = null
+                scope.launch {
+                    try {
+                        val joined = actions.acceptPublisher(f, link) {}
+                        // `null`: not approved yet; the request stays and
+                        // lands by itself (the waiting line, from the
+                        // pending record).
+                        if (joined != null) actions.openChannel(joined)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: me.lakko.app.channels.LegacyChannelException) {
+                        acceptError = e.text
+                    } catch (e: Throwable) {
+                        android.util.Log.w("ChannelInviteBubble", "publisher accept failed: ${e.javaClass.simpleName}")
+                        when (publisherAcceptFailure(e)) {
+                            PublisherAcceptFailure.LINK_DEAD -> linkDead = true
+                            PublisherAcceptFailure.OFFLINE -> acceptError = me.lakko.app.l10n.UiText("common.error.offline")
+                            PublisherAcceptFailure.OTHER -> acceptError = me.lakko.app.chat.joinFailureCopy(e)
+                        }
+                    } finally {
+                        busy = false
                     }
                 }
+            }
+            when (publisherControl) {
+                PublisherInviteControl.OPEN ->
+                    CardButton(t("search.conversation.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
+                PublisherInviteControl.SENDING ->
+                    CardButton(t("channels.join.waiting"), false, bubbleColor, contentColor) {}
+                // Sent and waiting for the owner's device; it lands by itself
+                // (no deadline), so there is nothing to press.
+                PublisherInviteControl.WAITING ->
+                    Text(t("channels.join.waiting"), style = MaterialTheme.typography.bodySmall, color = lineColor)
+                PublisherInviteControl.ASK_AGAIN -> {
+                    Text(t("requests_sent.no_answer"), style = MaterialTheme.typography.bodySmall, color = lineColor)
+                    CardButton(t("requests_sent.ask_again"), true, bubbleColor, contentColor, sendRequest)
+                }
+                PublisherInviteControl.LINK_INVALID ->
+                    Text(t("invite.link.invalid"), style = MaterialTheme.typography.bodySmall, color = lineColor)
+                PublisherInviteControl.ACCEPT ->
+                    CardButton(t("channels.publishers.accept"), true, bubbleColor, contentColor, sendRequest)
+                null -> Unit
+            }
+            if (publisherControl != null) {
+                acceptError?.let { line: me.lakko.app.l10n.UiText ->
+                    Text(line.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+            when {
+                publisherControl != null -> Unit
                 actions.isFollowed(f.channelIdHex) ->
                     CardButton(t("common.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
                 else -> CardButton(

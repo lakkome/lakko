@@ -61,6 +61,12 @@ public final class DeviceGroupSnapshotStore {
         case rejoin
         /// A sibling's admission record (``DeviceGroupAdmissionRecord``).
         case admissions
+        /// Where the receive loop resumes, bound to the journal's group id
+        /// (``DeviceGroupJournalCursor``). Kept by a rejoin: the position it
+        /// names is before the commit that admits this device again, so
+        /// nothing the new membership can read is skipped. Deleted with the
+        /// snapshot on Forget device.
+        case journalCursor = "cursor"
     }
 
     /// Refused: another handle wrote the snapshot since the generation this

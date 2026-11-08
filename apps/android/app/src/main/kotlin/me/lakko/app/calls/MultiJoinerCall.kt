@@ -789,6 +789,10 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.ADMISSION_SEED,
             FfiIncomingEnvelopeKind.GROUP_PHOTO,
             FfiIncomingEnvelopeKind.GROUP_REACTIONS,
+            // ADR-0087 — a channel's earlier seeds and a rotate request ride
+            // the PublisherGroup journal, never the SFU signal-relay. Dropped.
+            FfiIncomingEnvelopeKind.CHANNEL_EPOCH_SEEDS,
+            FfiIncomingEnvelopeKind.CHANNEL_ROTATE_REQUEST,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.

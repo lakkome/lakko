@@ -535,12 +535,14 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
             continue;
           }
           let seed: Uint8Array;
+          let seedEpoch: number;
           try {
             seed = group.channelSeed(args.identity);
+            seedEpoch = Number(group.epoch());
           } finally {
             group.free();
           }
-          channelsActions.setKeys(id, { seed, signingKeySeed });
+          channelsActions.setKeys(id, { seed, signingKeySeed, seedEpoch });
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(`channel ${id}: could not re-open publisher keys`, err);
@@ -979,10 +981,23 @@ export const channelsActions = {
    */
   async recordPublisherCommit(entry: PublisherCommitEntry): Promise<void> {
     setPublisherCommits((list) => [...list.filter((e) => e.id !== entry.id), entry]);
+    // The commit moves the channel to a new epoch, so the channel record is
+    // owed under it (ADR-0051 section 4); written in the same flush as the
+    // commit's record, and cleared once the re-post landed (`settleOwedRecord`).
+    const priorAccess = untrack(accessByChannel).get(entry.channelIdHex);
+    setAccessByChannel((map) =>
+      new Map(map).set(entry.channelIdHex, { ...(map.get(entry.channelIdHex) ?? emptyAccessRecord()), recordOwed: true }),
+    );
     try {
       await flushDurable();
     } catch (err) {
       setPublisherCommits((list) => list.filter((e) => e.id !== entry.id));
+      setAccessByChannel((map) => {
+        const next = new Map(map);
+        if (priorAccess === undefined) next.delete(entry.channelIdHex);
+        else next.set(entry.channelIdHex, priorAccess);
+        return next;
+      });
       poisoned = true;
       // eslint-disable-next-line no-console
       console.error("G-50: a PublisherGroup commit could not be recorded; channel writes are refused until reload");

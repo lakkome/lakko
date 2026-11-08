@@ -1914,10 +1914,13 @@ private fun SessionRoot(
             override fun isFollowed(channelIdHex: String): Boolean =
                 channelsState.channels.value.any { it.id == channelIdHex }
 
-            override fun isPublisherRequestPending(channelIdHex: String): Boolean =
+            override fun isPublisherOf(channelIdHex: String): Boolean =
+                channelsState.keysByChannel.value.containsKey(channelIdHex)
+
+            override fun publisherRequestSentAtMs(channelIdHex: String): Long? =
                 channelsState.boundAccount?.let { acct ->
-                    me.lakko.app.channels.PendingPublisherRequests.isPending(inviteCardContext, acct, channelIdHex)
-                } == true
+                    me.lakko.app.channels.PendingPublisherRequests.sentAtMs(inviteCardContext, acct, channelIdHex)
+                }
 
             override suspend fun subscribe(facts: me.lakko.app.ui.channels.ChannelInviteFacts) {
                 val invite = facts.preview.subscriber ?: return
@@ -3283,6 +3286,12 @@ private fun SessionRoot(
                             }
                             joined
                         },
+                        publisherRequestSentAtMs = { channelIdHex ->
+                            channelsState.boundAccount?.let { acct ->
+                                me.lakko.app.channels.PendingPublisherRequests.sentAtMs(inviteCardContext, acct, channelIdHex)
+                            }
+                        },
+                        isPublisherOf = { channelIdHex -> channelsState.keysByChannel.value.containsKey(channelIdHex) },
                         onOpenChat = { hex ->
                             // Replace the landing with the chat, so Back from
                             // the chat does not return to a finished join.

@@ -18,7 +18,7 @@ const base = {
   id: "00".repeat(16),
   localName: "Lakko news",
   localHandle: "lakko-news",
-  isOwner: true,
+  role: "owner" as const,
   subscriberCount: null,
   lastPostMs: null,
 };
@@ -57,7 +57,14 @@ describe("channelRowModel", () => {
   it("says the role when there is neither a handle nor a count", () => {
     const noHandle = { ...base, localHandle: undefined };
     expect(channelRowModel(noHandle, NOW).subtitle).toBe("Your channel");
-    expect(channelRowModel({ ...noHandle, isOwner: false }, NOW).subtitle).toBe("Subscribed");
+    expect(channelRowModel({ ...noHandle, role: "subscriber" }, NOW).subtitle).toBe("Subscribed");
+  });
+
+  it("names a publisher as a publisher, never as subscribed (UX 15.2)", () => {
+    const noHandle = { ...base, localHandle: undefined };
+    expect(channelRowModel({ ...noHandle, role: "publisher" }, NOW).subtitle).toBe("Publisher");
+    // The @name still comes first when there is one.
+    expect(channelRowModel({ ...base, role: "publisher" }, NOW).subtitle).toBe("@lakko-news");
   });
 
   it("labels the last post time like a chat row, and stays empty when unknown", () => {

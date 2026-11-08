@@ -2538,6 +2538,20 @@ pub enum FfiIncomingEnvelopeKind {
     /// `openChannelReadKeyEnvelope` after checking the MLS sender resolved
     /// to the channel's owner. Never render it. Appended last.
     ChannelReadKey,
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). `payload` is the whole
+    /// envelope; open it with `openChannelEpochSeedsEnvelope` after checking
+    /// it came on this channel's PublisherGroup and the MLS sender resolved
+    /// to the channel's owner, then add only the seeds of epochs not held.
+    /// Never render it. Appended last.
+    ChannelEpochSeeds,
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08). `payload` is the 16-byte channel id. Only the
+    /// owner's device acts on it, when it came on that channel's
+    /// PublisherGroup and the MLS sender resolved at receipt to a current
+    /// publisher; requests before the next rotation collapse into it. Never
+    /// render it. Appended last.
+    ChannelRotateRequest,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2771,6 +2785,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::GroupContactRequest(_) => FfiIncomingEnvelope {
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::GroupContactRequest)
+        },
+        IncomingEnvelope::ChannelEpochSeeds(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelEpochSeeds)
+        },
+        IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
+            payload: channel.to_vec(),
+            ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),

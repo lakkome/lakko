@@ -312,9 +312,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
 
         // Seed the fold from this device's own disk BEFORE the poll starts.
-        // The journal cannot refill it: the poll runs from cursor 0, but the
-        // MLS snapshot was restored above, so every row it re-fetches is one
-        // this state has already consumed. A backup restore merged its state
+        // The journal cannot refill it: the poll resumes from the stored
+        // cursor (0 on a first run), and the MLS snapshot was restored above,
+        // so any row it re-fetches is one this state has already consumed. A backup restore merged its state
         // into the same store before this ran (``SyncedStateStore``).
         syncedState = SyncedStateStore.load(accountIdB64: accountIdB64)
         pending = PendingSyncTracker(accountIdB64: accountIdB64)
@@ -1245,7 +1245,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
-        var cursor: Int64 = startCursor
+        // Resume where the last persisted batch left off instead of re-reading
+        // the whole journal on every start (``DeviceGroupJournalCursor``).
+        var cursor: Int64 = max(
+            startCursor, DeviceGroupJournalCursor.read(accountIdB64: accountIdB64, groupId: groupId))
+        var durableCursor = JournalCursorTracker(start: cursor)
         // This loop reads ``identity`` and ``group`` afresh after every wait.
         // Once its binding has moved they are another account's (or the same
         // account's next session's): the batch in hand is then dropped and
@@ -1382,6 +1386,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // this batch: own claims and notes judged at their rows, commits
             // moving the journal's epoch.
             var journal = group.flatMap { loadJournalEpochs($0) }
+            // This device's own rows coming back, counted for one line per
+            // batch: each is benign (its effect is already in the snapshot).
+            var ownRows = 0
             for message in result.messages {
                 cursor = message.id
                 guard let id = identity, let g = group else { return }
@@ -1391,6 +1398,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     entry = try DeviceGroupJournalEnvelope.decode(message.payload)
                 } catch {
                     NSLog("DeviceGroupSync envelope decode failed: %@", error.localizedDescription)
+                    // Never readable by any later pass either.
+                    durableCursor.passed(message.id)
                     continue
                 }
                 // ADR-0079 — a commit that took effect moves the journal's
@@ -1408,12 +1417,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 // at this row's position; recorded before the cursor moves
                 // past it.
                 if let j = journal, judgeOwnLinkRow(entry.message, messageId: message.id, journal: j.epochs) {
+                    durableCursor.passed(message.id)
                     continue
                 }
                 let attestations: [Data] = entry.attestation.map { [$0] } ?? []
                 // ADR-0058 section 5.1 — the members before this row, to tell
                 // whether a commit grew the group.
                 let devicesBefore = (try? g.devices()) ?? []
+                let epochBeforeRow = try? g.epoch()
                 let processed: ProcessedMessage
                 do {
                     processed = try g.processIncomingVerifyingRemovals(
@@ -1424,9 +1435,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         nowUnixSecs: Int64(Date().timeIntervalSince1970)
                     )
                 } catch {
-                    NSLog("DeviceGroupSync processIncomingVerifyingRemovals failed: %@", error.localizedDescription)
+                    let own = DeviceGroupJournalCursor.isOwnMessageEcho(error)
+                    if own {
+                        ownRows += 1
+                    } else {
+                        NSLog("DeviceGroupSync processIncomingVerifyingRemovals failed: %@", error.localizedDescription)
+                    }
+                    durableCursor.refused(message.id, verdict: FailedRowVerdict.of(
+                        isOwnEcho: own,
+                        sealedEpoch: epochOfMessage(bytes: entry.message),
+                        epochAfter: epochAfterMessage(bytes: entry.message),
+                        localEpoch: epochBeforeRow))
                     continue
                 }
+                durableCursor.passed(message.id)
                 mutated = true
                 switch processed {
                 case .application(let data, let senderLeaf, _):
@@ -1477,28 +1499,42 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
             }
 
+            if ownRows > 0 { NSLog("DeviceGroupSync: skipped %d own rows of this device", ownRows) }
+            if mutated, identity == nil { durableCursor.snapshotPersistFailed() }
             if mutated, let id = identity {
                 // ADR-0081 decision 3 — fail-closed and conditional on the
                 // generation this handle read: a handle another one wrote past
                 // (a commit of this device made N+1 current) reloads instead of
                 // putting its older state back. Any other failure keeps the
-                // applied state in memory; the next batch writes it again (the
-                // cursor is in memory too, so nothing reads past what this
-                // process holds).
+                // applied state in memory; the next batch writes it again, and
+                // the stored cursor waits for that write (C-67).
                 do {
                     handleGeneration = try DeviceGroupLifecycle.persistSnapshotOrThrow(
                         identity: id, accountIdB64: accountIdB64, expectedGeneration: handleGeneration)
+                    durableCursor.snapshotPersisted()
                     saveAdmissions(accountIdB64: accountIdB64)
                     if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch is DeviceGroupSnapshotStore.SnapshotChanged {
                     NSLog("DeviceGroupSync: the snapshot moved under this handle; reloading")
+                    durableCursor.snapshotMovedUnderHandle()
                     reloadFromDisk(accountIdB64: accountIdB64)
                     if rosterChange.persisted() { DeviceRosterChanges.note(accountIdB64: accountIdB64) }
                 } catch {
+                    durableCursor.snapshotPersistFailed()
                     NSLog("DeviceGroupSync snapshot persist failed: %@", String(describing: error))
                 }
                 // ADR-0057 — no heal-on-apply: the device that committed
                 // registered the epoch, with its commit (ADR-0081).
+            }
+            // C-67 — the cursor goes to disk only after the snapshot that
+            // reflects every row up to it (``DeviceGroupJournalCursor``).
+            if let value = durableCursor.cursorToWrite() {
+                do {
+                    try DeviceGroupJournalCursor.write(accountIdB64: accountIdB64, groupId: groupId, cursor: value)
+                    durableCursor.cursorWritten(value)
+                } catch {
+                    NSLog("DeviceGroupSync: the journal cursor was not stored: %@", String(describing: error))
+                }
             }
 
             // A row in this batch removed THIS device (docs/ux/second-device.md

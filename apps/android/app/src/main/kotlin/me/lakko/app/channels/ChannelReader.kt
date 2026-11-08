@@ -46,14 +46,7 @@ public class ChannelReader(
     public fun isPublisher(): Boolean = state.keysByChannel.value.containsKey(channelId)
 
     /** The seed of [epoch] this device holds, or `null`. */
-    public fun seedFor(epoch: UInt): ByteArray? {
-        if (isPublisher()) {
-            val current = state.epochByChannel.value[channelId]
-            val keys = state.keysByChannel.value[channelId]
-            if (keys != null && current == epoch) return keys.seed
-        }
-        return state.subscribedSeeds(channelId)[epoch]
-    }
+    public fun seedFor(epoch: UInt): ByteArray? = state.readSeed(channelId, epoch)
 
     /** The epoch [cursor]'s post was sealed in, once read. */
     public fun epochOf(cursor: Long): UInt? = epochOfPost[cursor]

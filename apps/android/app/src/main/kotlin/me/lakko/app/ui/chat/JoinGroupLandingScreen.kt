@@ -305,6 +305,13 @@ public fun JoinGroupLandingScreen(
      *  further step: progress lines go to the callback; the channel id, or
      *  `null` when the owner's device has not approved within the wait. */
     onAcceptPublisher: (suspend (onStatus: (me.lakko.app.l10n.UiText?) -> Unit) -> String?)? = null,
+    /** Section 15.2.2 — when the publisher request this account sent for
+     *  the channel [channelIdHex] was sent, `null` when none is pending (a
+     *  pending one lands by itself): the page shows the waiting line, then
+     *  `Ask again` after seven days, never a second `Accept`. */
+    publisherRequestSentAtMs: (channelIdHex: String) -> Long? = { null },
+    /** This account already publishes in the channel: `Open`. */
+    isPublisherOf: (channelIdHex: String) -> Boolean = { false },
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val card by viewModel.card.collectAsStateWithLifecycle()
@@ -394,7 +401,12 @@ public fun JoinGroupLandingScreen(
                     InviteHeadline(card)
                     Spacer(Modifier.height(16.dp))
                     if (onAcceptPublisher != null) {
-                        PublisherAccept(onAcceptPublisher)
+                        val channelIdHex = preview.channelId?.let { me.lakko.app.channels.ChannelsComposer.bytesToHex(it) }
+                        PublisherAccept(
+                            onAcceptPublisher,
+                            pendingSentAtMs = channelIdHex?.let(publisherRequestSentAtMs),
+                            isPublisher = channelIdHex != null && isPublisherOf(channelIdHex),
+                        )
                     } else {
                         Button(onClick = onJoinAsPublisher) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
                     }
@@ -516,44 +528,66 @@ private fun InviteFoot(card: GroupInviteCard?) {
 @Composable
 private fun PublisherAccept(
     onAccept: suspend (onStatus: (me.lakko.app.l10n.UiText?) -> Unit) -> String?,
+    pendingSentAtMs: Long?,
+    isPublisher: Boolean,
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var status by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
     var error by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
-    // ADR-0087 section 15 — once sent, the request waits for the owner's
-    // device with no deadline: the page says so and offers nothing to press.
-    var waitingForOwner by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    Button(
-        enabled = !busy && !waitingForOwner,
-        onClick = {
-            busy = true
-            error = null
-            scope.launch {
-                try {
-                    val joined = onAccept { status = it }
-                    waitingForOwner = joined == null
-                    // `null`: not approved yet. The request has no deadline
-                    // and lands by itself, so the page keeps saying it waits.
-                    status = if (joined == null) me.lakko.app.l10n.UiText("channels.join.waiting") else null
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: me.lakko.app.channels.LegacyChannelException) {
-                    status = null
-                    error = e.text
-                } catch (e: Throwable) {
-                    android.util.Log.w("JoinGroupLanding", "publisher accept failed: ${e.javaClass.simpleName}")
-                    status = null
-                    error = me.lakko.app.chat.joinFailureCopy(e)
-                } finally {
-                    busy = false
+    var linkDead by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    // The request this page just sent, until the stored record is read again.
+    var sentHereAtMs by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Long?>(null) }
+    val send: () -> Unit = {
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                val joined = onAccept {}
+                // `null`: not approved yet. The request has no deadline and
+                // lands by itself, so the page keeps saying it waits.
+                if (joined == null) sentHereAtMs = System.currentTimeMillis()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: me.lakko.app.channels.LegacyChannelException) {
+                error = e.text
+            } catch (e: Throwable) {
+                android.util.Log.w("JoinGroupLanding", "publisher accept failed: ${e.javaClass.simpleName}")
+                when (me.lakko.app.ui.channels.publisherAcceptFailure(e)) {
+                    me.lakko.app.ui.channels.PublisherAcceptFailure.LINK_DEAD -> linkDead = true
+                    me.lakko.app.ui.channels.PublisherAcceptFailure.OFFLINE ->
+                        error = me.lakko.app.l10n.UiText("common.error.offline")
+                    me.lakko.app.ui.channels.PublisherAcceptFailure.OTHER -> error = me.lakko.app.chat.joinFailureCopy(e)
                 }
+            } finally {
+                busy = false
             }
-        },
-    ) { Text(if (busy) t("channels.join.requesting") else t("channels.publishers.accept")) }
-    status?.let { line: me.lakko.app.l10n.UiText ->
-        Spacer(Modifier.height(8.dp))
-        Text(line.text(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    val sentAt = listOfNotNull(pendingSentAtMs, sentHereAtMs).maxOrNull()
+    when (
+        me.lakko.app.ui.channels.publisherInviteControl(
+            isPublisher = isPublisher,
+            pendingSentAtMs = sentAt,
+            nowMs = System.currentTimeMillis(),
+            sending = busy,
+            linkDead = linkDead,
+        )
+    ) {
+        // Approved meanwhile: the channel opens from Chats; nothing to press.
+        me.lakko.app.ui.channels.PublisherInviteControl.OPEN -> Unit
+        me.lakko.app.ui.channels.PublisherInviteControl.SENDING ->
+            Button(enabled = false, onClick = {}) { Text(t("channels.join.waiting")) }
+        me.lakko.app.ui.channels.PublisherInviteControl.WAITING ->
+            Text(t("channels.join.waiting"), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        me.lakko.app.ui.channels.PublisherInviteControl.ASK_AGAIN -> {
+            Text(t("requests_sent.no_answer"), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = send) { Text(t("requests_sent.ask_again")) }
+        }
+        me.lakko.app.ui.channels.PublisherInviteControl.LINK_INVALID ->
+            Text(t("invite.link.invalid"), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        me.lakko.app.ui.channels.PublisherInviteControl.ACCEPT ->
+            Button(onClick = send) { Text(t("channels.publishers.accept")) }
     }
     error?.let { line: me.lakko.app.l10n.UiText ->
         Spacer(Modifier.height(8.dp))

@@ -6,7 +6,10 @@
 //! reactions (section 13a), the conversation handle (section 3), the
 //! knock-seed envelope (section 5) and, in a channel's PublisherGroup, the
 //! admission-seed envelope (section 7), the read-key envelope (section 7,
-//! phase B) and a co-publisher's step-down (section 15, phase B).
+//! phase B), the earlier-seeds envelope to a new publisher (section 7,
+//! amended 2026-11-08), a publisher's request that the owner rotate
+//! (section 15, amended 2026-11-08) and a co-publisher's step-down (section
+//! 15, phase B).
 //!
 //! ## Why the NSE needs this
 //!
@@ -24,7 +27,14 @@
 //! separator answers `false`, and the chain falls through.
 
 use lakko_contacts::admission_seed::{decode_admission_seed, ADMISSION_SEED_ENVELOPE_LEN};
+use lakko_contacts::channel_epoch_seeds::{
+    decode_channel_epoch_seeds, CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN,
+    CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN,
+};
 use lakko_contacts::channel_read_key::{decode_channel_read_key, CHANNEL_READ_KEY_ENVELOPE_LEN};
+use lakko_contacts::channel_rotate_request::{
+    decode_channel_rotate_request, CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN,
+};
 use lakko_contacts::conversation_handle::{
     decode_conversation_handle, CONVERSATION_HANDLE_ENVELOPE_MAX_LEN,
     CONVERSATION_HANDLE_ENVELOPE_MIN_LEN,
@@ -150,6 +160,43 @@ pub fn channel_read_key_envelope_len() -> u32 {
     len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
 }
 
+/// Whether `plaintext` is a well-formed earlier-seeds envelope to a new
+/// publisher (the seeds stay sealed).
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_epoch_seeds_envelope(plaintext: Vec<u8>) -> bool {
+    decode_channel_epoch_seeds(&plaintext).is_ok()
+}
+
+/// The shortest earlier-seeds envelope (one seed).
+#[uniffi::export]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_min_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN)
+}
+
+/// The longest earlier-seeds envelope (64 seeds).
+#[uniffi::export]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_max_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN)
+}
+
+/// Whether `plaintext` is a publisher's request that the owner rotate (any
+/// channel).
+#[uniffi::export]
+#[must_use]
+pub fn is_channel_rotate_request_envelope(plaintext: Vec<u8>) -> bool {
+    decode_channel_rotate_request(&plaintext).is_ok()
+}
+
+/// The one length of a rotate-request envelope.
+#[uniffi::export]
+#[must_use]
+pub fn channel_rotate_request_envelope_len() -> u32 {
+    len_u32(CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN)
+}
+
 /// Whether `plaintext` is a co-publisher's step-down envelope (any channel).
 #[uniffi::export]
 #[must_use]
@@ -169,7 +216,9 @@ mod tests {
     use super::*;
     use lakko_contacts::admission_seed::compose_admission_seed;
     use lakko_contacts::allowed_reactions::AllowedReactions;
+    use lakko_contacts::channel_epoch_seeds::{compose_channel_epoch_seeds, ChannelEpochSeed};
     use lakko_contacts::channel_read_key::compose_channel_read_key;
+    use lakko_contacts::channel_rotate_request::compose_channel_rotate_request;
     use lakko_contacts::conversation_handle::{compose_conversation_handle, ConversationHandle};
     use lakko_contacts::group_photo::{compose_group_photo, GroupPhoto};
     use lakko_contacts::group_reactions::{compose_group_reactions, GroupReactions};
@@ -213,6 +262,19 @@ mod tests {
         compose_channel_read_key(&[0x0C; 16], &[0x4B; 32], &pk, &[0x11; 32]).unwrap()
     }
 
+    fn epoch_seeds() -> Vec<u8> {
+        let pk = SecretKey::from_bytes([0x33; 32]).public_key();
+        let seeds = [ChannelEpochSeed {
+            epoch: 0,
+            seed: [0x11; 32],
+        }];
+        compose_channel_epoch_seeds(&[0x0C; 16], &[0x4B; 32], &pk, &seeds).unwrap()
+    }
+
+    fn rotate_request() -> Vec<u8> {
+        compose_channel_rotate_request(&[0x0C; 16])
+    }
+
     fn step_down() -> Vec<u8> {
         let channel = lakko_mls::ChannelId::try_from_slice(&[0x0C; 16]).unwrap();
         lakko_mls::compose_publisher_step_down(&channel)
@@ -226,6 +288,8 @@ mod tests {
         assert!(is_knock_seed_envelope(knock_seed()));
         assert!(is_admission_seed_envelope(admission_seed()));
         assert!(is_channel_read_key_envelope(read_key()));
+        assert!(is_channel_epoch_seeds_envelope(epoch_seeds()));
+        assert!(is_channel_rotate_request_envelope(rotate_request()));
         assert!(is_publisher_step_down_envelope(step_down()));
         let chat = lakko_attachments::compose("hello", Vec::new()).unwrap();
         assert!(!is_group_photo_envelope(chat.clone()));
@@ -234,6 +298,8 @@ mod tests {
         assert!(!is_knock_seed_envelope(chat.clone()));
         assert!(!is_admission_seed_envelope(chat.clone()));
         assert!(!is_channel_read_key_envelope(chat.clone()));
+        assert!(!is_channel_epoch_seeds_envelope(chat.clone()));
+        assert!(!is_channel_rotate_request_envelope(chat.clone()));
         assert!(!is_publisher_step_down_envelope(chat));
     }
 
@@ -246,6 +312,8 @@ mod tests {
             knock_seed(),
             admission_seed(),
             read_key(),
+            epoch_seeds(),
+            rotate_request(),
             step_down(),
         ] {
             assert_eq!(
@@ -269,6 +337,9 @@ mod tests {
         assert_eq!(knock_seed_envelope_len(), 205);
         assert_eq!(admission_seed_envelope_len(), 195);
         assert_eq!(channel_read_key_envelope_len(), 155);
+        assert_eq!(channel_epoch_seeds_envelope_min_len(), 163);
+        assert_eq!(channel_epoch_seeds_envelope_max_len(), 2431);
+        assert_eq!(channel_rotate_request_envelope_len(), 49);
         assert_eq!(publisher_step_down_envelope_len(), 46);
         let p = photo();
         assert_eq!(&p[..21], b"lakko/group-photo/v1\x00");
@@ -288,10 +359,16 @@ mod tests {
         let c = read_key();
         assert_eq!(&c[..26], b"lakko/channel-read-key/v1\x00");
         assert_eq!(c.len(), 155);
+        let e = epoch_seeds();
+        assert_eq!(&e[..29], b"lakko/channel-epoch-seeds/v1\x00");
+        assert_eq!(e.len(), 163);
+        let q = rotate_request();
+        assert_eq!(&q[..32], b"lakko/channel-rotate-request/v1\x00");
+        assert_eq!(q.len(), 49);
         let d = step_down();
         assert_eq!(&d[..29], b"lakko/publisher-step-down/v1\x00");
         assert_eq!(d.len(), 46);
-        for w in [p, r, h, k, a, c, d] {
+        for w in [p, r, h, k, a, c, e, q, d] {
             assert_eq!(w[0], 0x6c);
         }
     }
@@ -305,15 +382,19 @@ mod tests {
             knock_seed(),
             admission_seed(),
             read_key(),
+            epoch_seeds(),
+            rotate_request(),
             step_down(),
         ];
-        let tests: [fn(Vec<u8>) -> bool; 7] = [
+        let tests: [fn(Vec<u8>) -> bool; 9] = [
             is_group_photo_envelope,
             is_group_reactions_envelope,
             is_conversation_handle_envelope,
             is_knock_seed_envelope,
             is_admission_seed_envelope,
             is_channel_read_key_envelope,
+            is_channel_epoch_seeds_envelope,
+            is_channel_rotate_request_envelope,
             is_publisher_step_down_envelope,
         ];
         for (i, w) in all.iter().enumerate() {

@@ -168,11 +168,9 @@ enum ChannelMemberCards {
     static func refreshMembers(
         state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
     ) async -> [Member] {
-        var seeds = state.subscribedSeeds(channelId: channelId)
-        // A publisher opens the cards of the current epoch with its own seed.
-        if let keys = state.keysByChannel[channelId], let epoch = state.epochByChannel[channelId] {
-            seeds[epoch] = keys.seed
-        }
+        // A publisher opens the cards of the epoch its composer seed serves
+        // with that seed; every other epoch reads from the seeds kept.
+        let seeds = state.readSeeds(channelId: channelId)
         guard !seeds.isEmpty, let channelIdBytes = CoPublisher.hexToData(channelId) else { return [] }
         let ownPk = state.subscriberKeysByChannel[channelId]
             .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }

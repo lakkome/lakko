@@ -82,6 +82,7 @@ import { loadRotationState, saveRotationState } from "./rotation-state-store";
 import { ticketInviteKeyHex } from "./subscriber-admission";
 import { channelIdForHandle, forgetClaimedHandle } from "./claimed-handles";
 import { LegacyChannelError } from "./legacy-v1";
+import { composerSeedFor, outgoingPublisherSeed, readsPublicSeeds } from "./publisher-seed";
 import { listedStamp, nextListingStamp } from "../discover/listing";
 import { channelsActions, channelsState, awaitChannelsHydration } from "../state/channels-state";
 import {
@@ -241,6 +242,12 @@ function isOwnerHere(idHex: string): boolean {
   return isPublisherHere(idHex) && channelsActions.coPublisherGroupIdOf(idHex) === undefined;
 }
 
+/** Only the channel owner's device rotates the channel key (maintainer,
+ *  2026-11-08); a co-publisher's never does, scheduled or on demand. */
+export function channelRotatesHere(idHex: string): boolean {
+  return isOwnerHere(idHex);
+}
+
 /** Reactive. Owner: its own setting; reader: the newest record's flag, else
  *  what it came by. */
 export function channelVisibilityOf(idHex: string): ChannelVisibility | null {
@@ -311,8 +318,12 @@ export function channelReadStateOf(idHex: string): "reading" | "waiting" | "none
 /** The seed of `epoch` this device holds (owner, publisher or reader). */
 export function channelSeedFor(idHex: string, epoch: number): Uint8Array | undefined {
   const keys = channelsState.keysByChannel().get(idHex);
-  const current = channelsState.epochByChannel().get(idHex);
-  if (keys !== undefined && (current === undefined || current === epoch)) return keys.seed;
+  if (keys !== undefined) {
+    // The composer's seed opens the epoch it serves; any other epoch reads
+    // from the seeds kept per epoch.
+    const served = keys.seedEpoch ?? channelsState.epochByChannel().get(idHex);
+    if (served === undefined || served === epoch) return keys.seed;
+  }
   return channelsActions.currentSeed(idHex, epoch);
 }
 
@@ -898,7 +909,12 @@ const PUBLIC_SEED_LOOKBACK = 40;
 export async function catchUpChannel(idHex: string): Promise<void> {
   const epoch = (await fetchEpoch(idHex)).epoch;
   channelsActions.setEpoch(idHex, epoch);
-  if (isPublisherHere(idHex)) return;
+  // A publisher reads the epochs before it became one the way a reader
+  // does: the envelopes it still holds as a subscriber, and on a public
+  // channel the public seeds under the read key the owner sent it. Without
+  // them a new publisher's view of the channel opened with "Earlier posts
+  // aren't available." over the owner's record at creation.
+  const publisher = isPublisherHere(idHex);
   const kp = channelsState.subscriberKeysByChannel().get(idHex);
   if (kp !== undefined) {
     try {
@@ -914,26 +930,37 @@ export async function catchUpChannel(idHex: string): Promise<void> {
       }
     } catch (err) {
       if (apiError.is(err) && (err.code === SUBSCRIBER_REMOVED || err.status === 410)) {
-        await onRemoved?.(idHex);
-        return;
+        // A publisher's subscription row going is not the end of the
+        // channel for it: it still posts and reads its own epochs.
+        if (!publisher) {
+          await onRemoved?.(idHex);
+          return;
+        }
+      } else if (!(apiError.is(err) && err.status === 404)) {
+        if (!publisher) throw err;
       }
-      if (!(apiError.is(err) && err.status === 404)) throw err;
     }
   }
   const readKeyB64 = accessOf(idHex).readKeyB64;
-  if (readKeyB64 !== null) {
+  if (readsPublicSeeds(publisher, readKeyB64 !== null, channelVisibilityOf(idHex)) && readKeyB64 !== null) {
     const readKey = b64ToBytes(readKeyB64);
     const wasm = await loadWasm();
     const channelId = channelIdFromHex(idHex);
-    for (let e = epoch; e >= 0 && e > epoch - PUBLIC_SEED_LOOKBACK; e -= 1) {
-      if (channelsActions.currentSeed(idHex, e) !== undefined) continue;
-      const wire = await fetchPublicSeed(idHex, e);
-      if (wire === null) break;
-      try {
-        channelsActions.setSubscribedSeedForEpoch(idHex, e, wasm.openPublicSeedEnvelope(readKey, channelId, e, wire));
-      } catch {
-        // A seed that does not open under this key is not the channel's.
+    try {
+      for (let e = epoch; e >= 0 && e > epoch - PUBLIC_SEED_LOOKBACK; e -= 1) {
+        if (channelsActions.currentSeed(idHex, e) !== undefined) continue;
+        const wire = await fetchPublicSeed(idHex, e);
+        if (wire === null) break;
+        try {
+          channelsActions.setSubscribedSeedForEpoch(idHex, e, wasm.openPublicSeedEnvelope(readKey, channelId, e, wire));
+        } catch {
+          // A seed that does not open under this key is not the channel's.
+        }
       }
+    } catch (err) {
+      // A publisher posts and reads its own epochs without these; a failed
+      // read is tried again at the next catch-up.
+      if (!publisher) throw err;
     }
   }
   if (accessOf(idHex).waiting && channelsActions.currentSeed(idHex, epoch) !== undefined) {
@@ -953,10 +980,17 @@ export async function catchUpChannel(idHex: string): Promise<void> {
 export async function publishChannelPost(identity: WasmIdentity, idHex: string, plaintext: Uint8Array): Promise<number> {
   const keys = channelsState.keysByChannel().get(idHex);
   if (keys === undefined) throw new ChannelError("not-publisher");
+  const sealing = composerSeedFor(keys, channelsState.epochByChannel().get(idHex), (e) =>
+    channelsActions.currentSeed(idHex, e),
+  );
+  // The channel has not reached the composer's epoch and the earlier seed is
+  // not on this device (a reload in that window): nothing is sealed under an
+  // epoch the readers do not hold yet. A retry posts once the reseal lands.
+  if (sealing === null) throw new ChannelError("failed");
   try {
-    const epoch = channelsState.epochByChannel().get(idHex) ?? 0;
+    const epoch = sealing.epoch;
     const counter = channelsActions.nextCounter(idHex);
-    const wire = await composePost(keys, idHex, epoch, counter, plaintext);
+    const wire = await composePost({ ...keys, seed: sealing.seed }, idHex, epoch, counter, plaintext);
     const view = await publishPost(idHex, wire, identity);
     const state = loadRotationState(idHex);
     if (state !== null) {
@@ -1012,8 +1046,20 @@ export async function channelSubscriberPage(
   }
 }
 
+type RequestRotation = (idHex: string) => Promise<void>;
+let requestRotation: RequestRotation | null = null;
+
+/** `ChannelPublisherLoops` installs how a co-publisher asks the owner's
+ *  device to rotate (the rotate request on the PublisherGroup). */
+export function installChannelRotateRequest(fn: RequestRotation | null): void {
+  requestRotation = fn;
+}
+
 /** Private channel only: remove the key, then rotate at once (UX 7.3), so
- *  the removed device gets nothing from the next epoch. */
+ *  the removed device gets nothing from the next epoch. Only the owner's
+ *  device rotates (maintainer, 2026-11-08); a co-publisher's device asks it
+ *  to, with a rotate request on the PublisherGroup, and the owner's device
+ *  rotates at its next run. */
 export async function removeChannelSubscriber(identity: WasmIdentity, idHex: string, pkHex: string): Promise<void> {
   if (channelVisibilityOf(idHex) !== "private") throw new ChannelError("failed");
   for (const step of removalSteps(false)) {
@@ -1023,10 +1069,45 @@ export async function removeChannelSubscriber(identity: WasmIdentity, idHex: str
       } catch (err) {
         throw new ChannelError(serviceErrorCode(err), { cause: err });
       }
-    } else {
+    } else if (channelRotatesHere(idHex)) {
       await rotateChannelNow(idHex);
+    } else {
+      // The row is already gone: the request is owed from here on, written
+      // durably before it is published, and retried by the publisher pass
+      // until it goes out. The removal itself succeeded for the person.
+      try {
+        await channelsActions.updateAccessDurable(idHex, (r) => ({ ...r, rotateRequestOwed: true }));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[channels] owed rotate request not written durably", err instanceof Error ? err.name : "");
+        channelsActions.updateAccess(idHex, (r) => ({ ...r, rotateRequestOwed: true }));
+      }
+      await settleOwedRotateRequest(idHex);
     }
   }
+}
+
+/**
+ * Send the owed rotate request of `idHex` once, if one is owed (a
+ * co-publisher's device after removing a subscriber). Cleared once it went
+ * out; a failure keeps it owed for the next publisher pass. Never throws.
+ */
+export async function settleOwedRotateRequest(idHex: string): Promise<"none" | "sent" | "failed"> {
+  if (accessOf(idHex).rotateRequestOwed !== true) return "none";
+  if (requestRotation === null) return "failed";
+  try {
+    await requestRotation(idHex);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[channels] rotate request not sent; retried next pass", err instanceof Error ? err.name : "");
+    return "failed";
+  }
+  channelsActions.updateAccess(idHex, (r) => {
+    if (r.rotateRequestOwed !== true) return r;
+    const { rotateRequestOwed: _sent, ...rest } = r;
+    return rest;
+  });
+  return "sent";
 }
 
 
@@ -1162,8 +1243,12 @@ export function channelAccessRecordOf(idHex: string): ChannelAccessRecord {
 export async function ensurePublicSeed(identity: WasmIdentity, idHex: string): Promise<void> {
   const keys = channelsState.keysByChannel().get(idHex);
   if (keys === undefined || channelVisibilityOf(idHex) !== "public") return;
-  const epoch = channelsState.epochByChannel().get(idHex);
-  if (epoch === undefined) return;
+  const current = channelsState.epochByChannel().get(idHex);
+  if (current === undefined) return;
+  // The composer's seed under the epoch it serves, and only once the channel
+  // reached that epoch (the reseal files the next epoch's seed itself).
+  const epoch = keys.seedEpoch ?? current;
+  if (epoch > current) return;
   keepPublisherSeed(idHex, epoch, keys.seed);
   await filePublicSeed(identity, idHex, epoch, keys.seed);
 }
@@ -1172,6 +1257,43 @@ export async function ensurePublicSeed(identity: WasmIdentity, idHex: string): P
 export function noteChannelRotated(idHex: string, epoch: number, seed: Uint8Array): void {
   channelsActions.setEpoch(idHex, epoch);
   keepPublisherSeed(idHex, epoch, seed);
+}
+
+/**
+ * A PublisherGroup commit of this device finished (an approve, a removal, a
+ * rotation): its steps, the reseal included, landed the channel at
+ * `newEpoch` with `newSeed`. The seed being replaced stays filed under the
+ * epoch it served (`newEpoch - 1`), the composer takes the new seed (the
+ * signing seed kept), and the new epoch is the channel's. Before this the
+ * owner's approve left the composer on the outgoing seed, so its next posts
+ * went out under the new epoch's number sealed with the old epoch's seed,
+ * which nobody else could open.
+ */
+export function notePublisherCommitLanded(idHex: string, newEpoch: number, newSeed: Uint8Array): void {
+  notePublisherSeedAt(idHex, newEpoch, newSeed);
+  channelsActions.setEpoch(idHex, newEpoch);
+}
+
+/**
+ * The composer's seed moves to `seed`, which serves channel epoch `epoch`
+ * (the PublisherGroup epoch it was read at). The seed it replaces stays
+ * filed under the epoch it served, and the new one is filed under its own.
+ * The channel's current epoch is left alone: on a co-publisher the owner's
+ * reseal may not have moved it yet, and `publishChannelPost` keeps sealing
+ * under the committed epoch until it does (`composerSeedFor`). Idempotent.
+ */
+export function notePublisherSeedAt(idHex: string, epoch: number, seed: Uint8Array): void {
+  const prev = channelsState.keysByChannel().get(idHex);
+  const kept = outgoingPublisherSeed(prev?.seed, prev?.seedEpoch ?? epoch - 1, seed, (e) => channelsActions.currentSeed(idHex, e) !== undefined);
+  if (kept !== null) channelsActions.setSubscribedSeedForEpoch(idHex, kept.epoch, kept.seed);
+  if (prev !== undefined && (prev.seedEpoch !== epoch || !sameSeed(prev.seed, seed))) {
+    channelsActions.setKeys(idHex, { seed, signingKeySeed: prev.signingKeySeed, seedEpoch: epoch });
+  }
+  keepPublisherSeed(idHex, epoch, seed);
+}
+
+function sameSeed(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** Re-exported for screens that must tell a wasm type apart. */

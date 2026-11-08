@@ -18,6 +18,7 @@ import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
+import { channelHandleOf, channelRoleOf } from "../channels/channel-access";
 import { channelRowModel, channelRowPreview } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { createChannelRowFeed } from "../feed/channel-unread";
@@ -289,13 +290,17 @@ export function createConversationRows() {
       const heldMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
       const lastPostMs =
         heldMs === null ? (readable?.serverTsMs ?? null) : Math.max(heldMs, readable?.serverTsMs ?? 0);
+      // The @name from the channel's own record when this device read one
+      // (a publisher that joined by a link holds no local one), else the
+      // name it was found under.
+      const handle = channelHandleOf(c.id) ?? c.localHandle;
       const model = channelRowModel(
         {
           id: c.id,
           sharedName: meta.get(c.id)?.name,
           localName: c.localName,
-          localHandle: c.localHandle,
-          isOwner: false,
+          localHandle: handle,
+          role: channelRoleOf(c.id) ?? "subscriber",
           subscriberCount: null,
           lastPostMs,
         },
@@ -312,7 +317,7 @@ export function createConversationRows() {
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
-        ...(c.localHandle !== undefined && c.localHandle.length > 0 ? { handle: c.localHandle } : {}),
+        ...(handle !== undefined && handle.length > 0 ? { handle } : {}),
         unread: channelUnread()(c.id),
         pinned: false,
         muted: false,

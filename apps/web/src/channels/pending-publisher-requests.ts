@@ -32,7 +32,12 @@ export interface PendingPublisherRequest {
   /** What the link said, for the channel row once joined. */
   readonly name: string;
   readonly description: string;
+  /** When the request was last sent: the first `Accept`, or the last
+   *  `Ask again` that went out (UX 15.2.2: the 7 days start from it). */
   readonly requestedAtMs: number;
+  /** `Ask again` found the link no longer works (UX 15.2.2). The record
+   *  stays, so an approval of the earlier request still lands. */
+  readonly linkDead?: boolean;
 }
 
 const [version, setVersion] = createSignal(0);
@@ -87,6 +92,17 @@ function save(accountIdB64: string, list: readonly PendingPublisherRequest[]): v
 export function recordPendingPublisherRequest(accountIdB64: string, record: PendingPublisherRequest): void {
   const rest = loadPendingPublisherRequests(accountIdB64).filter((r) => r.channelIdHex !== record.channelIdHex);
   save(accountIdB64, [...rest, record]);
+}
+
+/** UX 15.2.2 — `Ask again` found the link dead: the record stays (a late
+ *  approval still lands) and the card keeps the invalid-link line. */
+export function markPendingPublisherLinkDead(accountIdB64: string, channelIdHex: string): void {
+  const list = loadPendingPublisherRequests(accountIdB64);
+  if (!list.some((r) => r.channelIdHex === channelIdHex && r.linkDead !== true)) return;
+  save(
+    accountIdB64,
+    list.map((r) => (r.channelIdHex === channelIdHex ? { ...r, linkDead: true } : r)),
+  );
 }
 
 /** Drop the request for a channel (joined, or the channel is gone). */

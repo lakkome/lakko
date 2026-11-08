@@ -78,10 +78,19 @@ public class ChannelPostSync(
         val out = ArrayList<Readable>()
         val own = channels.keysByChannel.value
         val seeds = channels.subscribedSeedsByChannel.value
+        val epochs = channels.epochByChannel.value
         for (c in channels.channels.value) {
             val keys = own[c.id]
             if (keys != null) {
-                out += Readable(c.id, null, keys.seed, Long.MAX_VALUE)
+                // ADR-0087 section 15 — the composer's seed opens only the
+                // epoch it serves; the epochs before it from the seeds kept.
+                val served = keys.seedEpoch ?: epochs[c.id]
+                if (served == null) {
+                    out += Readable(c.id, null, keys.seed, Long.MAX_VALUE)
+                } else {
+                    val map = (seeds[c.id] ?: emptyMap()) + (served to keys.seed)
+                    out += Readable(c.id, map, null, map.keys.maxOf { it.toLong() })
+                }
                 continue
             }
             val map = seeds[c.id]

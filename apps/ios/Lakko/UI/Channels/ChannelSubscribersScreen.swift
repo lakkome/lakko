@@ -166,14 +166,16 @@ struct ChannelSubscribersScreen: View {
     }
 
     /// Section 7.3 — remove a subscriber of a private channel; a rotation
-    /// follows at once.
+    /// follows at once on the owner's device (a publisher asks it to).
     private func remove(_ row: ChannelsClient.SubscriberRow) async {
         guard let identity = try? Identity.fromSeed(seed: accountIdentitySeed) else { return }
         do {
             try await client.removeSubscriber(channelIdHex: channelId, pubkeyHex: row.pubkeyHex, accountIdentity: identity)
             rows.removeAll { $0.pubkeyHex == row.pubkeyHex }
             if let count { state.setSubscriberCount(channelId: channelId, count: max(0, count - 1)) }
-            try? await ChannelPublisherLoops.shared.rotateNow(
+            // Only the owner rotates; a publisher's removal asks the owner's
+            // device to (ADR-0087 section 15, the rotate request).
+            await ChannelPublisherLoops.shared.rotateAfterSubscriberRemoval(
                 channelId: channelId, channels: state, client: client, seed: accountIdentitySeed)
         } catch {
             NSLog("[channels] a subscriber was not removed")

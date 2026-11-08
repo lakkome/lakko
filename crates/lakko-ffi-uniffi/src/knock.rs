@@ -17,10 +17,21 @@ use lakko_contacts::admission_seed::{
     decode_admission_seed as rust_decode_admission_seed, AdmissionSeedError,
     ADMISSION_SEED_ENVELOPE_LEN,
 };
+use lakko_contacts::channel_epoch_seeds::{
+    compose_channel_epoch_seeds as rust_compose_channel_epoch_seeds,
+    decode_channel_epoch_seeds as rust_decode_channel_epoch_seeds, ChannelEpochSeed,
+    ChannelEpochSeedsError, CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN,
+    CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN, CHANNEL_EPOCH_SEEDS_MAX,
+};
 use lakko_contacts::channel_read_key::{
     compose_channel_read_key as rust_compose_channel_read_key,
     decode_channel_read_key as rust_decode_channel_read_key, ChannelReadKeyError,
     CHANNEL_READ_KEY_ENVELOPE_LEN,
+};
+use lakko_contacts::channel_rotate_request::{
+    compose_channel_rotate_request as rust_compose_channel_rotate_request,
+    decode_channel_rotate_request as rust_decode_channel_rotate_request, ChannelRotateRequestError,
+    CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN,
 };
 use lakko_contacts::knock::{
     is_knock_row_len as rust_is_knock_row_len, knock_public_key as rust_knock_public_key,
@@ -483,10 +494,234 @@ pub fn channel_read_key_envelope_len() -> u32 {
     len_u32(CHANNEL_READ_KEY_ENVELOPE_LEN)
 }
 
+// ============================================================================
+// Earlier channel seeds (channel owner -> new publisher, ADR-0087 section 7
+// as amended 2026-11-08)
+// ============================================================================
+
+/// One channel epoch's content-key seed.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiChannelEpochSeed {
+    /// The channel epoch id the seed serves.
+    pub epoch: u32,
+    /// The 32-byte content-key seed of that epoch. Secret.
+    pub seed: Vec<u8>,
+}
+
+impl core::fmt::Debug for FfiChannelEpochSeed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FfiChannelEpochSeed")
+            .field("epoch", &self.epoch)
+            .field("seed", &"<redacted>")
+            .finish()
+    }
+}
+
+/// A decoded epoch-seeds envelope; the seeds are still sealed.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiChannelEpochSeedsEnvelope {
+    /// The 16-byte channel id.
+    pub channel_id: Vec<u8>,
+    /// The addressee's 32-byte account key.
+    pub member_account_key: Vec<u8>,
+    /// How many seeds the envelope carries, 1 to `channelEpochSeedsMax()`.
+    pub count: u32,
+}
+
+fn channel_epoch_seeds_error(e: ChannelEpochSeedsError) -> FfiError {
+    FfiError::Contacts(format!("channelEpochSeeds.{}: {e}", e.code()))
+}
+
+/// Compose an epoch-seeds envelope for one new publisher, sealed to that
+/// publisher's account X25519 key; send it with
+/// `PublisherGroup.createApplicationMessage` beside the read key. `seeds`
+/// may come in any order; 1 to `channelEpochSeedsMax()` of them, no epoch
+/// twice.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `channelEpochSeeds.<code>` first (`badCount`,
+/// `duplicateEpoch`, `badLength` for a seed or channel id of the wrong
+/// length), or a wrong key length.
+#[uniffi::export]
+pub fn compose_channel_epoch_seeds_envelope(
+    channel_id: Vec<u8>,
+    member_account_key: Vec<u8>,
+    member_x25519_public_key: Vec<u8>,
+    seeds: Vec<FfiChannelEpochSeed>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel = <[u8; 16]>::try_from(channel_id.as_slice()).map_err(|_| {
+        FfiError::Contacts("channelEpochSeeds.badLength: channel id must be 16 bytes".to_string())
+    })?;
+    let seeds = seeds
+        .iter()
+        .map(|s| {
+            <[u8; 32]>::try_from(s.seed.as_slice())
+                .map(|seed| ChannelEpochSeed {
+                    epoch: s.epoch,
+                    seed,
+                })
+                .map_err(|_| {
+                    FfiError::Contacts(
+                        "channelEpochSeeds.badLength: a seed must be 32 bytes".to_string(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    rust_compose_channel_epoch_seeds(
+        &channel,
+        &key32("member account key", &member_account_key)?,
+        &x25519("member X25519 key", &member_x25519_public_key)?,
+        &seeds,
+    )
+    .map_err(channel_epoch_seeds_error)
+}
+
+/// Strictly decode an epoch-seeds envelope.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `channelEpochSeeds.<code>` first.
+#[uniffi::export]
+pub fn decode_channel_epoch_seeds_envelope(
+    plaintext: Vec<u8>,
+) -> Result<FfiChannelEpochSeedsEnvelope, FfiError> {
+    let env = rust_decode_channel_epoch_seeds(&plaintext).map_err(channel_epoch_seeds_error)?;
+    Ok(FfiChannelEpochSeedsEnvelope {
+        channel_id: env.channel_id.to_vec(),
+        member_account_key: env.member_account_key.to_vec(),
+        count: u32::from(env.count),
+    })
+}
+
+/// Open an epoch-seeds envelope with the ACCOUNT identity it is addressed
+/// to, returning the seeds in ascending epoch order. The caller also checks
+/// the message arrived on this channel's PublisherGroup and the MLS sender
+/// resolved at receipt to the channel's owner, then adds only the seeds of
+/// epochs it holds none of.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] when malformed, addressed to another account
+/// (`channelEpochSeeds.otherAccount`), or it does not open.
+#[uniffi::export]
+pub fn open_channel_epoch_seeds_envelope(
+    plaintext: Vec<u8>,
+    account_identity: &Identity,
+) -> Result<Vec<FfiChannelEpochSeed>, FfiError> {
+    let env = rust_decode_channel_epoch_seeds(&plaintext).map_err(channel_epoch_seeds_error)?;
+    let own = key32(
+        "own account key",
+        account_identity.inner.signature_public_key(),
+    )?;
+    if !env.is_addressed_to(&own) {
+        return Err(FfiError::Contacts(
+            "channelEpochSeeds.otherAccount: addressed to another account".to_string(),
+        ));
+    }
+    let secret = X25519SecretKey::from_bytes(account_identity.inner.x25519_secret_bytes());
+    let seeds = env.open(&secret).map_err(channel_epoch_seeds_error)?;
+    Ok(seeds
+        .iter()
+        .map(|s| FfiChannelEpochSeed {
+            epoch: s.epoch,
+            seed: s.seed.to_vec(),
+        })
+        .collect())
+}
+
+/// Most seeds one epoch-seeds envelope carries (64).
+#[uniffi::export]
+#[must_use]
+pub fn channel_epoch_seeds_max() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_MAX)
+}
+
+/// Length of an epoch-seeds envelope carrying one seed.
+#[uniffi::export]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_min_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN)
+}
+
+/// Length of an epoch-seeds envelope carrying the most seeds.
+#[uniffi::export]
+#[must_use]
+pub fn channel_epoch_seeds_envelope_max_len() -> u32 {
+    len_u32(CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN)
+}
+
+// ============================================================================
+// A publisher asks the owner to rotate (ADR-0087 section 15 as amended
+// 2026-11-08)
+// ============================================================================
+
+fn channel_rotate_request_error(e: ChannelRotateRequestError) -> FfiError {
+    FfiError::Contacts(format!("channelRotateRequest.{}: {e}", e.code()))
+}
+
+/// Compose the request a publisher sends on the channel's PublisherGroup
+/// with `PublisherGroup.createApplicationMessage` after removing a
+/// subscriber: the owner's device rotates at its next publisher pass.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] `channelRotateRequest.badLength` when the channel
+/// id is not 16 bytes.
+#[uniffi::export]
+pub fn compose_channel_rotate_request_envelope(channel_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let channel = <[u8; 16]>::try_from(channel_id.as_slice()).map_err(|_| {
+        FfiError::Contacts(
+            "channelRotateRequest.badLength: channel id must be 16 bytes".to_string(),
+        )
+    })?;
+    Ok(rust_compose_channel_rotate_request(&channel))
+}
+
+/// Strictly decode a rotate request, returning the 16-byte channel id. Only
+/// the channel's owner acts on it, and only when it came on that channel's
+/// PublisherGroup and the MLS sender resolved at receipt to a current
+/// publisher.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with `channelRotateRequest.<code>` first.
+#[uniffi::export]
+pub fn decode_channel_rotate_request_envelope(plaintext: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    rust_decode_channel_rotate_request(&plaintext)
+        .map(|c| c.to_vec())
+        .map_err(channel_rotate_request_error)
+}
+
+/// The one well-formed rotate-request length (49).
+#[uniffi::export]
+#[must_use]
+pub fn channel_rotate_request_envelope_len() -> u32 {
+    len_u32(CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scoped_discovery::{derive_reach_grant, FfiReachClass};
+
+    #[test]
+    fn a_channel_rotate_request_round_trips() {
+        let wire = compose_channel_rotate_request_envelope(vec![0x0C; 16]).unwrap();
+        assert_eq!(wire.len(), channel_rotate_request_envelope_len() as usize);
+        assert_eq!(channel_rotate_request_envelope_len(), 49);
+        assert_eq!(
+            decode_channel_rotate_request_envelope(wire.clone()).unwrap(),
+            vec![0x0C; 16]
+        );
+        assert!(compose_channel_rotate_request_envelope(vec![0; 15]).is_err());
+        let d = crate::contacts::dispatch_incoming_envelope(wire).unwrap();
+        assert_eq!(
+            d.kind,
+            crate::contacts::FfiIncomingEnvelopeKind::ChannelRotateRequest
+        );
+        assert_eq!(d.payload, vec![0x0C; 16]);
+    }
 
     fn account() -> Identity {
         Identity::from_seed(vec![0x71; 64]).unwrap()
@@ -567,6 +802,50 @@ mod tests {
             seed
         );
     }
+    #[test]
+    fn channel_epoch_seeds_reach_only_their_publisher_in_order() {
+        let member = account();
+        let other = Identity::from_seed(vec![0x72; 64]).unwrap();
+        let seeds = vec![
+            FfiChannelEpochSeed {
+                epoch: 4,
+                seed: vec![4; 32],
+            },
+            FfiChannelEpochSeed {
+                epoch: 0,
+                seed: vec![0; 32],
+            },
+        ];
+        let wire = compose_channel_epoch_seeds_envelope(
+            vec![0x0C; 16],
+            member.signature_public_key(),
+            member.x25519_public_key(),
+            seeds,
+        )
+        .unwrap();
+        let len = u32::try_from(wire.len()).unwrap();
+        assert!(len > channel_epoch_seeds_envelope_min_len());
+        assert!(len <= channel_epoch_seeds_envelope_max_len());
+        let env = decode_channel_epoch_seeds_envelope(wire.clone()).unwrap();
+        assert_eq!(env.count, 2);
+        assert_eq!(env.channel_id, vec![0x0C; 16]);
+        let opened = open_channel_epoch_seeds_envelope(wire.clone(), &member).unwrap();
+        assert_eq!(
+            opened.iter().map(|s| s.epoch).collect::<Vec<_>>(),
+            vec![0, 4]
+        );
+        assert_eq!(opened[1].seed, vec![4; 32]);
+        assert!(open_channel_epoch_seeds_envelope(wire, &other).is_err());
+        assert_eq!(channel_epoch_seeds_max(), 64);
+        assert!(compose_channel_epoch_seeds_envelope(
+            vec![0x0C; 16],
+            member.signature_public_key(),
+            member.x25519_public_key(),
+            Vec::new(),
+        )
+        .is_err());
+    }
+
     #[test]
     fn a_channel_read_key_reaches_only_its_co_publisher() {
         let member = account();

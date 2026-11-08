@@ -387,6 +387,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                     // step-down ride PublisherGroup journals; never shown.
                     || isChannelReadKeyEnvelope(plaintext: bytes)
                     || isPublisherStepDownEnvelope(plaintext: bytes)
+                    // A new publisher's earlier seeds and a co-publisher's
+                    // rotate request ride PublisherGroup journals too.
+                    || isChannelEpochSeedsEnvelope(plaintext: bytes)
+                    || isChannelRotateRequestEnvelope(plaintext: bytes)
             },
             // `docs/ux/who-can-find-me.md` 6.4 — a contact request inside the
             // group: a yes / no from the slim FFI, never opened here.

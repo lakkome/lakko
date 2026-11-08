@@ -325,8 +325,9 @@ private fun isServiceEnvelopeOtherThanCall(
     // previewed here.
     if (me.lakko.app.devices.looksLikeKeyRotationEnvelope(payload)) return true
 
-    // Kind 12 — ADR-0087 section 7, a co-publisher's step-down and the
-    // owner's sealed channel read key. Both ride a PublisherGroup journal,
+    // Kind 12 — ADR-0087 section 7, a co-publisher's step-down, the
+    // owner's sealed channel read key and earlier channel seeds, and a
+    // co-publisher's rotate request. All ride a PublisherGroup journal,
     // which no chat path reads, but the prefix peek keeps them off every
     // preview should one ever reach a chat journal. Suppressed only (C-59).
     if (looksLikePublisherChannelEnvelope(payload)) return true
@@ -336,11 +337,17 @@ private fun isServiceEnvelopeOtherThanCall(
 
 private val PUBLISHER_STEP_DOWN_PREFIX = "lakko/publisher-step-down/v1\u0000".toByteArray(Charsets.US_ASCII)
 private val CHANNEL_READ_KEY_PREFIX = "lakko/channel-read-key/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_EPOCH_SEEDS_PREFIX = "lakko/channel-epoch-seeds/v1\u0000".toByteArray(Charsets.US_ASCII)
+private val CHANNEL_ROTATE_REQUEST_PREFIX = "lakko/channel-rotate-request/v1\u0000".toByteArray(Charsets.US_ASCII)
 
-/** `true` for the ADR-0087 step-down and channel read-key envelopes: a
- *  NUL-terminated domain peek, no decode. */
+/** `true` for the ADR-0087 step-down, channel read-key, earlier channel
+ *  seeds and rotate-request envelopes: a NUL-terminated domain peek, no
+ *  decode. */
 internal fun looksLikePublisherChannelEnvelope(payload: ByteArray): Boolean =
-    startsWith(payload, PUBLISHER_STEP_DOWN_PREFIX) || startsWith(payload, CHANNEL_READ_KEY_PREFIX)
+    startsWith(payload, PUBLISHER_STEP_DOWN_PREFIX) ||
+        startsWith(payload, CHANNEL_READ_KEY_PREFIX) ||
+        startsWith(payload, CHANNEL_EPOCH_SEEDS_PREFIX) ||
+        startsWith(payload, CHANNEL_ROTATE_REQUEST_PREFIX)
 
 private fun startsWith(payload: ByteArray, prefix: ByteArray): Boolean {
     if (payload.size < prefix.size) return false

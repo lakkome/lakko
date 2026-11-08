@@ -1767,7 +1767,7 @@
     },
     "channels.join.waiting": {
       "text": "Waiting for the channel owner to approve...",
-      "comment": "The co-publisher request is sent and waits for the owner's approval."
+      "comment": "A request to be a publisher of a channel is being sent, or was sent less than 7 days ago and waits for the owner's device. Never say it was refused."
     },
     "channels.keys_reset.notice": {
       "text": "You can no longer post to this channel. Your account keys were reset, and the channel's posts were signed with the old ones. Subscribers are not told; create a new channel and share it with them.",
@@ -8662,11 +8662,11 @@
     },
     "requests_sent.ask_again": {
       "text": "Ask again",
-      "comment": "Button on a request to join with no answer after 7 days."
+      "comment": "Button on a request with no answer after 7 days: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
     },
     "requests_sent.no_answer": {
       "text": "No answer yet.",
-      "comment": "Line of a request to join sent 7 days ago or more. Never say it was refused."
+      "comment": "Line of a request sent 7 days ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
     },
     "requests_sent.title": {
       "text": "Requests sent",
