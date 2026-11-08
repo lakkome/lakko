@@ -166,6 +166,8 @@ final class SfuCallUi {
                     speaking.start()
                 case .failed, .closed:
                     speaking.stop()
+                    // The call's chat ends with the call for this device.
+                    ui.chat.callEnded()
                     ui.clearRemoteVideoCopies()
                     screenTracker.detachAll(ui: ui)
                     ui.setScreenShare(nil)
@@ -371,6 +373,10 @@ final class SfuCallUi {
                     tile = name ?? ""
                 }
                 if let tile { ui.setParticipantName(Self.participantId(forPeer: peerId), tile) }
+            },
+            onCallChat: { peerId, seq, text in
+                // A verified message in the call's chat (section 4.1.4).
+                ui.chat.receive(peerId: peerId, seq: seq, text: text)
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)
@@ -389,6 +395,10 @@ final class SfuCallUi {
                 ui.setParticipantName(
                     "local", Self.ownTileName(callName: name, profileName: localDisplayName))
             })
+        // The call's chat (`docs/ux/calls.md` section 4.1.4).
+        ui.chat.setActions(
+            send: { [weak session] text in session?.sendCallChat(text) ?? (seq: 0, sent: false) },
+            resend: { [weak session] seq in session?.resendCallChat(seq: seq) ?? false })
         speaking.source = { [weak session] in await session?.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak session] tile, peerId, quality in

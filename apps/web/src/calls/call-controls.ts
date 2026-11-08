@@ -10,13 +10,16 @@
  * | Call | The row, left to right |
  * |---|---|
  * | One-to-one, voice or video | Microphone · Camera · Settings · End |
- * | Group | Microphone · Camera · Participants · Settings · End |
+ * | Group | Microphone · Camera · Participants · Chat · Settings · End |
  *
  * A browser that can send a screen share gets `Share screen` after Camera in
  * a connected call (`docs/ux/screen-share.md` section 1); everywhere else the
  * circle is absent, not disabled.
  *
- * Nothing else. There is no Speaker control, no chat, no More menu. Which
+ * Nothing else. There is no Speaker control and no More menu. The group
+ * row's `Chat` (section 4.1.4, 2026-11-07) opens the call's own chat; it
+ * replaced nothing, the old Chat circle that sent nothing having gone in
+ * 2026-10. Which
  * microphone, camera and speaker the call uses is chosen in Settings, a sheet
  * of the app's own (`call-settings.ts`); the row itself stays short enough to
  * fit a phone in one line.
@@ -56,9 +59,17 @@
 
 import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
 import { t } from "../l10n";
+import { chatControlName, unreadBadge } from "./call-chat-panel-state";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
-export type CallControlId = "mic" | "camera" | "screen" | "participants" | "settings" | "end";
+export type CallControlId =
+  | "mic"
+  | "camera"
+  | "screen"
+  | "participants"
+  | "chat"
+  | "settings"
+  | "end";
 
 /**
  * How a control is painted (§4.1.1).
@@ -77,6 +88,7 @@ export type CallControlIcon =
   | "videoOff"
   | "monitor"
   | "groups"
+  | "chat"
   | "settings"
   | "phoneEnd";
 
@@ -96,6 +108,9 @@ export interface CallControlSpec {
   readonly pressed: boolean | null;
   /** 40 percent opacity and inert — never hidden (§4.1.1). */
   readonly disabled: boolean;
+  /** A count drawn on the circle (`Chat`'s unread messages, `1`..`9`, `9+`);
+   *  absent for none. */
+  readonly badge?: string;
 }
 
 /** What {@link callControls} needs to know. */
@@ -134,6 +149,12 @@ export interface CallControlsInput {
    * picker is open or the share is being set up.
    */
   readonly screenShare?: { readonly sharing: boolean; readonly busy: boolean } | undefined;
+  /**
+   * The call's chat (section 4.1.4): absent on a call that has none (a
+   * one-to-one call). `open` is the panel; `unread` the messages from others
+   * that arrived while it was closed.
+   */
+  readonly chat?: { readonly open: boolean; readonly unread: number } | undefined;
 }
 
 /**
@@ -207,6 +228,25 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       // a pressed state would be a false claim.
       pressed: canInvite ? null : input.participantsOpen === true,
       disabled: dead || input.inviteBusy === true,
+    });
+  }
+
+  // The call's chat (section 4.1.4): after Participants, from the first
+  // second, alone in the call too.
+  const chat = input.chat;
+  if (input.surface === "group" && chat !== undefined) {
+    const spoken = chatControlName(chat.open, chat.unread);
+    const badge = chat.open ? null : unreadBadge(chat.unread);
+    out.push({
+      id: "chat",
+      label: t("call.control.chat"),
+      accessibleName:
+        spoken.count === undefined ? t(spoken.key) : t(spoken.key, { count: spoken.count }),
+      icon: "chat",
+      tone: "outline",
+      pressed: chat.open,
+      disabled: dead,
+      ...(badge !== null ? { badge } : {}),
     });
   }
 

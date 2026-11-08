@@ -343,6 +343,10 @@ final class MultiJoinerCall {
                 guard let self else { return }
                 self.names.setCallName(peerId, name)
                 self.names.relabel(self.ui)
+            },
+            onCallChat: { [weak self] peerId, seq, text in
+                // A verified message in the call's chat (section 4.1.4).
+                self?.ui.chat.receive(peerId: peerId, seq: seq, text: text)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -365,6 +369,11 @@ final class MultiJoinerCall {
                 self.session.setOwnCallName(name)
                 self.ui.setParticipantName("local", self.localTileName())
             })
+        // The call's chat (`docs/ux/calls.md` section 4.1.4), for the
+        // owner, the members and guests alike.
+        ui.chat.setActions(
+            send: { [weak self] text in self?.session.sendCallChat(text) ?? (seq: 0, sent: false) },
+            resend: { [weak self] seq in self?.session.resendCallChat(seq: seq) ?? false })
         self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in
@@ -651,6 +660,8 @@ final class MultiJoinerCall {
             }
         case .failed, .closed:
             speaking.stop()
+            // The call's chat ends with the call for this device.
+            ui.chat.callEnded()
             ui.clearRemoteVideoCopies()
             screenTracks.detachAll(ui: ui)
             ui.setScreenShare(nil)

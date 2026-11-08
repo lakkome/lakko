@@ -110,3 +110,42 @@ describe("call names through the real core (docs/ux/calls.md 4.1)", () => {
     expect(wasmNs.callNameIsNewer(1n, 1n)).toBe(false);
   });
 });
+
+describe("call chat through the real core (docs/ux/calls.md 4.1.4)", () => {
+  it("seals, classifies and verifies a message only against the announced leaf", () => {
+    const alice = Identity.fromSeed(new Uint8Array(32).fill(0xa1));
+    const bob = Identity.fromSeed(new Uint8Array(32).fill(0xb2));
+    const group = new Group(alice, GroupKind.Group);
+    group.addMember(alice, bob.createKeyPackage());
+    const asBob = groupPeerAnnouncer(wasmNs, bob, CALL, () => group);
+    const verifier = groupPeerAnnouncer(wasmNs, alice, CALL, () => group);
+
+    const wire = asBob.composeCallChat?.("bobpeer", 1n, "hello\nthere https://lakko.me") ?? null;
+    expect(wire).not.toBeNull();
+    const relay = new CallRelay(wasmNs);
+    relay.setSeed(new Uint8Array(32).fill(5));
+    expect(relay.open(relay.seal(wire!)!)).toEqual({ kind: "call-chat", bytes: wire });
+
+    expect(verifier.verifyCallChat?.("bobpeer", bob.signaturePublicKey, wire!)).toEqual({
+      seq: 1n,
+      text: "hello\nthere https://lakko.me",
+    });
+    expect(verifier.verifyCallChat?.("alicepeer", bob.signaturePublicKey, wire!)).toBeNull();
+    expect(verifier.verifyCallChat?.("bobpeer", alice.signaturePublicKey, wire!)).toBeNull();
+    // The core refuses what the composer must never send.
+    expect(asBob.composeCallChat?.("bobpeer", 2n, "   ")).toBeNull();
+    expect(asBob.composeCallChat?.("bobpeer", 0n, "zero")).toBeNull();
+  });
+
+  it("states the text rule the composer uses", () => {
+    const max = wasmNs.callChatMaxTextBytes();
+    expect(max).toBe(800);
+    expect(wasmNs.checkCallChatText("hi")).toBeUndefined();
+    expect(wasmNs.checkCallChatText("")).toBe("empty");
+    expect(wasmNs.checkCallChatText(" \n\t")).toBe("blank");
+    expect(wasmNs.checkCallChatText("a\u0007b")).toBe("controlCharacter");
+    expect(wasmNs.checkCallChatText("x".repeat(max + 1))).toBe("tooLong");
+    // Cut on a character boundary: 401 two-byte letters keep 400.
+    expect(wasmNs.clampCallChatText("я".repeat(401))).toBe("я".repeat(400));
+  });
+});

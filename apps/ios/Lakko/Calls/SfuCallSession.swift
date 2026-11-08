@@ -227,6 +227,10 @@ final class SfuCallSession {
         /// announcement verified with, newest per peer. `nil` when the peer
         /// went back to its default naming.
         var onRemoteCallName: ((_ peerId: String, _ name: String?) -> Void)? = nil
+        /// A message in the call's chat (`docs/ux/calls.md` section 4.1.4,
+        /// ``CallChatChannel``) verified against the leaf key its sender's
+        /// announcement verified with; each `(peer, seq)` once.
+        var onCallChat: ((_ peerId: String, _ seq: UInt64, _ text: String) -> Void)? = nil
     }
 
     private let config: Config
@@ -336,6 +340,28 @@ final class SfuCallSession {
         },
         selfPeerId: { [weak self] in self?.selfPeerId },
         onName: { [weak self] peerId, name in self?.callbacks.onRemoteCallName?(peerId, name) }
+    ))
+    /// The call's chat (``CallChatChannel``): this device's sequence numbers,
+    /// messages held for a peer not yet named, what was already shown. Unlike
+    /// the call name, a message is never re-sent on a re-announcement.
+    private lazy var callChats = CallChatChannel(deps: CallChatChannel.Deps(
+        compose: { [weak self] selfPeerId, seq, text in
+            self?.config.peerAnnouncer?.composeCallChat(selfPeerId, seq, text)
+        },
+        verify: { [weak self] from, signerKey, bytes in
+            self?.config.peerAnnouncer?.verifyCallChat(from, signerKey, bytes)
+        },
+        sendSealed: { [weak self] plaintext in
+            guard let self, self.isLive, self.signaling != nil,
+                  let sealed = self.relay.seal(plaintext)
+            else { return false }
+            self.sendSignalRelayToCall(payload: sealed)
+            return true
+        },
+        selfPeerId: { [weak self] in self?.selfPeerId },
+        onMessage: { [weak self] peerId, message in
+            self?.callbacks.onCallChat?(peerId, message.seq, message.text)
+        }
     ))
 
     // ---- What this device shows of each person (ADR-0070 steps 5 and 6) ----
@@ -472,6 +498,18 @@ final class SfuCallSession {
     /// every announcement, so someone who joins later sees it too.
     func setOwnCallName(_ name: String) {
         callNames.setOwnName(name)
+    }
+
+    /// Send a message to the call's chat (`docs/ux/calls.md` section 4.1.4):
+    /// `text` has passed the call-chat rule. Returns its sequence number and
+    /// whether it went out (no socket, no relay key: not sent).
+    func sendCallChat(_ text: String) -> (seq: UInt64, sent: Bool) {
+        callChats.send(text)
+    }
+
+    /// `Send again` on the chat message numbered `seq`: the same signed bytes.
+    func resendCallChat(seq: UInt64) -> Bool {
+        callChats.resend(seq: seq)
     }
 
     private func startAnnouncing() {
@@ -794,6 +832,8 @@ final class SfuCallSession {
         announceTask?.cancel()
         announceTask = nil
         relay.dispose()
+        // The call's chat goes with the call.
+        callChats.clear()
         stopMediaLog()
         // Stop the camera first (fire-and-forget — `LocalCameraCapture`
         // also stops in its deinit, but the explicit stop releases the
@@ -1261,6 +1301,7 @@ final class SfuCallSession {
                     self.callbacks.onScreenShareChanged?(self.screenShares.current)
                 }
                 self.callNames.peerLeft(peerId)
+                self.callChats.peerLeft(peerId)
                 self.callbacks.onPeerLeft?(peerId)
             }
         }
@@ -1323,11 +1364,14 @@ final class SfuCallSession {
                     if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }
                     callbacks.onPeerIdentified?(from, identity)
                     callNames.peerIdentified(from, signerKey: identity.signatureKey)
+                    callChats.peerIdentified(from, signerKey: identity.signatureKey)
                 }
             case .screenShare(let state):
                 receiveScreenShare(from: from, state: state)
             case .callName(let name):
                 callNames.received(from: from, bytes: name)
+            case .callChat(let message):
+                callChats.received(from: from, bytes: message)
             case .unknown:
                 break
             }

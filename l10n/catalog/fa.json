@@ -373,16 +373,40 @@
       "text": "بستن گفتگو",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "هنوز پیامی نیست. پیام‌های اینجا با رمزگذاری سرتاسری محافظت می‌شوند.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} به تماس پیوست",
+    "call.chat.new_messages": {
+      "text": "پیام‌های جدید",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "یکی از شرکت‌کنندگان تماس را ترک کرد",
+    "call.chat.not_sent": {
+      "text": "ارسال نشد.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "با پایان تماس ناپدید می‌شوند.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "پیام‌های اینجا را فقط افراد حاضر در تماس می‌بینند.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "پیام به همه در تماس",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "ارسال",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "ارسال دوباره",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "پیام در تماس نمی‌تواند از این طولانی‌تر باشد.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "پنهان کردن گفتگو",
+      "text": "بستن گفتگو",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "نمایش گفتگو",
+      "text": "باز کردن گفتگو",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {گفتگو (# خوانده‌نشده)} other {گفتگو (# خوانده‌نشده)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {باز کردن گفتگو، # خوانده‌نشده} other {باز کردن گفتگو، # خوانده‌نشده}}",
       "status": "machine"
     },
     "call.control.end": {

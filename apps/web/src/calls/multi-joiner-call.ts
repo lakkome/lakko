@@ -76,6 +76,7 @@ import {
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import { groupPeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { callNameActions, rememberCallName, rememberedCallName } from "./call-name";
+import { callChatActions } from "./call-chat";
 import {
   CallPresence,
   electActingCommitterLeaf,
@@ -451,6 +452,12 @@ export class MultiJoinerCall {
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
         onRemoteScreenShareState: (peerId, state): void => this.share.onState(peerId, state),
+        onCallChatChanged: (messages): void => {
+          if (this.current()) callChatActions.setMessages(messages);
+        },
+        onCallChatIncoming: (message): void => {
+          if (this.current()) callChatActions.incoming(message);
+        },
         onRemoteCallName: (peerId, name): void => {
           if (name === null) this.peerCallNames.delete(peerId);
           else this.peerCallNames.set(peerId, name);
@@ -472,6 +479,15 @@ export class MultiJoinerCall {
     this.ownCallName = opts.initialCallName ?? rememberedCallName(callIdHex);
     rememberCallName(callIdHex, this.ownCallName);
     this.session.setOwnCallName(this.ownCallName);
+    // The call's chat (`docs/ux/calls.md` section 4.1.4): there from the
+    // first second, for the owner and for every joiner, guests included.
+    if (this.current()) {
+      callChatActions.reset();
+      callChatActions.setControl({
+        send: (text: string): void => this.session.sendCallChat(text),
+        sendAgain: (id: string): void => this.session.resendCallChat(id),
+      });
+    }
     if (this.current()) {
       callNameActions.setOwnName(this.ownCallName);
       callNameActions.setDefaultName(opts.profileName ?? "");
@@ -728,6 +744,7 @@ export class MultiJoinerCall {
     if (this.current()) screenShareActions.reset();
     if (this.current()) callNameActions.reset();
     this.session.hangUp();
+    if (this.current()) callChatActions.reset();
     this.setRemoteStreams(() => new Map());
     this.setRemoteLightStreams(() => new Map());
     this.setRemoteMiddleStreams(() => new Map());
@@ -824,6 +841,7 @@ export class MultiJoinerCall {
       case "closed":
         this.share.dispose();
         if (current) screenShareActions.reset();
+        if (current) callChatActions.reset();
         if (current) callActions.setPhase({ kind: "ended", endedAt: Date.now() });
         this.opts.onEnded?.();
         break;

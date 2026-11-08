@@ -373,16 +373,40 @@
       "text": "चैट बंद करें",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "अभी कोई मैसेज नहीं है। यहाँ के मैसेज एंड-टू-एंड एन्क्रिप्टेड हैं।",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} कॉल में शामिल हुए",
+    "call.chat.new_messages": {
+      "text": "नए संदेश",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "एक प्रतिभागी ने कॉल छोड़ दी",
+    "call.chat.not_sent": {
+      "text": "नहीं भेजा गया।",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "कॉल खत्म होने पर ये गायब हो जाते हैं।",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "यहाँ के संदेश केवल कॉल में मौजूद लोग देखते हैं।",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "कॉल में सभी को संदेश",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "भेजें",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "फिर से भेजें",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "कॉल में संदेश इससे लंबा नहीं हो सकता।",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "चैट छिपाएँ",
+      "text": "चैट बंद करें",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "चैट दिखाएँ",
+      "text": "चैट खोलें",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {चैट (# बिना पढ़ा)} other {चैट (# बिना पढ़े)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {चैट खोलें, # अपठित} other {चैट खोलें, # अपठित}}",
       "status": "machine"
     },
     "call.control.end": {

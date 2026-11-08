@@ -319,6 +319,31 @@ public final class CallUiState: ObservableObject {
     /// Applies a saved name to the live call; set by the call's adapter.
     private var callNameSave: ((String) -> Void)?
 
+    // MARK: - The call's chat (`docs/ux/calls.md` section 4.1.4)
+
+    /// The chat of a group or link call: its messages, panel, unread count
+    /// and preview. Observed on its own by the views that draw it;
+    /// ``CallChatModel/available`` is `false` until the call's adapter wires
+    /// the send, which a one-to-one call never does.
+    let chat = CallChatModel()
+    /// Whether the call carries a chat, and whether its panel is open:
+    /// mirrored from ``chat`` so the call screen re-lays its tiles and row on
+    /// these two alone, not on every message.
+    @Published private(set) var chatAvailable = false
+    @Published private(set) var chatPanelOpen = false
+    private var chatMirrors: [AnyCancellable] = []
+
+    public init() {
+        // The name over a bubble is the name the sender's tile shows now.
+        chat.tileName = { [weak self] peerId in
+            self?.participants.first(where: { $0.id == "peer-\(peerId)" })?.displayName
+        }
+        chatMirrors = [
+            chat.$available.removeDuplicates().sink { [weak self] in self?.chatAvailable = $0 },
+            chat.$panelOpen.removeDuplicates().sink { [weak self] in self?.chatPanelOpen = $0 },
+        ]
+    }
+
     /// The call's adapter: this call carries a name, starting at `ownName`,
     /// with `defaultName` shown when none is typed; `save` applies a new one.
     func setCallNameControl(
@@ -905,6 +930,8 @@ public final class CallUiState: ObservableObject {
         self.ownCallName = ""
         self.callNameDefault = ""
         self.callNameSave = nil
+        // A chat belongs to its call.
+        chat.reset()
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.

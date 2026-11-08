@@ -202,6 +202,10 @@ class SfuCallSession(
          *  went back to its default naming. Only names verified against the
          *  leaf key the peer's announcement named reach here. */
         val onRemoteCallName: (peerId: String, name: String?) -> Unit = { _, _ -> },
+        /** A message of the call's chat arrived (`CallChat.kt`,
+         *  `docs/ux/calls.md` section 4.1.4), verified against the leaf key
+         *  the peer's announcement named, once per `(peerId, seq)`. */
+        val onCallChat: (peerId: String, seq: ULong, text: String) -> Unit = { _, _, _ -> },
     )
 
     class SfuCallException(message: String) : Exception(message)
@@ -289,6 +293,40 @@ class SfuCallSession(
             onName = { peerId, name -> callbacks.onRemoteCallName(peerId, name) },
         ),
     )
+
+    /** The call's chat (`CallChat.kt`, section 4.1.4). Used on [scope]
+     *  only; cleared when the call ends for this device. */
+    private val callChat = CallChatChannel(
+        CallChatChannelDeps(
+            compose = { self, seq, text -> config.peerAnnouncer?.composeCallChat?.invoke(self, seq, text) },
+            verify = { from, key, bytes -> config.peerAnnouncer?.verifyCallChat?.invoke(from, key, bytes) },
+            sendSealed = { plaintext ->
+                val sealed = relay.seal(plaintext)
+                val sig = signaling
+                if (sealed != null && sig != null && !isOver()) {
+                    sig.sendSignalRelayToCall(sealed)
+                    true
+                } else {
+                    false
+                }
+            },
+            selfPeerId = { selfPeerId },
+            onMessage = { peerId, seq, text -> callbacks.onCallChat(peerId, seq, text) },
+            onRejected = { android.util.Log.w(MEDIA_LOG_TAG, CALL_CHAT_REJECTED_WARNING) },
+        ),
+    )
+
+    /** Send [text] (it passed the core's text rule) to everyone in the call;
+     *  [done] says on [scope] which number it got and whether it went. */
+    fun sendCallChat(text: String, done: (CallChatSendResult) -> Unit) {
+        scope.launch { done(callChat.send(text)) }
+    }
+
+    /** Send this device's message [seq] again, the same bytes; [done] says
+     *  on [scope] whether it went. */
+    fun resendCallChat(seq: ULong, done: (sent: Boolean) -> Unit) {
+        scope.launch { done(callChat.resend(seq)) }
+    }
 
     /**
      * This device's name for the call (`docs/ux/calls.md` section 4.1),
@@ -918,6 +956,8 @@ class SfuCallSession(
         peerSignerKeys.clear()
         pendingShareStates.clear()
         callNames.clear()
+        // The call's chat is gone when the call ends for this device.
+        callChat.clear()
         stopMediaCounters()
         // What was asked of the SFU and what it said go with the call.
         wantsSender.reset()
@@ -1632,6 +1672,9 @@ class SfuCallSession(
                     peerSignerKeys.remove(peerId)?.let { key -> screenShare?.participantLeft(key) }
                     // What it called itself goes with it too.
                     callNames.onPeerLeft(peerId)
+                    // What it wrote and was shown stays; what was held, never
+                    // verified, goes.
+                    callChat.onPeerLeft(peerId)
                     onRosterChanged(joined = false)
                 }
                 callbacks.onPeerLeft(peerId)
@@ -1668,10 +1711,13 @@ class SfuCallSession(
                                 pendingShareStates.remove(from)?.let { onScreenShareState(from, it) }
                                 // A name it sent before is read now.
                                 signerKey?.let { callNames.onPeerIdentified(from, it) }
+                                // What it wrote to the chat before is shown now.
+                                signerKey?.let { callChat.onPeerIdentified(from, it) }
                             }
                         }
                         is CallRelay.Opened.ScreenShare -> onScreenShareState(from, opened.state)
                         is CallRelay.Opened.CallName -> callNames.onReceived(from, opened.bytes)
+                        is CallRelay.Opened.CallChat -> callChat.onReceived(from, opened.bytes)
                         CallRelay.Opened.Unknown -> Unit
                         null -> callbacks.onSignalRelay(from, bytes)
                     }
@@ -1872,6 +1918,9 @@ class SfuCallSession(
 
         /** The log tag of the media-counter lines. */
         const val MEDIA_LOG_TAG = "SfuCallSession"
+
+        /** A chat message that did not verify: no text, no ids. */
+        const val CALL_CHAT_REJECTED_WARNING = "WARN call chat message dropped: verification failed"
     }
 }
 

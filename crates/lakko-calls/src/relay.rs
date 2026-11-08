@@ -16,7 +16,8 @@
 //! `peer id -> person` stays spoof-proof, and the SFU never sees it: the
 //! announcement, and every other relay payload the clients agree on (today
 //! the camera on/off media state, the ADR-0083 screen-share state and the
-//! name a participant gives themself for the call, [`crate::call_name`]), is
+//! name a participant gives themself for the call, [`crate::call_name`], and
+//! the messages of the call's own chat, [`crate::call_chat`]), is
 //! sealed under a key only members hold.
 //!
 //! # The relay key
@@ -271,6 +272,9 @@ pub enum RelayPayload {
     /// A participant's name for this call (the whole plaintext; verify it
     /// with [`crate::call_name::verify_call_name`]).
     CallName(Vec<u8>),
+    /// A message in the call's chat (the whole plaintext; verify it with
+    /// [`crate::call_chat::verify_call_chat`]).
+    CallChat(Vec<u8>),
     /// Anything else: dropped by the caller.
     Unknown,
 }
@@ -288,6 +292,9 @@ pub fn classify_relay_plaintext(plaintext: &[u8]) -> RelayPayload {
     }
     if plaintext.starts_with(crate::call_name::CALL_NAME_DOMAIN) {
         return RelayPayload::CallName(plaintext.to_vec());
+    }
+    if plaintext.starts_with(crate::call_chat::CALL_CHAT_DOMAIN) {
+        return RelayPayload::CallChat(plaintext.to_vec());
     }
     match lakko_contacts::media_state::try_unwrap_media_state(plaintext) {
         Ok(Some(state)) => RelayPayload::MediaState {

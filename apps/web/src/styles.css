@@ -4642,7 +4642,8 @@ button.lk-reactors-row:focus-visible {
    inside reads the same tokens as the rest of the app and no second palette
    exists. Values are the dark column of `:root` above. */
 .lk-call,
-.lk-incoming-call {
+.lk-incoming-call,
+.lk-call-chat {
   color-scheme: dark;
   --surface-bg: #0f1220;
   --surface-elevated: #171b2e;
@@ -6138,6 +6139,365 @@ button.lk-call-chip:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The chat of a group call (docs/ux/calls.md section 4.1.4). Under 900 px a
+   panel over the whole call screen; from 900 px a 360 px column at the end
+   side, and the call screen (tiles, status, control row) takes the width that
+   is left, so the grid reflows by its own rule. The panel is a sibling of
+   `.lk-call` and shares its dark token block. */
+.lk-call[data-chat="column"] {
+  inset-inline-end: 360px;
+}
+.lk-call-chat {
+  display: flex;
+  flex-direction: column;
+  z-index: 1001;
+  background: var(--surface-elevated);
+}
+.lk-call-chat[data-shape="column"] {
+  inset-inline-start: auto;
+  width: 360px;
+  z-index: 1000;
+  border-inline-start: 1px solid var(--surface-border);
+}
+.lk-call-chat[data-shape="sheet"] {
+  animation: lk-call-chat-up 180ms ease-out;
+}
+@keyframes lk-call-chat-up {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-call-chat[data-shape="sheet"] {
+    animation: none;
+  }
+}
+.lk-call-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top)) 12px 10px 16px;
+  border-bottom: 1px solid var(--surface-border);
+  flex: 0 0 auto;
+}
+.lk-call-chat[data-shape="column"] .lk-call-chat-head {
+  padding-top: 10px;
+}
+.lk-call-chat-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.lk-call-chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lk-call-chat-mute {
+  width: 40px;
+  height: 40px;
+}
+.lk-call-chat-close {
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--surface-fg);
+  cursor: pointer;
+}
+.lk-call-chat-close:hover {
+  background: var(--surface-hover);
+}
+/* The shared chevron points to the end side; down closes the sheet. */
+.lk-call-chat-close.down svg {
+  transform: rotate(90deg);
+}
+.lk-call-chat-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-call-chat-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.lk-call-chat-empty {
+  margin: auto;
+  max-width: 280px;
+  text-align: center;
+  color: var(--surface-muted);
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-call-chat-empty p {
+  margin: 0;
+}
+.lk-call-chat-note {
+  margin: 0 auto 12px;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  text-align: center;
+  color: var(--surface-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.lk-call-chat-messages {
+  list-style: none;
+  margin: auto 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lk-call-chat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.lk-call-chat-item.own {
+  align-items: flex-end;
+}
+.lk-call-chat-sender {
+  max-width: 65%;
+  margin: 8px 0 2px;
+  margin-inline-start: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--surface-muted);
+}
+.lk-call-chat-bubble {
+  max-width: 65%;
+  padding: 10px 14px 6px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  font-size: 15px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  column-gap: 8px;
+}
+.lk-call-chat-bubble:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-chat-item.own .lk-call-chat-bubble {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-call-chat-item.own .lk-text-link {
+  color: inherit;
+  text-decoration: underline;
+}
+.lk-call-chat-bubble.not-sent {
+  opacity: 0.6;
+}
+.lk-call-chat-text {
+  min-width: 0;
+}
+.lk-call-chat-time {
+  margin-inline-start: auto;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--surface-muted);
+}
+.lk-call-chat-item.own .lk-call-chat-time {
+  color: color-mix(in srgb, var(--accent-fg) 70%, transparent);
+}
+.lk-call-chat-failed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--danger);
+}
+.lk-call-chat-retry {
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.lk-call-chat-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  min-height: 32px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+}
+.lk-call-chat-composer {
+  flex: 0 0 auto;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+}
+.lk-call-chat-field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.lk-call-chat-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 20px;
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+  font: inherit;
+  font-size: 15px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+}
+.lk-call-chat-field::placeholder {
+  color: var(--surface-faint);
+}
+.lk-call-chat-field:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.lk-call-chat-send {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+.lk-call-chat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.lk-call-chat-too-long {
+  margin: 6px 4px 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+}
+.lk-call-chat-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+}
+.lk-call-chat-menu {
+  position: fixed;
+  bottom: auto;
+  transform: none;
+  min-width: 160px;
+  z-index: 4;
+}
+.lk-call-chat-menu.sheet {
+  left: 8px;
+  right: 8px;
+  top: auto;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  max-width: none;
+}
+.lk-call-chat-menu.sheet .lk-call-menu-item {
+  min-height: 52px;
+}
+/* The preview above the control bar while the chat is closed. */
+.lk-call-chat-preview {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--call-bar-bottom) + var(--call-bar-h) + 10px);
+  z-index: 8;
+  max-width: min(520px, calc(100% - 32px));
+  min-height: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--call-bar-border);
+  background: var(--call-bar-bg);
+  backdrop-filter: blur(18px);
+  color: var(--surface-fg);
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.lk-call-chat-preview-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+.lk-call-chat-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The unread count on the Chat circle: the design system's accent badge. */
+.lk-call-ctl[data-control="chat"] .lk-call-ctl-btn {
+  position: relative;
+}
+.lk-call-ctl-badge {
+  position: absolute;
+  top: -2px;
+  inset-inline-end: -4px;
+  min-width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+  pointer-events: none;
 }
 
 /* Phase banner and the ended overlay. */

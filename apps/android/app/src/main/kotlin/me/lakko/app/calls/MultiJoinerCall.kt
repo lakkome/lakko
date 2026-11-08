@@ -240,6 +240,10 @@ class MultiJoinerCall private constructor(
             participantIdOf = { "$PEER_PREFIX$it" },
         )
 
+    /** The call's chat (`docs/ux/calls.md` section 4.1.4), for account
+     *  holders and guests alike; gone when the call ends for this device. */
+    private val chat = CallChatModel()
+
     init {
         localLeaf = initialLeaf
         session = SfuCallSession(
@@ -298,6 +302,11 @@ class MultiJoinerCall private constructor(
                         ui.setParticipantName("$PEER_PREFIX$peerId", opts.names.name(peerId))
                     }
                 },
+                // A message of the call's chat, verified: the name over it is
+                // the one its sender's tile shows.
+                onCallChat = { peerId, seq, text ->
+                    chat.addReceived(peerId, seq, text, opts.names.name(peerId))
+                },
             ),
         )
         // A joiner behind a symmetric NAT has no server-reflexive candidate
@@ -322,6 +331,7 @@ class MultiJoinerCall private constructor(
             own = ownCallName,
             default = opts.localDisplayName,
         )
+        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
     }
 
     companion object {
@@ -447,6 +457,8 @@ class MultiJoinerCall private constructor(
         clearOwnerProbe()
         lastKnownCameraOn.clear()
         ui.setCallNameControl(null, own = "", default = "")
+        // Nothing of the call's chat is kept.
+        ui.setCallChat(null)
         session.hangUp()
     }
 
@@ -614,6 +626,8 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.FAILED,
             SfuCallSession.State.CLOSED -> {
                 speaking.stop()
+                // The chat goes with the call.
+                chat.clear()
                 // The call's tracks are gone with its connection.
                 ui.clearRemoteCopyVideoTracks()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))

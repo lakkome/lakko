@@ -53,6 +53,7 @@ import { screenShareActions } from "./screen-share-store";
 import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { callNameActions, rememberCallName, rememberedCallName } from "./call-name";
+import { callChatActions } from "./call-chat";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
@@ -362,6 +363,8 @@ export function createSfuCallUi(
         case "closed":
           share.dispose();
           screenShareActions.reset();
+          // The chat goes with the call (docs/ux/calls.md section 4.1.4).
+          callChatActions.reset();
           callActions.setPhase({ kind: "ended", endedAt: Date.now() });
           break;
         case "idle":
@@ -423,6 +426,12 @@ export function createSfuCallUi(
     onRemoteScreenShareState: (peerId, state): void => {
       share.onState(peerId, state);
     },
+    onCallChatChanged: (messages): void => {
+      callChatActions.setMessages(messages);
+    },
+    onCallChatIncoming: (message): void => {
+      callChatActions.incoming(message);
+    },
     onVideoGiven: (given): void => {
       setRemoteVideoGiven(given);
     },
@@ -471,6 +480,14 @@ export function createSfuCallUi(
     },
   });
 
+  // The call's chat (`docs/ux/calls.md` section 4.1.4): there from the first
+  // second, alone in the call too.
+  callChatActions.reset();
+  callChatActions.setControl({
+    send: (text: string): void => session.sendCallChat(text),
+    sendAgain: (id: string): void => session.resendCallChat(id),
+  });
+
   return {
     session,
     remoteStreams,
@@ -489,6 +506,7 @@ export function createSfuCallUi(
       screenShareActions.reset();
       callNameActions.reset();
       session.hangUp();
+      callChatActions.reset();
       peerPersons.clear();
       peerCallNames.clear();
       setRemoteStreams(new Map());

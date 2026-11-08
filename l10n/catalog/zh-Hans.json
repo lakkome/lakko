@@ -373,16 +373,40 @@
       "text": "关闭聊天",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "还没有消息。这里的消息均为端到端加密。",
+    "call.chat.message_a11y": {
+      "text": "{name}：{text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} 加入了通话",
+    "call.chat.new_messages": {
+      "text": "新消息",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "一位参与者离开了通话",
+    "call.chat.not_sent": {
+      "text": "未发送。",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "通话结束后消息会消失。",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "只有通话中的人能看到这里的消息。",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "发送给通话中所有人的消息",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "发送",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "再次发送",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "通话中的消息不能更长了。",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "隐藏聊天",
+      "text": "关闭聊天",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "显示聊天",
+      "text": "打开聊天",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, other {聊天（# 条未读）}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, other {打开聊天，# 条未读}}",
       "status": "machine"
     },
     "call.control.end": {

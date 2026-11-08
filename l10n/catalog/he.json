@@ -366,23 +366,47 @@
       "status": "machine"
     },
     "call.chat.a11y": {
-      "text": "הצ׳אט של השיחה",
+      "text": "צ'אט השיחה",
       "status": "machine"
     },
     "call.chat.close_a11y": {
-      "text": "סגירת הצ׳אט",
+      "text": "סגירת הצ'אט",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "אין עדיין הודעות. ההודעות כאן מוצפנות מקצה לקצה.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "הצטרפות לשיחה: {name}",
+    "call.chat.new_messages": {
+      "text": "הודעות חדשות",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "אחד המשתתפים יצא מהשיחה",
+    "call.chat.not_sent": {
+      "text": "לא נשלחה.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "הן נעלמות כשהשיחה מסתיימת.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "רק מי שנמצא בשיחה רואה את ההודעות כאן.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "הודעה לכל מי שבשיחה",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "שליחה",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "שליחה שוב",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "הודעה בשיחה לא יכולה להיות ארוכה יותר.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "הסתרת הצ׳אט",
+      "text": "סגירת הצ'אט",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "הצגת הצ׳אט",
+      "text": "פתיחת הצ'אט",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {צ׳אט (הודעה אחת שלא נקראה)} two {צ׳אט (# שלא נקראו)} other {צ׳אט (# שלא נקראו)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {פתיחת הצ'אט, # שלא נקראה} two {פתיחת הצ'אט, # שלא נקראו} other {פתיחת הצ'אט, # שלא נקראו}}",
       "status": "machine"
     },
     "call.control.end": {

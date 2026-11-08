@@ -373,16 +373,40 @@
       "text": "Закрыть чат",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "Сообщений пока нет. Сообщения здесь защищены сквозным шифрованием.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} присоединяется к звонку",
+    "call.chat.new_messages": {
+      "text": "Новые сообщения",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "Участник покинул звонок",
+    "call.chat.not_sent": {
+      "text": "Не отправлено.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "Они исчезнут, когда звонок закончится.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "Сообщения здесь видят только участники звонка.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "Сообщение всем в звонке",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "Отправить",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "Отправить ещё раз",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "Сообщение в звонке не может быть длиннее.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "Скрыть чат",
+      "text": "Закрыть чат",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "Показать чат",
+      "text": "Открыть чат",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {Чат (# непрочитанное)} few {Чат (# непрочитанных)} many {Чат (# непрочитанных)} other {Чат (# непрочитанного)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {Открыть чат, # непрочитанное} few {Открыть чат, # непрочитанных} many {Открыть чат, # непрочитанных} other {Открыть чат, # непрочитанного}}",
       "status": "machine"
     },
     "call.control.end": {

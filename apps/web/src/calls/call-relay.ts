@@ -30,6 +30,7 @@ import type {
   VerifiedCallScreenShare,
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
+import type { CallChatSigner } from "./call-chat";
 import type { CallNameSigner } from "./call-name";
 
 /** The wasm surface this module uses. */
@@ -43,6 +44,8 @@ export type CallRelayWasm = Pick<
   | "verifyCallScreenShare"
   | "composeCallName"
   | "verifyCallName"
+  | "composeCallChat"
+  | "verifyCallChat"
 >;
 
 /** What an opened relay payload carries. */
@@ -55,6 +58,9 @@ export type OpenedRelay =
   /** A signed name for this call (`call-name.ts`), to verify against the
    *  sender's verified announcement. */
   | { readonly kind: "call-name"; readonly bytes: Uint8Array }
+  /** A signed message of the call's chat (`call-chat.ts`), to verify against
+   *  the sender's verified announcement. */
+  | { readonly kind: "call-chat"; readonly bytes: Uint8Array }
   | { readonly kind: "unknown" };
 
 /** The relay keys of the current and the previous call epoch. */
@@ -118,6 +124,8 @@ export class CallRelay {
             return { kind: "screen-share", state: classified.state };
           case "call-name":
             return { kind: "call-name", bytes: classified.callName };
+          case "call-chat":
+            return { kind: "call-chat", bytes: classified.message };
           default:
             return { kind: "unknown" };
         }
@@ -151,7 +159,7 @@ export interface VerifiedPeerIdentity {
  * group is read at each call, since the call's MLS group changes epoch (and
  * a link joiner has none before its Welcome).
  */
-export interface PeerAnnouncer extends CallNameSigner {
+export interface PeerAnnouncer extends CallNameSigner, CallChatSigner {
   /** This device's announcement of `selfPeerId`, or `null` when it cannot
    *  make one yet. */
   compose(selfPeerId: string): Uint8Array | null;
@@ -246,6 +254,31 @@ export function groupPeerAnnouncer(
         const verified = wasm.verifyCallName(g, callId, from, signerKey, bytes);
         try {
           return { seq: verified.seq, name: verified.name ?? null };
+        } finally {
+          verified.free();
+        }
+      } catch {
+        return null;
+      }
+    },
+    composeCallChat: (selfPeerId, seq, text) => {
+      if (group() === null) return null;
+      try {
+        return wasm.composeCallChat(identity, callId, selfPeerId, seq, text);
+      } catch {
+        return null;
+      }
+    },
+    verifyCallChat: (from, signerKey, bytes) => {
+      const g = group();
+      if (g === null) return null;
+      try {
+        const verified = wasm.verifyCallChat(g, callId, from, signerKey, bytes);
+        try {
+          // The relay `from` is what the message was verified against; a
+          // message naming another peer id is not this sender's.
+          if (verified.peerId !== from) return null;
+          return { seq: verified.seq, text: verified.text };
         } finally {
           verified.free();
         }

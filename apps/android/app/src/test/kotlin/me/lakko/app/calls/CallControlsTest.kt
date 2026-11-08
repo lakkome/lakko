@@ -28,6 +28,7 @@ class CallControlsTest {
         ringing: Boolean = false,
         participants: ParticipantsControl = ParticipantsControl.ABSENT,
         participantsOpen: Boolean = false,
+        chat: CallChatButton? = null,
     ) = callControlRow(
         micOn = micOn,
         cameraOn = cameraOn,
@@ -35,6 +36,7 @@ class CallControlsTest {
         ringing = ringing,
         participants = participants,
         participantsOpen = participantsOpen,
+        chat = chat,
     )
 
     private fun List<CallControl>.kinds() = map { it.kind }
@@ -74,15 +76,60 @@ class CallControlsTest {
     }
 
     @Test
-    fun `the row has no chat, no speaker and no overflow menu`() {
-        // The chat control sent nothing anywhere; raise hand and share screen
-        // changed a flag nothing read; the overflow menu held only those. The
-        // sound's route is a rule and a Settings choice, not a button.
+    fun `the row has no speaker and no overflow menu`() {
+        // Raise hand and share screen changed a flag nothing read; the
+        // overflow menu held only those. The sound's route is a rule and a
+        // Settings choice, not a button.
         val names = CallControlKind.entries.map { it.name }
-        for (gone in listOf("CHAT", "MORE", "SPEAKER", "INVITE", "HAND", "SHARE")) {
+        for (gone in listOf("MORE", "SPEAKER", "INVITE", "HAND", "SHARE")) {
             assertFalse(gone, names.any { it.contains(gone) })
         }
-        assertEquals(5, CallControlKind.entries.size)
+        assertEquals(6, CallControlKind.entries.size)
+    }
+
+    @Test
+    fun `a group row with a chat is microphone, camera, participants, chat, settings, end`() {
+        // Section 4.1 / 4.1.4 (2026-11-07): the call's own chat, after
+        // Participants.
+        assertEquals(
+            listOf(
+                CallControlKind.MICROPHONE,
+                CallControlKind.CAMERA,
+                CallControlKind.PARTICIPANTS,
+                CallControlKind.CHAT,
+                CallControlKind.SETTINGS,
+                CallControlKind.END,
+            ),
+            row(participants = ParticipantsControl.MENU, chat = CallChatButton(open = false, unread = 0)).kinds(),
+        )
+        // Alone in a call placed in a conversation: no Participants, the
+        // chat is there from the first second.
+        assertEquals(
+            listOf(
+                CallControlKind.MICROPHONE,
+                CallControlKind.CAMERA,
+                CallControlKind.CHAT,
+                CallControlKind.SETTINGS,
+                CallControlKind.END,
+            ),
+            row(chat = CallChatButton(open = false, unread = 0)).kinds(),
+        )
+        // A one-to-one call has no chat.
+        assertFalse(row().kinds().contains(CallControlKind.CHAT))
+    }
+
+    @Test
+    fun `the chat circle carries the unread count and its spoken name, never a count while open`() {
+        val closed = row(chat = CallChatButton(open = false, unread = 12)).of(CallControlKind.CHAT)
+        assertEquals("9+", closed.badge)
+        assertEquals("Open chat, 12 unread", closed.spokenLabel.en)
+        assertEquals("Chat", closed.label.en)
+        assertTrue(closed.enabled)
+        val open = row(chat = CallChatButton(open = true, unread = 0)).of(CallControlKind.CHAT)
+        assertEquals(null, open.badge)
+        assertEquals("Close chat", open.spokenLabel.en)
+        // Usable while the call still rings.
+        assertTrue(row(ringing = true, chat = CallChatButton(false, 0)).of(CallControlKind.CHAT).enabled)
     }
 
     @Test

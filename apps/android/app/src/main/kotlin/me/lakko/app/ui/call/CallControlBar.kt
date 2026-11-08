@@ -12,12 +12,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -210,6 +214,7 @@ private fun CallControlButton(
                 if (!control.enabled) disabled()
             },
     ) {
+        Box {
         Box(
             modifier = Modifier
                 .size(diameter)
@@ -233,6 +238,31 @@ private fun CallControlButton(
                     modifier = Modifier.size(iconSize),
                 )
             }
+        }
+        // The design system's badge: the chat's unread count (section
+        // 4.1.4). Spoken as part of the circle's name, so silent itself.
+        control.badge?.let { badge ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 4.dp, y = (-4).dp)
+                    .heightIn(min = 18.dp)
+                    .widthIn(min = 18.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(LakkoDark.accent)
+                    .padding(horizontal = 5.dp)
+                    .clearAndSetSemantics { },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = badge,
+                    color = LakkoDark.accentFg,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+            }
+        }
         }
         if (showLabel) {
             Spacer(Modifier.height(6.dp))
@@ -263,18 +293,19 @@ internal fun CallControl.icon(): ImageVector = when (kind) {
     CallControlKind.CAMERA ->
         if (emphasis == CallControlEmphasis.SOLID) Icons.Filled.VideocamOff else Icons.Filled.Videocam
     CallControlKind.PARTICIPANTS -> Icons.Filled.Group
+    CallControlKind.CHAT -> Icons.AutoMirrored.Filled.Chat
     CallControlKind.SETTINGS -> Icons.Filled.Settings
     CallControlKind.END -> Icons.Filled.CallEnd
 }
 
-private fun CallControlEmphasis.fill(): Color = when (this) {
+internal fun CallControlEmphasis.fill(): Color = when (this) {
     // "a translucent white fill at about 12 percent with a white icon"
     CallControlEmphasis.OUTLINE -> LakkoDark.text.copy(alpha = 0.12f)
     CallControlEmphasis.SOLID -> LakkoDark.text
     CallControlEmphasis.DANGER -> LakkoDark.danger
 }
 
-private fun CallControlEmphasis.foreground(): Color = when (this) {
+internal fun CallControlEmphasis.foreground(): Color = when (this) {
     CallControlEmphasis.OUTLINE -> LakkoDark.text
     CallControlEmphasis.SOLID -> LakkoDark.background
     CallControlEmphasis.DANGER -> LakkoDark.dangerFg

@@ -51,10 +51,33 @@ final class CallScreenPresentationTests: XCTestCase {
             "and it must be pressable once the call is up")
     }
 
-    /// A group call: Microphone, Camera, Participants, Settings, End. There is
-    /// no chat in a call and no menu of leftovers behind the row: the chat
-    /// control sent nothing anywhere, and a control that does nothing is worse
-    /// than none (removed 2026-10-02).
+    /// A group call that carries a chat (every group or link call through the
+    /// SFU, section 4.1.4): Microphone, Camera, Participants, Chat, Settings,
+    /// End. `Chat` is there alone in the call too; a 1x1 call never has it.
+    func testAGroupCallWithAChatAddsChatAfterParticipants() {
+        XCTAssertEqual(
+            CallScreenPresentation.controls(
+                layout: .gallery, canInvite: true, hasOthers: true, chat: true),
+            [.microphone, .camera, .participants, .chat, .settings, .end])
+        XCTAssertEqual(
+            CallScreenPresentation.controls(
+                layout: .gallery, canInvite: false, hasOthers: false, chat: true),
+            [.microphone, .camera, .chat, .settings, .end],
+            "alone in a call placed in a conversation the chat is still there")
+        for layout in [CallScreenLayout.portrait, .video] {
+            XCTAssertFalse(
+                CallScreenPresentation.controls(layout: layout, chat: true).contains(.chat),
+                "a 1x1 \(layout.rawValue) call has no chat")
+        }
+        XCTAssertTrue(CallScreenPresentation.isEnabled(.chat, phase: .calling))
+        XCTAssertFalse(CallScreenPresentation.isEnabled(.chat, phase: .ended(endedAt: Date())))
+        XCTAssertEqual(CallScreenPresentation.face(.chat, on: true), .outline)
+        XCTAssertEqual(CallScreenPresentation.face(.chat, on: false), .outline)
+    }
+
+    /// Without a chat (the adapter wired none) the group row is Microphone,
+    /// Camera, Participants, Settings, End, with no menu of leftovers behind
+    /// it.
     func testAGroupCallRowIsMicrophoneCameraParticipantsSettingsEnd() {
         XCTAssertEqual(
             CallScreenPresentation.controls(layout: .gallery, canInvite: true, hasOthers: true),
@@ -78,12 +101,12 @@ final class CallScreenPresentationTests: XCTestCase {
     }
 
     /// The whole set of controls a call can carry. There is no Speaker
-    /// control on any call, and a chat, a raised hand, a screen share, a
-    /// separate Invite or a More menu coming back would have to add a case
-    /// here.
+    /// control on any call, and a raised hand, a screen share, a separate
+    /// Invite or a More menu coming back would have to add a case here. The
+    /// chat came back on 2026-11-07, now with a carrier (section 4.1.4).
     func testNoControlExistsThatDoesNothing() {
         XCTAssertEqual(
-            CallControl.allCases, [.microphone, .camera, .participants, .settings, .end])
+            CallControl.allCases, [.microphone, .camera, .participants, .chat, .settings, .end])
     }
 
     // MARK: - What Participants opens (call-links section 3)

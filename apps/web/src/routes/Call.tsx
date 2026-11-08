@@ -175,6 +175,9 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
 );
 import { t } from "../l10n";
 import { callNameState } from "../calls/call-name";
+import { callChatActions, callChatState } from "../calls/call-chat";
+import { chatPanelShape, CHAT_COLUMN_MIN_WIDTH, previewAllowed } from "../calls/call-chat-panel-state";
+import { CallChatPanel } from "../calls/CallChatPanel";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { displayLocale } from "../l10n/display-locale";
@@ -754,6 +757,13 @@ const ControlButton: Component<{
       >
         <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={26} />}>
           <Spinner size={26} />
+        </Show>
+        <Show when={props.spec.badge}>
+          {(badge) => (
+            <span class="lk-call-ctl-badge" aria-hidden="true">
+              {badge()}
+            </span>
+          )}
         </Show>
       </button>
       <span class="lk-call-ctl-label" aria-hidden="true">
@@ -2818,6 +2828,10 @@ const Call: Component<{
       othersPresent: remotes().length > 0,
       canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
+      chat:
+        callChatState.control() !== null
+          ? { open: callChatState.panel().open, unread: callChatState.panel().unread }
+          : undefined,
     }),
   );
 
@@ -2828,6 +2842,60 @@ const Call: Component<{
       msSinceInteraction: now() - lastInteraction(),
     }),
   );
+
+  // ----- the call's chat (section 4.1.4) --------------------------------------
+
+  /** Wide enough for the chat to be a column beside the call. */
+  const [wideScreen, setWideScreen] = createSignal(
+    typeof window !== "undefined" ? chatPanelShape(window.innerWidth) === "column" : false,
+  );
+  onMount(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(`(min-width: ${CHAT_COLUMN_MIN_WIDTH}px)`);
+    const sync = (): void => void setWideScreen(query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    onCleanup(() => query.removeEventListener?.("change", sync));
+  });
+  const chatOpen = (): boolean => callChatState.control() !== null && callChatState.panel().open;
+  const chatShape = (): "sheet" | "column" => (wideScreen() ? "column" : "sheet");
+
+  /** The name a sender's tile shows (section 4.4), and the last one it
+   *  showed once the person left. */
+  const chatNameOf = (peerId: string): string => {
+    const tile = callState.participants().find((p) => p.id === `peer-${peerId}`);
+    const name = tile?.displayName ?? callChatState.lastName(peerId) ?? "";
+    return name !== "" ? name : t("call.participant.unnamed");
+  };
+  createEffect(() => {
+    for (const p of callState.participants()) {
+      if (!p.isLocal && p.id.startsWith("peer-")) {
+        callChatActions.rememberName(p.id.slice("peer-".length), p.displayName);
+      }
+    }
+  });
+
+  /** Close the panel and give focus back to the `Chat` circle. */
+  function closeChat(): void {
+    callChatActions.close();
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('.lk-call [data-control="chat"] .lk-call-ctl-btn')?.focus();
+    });
+  }
+
+  /** The preview above the control bar, while the panel is closed. */
+  const chatPreview = createMemo(() => {
+    if (callChatState.control() === null) return null;
+    const p = callChatState.panel();
+    if (p.open || p.preview === null) return null;
+    const allowed = previewAllowed({
+      barFaded: barHidden(),
+      settingsOpen: settingsOpen() || encryptionSheetOpen(),
+      participantsOpen: callState.participantListOpen(),
+      menuOpen: inviteMenuOpen() || endMenuOpen(),
+    });
+    return allowed ? p.preview : null;
+  });
 
   // ----- actions ------------------------------------------------------------
 
@@ -2853,6 +2921,10 @@ const Call: Component<{
         // since a menu of one item is a second step for nothing.
         if (props.onCopyInviteLink !== undefined) setInviteMenuOpen(!inviteMenuOpen());
         else callActions.setParticipantListOpen(!callState.participantListOpen());
+        return;
+      case "chat":
+        if (callChatState.panel().open) closeChat();
+        else callChatActions.open();
         return;
       case "settings":
         void refreshCallDevices();
@@ -2906,14 +2978,13 @@ const Call: Component<{
    * order rather than on anything meaningful. Asking the state directly is
    * order-independent.
    *
-   * The participant list and the chat panel are deliberately NOT treated the
-   * same way: neither closes on `Esc` today, so guarding on them would make the
-   * key do nothing at all while one is open. They are panels inside the call and
-   * keep their state for when the person comes back.
+   * The participant list is deliberately NOT treated the same way: it does
+   * not close on `Esc`, so guarding on it would make the key do nothing at all
+   * while it is open. The chat panel does close on `Esc`, before the call is
+   * put away (section 4.1.4).
    */
   createEffect(() => {
     const collapse = props.onCollapse;
-    if (collapse === undefined) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       if (encryptionSheetOpen() || settingsOpen()) return;
@@ -2927,6 +2998,14 @@ const Call: Component<{
         setEndMenuOpen(false);
         return;
       }
+      // Section 4.1.4: `Esc` closes the chat first, and only then puts the
+      // call away.
+      if (chatOpen()) {
+        event.preventDefault();
+        closeChat();
+        return;
+      }
+      if (collapse === undefined) return;
       event.preventDefault();
       collapse();
     };
@@ -2935,8 +3014,10 @@ const Call: Component<{
   });
 
   return (
+    <>
     <div
       class="lk-call"
+      data-chat={chatOpen() ? chatShape() : undefined}
       data-surface={surface()}
       data-phase={phaseKind()}
       data-notice={callState.notice() !== null ? "" : undefined}
@@ -3119,6 +3200,24 @@ const Call: Component<{
 
       <ParticipantList />
 
+      {/* A message from someone else while the chat is closed: one line for
+          four seconds above the control bar (section 4.1.4). */}
+      <Show when={chatPreview()}>
+        {(preview) => (
+          <button
+            type="button"
+            class="lk-call-chat-preview"
+            onClick={(event): void => {
+              event.stopPropagation();
+              callChatActions.open();
+            }}
+          >
+            <span class="lk-call-chat-preview-name">{chatNameOf(preview().peerId)}</span>
+            <span class="lk-call-chat-preview-text">{preview().text}</span>
+          </button>
+        )}
+      </Show>
+
       {/* Participants: the list of who is here and the two ways to invite, in a
           menu of the app's own, never the system's share sheet
           (`docs/ux/call-links.md` section 3). */}
@@ -3247,6 +3346,10 @@ const Call: Component<{
         />
       </Show>
     </div>
+    <Show when={chatOpen() && phaseKind() !== "ended"}>
+      <CallChatPanel shape={chatShape()} nameOf={chatNameOf} onClose={closeChat} />
+    </Show>
+    </>
   );
 };
 

@@ -255,6 +255,32 @@ public class CallUiState(
     }
 
     /**
+     * The call's chat (`docs/ux/calls.md` section 4.1.4, `CallChatModel.kt`),
+     * or `null` on a call that has none (a one-to-one call). Written by the
+     * SFU call adapters when the call starts; its messages go when the call
+     * ends for this device.
+     */
+    private val _callChat = MutableStateFlow<CallChatHandle?>(null)
+    public val callChat: StateFlow<CallChatHandle?> = _callChat.asStateFlow()
+
+    /** The call can carry a chat ([handle]), or no longer can (`null`): the
+     *  chat that was there is cleared. */
+    public fun setCallChat(handle: CallChatHandle?) {
+        val before = _callChat.value
+        if (before != null && before !== handle) before.model.clear()
+        _callChat.value = handle
+    }
+
+    /** System back on the call screen: closes the chat panel when it is
+     *  open (`docs/ux/calls.md` section 4.1.4), and says whether it did. */
+    public fun closeCallChatPanel(): Boolean {
+        val model = _callChat.value?.model ?: return false
+        if (!model.panelOpen.value) return false
+        model.closePanel()
+        return true
+    }
+
+    /**
      * Who holds the floor and who held it last, as the stage of the Focus
      * layout reads it. Written by [setSpeech]; [StageSpeech.None] until a level
      * has been heard, in which case the stage falls back to the roster.
@@ -922,6 +948,8 @@ public class CallUiState(
         _callNameControl.value = null
         _ownCallName.value = ""
         _callNameDefault.value = ""
+        // The call's chat is per call: nothing is kept after it.
+        setCallChat(null)
         // A share is per call.
         _screenShare.value = null
         choiceBeforeShare = null

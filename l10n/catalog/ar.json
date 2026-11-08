@@ -373,16 +373,40 @@
       "text": "إغلاق الدردشة",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "لا توجد رسائل بعد. الرسائل هنا مشفّرة تشفيرًا تامًا بين الطرفين.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "انضم {name} إلى المكالمة",
+    "call.chat.new_messages": {
+      "text": "رسائل جديدة",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "غادر أحد المشاركين المكالمة",
+    "call.chat.not_sent": {
+      "text": "لم تُرسل.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "تختفي عند انتهاء المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "لا يرى الرسائل هنا إلا الموجودون في المكالمة.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "رسالة إلى الجميع في المكالمة",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "إرسال",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "إرسال مرة أخرى",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "لا يمكن أن تكون الرسالة في المكالمة أطول من ذلك.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "إخفاء الدردشة",
+      "text": "إغلاق الدردشة",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "إظهار الدردشة",
+      "text": "فتح الدردشة",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, zero {الدردشة (لا رسائل غير مقروءة)} one {الدردشة (رسالة واحدة غير مقروءة)} two {الدردشة (رسالتان غير مقروءتين)} few {الدردشة (# رسائل غير مقروءة)} many {الدردشة (# رسالة غير مقروءة)} other {الدردشة (# رسالة غير مقروءة)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, zero {فتح الدردشة، # غير مقروءة} one {فتح الدردشة، # غير مقروءة} two {فتح الدردشة، # غير مقروءتين} few {فتح الدردشة، # غير مقروءة} many {فتح الدردشة، # غير مقروءة} other {فتح الدردشة، # غير مقروءة}}",
       "status": "machine"
     },
     "call.control.end": {

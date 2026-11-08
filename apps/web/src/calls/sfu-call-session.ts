@@ -89,6 +89,7 @@ import { loadWasm } from "../wasm";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { bytesOfHex, CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { CallNameChannel } from "./call-name";
+import { CallChatChannel, type CallChatMessage } from "./call-chat";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -382,6 +383,13 @@ export interface SfuCallCallbacks {
    */
   onRemoteCallName?(peerId: string, name: string | null): void;
   /**
+   * The call's chat changed (`docs/ux/calls.md` section 4.1.4,
+   * `call-chat.ts`): the whole list, oldest first.
+   */
+  onCallChatChanged?(messages: readonly CallChatMessage[]): void;
+  /** A message from someone else is now shown in the call's chat. */
+  onCallChatIncoming?(message: CallChatMessage): void;
+  /**
    * The device did not have everything the call asked for, so the person
    * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
    * only the microphone is live, or neither could be captured and they
@@ -460,6 +468,9 @@ export class SfuCallSession {
   /** This device's name for the call and the newest one per peer
    *  (`call-name.ts`). Re-sent after every announcement. */
   private readonly callNames: CallNameChannel;
+  /** The call's chat (`call-chat.ts`): cleared when the call ends for this
+   *  device, kept across everything inside the call. */
+  private readonly callChat: CallChatChannel;
 
   /** Serializes SFU-initiated offers so two `setRemoteDescription`
    *  calls never overlap. Each entry is the offer SDP. */
@@ -634,6 +645,15 @@ export class SfuCallSession {
       sendSealed: (plaintext) => this.sendSealedRelay(plaintext),
       selfPeerId: () => this.selfPeerId,
       onName: (peerId, name) => this.callbacks.onRemoteCallName?.(peerId, name),
+    });
+    this.callChat = new CallChatChannel({
+      signer: config.peerAnnouncer,
+      sendSealed: (plaintext) => this.sendSealedRelay(plaintext),
+      selfPeerId: () => this.selfPeerId,
+      now: () => Date.now(),
+      onChange: (messages) => this.callbacks.onCallChatChanged?.(messages),
+      onIncoming: (message) => this.callbacks.onCallChatIncoming?.(message),
+      log: (line) => console.info(line),
     });
     this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
       now: () => this.nowMs(),
@@ -1330,6 +1350,22 @@ export class SfuCallSession {
    */
   setOwnCallName(name: string): void {
     this.callNames.setOwnName(name);
+  }
+
+  /**
+   * Send a message to everyone in the call's chat (`docs/ux/calls.md`
+   * section 4.1.4). `text` has passed the core's rule. Shown at once; as not
+   * sent when it could not leave the device (no relay key, no socket).
+   */
+  sendCallChat(text: string): void {
+    if (this.isOver()) return;
+    this.callChat.send(text);
+  }
+
+  /** Send a chat message that was not sent again (the same bytes). */
+  resendCallChat(id: string): void {
+    if (this.isOver()) return;
+    this.callChat.sendAgain(id);
   }
 
   /** The relay keys, built on first use and seeded from the current seed. */
@@ -2089,6 +2125,8 @@ export class SfuCallSession {
     }
     this.relay?.dispose();
     this.relay = null;
+    // The call's chat goes with the call (section 4.1.4): nothing is kept.
+    this.callChat.clear();
     if (this.signaling !== null) {
       this.signaling.close();
       this.signaling = null;
@@ -2569,6 +2607,7 @@ export class SfuCallSession {
     }
     this.onRosterChanged(false);
     this.callNames.onPeerLeft(frame.peer_id);
+    this.callChat.onPeerLeft(frame.peer_id);
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
@@ -2613,12 +2652,17 @@ export class SfuCallSession {
           if (identity !== null) {
             identifiedCb?.(frame.from, identity);
             const key = bytesOfHex(identity.memberKeyHex);
-            if (key !== null) this.callNames.onPeerIdentified(frame.from, key);
+            if (key !== null) {
+              this.callNames.onPeerIdentified(frame.from, key);
+              this.callChat.onPeerIdentified(frame.from, key);
+            }
           }
         } else if (opened.kind === "screen-share") {
           this.callbacks.onRemoteScreenShareState?.(frame.from, opened.state);
         } else if (opened.kind === "call-name") {
           this.callNames.onReceived(frame.from, opened.bytes);
+        } else if (opened.kind === "call-chat") {
+          this.callChat.onReceived(frame.from, opened.bytes);
         }
         return;
       }

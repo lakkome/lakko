@@ -264,7 +264,8 @@ struct CallHostOverlay: ViewModifier {
                         connectedAt: callBar.connectedAt,
                         endedLine: group.endedForEveryoneNotice?.text,
                         onEndForEveryone: group.startedCall ? { group.endForEveryone() } : nil,
-                        onCollapse: { callBar.collapse() }
+                        onCollapse: { callBar.collapse() },
+                        onOwnLink: { inviteIntake.handle($0) }
                     ) {
                         group.dismissPresentation()
                     }
@@ -284,7 +285,8 @@ struct CallHostOverlay: ViewModifier {
                         endedLine: link.endedForEveryoneNotice?.text,
                         // The link's owner, and nobody else.
                         onEndForEveryone: link.startedCall ? { link.endForEveryone() } : nil,
-                        onCollapse: { callBar.collapse() }
+                        onCollapse: { callBar.collapse() },
+                        onOwnLink: { inviteIntake.handle($0) }
                     ) {
                         let slug = link.presentationSlug
                         link.dismissPresentation()

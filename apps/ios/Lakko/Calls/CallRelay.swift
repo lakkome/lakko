@@ -31,6 +31,9 @@ final class CallRelay {
         /// A signed call name (`docs/ux/calls.md` section 4.1), still to be
         /// verified with ``CallPeerAnnouncer/verifyCallName``.
         case callName(Data)
+        /// A signed call-chat message (`docs/ux/calls.md` section 4.1.4),
+        /// still to be verified with ``CallPeerAnnouncer/verifyCallChat``.
+        case callChat(Data)
         case unknown
     }
 
@@ -65,6 +68,7 @@ final class CallRelay {
             case .mediaState(let cameraOn): return .mediaState(cameraOn: cameraOn)
             case .screenShare(let state): return .screenShare(state)
             case .callName(let name): return .callName(name)
+            case .callChat(let message): return .callChat(message)
             case .unknown: return .unknown
             }
         }
@@ -121,6 +125,18 @@ struct CallPeerAnnouncer {
     var verifyCallName: @MainActor (
         _ from: String, _ signerKey: Data, _ name: Data
     ) -> CallNameChannel.Verified? = { _, _, _ in nil }
+    /// This device's signed call-chat message (`docs/ux/calls.md` section
+    /// 4.1.4) as `selfPeerId`, numbered `seq`; `nil` when it cannot make one
+    /// (no group yet, a text the rule refuses).
+    var composeCallChat: @MainActor (
+        _ selfPeerId: String, _ seq: UInt64, _ text: String
+    ) -> Data? = { _, _, _ in nil }
+    /// A call-chat message from `from`, verified against the call's group
+    /// with `signerKey` (the leaf key `from`'s verified announcement named).
+    /// `nil` on any refusal, and when there is no group.
+    var verifyCallChat: @MainActor (
+        _ from: String, _ signerKey: Data, _ message: Data
+    ) -> CallChatChannel.Verified? = { _, _, _ in nil }
 
     /// The announcer for a call whose roster is `group()`.
     static func forGroup(
@@ -155,6 +171,20 @@ struct CallPeerAnnouncer {
                           group: g, callId: callId, peerId: from, peerSignerKey: signerKey, name: name)
                 else { return nil }
                 return CallNameChannel.Verified(seq: verified.seq, name: verified.name)
+            },
+            composeCallChat: { selfPeerId, seq, text in
+                guard group() != nil else { return nil }
+                return try? LakkoCore.composeCallChat(
+                    identity: identity, callId: callId, peerId: selfPeerId, seq: seq, text: text)
+            },
+            verifyCallChat: { from, signerKey, message in
+                guard let g = group(),
+                      let verified = try? LakkoCore.verifyCallChat(
+                          group: g, callId: callId, peerId: from, peerSignerKey: signerKey,
+                          message: message),
+                      verified.peerId == from
+                else { return nil }
+                return CallChatChannel.Verified(seq: verified.seq, text: verified.text)
             }
         )
     }

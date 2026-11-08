@@ -392,7 +392,8 @@ private fun HostedCallDialog(
         // inside it, because this window's back is the platform's to deliver and
         // that is the path it delivers it on. Returning here does not dismiss
         // the dialog; the caller's collapse gate is what stops drawing it.
-        onDismissRequest = onCollapse,
+        // Section 4.1.4 — an open chat panel closes first.
+        onDismissRequest = { if (!state.closeCallChatPanel()) onCollapse() },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnBackPress = true,

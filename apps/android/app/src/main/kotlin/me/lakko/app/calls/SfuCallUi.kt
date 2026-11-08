@@ -99,6 +99,10 @@ class SfuCallUi(
         // else none. It names the own tile ahead of the profile name.
         var ownCallName = callIdHex?.let(RememberedCallNames::get).orEmpty()
 
+        // The call's chat (`docs/ux/calls.md` section 4.1.4): one per call,
+        // gone when the call ends for this device.
+        val chat = CallChatModel()
+
         // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
         // this device from the session's own connection. The session is
         // assigned last, so the reader goes through a holder.
@@ -138,6 +142,8 @@ class SfuCallUi(
                     SfuCallSession.State.FAILED,
                     SfuCallSession.State.CLOSED -> {
                         monitor.stop()
+                        // The chat goes with the call.
+                        chat.clear()
                         // The call's tracks are gone with its connection.
                         ui.clearRemoteCopyVideoTracks()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
@@ -249,6 +255,11 @@ class SfuCallUi(
                     ui.setParticipantName(participantId(peerId), peerNames.name(peerId))
                 }
             },
+            // A message of the call's chat, verified: the name over it is the
+            // one its sender's tile shows.
+            onCallChat = { peerId, seq, text ->
+                chat.addReceived(peerId, seq, text, peerNames?.name(peerId).orEmpty())
+            },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -274,6 +285,7 @@ class SfuCallUi(
             own = ownCallName,
             default = localDisplayName,
         )
+        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -287,6 +299,8 @@ class SfuCallUi(
         speaking.stop()
         // The name field belongs to a call that can carry a call name.
         ui.setCallNameControl(null, own = "", default = "")
+        // Nothing of the call's chat is kept.
+        ui.setCallChat(null)
         session.hangUp()
     }
 

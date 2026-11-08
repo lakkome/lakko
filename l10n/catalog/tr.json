@@ -373,16 +373,40 @@
       "text": "Sohbeti kapat",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "Henüz mesaj yok. Buradaki mesajlar uçtan uca şifrelidir.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "Aramaya katıldı: {name}",
+    "call.chat.new_messages": {
+      "text": "Yeni mesajlar",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "Bir katılımcı aramadan ayrıldı",
+    "call.chat.not_sent": {
+      "text": "Gönderilemedi.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "Arama bittiğinde kaybolurlar.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "Buradaki mesajları yalnızca aramadakiler görür.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "Aramadaki herkese mesaj",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "Gönder",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "Yeniden gönder",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "Aramadaki bir mesaj bundan uzun olamaz.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -414,15 +438,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "Sohbeti gizle",
+      "text": "Sohbeti kapat",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "Sohbeti göster",
+      "text": "Sohbeti aç",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {Sohbet (# okunmamış)} other {Sohbet (# okunmamış)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {Sohbeti aç, # okunmamış} other {Sohbeti aç, # okunmamış}}",
       "status": "machine"
     },
     "call.control.end": {
