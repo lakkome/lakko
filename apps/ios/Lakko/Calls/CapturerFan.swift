@@ -36,12 +36,22 @@ import WebRTC
 /// `RTCVideoCapturer.delegate` is weak, so whoever installs a fan as the
 /// capturer's delegate must hold it (``LocalCameraCapture`` does). The fan
 /// holds its delegates strongly.
+///
+/// ## The camera background
+///
+/// Each capturer frame is handed to the ``CameraFrameStage`` once, before
+/// any delegate sees it (ADR-0089 section 2): every copy and the self view
+/// get the same processed frame, and a frame the stage drops reaches no
+/// source at all. While a background is selected the stage never answers
+/// with the raw camera frame.
 final class CapturerFan: NSObject, RTCVideoCapturerDelegate {
     private let lock = NSLock()
     private var delegates: [RTCVideoCapturerDelegate]
+    private let stage: CameraFrameStage?
 
-    init(first: RTCVideoCapturerDelegate) {
+    init(first: RTCVideoCapturerDelegate, stage: CameraFrameStage? = nil) {
         delegates = [first]
+        self.stage = stage
     }
 
     /// The number of delegates frames are handed to.
@@ -68,11 +78,18 @@ final class CapturerFan: NSObject, RTCVideoCapturerDelegate {
     }
 
     func capturer(_ capturer: RTCVideoCapturer, didCapture frame: RTCVideoFrame) {
+        let out: RTCVideoFrame
+        if let stage {
+            guard let processed = stage.process(frame) else { return }
+            out = processed
+        } else {
+            out = frame
+        }
         lock.lock()
         let now = delegates
         lock.unlock()
         for delegate in now {
-            delegate.capturer(capturer, didCapture: frame)
+            delegate.capturer(capturer, didCapture: out)
         }
     }
 }

@@ -289,6 +289,82 @@
       "text": "कॉल",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "फ़ोटो जोड़ें",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "धुंधला",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "पृष्ठभूमि: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "पृष्ठभूमि ने काम करना बंद कर दिया, इसलिए आपका कैमरा बंद कर दिया गया।",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "बिना पृष्ठभूमि के कैमरा चालू करें",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "भोर",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "सांझ",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "बंदरगाह",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "घास का मैदान",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "सुबह",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "रात",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "कोई नहीं",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "यह फ़ोटो इस्तेमाल नहीं की जा सकती। कोई दूसरी आज़माएं।",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "पृष्ठभूमि तैयार हो रही है...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "इसे सिर्फ़ आप देख रहे हैं। आपका कैमरा बंद है।",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "आपका कैमरा, जैसा दूसरों को दिखता है",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "हटाएं",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "ज़्यादा धुंधला",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "आपकी फ़ोटो",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "आपका कैमरा चालू है",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "कैमरा शुरू हो रहा है...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "पृष्ठभूमि",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "दूसरे लोग इसे आपके पीछे देखते हैं। यह इसी डिवाइस पर रहता है।",
       "status": "machine"
     },
     "call.settings.devices": {

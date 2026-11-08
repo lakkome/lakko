@@ -514,6 +514,20 @@ final class LinkCallHost: ObservableObject {
     /// room it has not been admitted to.
     private func bindControls(ui: CallUiState, handle: LinkCallHandle) {
         controls.removeAll()
+        // ADR-0089: the camera background stopped working. Nothing has been
+        // sent since; the camera is turned off here, where the camera button
+        // lands, so it happens with the call collapsed into the bar too.
+        CameraBackground.shared.$failures
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak ui] _ in
+                MainActor.assumeIsolated {
+                    guard let ui, ui.participants.first(where: { $0.isLocal })?.camOn == true
+                    else { return }
+                    ui.setCamera(false)
+                }
+            }
+            .store(in: &controls)
         ui.$participants
             .compactMap { $0.first(where: { $0.isLocal })?.micOn }
             .removeDuplicates()

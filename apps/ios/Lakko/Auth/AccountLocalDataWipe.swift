@@ -433,6 +433,9 @@ enum AccountLocalDataWipe {
         step("person-names") { PersonNameMirror.clear(accountIdB64: accountIdB64) }
         step("conversation-mutes") { ConversationMuteMirror.clear(accountIdB64: accountIdB64) }
         step("media-played") { MediaPrefs().clearPlayed(accountIdB64: accountIdB64) }
+        // ADR-0089 — the camera background chosen on this device and the own
+        // photos behind it.
+        step("call-backgrounds") { try CameraBackground.delete(accountIdB64: accountIdB64) }
         step("emoji-recents-and-tones") { EmojiIndex.clear(accountIdB64: accountIdB64, standard) }
 
         // 8. Device-wide keys and files holding this account's data.

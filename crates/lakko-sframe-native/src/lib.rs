@@ -104,6 +104,7 @@
 #![allow(clippy::same_length_and_capacity)]
 
 pub mod noise;
+pub mod segment;
 
 use std::sync::Mutex;
 

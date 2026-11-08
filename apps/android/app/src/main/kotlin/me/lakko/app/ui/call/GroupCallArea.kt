@@ -649,6 +649,11 @@ private fun GroupTile(
                     scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                 )
             }
+            // docs/ux/call-backgrounds.md section 3 — nothing is sent while a
+            // background gets ready: the avatar with a small spinner.
+            if (backgroundStarting()) {
+                BackgroundStartingCover(modifier = Modifier.fillMaxSize())
+            }
         } else if (participant.camOn) {
             // The person is sending a picture that has not arrived yet.
             Box(

@@ -6,9 +6,10 @@
   "license": "AGPL-3.0-or-later",
   "description": "Lakko web client — Solid.js + WASM core (Phase 1.16a skeleton)",
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --release && npm run build:noise",
-    "build:wasm:dev": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --dev && npm run build:noise",
+    "build:wasm": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --release && npm run build:noise && npm run build:segment",
+    "build:wasm:dev": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --dev && npm run build:noise && npm run build:segment",
     "build:noise": "node scripts/build-noise-wasm.mjs",
+    "build:segment": "node scripts/build-segment-wasm.mjs",
     "dev": "npm run build:wasm:dev && vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/post-build.mjs && node scripts/link-previews.mjs && node scripts/build-sw.mjs",
     "preview": "vite preview",

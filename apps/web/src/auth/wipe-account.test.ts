@@ -165,6 +165,8 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-reach", store: "rows", row: { key: `${acct}|grants`, ciphertext: ct } },
     byId("lakko-read-watermarks", "rows"),
     byId("lakko-call-log", "rows"),
+    // ADR-0089: the person's own background photos, sealed under the device key.
+    { db: "lakko-call-backgrounds", store: "photos", row: { id: `${acct}|p1`, addedAt: 1, ciphertext: ct } },
     byId("lakko-device-sync", "rows"),
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
@@ -599,6 +601,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-reach": "account",
   "lakko-read-watermarks": "account",
   "lakko-call-log": "account",
+  "lakko-call-backgrounds": "account",
   "lakko-device-sync": "account",
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
@@ -724,6 +727,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.account-store-gate.wiped.v1": "device",
   "lakko.push.token.v1": "device",
   "lakko.composer.recordMode": "device",
+  // ADR-0089: the camera background chosen on this device, not synced.
+  "lakko.call.background": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",
   // A diagnostic switch of this device (`calls/av-align.ts`): `off` makes a

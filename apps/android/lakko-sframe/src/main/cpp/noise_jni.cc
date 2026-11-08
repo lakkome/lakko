@@ -22,7 +22,13 @@
 
 #include <cstdint>
 
+// The header cbindgen emits is plain C (no `extern "C"` guard of its own):
+// included bare in C++ its functions are looked up under C++-mangled names
+// the Rust archive does not define, and `System.loadLibrary` then fails on
+// the device with "cannot locate symbol", taking SFrame down with it.
+extern "C" {
 #include "lakko_sframe_native.h"
+}
 
 extern "C" {
 

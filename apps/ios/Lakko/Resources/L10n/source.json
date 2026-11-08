@@ -305,6 +305,82 @@
       "text": "Call",
       "comment": "Title of the alert that explains why a call did not start or ended (the message under it says why)."
     },
+    "call.background.add_photo": {
+      "text": "Add photo",
+      "comment": "Button at the end of the background choices that opens the photo library to add the person's own photo as a background."
+    },
+    "call.background.blur": {
+      "text": "Blur",
+      "comment": "Background choice: the room behind the person is blurred, keeping its colours."
+    },
+    "call.background.builtin_label": {
+      "text": "Background: {name}",
+      "comment": "Spoken name of a built-in background picture for the screen reader. {name} is the picture's name, such as Dawn."
+    },
+    "call.background.failed": {
+      "text": "Background stopped working, so your camera was turned off.",
+      "comment": "Shown in the call when the background could not run. The camera was turned off so the room is not shown."
+    },
+    "call.background.failed_action": {
+      "text": "Turn on camera without background",
+      "comment": "Button after the background failed: selects no background and turns the camera on."
+    },
+    "call.background.name.dawn": {
+      "text": "Dawn",
+      "comment": "Name of a built-in background picture: soft light sand and blue shapes."
+    },
+    "call.background.name.dusk": {
+      "text": "Dusk",
+      "comment": "Name of a built-in background picture: dark indigo with a warm glow."
+    },
+    "call.background.name.harbor": {
+      "text": "Harbor",
+      "comment": "Name of a built-in background picture: soft indigo shapes."
+    },
+    "call.background.name.meadow": {
+      "text": "Meadow",
+      "comment": "Name of a built-in background picture: soft teal shapes."
+    },
+    "call.background.name.morning": {
+      "text": "Morning",
+      "comment": "Name of a built-in background picture: soft light blue and teal shapes."
+    },
+    "call.background.name.night": {
+      "text": "Night",
+      "comment": "Name of a built-in background picture: dark navy shapes."
+    },
+    "call.background.none": {
+      "text": "None",
+      "comment": "Background choice: the camera as it is, nothing replaced."
+    },
+    "call.background.photo_unusable": {
+      "text": "This photo can't be used. Try another one.",
+      "comment": "Shown under the background choices when the picked file cannot be read as a picture."
+    },
+    "call.background.preparing": {
+      "text": "Preparing background...",
+      "comment": "Shown while the chosen background starts. Until it is ready the camera sends nothing."
+    },
+    "call.background.preview_camera_off": {
+      "text": "Only you see this. Your camera is off.",
+      "comment": "Line on the background preview when the person's camera is off in the call: the preview is local and nothing is sent."
+    },
+    "call.background.preview_label": {
+      "text": "Your camera as the others see it",
+      "comment": "Spoken label of the preview of the person's own camera with the chosen background, in the call settings."
+    },
+    "call.background.remove": {
+      "text": "Remove",
+      "comment": "Action on one of the person's own background photos: removes it from this device's list. The photo stays in their library."
+    },
+    "call.background.strong_blur": {
+      "text": "Strong blur",
+      "comment": "Background choice: the room behind the person is blurred so that nothing in it can be told apart."
+    },
+    "call.background.your_photo": {
+      "text": "Your photo",
+      "comment": "Spoken name of one of the person's own photos used as a call background."
+    },
     "call.bar.camera_on_a11y": {
       "text": "your camera is on",
       "comment": "Added to what the screen reader says for the call bar while your camera is sending; joined into a list."
@@ -1246,6 +1322,14 @@
     "call.self.starting_camera": {
       "text": "Starting camera...",
       "comment": "Shown over your own picture in a call while the camera starts."
+    },
+    "call.settings.background": {
+      "text": "Background",
+      "comment": "Heading of the section in the call settings where the person picks what the others see behind them on camera: blur, a picture, or their own photo."
+    },
+    "call.settings.background_hint": {
+      "text": "The others see this behind you. It stays on this device.",
+      "comment": "Hint under the row of background choices in the call settings. The choice is stored on this device only and never sent."
     },
     "call.settings.call_name.a11y_cleared": {
       "text": "Your name in this call is your profile name again.",

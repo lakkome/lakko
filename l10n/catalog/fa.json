@@ -289,6 +289,82 @@
       "text": "تماس",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "افزودن عکس",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "محو",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "پس‌زمینه: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "پس‌زمینه از کار افتاد، به همین دلیل دوربین شما خاموش شد.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "روشن کردن دوربین بدون پس‌زمینه",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "سپیده‌دم",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "غروب",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "بندر",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "چمنزار",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "صبح",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "شب",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "هیچ",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "از این عکس نمی‌شود استفاده کرد. عکس دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "در حال آماده کردن پس‌زمینه...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "فقط شما این را می‌بینید. دوربین شما خاموش است.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "دوربین شما همان‌طور که دیگران می‌بینند",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "محو شدید",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "عکس شما",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "دوربین شما روشن است",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "در حال روشن کردن دوربین...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "پس‌زمینه",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "دیگران این را پشت سر شما می‌بینند. فقط روی همین دستگاه می‌ماند.",
       "status": "machine"
     },
     "call.settings.devices": {

@@ -125,6 +125,7 @@ import {
 } from "./video-codec-preference";
 import { CallPathLog } from "./call-path";
 import { NoiseSuppressionController } from "./noise-suppression";
+import { CameraBackgroundController } from "./background-controller";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
 import type { CallSignalingWake } from "./call-signaling-wake";
@@ -415,6 +416,9 @@ export class CallSession {
   /** Which microphone track the sender carries, raw or noise-suppressed
    *  (ADR-0088). Created with the first capture, disposed in `dispose()`. */
   private noise: NoiseSuppressionController | null = null;
+  /** Which camera track is published, raw or with the person's background
+   *  (ADR-0089). Owns the raw camera once adopted; disposed in `dispose()`. */
+  private background: CameraBackgroundController | null = null;
   private pc: RTCPeerConnection | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
@@ -1085,6 +1089,8 @@ export class CallSession {
     for (const track of this.localStream.getVideoTracks()) {
       track.enabled = on;
     }
+    // The raw camera behind a background stops sending too.
+    this.background?.setCameraEnabled(on);
   }
 
   /**
@@ -1103,9 +1109,11 @@ export class CallSession {
     if (pc === null || this.localStream === null) return;
     // A live video sender already exists (a call started as video, or a prior
     // addLocalVideo): just re-enable — no capture, no renegotiation.
-    const existing = pc.getSenders().find((s) => s.track?.kind === "video");
+    const existing = this.cameraSender(pc);
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
+      // A background that failed starts again (ADR-0089).
+      this.background?.setCameraEnabled(true);
       this.setVideoPublishState("live");
       return;
     }
@@ -1122,23 +1130,28 @@ export class CallSession {
       this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
     }
-    const track = captured.getVideoTracks()[0];
-    if (track === undefined) {
+    const raw = captured.getVideoTracks()[0];
+    if (raw === undefined) {
       this.addingVideo = false;
       this.setVideoPublishState("failed");
       throw new Error("no camera track captured");
     }
+    // The camera goes out with the person's background, if one is selected
+    // (ADR-0089).
+    const prepared = this.cameraBackground().prepare(raw);
+    const track = prepared.track;
     try {
       // Re-read state after the await — the call may have ended while
       // getUserMedia was in flight.
       const localStream = this.localStream;
       const pc2 = this.pc;
       if (localStream === null || pc2 === null) {
-        track.stop();
+        prepared.abort();
         this.addingVideo = false;
         this.setVideoPublishState("off");
         return;
       }
+      prepared.commit();
       localStream.addTrack(track);
       const sender = pc2.addTrack(track, localStream); // fires onnegotiationneeded -> reneg
       // The camera arriving mid-call is a new sender and needs its own seal;
@@ -1156,6 +1169,7 @@ export class CallSession {
       this.setVideoPublishState("live");
     } catch (err) {
       track.stop();
+      prepared.abort();
       this.addingVideo = false;
       this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
@@ -1189,9 +1203,8 @@ export class CallSession {
     const pc = this.pc;
     const localStream = this.localStream;
     // Only meaningful if a sender of this kind is already on the wire.
-    const sender = pc
-      .getSenders()
-      .find((s) => s.track?.kind === kind);
+    const sender =
+      kind === "video" ? this.cameraSender(pc) : pc.getSenders().find((s) => s.track?.kind === kind);
     if (sender === undefined) return;
 
     // The microphone asks for the same echo cancellation, noise suppression
@@ -1220,16 +1233,23 @@ export class CallSession {
       kind === "audio"
         ? localStream.getAudioTracks()
         : localStream.getVideoTracks();
-    const newTrack =
+    const captureTrack =
       kind === "audio"
         ? captured.getAudioTracks()[0]
         : captured.getVideoTracks()[0];
-    if (newTrack === undefined) {
+    if (captureTrack === undefined) {
       for (const t of captured.getTracks()) t.stop();
       return;
     }
     // Preserve the current mute (enabled) state so a switch never unmutes.
-    newTrack.enabled = oldTracks[0]?.enabled ?? true;
+    captureTrack.enabled = oldTracks[0]?.enabled ?? true;
+    // The new camera goes out with the person's background, if one is
+    // selected (ADR-0089); a background that had failed starts again.
+    const prepared =
+      kind === "video"
+        ? this.cameraBackground().prepare(captureTrack)
+        : { track: captureTrack, commit: (): void => undefined, abort: (): void => captureTrack.stop() };
+    const newTrack = prepared.track;
 
     // A noise-suppression build in flight for the old microphone must not
     // land on the sender after the new one (ADR-0088).
@@ -1239,7 +1259,7 @@ export class CallSession {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`replaceTrack (${kind} device switch) failed`, err);
-      newTrack.stop();
+      prepared.abort();
       const previous = oldTracks[0];
       if (kind === "audio" && previous !== undefined) void this.noise?.attach(previous);
       return;
@@ -1247,7 +1267,7 @@ export class CallSession {
     if (this.pc !== pc || this.localStream !== localStream) {
       // Ended while the track was being replaced: `dispose()` stopped the
       // old tracks, and the new one is in no stream it knew of.
-      newTrack.stop();
+      prepared.abort();
       return;
     }
 
@@ -1256,9 +1276,49 @@ export class CallSession {
       localStream.removeTrack(t);
       t.stop();
     }
+    prepared.commit();
     localStream.addTrack(newTrack);
     // The suppressor follows the microphone to the new device.
     if (kind === "audio") void this.noise?.attach(newTrack);
+    this.callbacks.onLocalStream?.(localStream);
+  }
+
+  /** The session's background controller, made on first use (ADR-0089). */
+  private cameraBackground(): CameraBackgroundController {
+    if (this.background === null) {
+      this.background = new CameraBackgroundController({
+        label: "1x1",
+        replaceCameraTrack: (track): Promise<void> => this.replaceCameraTrack(track),
+      });
+    }
+    return this.background;
+  }
+
+  /** This device's camera sender: a video sender that is not one of the
+   *  screen share's (ADR-0083). */
+  private cameraSender(pc: RTCPeerConnection): RTCRtpSender | undefined {
+    const screenSenders = this.screen?.transceivers.map((t) => t.sender) ?? [];
+    return pc.getSenders().find((s) => s.track?.kind === "video" && !screenSenders.includes(s));
+  }
+
+  /**
+   * Publishes `track` as the camera in place of the current one, for the
+   * background controller: the camera sender takes it (its SFrame seal stays
+   * bound, nothing is renegotiated) and the local stream holds it. The track
+   * it replaces is NOT stopped: the controller owns the raw camera and the
+   * stages.
+   */
+  private async replaceCameraTrack(track: MediaStreamTrack): Promise<void> {
+    const pc = this.pc;
+    const localStream = this.localStream;
+    if (localStream === null) return;
+    const sender = pc === null ? undefined : this.cameraSender(pc);
+    if (sender !== undefined) await sender.replaceTrack(track);
+    if (this.localStream !== localStream) return;
+    for (const t of localStream.getVideoTracks()) {
+      if (t !== track) localStream.removeTrack(t);
+    }
+    if (!localStream.getVideoTracks().includes(track)) localStream.addTrack(track);
     this.callbacks.onLocalStream?.(localStream);
   }
 
@@ -1291,6 +1351,8 @@ export class CallSession {
     }
     this.noise?.dispose();
     this.noise = null;
+    this.background?.dispose();
+    this.background = null;
     if (this.localStream !== null) {
       for (const track of this.localStream.getTracks()) {
         track.stop();
@@ -1369,6 +1431,16 @@ export class CallSession {
     if (this.callIsOver()) {
       for (const track of stream.getTracks()) track.stop();
       return;
+    }
+    // The camera goes out with the person's background, if one is selected
+    // (ADR-0089): the stream carries the processed track from here on.
+    const rawCamera = stream.getVideoTracks()[0];
+    if (rawCamera !== undefined) {
+      const published = this.cameraBackground().adopt(rawCamera);
+      if (published !== rawCamera) {
+        stream.removeTrack(rawCamera);
+        stream.addTrack(published);
+      }
     }
     this.localStream = stream;
     // Surface the local capture so the UI can render a self-preview

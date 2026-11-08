@@ -128,6 +128,8 @@ import {
   onNoiseSuppressionChange,
   setNoiseSuppression,
 } from "../calls/noise-setting";
+import { CallBackgroundSection } from "../calls/CallBackgroundSection";
+import { cameraBackgroundState, ownCameraPreparing } from "../calls/background-status";
 import {
   gridLayout,
   gridPage,
@@ -633,6 +635,8 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
               </button>
             </div>
           </section>
+          {/* ADR-0089: under Sound, above the device lists. */}
+          <CallBackgroundSection />
           <Show
             when={sections().length > 0}
             fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
@@ -928,6 +932,8 @@ const CallPortrait: Component<{ name: string; toneId: string; personKey?: string
 const SelfView: Component<{
   stream: MediaStream | undefined;
   starting: boolean;
+  /** The camera background is starting (ADR-0089): nothing is sent yet. */
+  preparing?: boolean;
   canFlip: boolean;
   onFlip: () => void;
 }> = (props) => {
@@ -1005,6 +1011,12 @@ const SelfView: Component<{
         <div class="lk-call-self-overlay" role="status" aria-live="polite">
           <Spinner size={20} />
           <span>{t("call.self.starting_camera")}</span>
+        </div>
+      </Show>
+      <Show when={!props.starting && props.preparing === true}>
+        <div class="lk-call-self-overlay" role="status" aria-live="polite">
+          <Spinner size={18} />
+          <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
         </div>
       </Show>
 
@@ -1666,7 +1678,10 @@ const ParticipantTile: Component<TileProps> = (props) => {
       }}
     >
       <Show
-        when={props.participant.camOn}
+        when={
+          props.participant.camOn &&
+          !(local && ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting"))
+        }
         fallback={
           <div class="lk-call-tile-avatar" aria-hidden="true">
             <PhotoOrInitials
@@ -1716,6 +1731,20 @@ const ParticipantTile: Component<TileProps> = (props) => {
         <div class="lk-call-tile-overlay" role="status" aria-live="polite">
           <Spinner size={props.large ? 30 : 24} />
           <span>{t("call.self.starting_camera")}</span>
+        </div>
+      </Show>
+      {/* ADR-0089: the background is starting; nothing is sent until it is
+          ready, so the tile shows the avatar with a small spinner. */}
+      <Show
+        when={
+          props.participant.isLocal &&
+          props.participant.camOn &&
+          ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting")
+        }
+      >
+        <div class="lk-call-tile-overlay lk-call-tile-overlay-quiet" role="status" aria-live="polite">
+          <Spinner size={props.large ? 22 : 18} />
+          <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
         </div>
       </Show>
 
@@ -3030,13 +3059,33 @@ const Call: Component<{
         )}
       </Show>
       <Show when={fill() === "local"}>
-        <Show when={props.localStream?.() !== undefined}>
-          <LocalVideo
-            stream={props.localStream?.()}
-            where="fill"
-            class="lk-call-fill mirrored"
-            ariaLabel={t("call.self.camera_a11y")}
-          />
+        {/* ADR-0089: while the background starts nothing is sent, so the
+            full-screen own camera shows the avatar with a small spinner, as
+            the own tile and the self view do. */}
+        <Show
+          when={!ownCameraPreparing(cameraBackgroundState(), callState.videoPublishState() === "starting")}
+          fallback={
+            <div class="lk-call-fill lk-call-fill-preparing" role="status" aria-live="polite">
+              <div class="lk-call-portrait-avatar" aria-hidden="true">
+                <PhotoOrInitials
+                  name={local()?.displayName || t("call.participant.you")}
+                  personKey={local()?.personKeyB64}
+                  class="lk-call-photo"
+                />
+              </div>
+              <Spinner size={22} />
+              <span class="lk-visually-hidden">{t("call.background.preparing")}</span>
+            </div>
+          }
+        >
+          <Show when={props.localStream?.() !== undefined}>
+            <LocalVideo
+              stream={props.localStream?.()}
+              where="fill"
+              class="lk-call-fill mirrored"
+              ariaLabel={t("call.self.camera_a11y")}
+            />
+          </Show>
         </Show>
       </Show>
 
@@ -3076,6 +3125,10 @@ const Call: Component<{
         <SelfView
           stream={props.localStream?.()}
           starting={callState.videoPublishState() === "starting"}
+          preparing={ownCameraPreparing(
+            cameraBackgroundState(),
+            callState.videoPublishState() === "starting",
+          )}
           canFlip={videoInputs().length >= 2}
           onFlip={flipCamera}
         />

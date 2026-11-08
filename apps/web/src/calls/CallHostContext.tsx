@@ -255,6 +255,9 @@ import { uiRules } from "../chat/ui-rules";
 import { CallBar } from "./CallBar";
 import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
+import { onCameraBackgroundFailure } from "./background-status";
+import { BackgroundPhotoStore, bindBackgroundPhotos } from "./background-photos";
+import { getDeviceKey } from "../auth/key-store";
 import { callFailureReason, callFailureText } from "./call-errors";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
@@ -518,6 +521,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const callLog = useCallLog();
   const membershipEnd = useMembershipEnd();
   const groupNames = useGroupNames();
+
+  // ADR-0089: the signed-in account's own background photos, for the call
+  // sessions and the Settings sheet.
+  createEffect(() => {
+    const account = sessionAccountOf(auth.state());
+    untrack(() => {
+      bindBackgroundPhotos(account === null ? null : new BackgroundPhotoStore(account, () => getDeviceKey(account)));
+    });
+  });
+  // ADR-0089: a background that stopped working turns the camera off, as if
+  // the person had pressed the button, and says so on the call screen. The
+  // processed track already sends nothing at that point; this makes the
+  // camera state say what is true.
+  onCleanup(
+    onCameraBackgroundFailure(() => {
+      callActions.setCamera(false);
+      callActions.showNotice(t("call.background.failed"));
+    }),
+  );
 
   // Seals and publishes signaling through the locked, fail-closed-persisting
   // seam (`call-signaling-publish.ts`), like every other application message.

@@ -68,6 +68,7 @@ import me.lakko.app.ui.theme.LakkoDark
  *
  * Above the device lists, the `Sound` section with the `Noise suppression`
  * switch (section 4.1.3, ADR-0088): shown even when no device list is.
+ * Under it, `Background` (`docs/ux/call-backgrounds.md`, ADR-0089).
  *
  * The app's own radio lists, never a system picker and never the system's
  * output switcher. Which sections and rows exist is decided by
@@ -92,6 +93,14 @@ internal fun CallSettingsSheet(
     ownCallName: String = "",
     /** The profile name, the field's placeholder (`""` = none). */
     callNameDefault: String = "",
+    /** The camera button's state, for the `Background` preview (ADR-0089). */
+    cameraOn: Boolean = false,
+    /** The camera chosen in this sheet, for a preview-only camera. */
+    preferredCamera: String? = null,
+    /** `Turn on camera without background`: no background, then the camera
+     *  on, as the camera button would. `null` hides the `Background` section
+     *  (a screen with no call to send it on). */
+    onTurnCameraOnWithoutBackground: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -120,6 +129,15 @@ internal fun CallSettingsSheet(
                 CallNameSection(callNameControl, ownCallName, callNameDefault)
             }
             NoiseSuppressionSection(noiseSuppressionOn, onNoiseSuppressionChange)
+            // `Background` (docs/ux/call-backgrounds.md section 2.1): under
+            // Sound, above the device lists.
+            if (onTurnCameraOnWithoutBackground != null) {
+                CallBackgroundSection(
+                    cameraOn = cameraOn,
+                    preferredCamera = preferredCamera,
+                    onTurnCameraOnWithout = onTurnCameraOnWithoutBackground,
+                )
+            }
             if (sections.isEmpty()) {
                 Text(
                     t("call.settings.no_devices"),

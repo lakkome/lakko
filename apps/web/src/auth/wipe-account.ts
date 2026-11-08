@@ -95,6 +95,7 @@ import { deleteTranslationRows } from "../translation/result-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
 import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
+import { deleteBackgroundPhotos } from "../calls/background-photos";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearClaimedHandles } from "../channels/claimed-handles";
@@ -247,6 +248,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "discover", run: () => deleteDiscoverRows(accountIdB64) },
     { name: "read-watermarks", run: () => deleteReadWatermarkRow(accountIdB64) },
     { name: "call-log", run: () => deleteCallLogRow(accountIdB64) },
+    { name: "call-backgrounds", run: () => deleteBackgroundPhotos(accountIdB64) },
     { name: "device-sync", run: () => deleteSyncState(accountIdB64) },
     { name: "minted-links", run: () => deleteMintedLinksForAccount(accountIdB64) },
     // The intro text of the unanswered contact requests this device sent,

@@ -52,6 +52,10 @@ enum UiTestFixture: String {
     /// per-message action menu, so a test can hold a finger on a bubble.
     case messageActions
 
+    /// `docs/ux/calls.md` section 4.1 and `docs/ux/call-backgrounds.md` — the
+    /// call's settings sheet on its own, with the camera background section.
+    case callSettings
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -84,6 +88,8 @@ struct UiTestFixtureRoot: View {
             CallBarFixture()
         case .messageActions:
             MessageActionsFixture()
+        case .callSettings:
+            CallSettingsSheet(state: CallUiState(), onDone: {})
         }
     }
 }

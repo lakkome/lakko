@@ -14,7 +14,8 @@
 #      triple).
 #   2. Compile apps/shared/sframe-bridge/sframe-bridge.cc +
 #      apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc +
-#      apps/android/lakko-sframe/src/main/cpp/noise_jni.cc.
+#      apps/android/lakko-sframe/src/main/cpp/noise_jni.cc +
+#      apps/android/lakko-sframe/src/main/cpp/segment_jni.cc.
 #   3. Link against the cross-compiled
 #      target/<triple>/release/liblakko_sframe_native.a.
 #   4. Emit a single libsframe_jni.so under
@@ -113,10 +114,14 @@ COMMON_INCLUDES=(
 #   - noise_jni.cc     — JNI for the capture noise suppressor
 #                        (ADR-0088), over the lakko_noise_* C ABI of the
 #                        same archive. Plain C++, no vtables.
+#   - segment_jni.cc   — JNI for the camera background segmenter
+#                        (ADR-0089), over the lakko_segment_* C ABI of the
+#                        same archive. Plain C++, no vtables.
 SRC=(
     "$ROOT/apps/shared/sframe-bridge/sframe-bridge.cc"
     "$ROOT/apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc"
     "$ROOT/apps/android/lakko-sframe/src/main/cpp/noise_jni.cc"
+    "$ROOT/apps/android/lakko-sframe/src/main/cpp/segment_jni.cc"
 )
 
 OUT_BASE="$ROOT/apps/android/lakko-sframe/src/main/jniLibs"

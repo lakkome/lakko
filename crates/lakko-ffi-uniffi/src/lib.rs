@@ -41,6 +41,7 @@ pub mod account_statement;
 pub mod anon_token;
 pub mod attachments;
 pub mod auth;
+pub mod background;
 pub mod backup;
 pub mod call_relay;
 pub mod channel_access;

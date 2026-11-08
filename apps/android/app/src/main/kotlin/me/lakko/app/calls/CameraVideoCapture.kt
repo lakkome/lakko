@@ -65,8 +65,21 @@ public class CameraVideoCapture private constructor(
     private var didStart: Boolean = false
 
     /** Hands the capturer's frames to [source] and to every copy's source
-     *  ([copySource]); see [CapturerFan] for why each copy has its own. */
-    private val fan = CapturerFan(source.capturerObserver)
+     *  ([copySource]); see [CapturerFan] for why each copy has its own.
+     *  Every frame first passes the camera background stage (ADR-0089).
+     *  Always present: on a device that cannot run a background the stage
+     *  hands the camera on while none is selected and refuses every frame
+     *  while one is, so the room is never sent against the choice. */
+    private val fan: CapturerFan = CapturerFan(
+        first = source.capturerObserver,
+        stage = CameraBackground.newStage(context),
+        onRunning = { running -> trackRunning(running) },
+        preview = CameraBackground::deliverPreview,
+    )
+
+    private fun trackRunning(running: Boolean) {
+        if (running) CameraBackground.fanStarted(fan) else CameraBackground.fanStopped(fan)
+    }
 
     /** The sources made for the camera's copies, by copy. Touched on the
      *  call's thread only. */
@@ -149,6 +162,8 @@ public class CameraVideoCapture private constructor(
             capturer.switchCamera(
                 object : CameraVideoCapturer.CameraSwitchHandler {
                     override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                        // A new camera: a failed background gets another chance.
+                        fan.stage?.requestRestart()
                         onDone(true, isFrontCamera)
                     }
 
@@ -182,6 +197,8 @@ public class CameraVideoCapture private constructor(
             capturer.switchCamera(
                 object : CameraVideoCapturer.CameraSwitchHandler {
                     override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                        // A new camera: a failed background gets another chance.
+                        fan.stage?.requestRestart()
                         onDone(true, isFrontCamera)
                     }
 
@@ -250,6 +267,14 @@ public class CameraVideoCapture private constructor(
      */
     public fun dispose() {
         capturer.dispose()
+        CameraBackground.fanStopped(fan)
+        // The background stage's GL objects live in the capture thread's EGL
+        // context: freed there, before that context goes.
+        fan.stage?.let { stage ->
+            runCatching {
+                org.webrtc.ThreadUtils.invokeAtFrontUninterruptibly(surfaceHelper.handler, Runnable { stage.release() })
+            }
+        }
         surfaceHelper.dispose()
         // The copies' sources are this capture's own (the main one is the
         // caller's). A track still on one holds a reference of its own, so

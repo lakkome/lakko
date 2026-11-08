@@ -85,3 +85,13 @@ path = "apps/android/app/src/test/screenshots/**/*.png"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Lakko Contributors"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# ADR-0089 — the MediaPipe selfie segmentation model (landscape), as the ONNX
+# conversion published by onnx-community on Hugging Face. Google's model card
+# (2021-05-06) states Apache License 2.0 for the model; the AGPL `**` fallback
+# must NOT relicense it. Pinned by SHA-256 in `crates/lakko-segment/src/model.rs`.
+[[annotations]]
+path = "crates/lakko-segment/model/selfie_segmenter_landscape.onnx"
+precedence = "override"
+SPDX-FileCopyrightText = "2021 Google LLC"
+SPDX-License-Identifier = "Apache-2.0"

@@ -120,7 +120,9 @@ public final class LocalCameraCapture {
     /// virtual camera, or a hypothetical Mac Catalyst host
     /// running without a webcam).
     public init?(source: RTCVideoSource) {
-        let fan = CapturerFan(first: source)
+        // ADR-0089 — every camera frame passes the background stage before
+        // any source sees it (the 1:1 call and the group call alike).
+        let fan = CapturerFan(first: source, stage: CameraBackgroundStage.shared)
         self.fan = fan
         self.copySources = CameraCopySources(fan: fan) { @MainActor in
             WebRTCPeerConnection.newVideoSource()
@@ -275,6 +277,11 @@ public final class LocalCameraCapture {
         // The owner already let this capture go (the call ended before the
         // camera was asked to start): the camera is not turned on at all.
         guard withGate({ $0.mayStart }) else { throw CaptureError.released }
+        // ADR-0089 — the stored background is applied before the first frame,
+        // and a background that failed is tried again on a camera that
+        // starts, switches or comes back.
+        CameraBackground.applyStoredChoice()
+        CameraBackground.cameraRestarted()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             capturer.startCapture(
                 with: device,

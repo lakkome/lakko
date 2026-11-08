@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-segment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Camera background for calls: person segmentation, mask smoothing, the frame gate and the built-in backgrounds, ADR-0089"
+
+[lints]
+workspace = true
+
+[features]
+# The segmentation model and its runtime. Off for the FFI crates that only
+# need the stored choice, the gate and the built-in backgrounds
+# (`lakko-ffi-uniffi`, `lakko-ffi-wasm`), so `tract` is linked only where a
+# frame is segmented (`lakko-segment-wasm`, `lakko-sframe-native`).
+default = ["model"]
+model = ["dep:tract-onnx"]
+
+[dependencies]
+# ADR-0089: runs the bundled MediaPipe selfie segmentation model (ONNX).
+tract-onnx = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+sha2 = "0.10"

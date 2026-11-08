@@ -761,6 +761,11 @@ private fun InCallView(
                         scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                     )
                 }
+                // docs/ux/call-backgrounds.md section 3 — nothing is sent
+                // while a background gets ready: the avatar with a spinner.
+                if (onLocal && backgroundStarting()) {
+                    BackgroundStartingCover(modifier = Modifier.fillMaxSize(), avatarSize = 96.dp)
+                }
                 FloatingStatusHeader(
                     state = state,
                     phase = phase,
@@ -982,6 +987,18 @@ private fun InCallView(
             )
         }
 
+        // docs/ux/call-backgrounds.md section 3 — a background that stopped
+        // working turns the camera off through the camera button's path and
+        // says so here for a few seconds.
+        BackgroundFailureLine(
+            cameraOn = local?.camOn == true,
+            onCameraOff = { onSetCamera(false) },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(bottom = barHeight + 24.dp),
+        )
+
         // docs/ux/screen-share.md section 5.3 — `Anna started sharing their
         // screen` and `Anna stopped sharing`, polite, once each.
         val unnamed = LocalStrings.current["call.participant.unnamed"]
@@ -1078,6 +1095,17 @@ private fun InCallView(
                 callNameControl = callNameControl,
                 ownCallName = ownCallName,
                 callNameDefault = callNameDefault,
+                cameraOn = local?.camOn == true,
+                preferredCamera = chosenCamera,
+                onTurnCameraOnWithoutBackground = {
+                    // docs/ux/call-backgrounds.md section 3: no background,
+                    // then the camera on through the camera button's path.
+                    me.lakko.app.calls.CameraBackground.select(
+                        context,
+                        me.lakko.app.calls.BackgroundSelection.None,
+                    )
+                    if (local?.camOn != true) onSetCamera(true)
+                },
                 sections = callSettingsSections(
                     devices = callSettingsSheetDevices(inputs, cameras, outputs, strings),
                     selection = SettingsSelection(
@@ -1354,7 +1382,10 @@ private fun SelfViewPip(
                 mirrored = mirrored,
                 scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
             )
-        } else if (starting) {
+        }
+        if (track != null && backgroundStarting()) {
+            BackgroundStartingCover(modifier = Modifier.fillMaxSize(), avatarSize = 48.dp)
+        } else if (track == null && starting) {
             // ADR-0032 piece B2a — the acquire is in flight, so the rectangle
             // says so instead of showing an empty box.
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

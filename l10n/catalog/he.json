@@ -289,6 +289,82 @@
       "text": "שיחה",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "הוספת תמונה",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "טשטוש",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "רקע: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "הרקע הפסיק לעבוד, ולכן המצלמה כובתה.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "הפעלת המצלמה בלי רקע",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "שחר",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "דמדומים",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "נמל",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "אחו",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "בוקר",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "לילה",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "ללא",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "אי אפשר להשתמש בתמונה הזו. אפשר לנסות אחרת.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "מכינים את הרקע...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "רק את/ה רואה את זה. המצלמה כבויה.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "המצלמה שלך כפי שהאחרים רואים אותה",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "הסרה",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "טשטוש חזק",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "התמונה שלך",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "המצלמה שלכם פועלת",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "מפעילים את המצלמה...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "רקע",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "האחרים רואים את זה מאחוריך. נשמר במכשיר הזה בלבד.",
       "status": "machine"
     },
     "call.settings.devices": {

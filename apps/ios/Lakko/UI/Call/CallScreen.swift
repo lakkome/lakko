@@ -619,10 +619,17 @@ private struct ParticipantTile: View {
     private var videoSurface: some View {
         if participant.camOn {
             if participant.isLocal, let track = state.localVideoTrack {
-                LocalVideoPreviewView(
-                    track: track,
-                    mirrored: state.settings.mirrorLocal,
-                    contentMode: .scaleAspectFill)
+                ZStack {
+                    LocalVideoPreviewView(
+                        track: track,
+                        mirrored: state.settings.mirrorLocal,
+                        contentMode: .scaleAspectFill)
+                    // ADR-0089: while the background starts nothing is sent,
+                    // and the tile says so with the avatar and a spinner.
+                    BackgroundStartingCover(
+                        name: displayLabel, identity: participant.id,
+                        avatarSize: CallScreenPresentation.tileInitialsDiameter(tileSize: size))
+                }
             } else if !participant.isLocal, let track = state.remoteVideoTracks[participant.id] {
                 // An SFU call: the heavy picture this tile watches (the
                 // person's main track or their middle one, the lower of what
@@ -1386,6 +1393,13 @@ public struct CallScreen: View {
                 remoteIds: remoteParticipants.map(\.id), connected: connected,
                 sounds: sounds.controller)
         }
+        // ADR-0089: the background stopped working. The call's owner turned
+        // the camera off (``CallSession``, the group and link hosts); the line
+        // is shown here, now or when the screen comes back from the bar.
+        .onReceive(CameraBackground.shared.$failureNoticePending) { pending in
+            guard pending, CameraBackground.shared.takeFailureNotice() else { return }
+            state.showNotice(.key("call.background.failed"))
+        }
         .onAppear {
             if let session, sessionBindings.isEmpty {
                 sessionBindings = state.driveFrom(session: session, peerName: peerName)
@@ -1569,7 +1583,8 @@ public struct CallScreen: View {
     /// The two sheets every call has: the safety number, only when asked for
     /// (section 5), and the call's settings (section 4.1).
     private var encryptionSheet: some ViewModifier {
-        CallSheetsModifier(state: state, settingsOpen: $settingsOpen)
+        CallSheetsModifier(
+            state: state, settingsOpen: $settingsOpen, onCameraOn: { setCamera(true) })
     }
 
     // MARK: - A group call
@@ -1941,6 +1956,10 @@ public struct CallScreen: View {
                     track: track,
                     mirrored: state.settings.mirrorLocal,
                     contentMode: .scaleAspectFill)
+                // ADR-0089: the background is starting, nothing is sent yet.
+                BackgroundStartingCover(
+                    name: local?.displayName ?? "", identity: local?.id ?? "local",
+                    avatarSize: width * 0.45)
                 if session?.canFlipCamera == true {
                     Button {
                         Task {
@@ -2206,6 +2225,8 @@ private struct InviteScope<Content: View>: View {
 private struct CallSheetsModifier: ViewModifier {
     @ObservedObject var state: CallUiState
     @Binding var settingsOpen: Bool
+    /// Turn the call's camera on, as the camera button does.
+    let onCameraOn: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -2220,7 +2241,8 @@ private struct CallSheetsModifier: ViewModifier {
                     onDone: { state.setEncryptionSheetOpen(false) })
             }
             .sheet(isPresented: $settingsOpen) {
-                CallSettingsSheet(state: state, onDone: { settingsOpen = false })
+                CallSettingsSheet(
+                    state: state, onCameraOn: onCameraOn, onDone: { settingsOpen = false })
             }
     }
 }

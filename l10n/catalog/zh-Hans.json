@@ -289,6 +289,82 @@
       "text": "通话",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "添加照片",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "模糊",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "背景：{name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "背景停止工作，因此已关闭你的摄像头。",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "不使用背景打开摄像头",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "黎明",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "黄昏",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "港湾",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "草地",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "清晨",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "夜晚",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "无",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "无法使用这张照片。请换一张。",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "正在准备背景...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "只有你能看到。你的摄像头已关闭。",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "其他人看到的你的摄像头画面",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "移除",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "强模糊",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "你的照片",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "你的摄像头已开启",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "正在启动摄像头…",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "背景",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "其他人会在你身后看到这个。仅保存在此设备上。",
       "status": "machine"
     },
     "call.settings.devices": {

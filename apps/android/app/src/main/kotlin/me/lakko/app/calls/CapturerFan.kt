@@ -39,8 +39,26 @@ import java.util.concurrent.CopyOnWriteArrayList
  * A frame is handed to each observer synchronously: libwebrtc's own observer
  * makes its adapted copy before returning, and the capturer releases the
  * frame after this returns.
+ *
+ * ## The camera background
+ *
+ * When a [stage] is set (the camera background of ADR-0089), each frame
+ * goes through it ONCE, before any observer sees it, so every copy of the
+ * camera and the self-view get the same processed frame and no copy can
+ * carry the room. A frame the stage drops reaches no observer at all. The
+ * Settings sheet's preview ([CameraBackground]) is handed the same frame
+ * the observers get.
  */
-internal class CapturerFan(first: CapturerObserver) : CapturerObserver {
+internal class CapturerFan(
+    first: CapturerObserver,
+    /** The step every frame passes before the observers; `null` hands the
+     *  camera frames on as they are. */
+    internal val stage: CameraFrameStage? = null,
+    /** Told when the capturer starts and stops (the preview's registry). */
+    private val onRunning: (running: Boolean) -> Unit = {},
+    /** Handed each frame the observers get (the sheet's preview). */
+    private val preview: (VideoFrame) -> Unit = {},
+) : CapturerObserver {
     private val observers = CopyOnWriteArrayList<CapturerObserver>(listOf(first))
 
     /** What the capturer last said of its start: `null` before it started
@@ -66,15 +84,24 @@ internal class CapturerFan(first: CapturerObserver) : CapturerObserver {
 
     override fun onCapturerStarted(success: Boolean) {
         started = success
+        if (success) stage?.onCapturerStarted()
+        onRunning(success)
         for (observer in observers) observer.onCapturerStarted(success)
     }
 
     override fun onCapturerStopped() {
         started = null
+        onRunning(false)
         for (observer in observers) observer.onCapturerStopped()
     }
 
     override fun onFrameCaptured(frame: VideoFrame) {
-        for (observer in observers) observer.onFrameCaptured(frame)
+        val out = if (stage == null) frame else (stage.process(frame) ?: return)
+        try {
+            for (observer in observers) observer.onFrameCaptured(out)
+            preview(out)
+        } finally {
+            if (out !== frame) out.release()
+        }
     }
 }

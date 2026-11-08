@@ -16,4 +16,10 @@
 
 #import "Calls/SFrameAttach.h"
 
+// ADR-0089 — the camera background's per-frame C ABI (`lakko_segment_*`)
+// in the same `liblakko_sframe_native.a` the SFrame shim links. Plain C.
+// By relative path, not HEADER_SEARCH_PATHS: the test target re-reads this
+// header through `@testable import Lakko` without the app's search paths.
+#import "../../../target/lakko-include/lakko_sframe_native.h"
+
 #endif  // LAKKO_BRIDGING_HEADER_H_

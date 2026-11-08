@@ -118,6 +118,7 @@ import {
 } from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { NoiseSuppressionController } from "./noise-suppression";
+import { CameraBackgroundController } from "./background-controller";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 import {
   addCameraSenderMidCall,
@@ -450,6 +451,10 @@ export class SfuCallSession {
   /** Which microphone track the sender carries, raw or noise-suppressed
    *  (ADR-0088). Created with the first publish, disposed at teardown. */
   private noise: NoiseSuppressionController | null = null;
+  /** Which camera track is published, raw or with the person's background
+   *  (ADR-0089). Owns the raw camera once it is adopted; disposed at
+   *  teardown. */
+  private background: CameraBackgroundController | null = null;
   private signaling: SfuSignalingClient | null = null;
   private selfPeerId: string | null = null;
   /** The relay keys of the current and previous call epoch (ADR-0078
@@ -1264,6 +1269,8 @@ export class SfuCallSession {
     }
     // The copies follow the camera.
     this.setCopiesEnabled(on);
+    // The raw camera behind a background stops sending too.
+    this.background?.setCameraEnabled(on);
     this.setLocalCameraOn(on);
     // The toggle is the tracks' `enabled`, as before; the encodings stay as
     // the people count and the SFU's last word have them (asked again here
@@ -1398,6 +1405,8 @@ export class SfuCallSession {
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
       this.setCopiesEnabled(true);
+      // A background that failed starts again (ADR-0089).
+      this.background?.setCameraEnabled(true);
       this.syncSenderActivity();
       this.setVideoPublishState("live");
       // Camera is live again — tell peers (camera-off-cleanup).
@@ -1417,11 +1426,15 @@ export class SfuCallSession {
       this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
     }
-    const track = captured.getVideoTracks()[0];
-    if (track === undefined) {
+    const raw = captured.getVideoTracks()[0];
+    if (raw === undefined) {
       this.setVideoPublishState("failed");
       throw new Error("no camera track captured");
     }
+    // The camera goes out with the person's background, if one is selected
+    // (ADR-0089): `track` is what every sender and the self-view carry.
+    const prepared = this.cameraBackground().prepare(raw);
+    const track = prepared.track;
     try {
       // Re-read state after the await — the call may have been torn down or
       // rekeyed while getUserMedia was in flight; attach at the CURRENT seed.
@@ -1429,7 +1442,7 @@ export class SfuCallSession {
       const pc2 = this.pc;
       const seed = this.activeSeed;
       if (localStream === null || pc2 === null || seed === null) {
-        track.stop();
+        prepared.abort();
         this.setVideoPublishState("off");
         return;
       }
@@ -1444,10 +1457,11 @@ export class SfuCallSession {
         if (this.pc !== pc2 || this.localStream !== localStream) {
           // Torn down while the track was being replaced: the stream the
           // teardown stopped no longer holds this track, so stop it here.
-          track.stop();
+          prepared.abort();
           this.setVideoPublishState("off");
           return;
         }
+        prepared.commit();
         localStream.removeTrack(old);
         localStream.addTrack(track);
         // The copies' clones ended with the camera they were cloned from:
@@ -1465,6 +1479,7 @@ export class SfuCallSession {
         this.callbacks.onLocalStream?.(localStream);
         return;
       }
+      prepared.commit();
       localStream.addTrack(track);
       // The main sender, on a transceiver of its own (never one the SFU
       // opened to send this device another person's camera).
@@ -1492,8 +1507,10 @@ export class SfuCallSession {
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
     } catch (err) {
-      // Never leave a half-added sender: release the capture.
+      // Never leave a half-added sender: release the capture (and the
+      // background stage made for it).
       track.stop();
+      prepared.abort();
       this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
     }
@@ -1557,16 +1574,23 @@ export class SfuCallSession {
       kind === "audio"
         ? localStream.getAudioTracks()
         : localStream.getVideoTracks();
-    const newTrack =
+    const captureTrack =
       kind === "audio"
         ? captured.getAudioTracks()[0]
         : captured.getVideoTracks()[0];
-    if (newTrack === undefined) {
+    if (captureTrack === undefined) {
       for (const t of captured.getTracks()) t.stop();
       return;
     }
     // Preserve the current mute (enabled) state so a switch never unmutes.
-    newTrack.enabled = oldTracks[0]?.enabled ?? true;
+    captureTrack.enabled = oldTracks[0]?.enabled ?? true;
+    // The new camera goes out with the person's background, if one is
+    // selected (ADR-0089); a background that had failed starts again.
+    const prepared =
+      kind === "video"
+        ? this.cameraBackground().prepare(captureTrack)
+        : { track: captureTrack, commit: (): void => undefined, abort: (): void => captureTrack.stop() };
+    const newTrack = prepared.track;
 
     // A noise-suppression build in flight for the old microphone must not
     // land on the sender after the new one (ADR-0088).
@@ -1578,7 +1602,7 @@ export class SfuCallSession {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`replaceTrack (SFU ${kind} device switch) failed`, err);
-      newTrack.stop();
+      prepared.abort();
       const previous = oldTracks[0];
       if (kind === "audio" && previous !== undefined) void this.noise?.attach(previous);
       return;
@@ -1586,7 +1610,7 @@ export class SfuCallSession {
     if (this.pc !== pc || this.localStream !== localStream) {
       // Torn down while the track was being replaced: the old tracks were
       // stopped by the teardown, and the new one is not in any stream it knew.
-      newTrack.stop();
+      prepared.abort();
       return;
     }
 
@@ -1594,6 +1618,7 @@ export class SfuCallSession {
       localStream.removeTrack(t);
       t.stop();
     }
+    prepared.commit();
     localStream.addTrack(newTrack);
     // The suppressor follows the microphone to the new device.
     if (kind === "audio") void this.noise?.attach(newTrack);
@@ -1606,6 +1631,48 @@ export class SfuCallSession {
     // A replaced track keeps the sender and its parameters; asked again all
     // the same, in case this browser reset the encoding.
     if (kind === "video") this.syncSenderActivity();
+  }
+
+  /** The session's background controller, made on first use (ADR-0089). */
+  private cameraBackground(): CameraBackgroundController {
+    if (this.background === null) {
+      this.background = new CameraBackgroundController({
+        label: "group",
+        replaceCameraTrack: (track): Promise<void> => this.replaceCameraTrack(track),
+      });
+    }
+    return this.background;
+  }
+
+  /** Lets the background and the raw camera behind it go. */
+  private releaseCameraBackground(): void {
+    this.background?.dispose();
+    this.background = null;
+  }
+
+  /**
+   * Publishes `track` as the camera in place of the current one, for the
+   * background controller (none <-> a background, a failed background
+   * started again): the main sender takes it (its SFrame transform stays
+   * bound, nothing is renegotiated), the local stream holds it, every copy
+   * takes a clone of it. The track it replaces is NOT stopped: the
+   * controller owns the raw camera and the stages.
+   */
+  private async replaceCameraTrack(track: MediaStreamTrack): Promise<void> {
+    const pc = this.pc;
+    const localStream = this.localStream;
+    if (localStream === null) return;
+    const sender = pc === null ? undefined : this.mainSenderOf(pc, "video");
+    if (sender !== undefined) await sender.replaceTrack(track);
+    if (this.localStream !== localStream) return;
+    for (const t of localStream.getVideoTracks()) {
+      if (t !== track) localStream.removeTrack(t);
+    }
+    if (!localStream.getVideoTracks().includes(track)) localStream.addTrack(track);
+    if (pc !== null && this.pc === pc && this.activeSeed !== null) {
+      await this.followCamera(pc, track, this.activeSeed, false);
+    }
+    this.callbacks.onLocalStream?.(localStream);
   }
 
   /** The copies' clones are enabled and disabled with the camera. */
@@ -2104,6 +2171,7 @@ export class SfuCallSession {
     }
     this.noise?.dispose();
     this.noise = null;
+    this.releaseCameraBackground();
     if (this.localStream !== null) {
       for (const track of this.localStream.getTracks()) {
         track.stop();
@@ -2249,6 +2317,17 @@ export class SfuCallSession {
     // An empty stream when nothing was captured, so a camera turned on later
     // (`publishVideo`) has a stream to join.
     const stream = captured.stream ?? new MediaStream();
+    // The camera goes out with the person's background, if one is selected
+    // (ADR-0089): the stream carries the processed track from here on, so
+    // the self-view, the main sender and every copy carry it.
+    const rawCamera = stream.getVideoTracks()[0];
+    if (rawCamera !== undefined) {
+      const published = this.cameraBackground().adopt(rawCamera);
+      if (published !== rawCamera) {
+        stream.removeTrack(rawCamera);
+        stream.addTrack(published);
+      }
+    }
     this.localStream = stream;
     // Surface the capture to the UI (group self-preview tile), mirroring the
     // 1×1 `onLocalStream`. Fired once, before the offer is built.
@@ -2269,6 +2348,7 @@ export class SfuCallSession {
     // that stream any more. No peer connection, no timer.
     if (this.isOver() || this.localStream !== stream || this.pc !== null) {
       for (const track of stream.getTracks()) track.stop();
+      if (this.localStream !== stream) this.releaseCameraBackground();
       return;
     }
     const pc = new RTCPeerConnection(

@@ -323,6 +323,7 @@ public final class WebRTCPeerConnection: NSObject {
         Self.libwebrtcQueue.async { p.close() }
         peer = nil
         localAudioTrack = nil
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         cameraCopies = [:]
     }
@@ -378,6 +379,8 @@ public final class WebRTCPeerConnection: NSObject {
         // The copies of an SFU call's camera carry the same picture and are
         // switched with it.
         for copy in cameraCopies.values { copy.track.isEnabled = on }
+        // ADR-0089: the camera background runs only while the camera sends.
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(on) }
     }
 
     /// G3-1-conn-quality — one-shot connection-stats sample
@@ -653,6 +656,8 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localVideoTrack = track
         self.localVideoSender = sender
+        // ADR-0089: a new camera track sends; the background runs for it.
+        CameraBackgroundStage.shared?.setCameraSending(true)
     }
 
     // MARK: - The SFU call's camera: three senders (ADR-0070 steps 1 and 5)
@@ -696,6 +701,8 @@ public final class WebRTCPeerConnection: NSObject {
         self.localVideoTrack = track
         self.localVideoSender = sender
         if let sender { configureMainCameraSender(sender) }
+        // ADR-0089: a new camera track sends; the background runs for it.
+        CameraBackgroundStage.shared?.setCameraSending(true)
     }
 
     /// Ask the main camera sender for its temporal layers
@@ -986,6 +993,7 @@ public final class WebRTCPeerConnection: NSObject {
             _ = peer.removeTrack(sender)
         }
         localVideoSender = nil
+        if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         // The copies of an SFU call's camera go with the camera.
         for kind in CameraCopyKind.addOrder {

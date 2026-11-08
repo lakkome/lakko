@@ -319,7 +319,19 @@ public final class CallSession: ObservableObject {
     public init(callId: Data, onOutboundSignaling: @escaping (_ bytes: Data, _ wake: Bool) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
+        // ADR-0089: the camera background stopped working. Nothing has been
+        // sent since; the camera goes off here, as the camera button turns it
+        // off, whether or not the call screen is showing.
+        backgroundFailure = CameraBackground.shared.$failures
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, self.cameraEnabled else { return }
+                self.setCameraEnabled(false)
+            }
     }
+
+    /// The camera background's failures (ADR-0089).
+    private var backgroundFailure: AnyCancellable?
 
     /// Inject the per-call SFrame keying material. Caller MUST
     /// run this AFTER the welcome-ferry / KP-forward dispatcher

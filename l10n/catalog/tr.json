@@ -289,6 +289,82 @@
       "text": "Arama",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "Fotoğraf ekle",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "Bulanıklaştır",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "Arka plan: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "Arka plan çalışmayı durdurdu, bu yüzden kameranız kapatıldı.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "Kamerayı arka plan olmadan aç",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "Şafak",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "Alacakaranlık",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "Liman",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "Çayır",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "Sabah",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "Gece",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "Yok",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "Bu fotoğraf kullanılamıyor. Başka bir tane deneyin.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "Arka plan hazırlanıyor...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "Bunu yalnızca siz görüyorsunuz. Kameranız kapalı.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "Kameranız, diğerlerinin gördüğü gibi",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "Güçlü bulanıklaştır",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "Fotoğrafınız",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "kameranız açık",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "Kamera başlatılıyor...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "Arka plan",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "Diğerleri bunu arkanızda görür. Bu cihazda kalır.",
       "status": "machine"
     },
     "call.settings.devices": {

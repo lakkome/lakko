@@ -8644,3 +8644,174 @@ button.lk-card-row-button {
   color: inherit;
   opacity: 0.85;
 }
+
+/* The camera background section of the call settings (ADR-0089,
+   docs/ux/call-backgrounds.md section 2.1). */
+.lk-call-bg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+.lk-call-bg-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-sunken);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Not mirrored: the picture the others receive. */
+.lk-call-bg-preview-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-call-bg-preview-line {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-call-bg-preview-note {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 18, 32, 0.6);
+  color: #ffffff;
+  font-size: 12px;
+  text-align: center;
+}
+.lk-call-bg-preview-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--surface-fg);
+}
+.lk-call-bg-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 6px;
+  scrollbar-width: thin;
+}
+.lk-call-bg-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.lk-call-bg-thumb {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  overflow: hidden;
+  cursor: pointer;
+  color: var(--surface-muted);
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.lk-call-bg-thumb.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.lk-call-bg-thumb:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-bg-thumb.selected:focus-visible {
+  outline-color: var(--accent);
+}
+.lk-call-bg-thumb-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+.lk-call-bg-thumb-face img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+.lk-call-bg-thumb-blur {
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface-sunken));
+}
+.lk-call-bg-thumb-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(3px);
+}
+.lk-call-bg-thumb-blur.strong .lk-call-bg-thumb-blob {
+  filter: blur(7px);
+}
+.lk-call-bg-thumb-blob.a {
+  width: 26px;
+  height: 26px;
+  left: 8px;
+  top: 10px;
+  background: var(--accent);
+  opacity: 0.55;
+}
+.lk-call-bg-thumb-blob.b {
+  width: 22px;
+  height: 22px;
+  right: 8px;
+  bottom: 8px;
+  background: #0f6f80;
+  opacity: 0.5;
+}
+.lk-call-bg-thumb-name {
+  max-width: 64px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--surface-muted);
+  text-align: center;
+  font-weight: 400;
+}
+.lk-call-bg-error {
+  font-size: 13px;
+  color: var(--danger);
+}
+.lk-call-bg-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.lk-call-menu.lk-call-bg-menu {
+  position: fixed;
+  bottom: auto;
+  transform: translateX(-50%);
+  z-index: 41;
+  min-width: 160px;
+}
+.lk-call-tile-overlay-quiet {
+  background: transparent;
+}
+/* The full-screen own camera while the background starts (ADR-0089): the
+   avatar and a small spinner, nothing sent yet. */
+.lk-call-fill.lk-call-fill-preparing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--surface-muted);
+}

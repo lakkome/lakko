@@ -425,6 +425,15 @@ the person needs to know what it removes, not how.
 **Not here.** No strength slider, no per-participant suppression of what others
 send (each device cleans its own microphone), no "voice isolation" mode.
 
+### 4.1.4 Camera background
+
+Decided by the maintainer on 2026-11-07: blur, built-in backgrounds and the
+person's own photo behind them, chosen in a `Background` section of the Settings
+sheet under `Sound`, stored on this device until changed. Specified in
+[`call-backgrounds.md`](call-backgrounds.md). Its one rule that touches the rest
+of the call: while a background is selected, a camera frame without it is never
+sent; if the background fails, the camera is turned off.
+
 ### 4.2 Measured against the messengers people already use
 
 Checked against Telegram, WhatsApp, Signal and the iPhone's own call screen, because a

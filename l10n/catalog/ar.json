@@ -289,6 +289,82 @@
       "text": "مكالمة",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "إضافة صورة",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "تمويه",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "الخلفية: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "توقفت الخلفية عن العمل، لذا أُوقفت كاميرتك.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "تشغيل الكاميرا دون خلفية",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "فجر",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "غسق",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "مرفأ",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "مرج",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "صباح",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "ليل",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "بلا",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "لا يمكن استخدام هذه الصورة. جرّب صورة أخرى.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "جارٍ تجهيز الخلفية...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "أنت وحدك ترى هذا. كاميرتك متوقفة.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "كاميرتك كما يراها الآخرون",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "تمويه قوي",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "صورتك",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "الكاميرا الخاصة بك قيد التشغيل",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "جارٍ تشغيل الكاميرا...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "الخلفية",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "يرى الآخرون هذا خلفك. يبقى على هذا الجهاز.",
       "status": "machine"
     },
     "call.settings.devices": {

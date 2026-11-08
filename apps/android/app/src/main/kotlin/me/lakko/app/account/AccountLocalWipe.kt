@@ -282,6 +282,9 @@ public object AccountLocalWipe {
             me.lakko.app.calls.SharedPreferencesGroupCallStore(ctx).deleteAccount(acct)
         },
         Step("call-history") { ctx, acct -> me.lakko.app.calls.CallHistoryStore.clear(ctx, acct) },
+        // ADR-0089 — the person's own background photos; a stored choice that
+        // names one of them goes back to no background.
+        Step("call-background-photos") { ctx, acct -> me.lakko.app.calls.wipeBackgroundPhotos(ctx, acct) },
 
         // ---- profiles + reach -----------------------------------------------
         Step("peer-profiles") { ctx, acct ->

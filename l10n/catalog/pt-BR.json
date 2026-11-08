@@ -289,6 +289,82 @@
       "text": "Chamada",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "Adicionar foto",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "Desfoque",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "Fundo: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "O fundo parou de funcionar, então sua câmera foi desligada.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "Ligar a câmera sem fundo",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "Aurora",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "Crepúsculo",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "Porto",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "Prado",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "Manhã",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "Noite",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "Nenhum",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "Esta foto não pode ser usada. Tente outra.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "Preparando o fundo...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "Só você vê isto. Sua câmera está desligada.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "Sua câmera como os outros a veem",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "Remover",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "Desfoque forte",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "Sua foto",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "sua câmera está ligada",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "Iniciando câmera...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "Fundo",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "Os outros veem isto atrás de você. Fica neste dispositivo.",
       "status": "machine"
     },
     "call.settings.devices": {

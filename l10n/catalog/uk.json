@@ -289,6 +289,82 @@
       "text": "Дзвінок",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "Додати фото",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "Розмиття",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "Фон: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "Фон перестав працювати, тому камеру вимкнено.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "Увімкнути камеру без фону",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "Світанок",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "Сутінки",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "Гавань",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "Луг",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "Ранок",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "Ніч",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "Немає",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "Це фото не можна використати. Виберіть інше.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "Готуємо фон...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "Це бачите лише ви. Камеру вимкнено.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "Ваша камера так, як її бачать інші",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "Сильне розмиття",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "Ваше фото",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "ваша камера увімкнена",
       "status": "machine"
@@ -1131,6 +1207,14 @@
     },
     "call.self.starting_camera": {
       "text": "Увімкнення камери...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "Фон",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "Інші бачать це позаду вас. Зберігається лише на цьому пристрої.",
       "status": "machine"
     },
     "call.settings.devices": {

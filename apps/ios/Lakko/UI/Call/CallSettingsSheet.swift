@@ -17,9 +17,16 @@ import UIKit
 ///
 /// A group or link call also carries, at the top, the name this person shows
 /// in the call (``CallNameEditor``); a one-to-one call has none.
+///
+/// Above the device lists, the camera background (``CallBackgroundSection``,
+/// `docs/ux/call-backgrounds.md`). This client has no `Sound` section yet, so
+/// it comes first.
 struct CallSettingsSheet: View {
     @ObservedObject var state: CallUiState
     @ObservedObject var l10n = Localization.shared
+    /// Turn the call's camera on, as the camera button does (the background
+    /// section's `Turn on camera without background`).
+    var onCameraOn: () -> Void = {}
     let onDone: () -> Void
 
     /// Whether the loudspeaker is a real alternative right now.
@@ -44,14 +51,18 @@ struct CallSettingsSheet: View {
                 CallNameEditor(state: state)
             }
 
-            if sections.isEmpty {
-                Text(l10n.t("call.settings.no_devices"))
-                    .font(.subheadline)
-                    .foregroundColor(Color.lakkoTextMuted)
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    // ADR-0089 — above the device lists; absent on a device
+                    // that cannot run a background at all.
+                    if CameraBackground.shared.isAvailable {
+                        CallBackgroundSection(state: state, onCameraOn: onCameraOn)
+                    }
+                    if sections.isEmpty {
+                        Text(l10n.t("call.settings.no_devices"))
+                            .font(.subheadline)
+                            .foregroundColor(Color.lakkoTextMuted)
+                    } else {
                         ForEach(sections) { section in
                             sectionView(section)
                         }

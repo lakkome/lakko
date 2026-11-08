@@ -289,6 +289,82 @@
       "text": "Звонок",
       "status": "machine"
     },
+    "call.background.add_photo": {
+      "text": "Добавить фото",
+      "status": "machine"
+    },
+    "call.background.blur": {
+      "text": "Размытие",
+      "status": "machine"
+    },
+    "call.background.builtin_label": {
+      "text": "Фон: {name}",
+      "status": "machine"
+    },
+    "call.background.failed": {
+      "text": "Фон перестал работать, поэтому камера выключена.",
+      "status": "machine"
+    },
+    "call.background.failed_action": {
+      "text": "Включить камеру без фона",
+      "status": "machine"
+    },
+    "call.background.name.dawn": {
+      "text": "Рассвет",
+      "status": "machine"
+    },
+    "call.background.name.dusk": {
+      "text": "Сумерки",
+      "status": "machine"
+    },
+    "call.background.name.harbor": {
+      "text": "Гавань",
+      "status": "machine"
+    },
+    "call.background.name.meadow": {
+      "text": "Луг",
+      "status": "machine"
+    },
+    "call.background.name.morning": {
+      "text": "Утро",
+      "status": "machine"
+    },
+    "call.background.name.night": {
+      "text": "Ночь",
+      "status": "machine"
+    },
+    "call.background.none": {
+      "text": "Нет",
+      "status": "machine"
+    },
+    "call.background.photo_unusable": {
+      "text": "Это фото нельзя использовать. Выберите другое.",
+      "status": "machine"
+    },
+    "call.background.preparing": {
+      "text": "Готовим фон...",
+      "status": "machine"
+    },
+    "call.background.preview_camera_off": {
+      "text": "Это видите только вы. Камера выключена.",
+      "status": "machine"
+    },
+    "call.background.preview_label": {
+      "text": "Ваша камера так, как её видят остальные",
+      "status": "machine"
+    },
+    "call.background.remove": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "call.background.strong_blur": {
+      "text": "Сильное размытие",
+      "status": "machine"
+    },
+    "call.background.your_photo": {
+      "text": "Ваше фото",
+      "status": "machine"
+    },
     "call.bar.camera_on_a11y": {
       "text": "ваша камера включена",
       "status": "machine"
@@ -1211,6 +1287,14 @@
     },
     "call.self.starting_camera": {
       "text": "Включение камеры...",
+      "status": "machine"
+    },
+    "call.settings.background": {
+      "text": "Фон",
+      "status": "machine"
+    },
+    "call.settings.background_hint": {
+      "text": "Остальные видят это позади вас. Хранится только на этом устройстве.",
       "status": "machine"
     },
     "call.settings.devices": {
