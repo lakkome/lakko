@@ -694,7 +694,12 @@ internal fun rememberConversationRows(
                 channel = channel,
                 posts = channelPosts[channel.id],
                 subscriberCount = null,
-                isOwner = channelKeys.containsKey(channel.id),
+                // The owner reads "Your channel", a publisher who is not
+                // the owner "Publisher" (ADR-0087 section 15).
+                role = me.lakko.app.ui.channels.channelViewerRole(
+                    holdsPublisherKeys = channelKeys.containsKey(channel.id),
+                    joinedAsCoPublisher = channels?.joinedGroupIdOf(channel.id) != null,
+                ),
                 nowMs = now,
                 zone = zone,
                 use24h = use24h,

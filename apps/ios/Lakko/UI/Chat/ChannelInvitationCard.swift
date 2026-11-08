@@ -122,7 +122,7 @@ struct CoPublisherCardFacts: Equatable {
 }
 
 /// UX 15.2 — the card in the one-to-one: "{name} invites you to be a
-/// publisher of {channel}." with `Accept`, which opens the link's page.
+/// publisher of {channel}." with `Accept`, which runs the whole join in place (no second page).
 struct CoPublisherInvitationCard: View {
     let facts: CoPublisherCardFacts
     let outgoing: Bool
@@ -151,41 +151,44 @@ struct CoPublisherInvitationCard: View {
 
     @ViewBuilder
     private var action: some View {
-        if acceptance.isPublisher(facts.channelIdHex) {
+        // UX 15.2.2 — the waiting states; a refusal is never told.
+        switch acceptance.cardState(facts) {
+        case .open:
             pill(l10n.t("search.conversation.open")) { acceptance.openChannel(facts.channelIdHex) }
-        } else {
-            switch acceptance.phases[facts.link.absoluteString] {
-            case .sending?, .waiting?:
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text(l10n.t(
-                        acceptance.phases[facts.link.absoluteString] == .sending
-                            ? "group.join.sending" : "channels.join.waiting"))
-                        .font(.footnote)
-                        .opacity(0.8)
-                }
+        case .accept:
+            pill(l10n.t("channels.publishers.accept")) { acceptance.accept(facts) }
+        case .sending:
+            HStack(spacing: 8) {
+                ProgressView()
+                waitingLine
+            }
+            .padding(.vertical, 5)
+        case .waiting:
+            waitingLine
                 .padding(.vertical, 5)
-            case .failed(let failure)?:
-                Text(failure.message.text)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoDanger)
-                if failure.offersRetry {
-                    pill(joinTryAgain) { acceptance.accept(facts) }
-                }
-            case nil where acceptance.isPending(facts.channelIdHex):
-                // A request sent earlier (this session or before a restart)
-                // waits for the owner; it lands by itself when approved.
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text(l10n.t("channels.join.waiting"))
-                        .font(.footnote)
-                        .opacity(0.8)
-                }
-                .padding(.vertical, 5)
-            case nil:
-                pill(l10n.t("channels.publishers.accept")) { acceptance.accept(facts) }
+        case .noAnswer:
+            Text(l10n.t("requests_sent.no_answer"))
+                .font(.footnote)
+                .opacity(0.8)
+            pill(l10n.t("requests_sent.ask_again")) { acceptance.accept(facts) }
+        case .linkDead:
+            Text(groupInviteInvalidMessage)
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoDanger)
+        case .failed(let failure, let askAgain):
+            Text(failure.message.text)
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoDanger)
+            if failure.offersRetry {
+                pill(askAgain ? l10n.t("requests_sent.ask_again") : joinTryAgain) { acceptance.accept(facts) }
             }
         }
+    }
+
+    private var waitingLine: some View {
+        Text(l10n.t("channels.join.waiting"))
+            .font(.footnote)
+            .opacity(0.8)
     }
 
     private func pill(_ title: String, action: @escaping () -> Void) -> some View {

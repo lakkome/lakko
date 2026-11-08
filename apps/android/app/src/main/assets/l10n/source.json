@@ -466,18 +466,43 @@
       "text": "Close chat",
       "comment": "Accessible name of the button that closes the chat panel inside a group call."
     },
-    "call.chat.empty": {
-      "text": "No messages yet. Messages here are end-to-end encrypted.",
-      "comment": "Empty state of the chat panel inside a group call.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
+      "comment": "Spoken announcement of a new message in a group call's chat; {name} is the sender, {text} the message."
+    },
+    "call.chat.new_messages": {
+      "text": "New messages",
+      "comment": "Pill at the bottom of a group call's chat while the person has scrolled up and new messages arrived; tapping it scrolls to the newest."
+    },
+    "call.chat.not_sent": {
+      "text": "Not sent.",
+      "comment": "Under a message in a group call's chat that could not be sent (the connection is down); followed by a 'Send again' button."
+    },
+    "call.chat.notice_ends": {
+      "text": "They disappear when the call ends.",
+      "comment": "Second line of the empty state of a group call's chat: nothing is kept after the call.",
       "security_critical": true
     },
-    "call.chat.joined": {
-      "text": "{name} joined the call",
-      "comment": "Line in the call's chat when someone joins; {name} is the person."
+    "call.chat.notice_people": {
+      "text": "Messages here are seen only by people in the call.",
+      "comment": "First line of the empty state of a group call's chat, kept as a small note at the top of the list once there are messages. Someone who joins later does not see earlier messages.",
+      "security_critical": true
     },
-    "call.chat.left": {
-      "text": "A participant left the call",
-      "comment": "Line in the call's chat when someone leaves."
+    "call.chat.placeholder": {
+      "text": "Message everyone in the call",
+      "comment": "Placeholder of the text field in a group call's chat."
+    },
+    "call.chat.send_a11y": {
+      "text": "Send",
+      "comment": "Accessible name of the send button in a group call's chat."
+    },
+    "call.chat.send_again": {
+      "text": "Send again",
+      "comment": "Button under a message in a group call's chat that could not be sent; sends it again."
+    },
+    "call.chat.too_long": {
+      "text": "A message in a call can't be longer than this.",
+      "comment": "Line under the text field of a group call's chat when the message reached the length limit and the field takes no more text."
     },
     "call.collapse_a11y": {
       "text": "Put the call away and return to the app",
@@ -508,16 +533,16 @@
       "comment": "Label under the group-call button that opens the call's chat; also the chat panel's heading."
     },
     "call.control.chat_hide_a11y": {
-      "text": "Hide chat",
-      "comment": "Accessible name of the group-call button that closes the call's chat."
+      "text": "Close chat",
+      "comment": "Accessible name of the group-call button while the call's chat is open."
     },
     "call.control.chat_show_a11y": {
-      "text": "Show chat",
-      "comment": "Accessible name of the group-call button that opens the call's chat."
+      "text": "Open chat",
+      "comment": "Accessible name of the group-call button that opens the call's chat (docs/ux/calls.md 4.1.4)."
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {Chat (# unread)} other {Chat (# unread)}}",
-      "comment": "Group call menu item that opens the call's chat, when messages are unread. {count} is the number of unread messages."
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {Open chat, # unread} other {Open chat, # unread}}",
+      "comment": "Accessible name of the group-call Chat button when messages from others arrived while the chat was closed. {count} is the number of unread messages."
     },
     "call.control.end": {
       "text": "End",
@@ -630,9 +655,14 @@
       "comment": "Accessible name of the Encrypted chip on the call screen.",
       "security_critical": true
     },
-    "call.encryption.compare_hint": {
-      "text": "Read these numbers aloud. If they match on both phones, no one is listening.",
-      "comment": "Under the call's safety number: how to compare it with the other person.",
+    "call.encryption.compare_hint_group": {
+      "text": "Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening.",
+      "comment": "Under the safety number in a group call or a call from a link, whatever the number of people in it: every participant compares the same number. Never names one person.",
+      "security_critical": true
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Read the number aloud to each other. If it matches on both devices, no one else is listening.",
+      "comment": "Under the safety number in a one-to-one call: how the two people compare it. Says devices, not phones: people call from computers too.",
       "security_critical": true
     },
     "call.encryption.copy_a11y": {
@@ -1821,7 +1851,7 @@
     },
     "channels.join.waiting": {
       "text": "Waiting for the channel owner to approve...",
-      "comment": "The co-publisher request is sent and waits for the owner's approval."
+      "comment": "A request to be a publisher of a channel is being sent, or was sent less than 7 days ago and waits for the owner's device. Never say it was refused."
     },
     "channels.keys_reset.notice": {
       "text": "You can no longer post to this channel. Your account keys were reset, and the channel's posts were signed with the old ones. Subscribers are not told; create a new channel and share it with them.",
@@ -8716,11 +8746,11 @@
     },
     "requests_sent.ask_again": {
       "text": "Ask again",
-      "comment": "Button on a request to join with no answer after 7 days."
+      "comment": "Button on a request with no answer after 7 days: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
     },
     "requests_sent.no_answer": {
       "text": "No answer yet.",
-      "comment": "Line of a request to join sent 7 days ago or more. Never say it was refused."
+      "comment": "Line of a request sent 7 days ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
     },
     "requests_sent.title": {
       "text": "Requests sent",

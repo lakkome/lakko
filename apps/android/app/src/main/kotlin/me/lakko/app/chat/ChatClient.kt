@@ -833,7 +833,8 @@ internal fun toEvent(
             // parser. Cheap unambiguous discriminator:
             // CallSignalingPayload's first proto wire tag
             // is one of 0x52 / 0x5A / 0x62 / 0x6A / 0x72 /
-            // 0x7A / 0x82 0x01 (oneof fields 10..16, see
+            // 0x7A / 0x82 0x01 / 0x8A 0x01 / 0x92 0x01
+            // (oneof fields 10..18, see
             // [looksLikeCallSignaling]); chat envelopes start
             // with `{` (0x7B). No overlap.
             if (looksLikeCallSignaling(processed.data)) {

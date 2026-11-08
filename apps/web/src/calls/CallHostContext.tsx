@@ -82,6 +82,7 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
   untrack,
   useContext,
@@ -197,6 +198,7 @@ import {
 } from "./call-signaling-dispatch";
 import { decideInboundSignaling } from "./call-host-routing";
 import { CallSoundController } from "./CallSoundController";
+import { RemoteAudioSinkController } from "./remote-audio-output";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
 import { useMembershipEnd } from "../chat/MembershipEndContext";
@@ -586,6 +588,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   const [videoCall, setVideoCall] = createSignal(false);
   const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
+  /** What the other person of the 1x1 call last said about its microphone
+   *  and camera (the `mediaState` call signal, 2026-11-07); unmuted and on
+   *  until the first one arrives. */
+  const [remoteMicOn, setRemoteMicOn] = createSignal(true);
+  const [remoteCameraOn, setRemoteCameraOn] = createSignal(true);
   const [remoteWantsVideo, setRemoteWantsVideo] = createSignal(false);
   const [videoPublishState, setVideoPublishState] = createSignal<VideoPublishState>("off");
   const [connStats, setConnStats] = createSignal<WebConnectionStats | null>(null);
@@ -883,8 +890,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     id: "peer",
     displayName: nameFor(callGroup()),
     isLocal: false,
-    micOn: true,
-    camOn: remoteHasVideo(),
+    micOn: remoteMicOn(),
+    camOn: remoteHasVideo() && remoteCameraOn(),
     quality: "good",
     speaking: false,
     personKeyB64: personKeyFor(callGroup()) ?? undefined,
@@ -1100,6 +1107,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           setLocalStream(null);
           setVideoCall(false);
           setRemoteHasVideo(false);
+          setRemoteMicOn(true);
+          setRemoteCameraOn(true);
           setRemoteWantsVideo(false);
           setVideoPublishState("off");
           setConnStats(null);
@@ -1265,6 +1274,17 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             senderKey = null;
           }
           live.share.receive(parsed.screenShareState, senderKey);
+        }
+        return;
+      }
+
+      // The other person's camera and microphone state (2026-11-07): for the
+      // call in the slot only. It is the MLS sender's word about its own
+      // devices, so it only ever names the remote tile.
+      if (parsed.kind === "mediaState") {
+        if (decision.oneToOne === "apply" && activeCall !== null) {
+          setRemoteMicOn(parsed.microphoneOn);
+          setRemoteCameraOn(parsed.cameraOn);
         }
         return;
       }
@@ -1589,7 +1609,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   // The remote tile's camera flag once the peer's video track arrives.
   createEffect(() => {
     if (state() !== "connected") return;
-    callActions.setParticipantCamera("peer", remoteHasVideo());
+    // A picture only while the track is there AND the person has not said the
+    // camera is off: a camera turned off is `track.enabled = false`, which
+    // the track itself never reports.
+    callActions.setParticipantCamera("peer", remoteHasVideo() && remoteCameraOn());
+  });
+
+  // The other person's mute mark (group-call-grid 7.2), from what they said.
+  createEffect(() => {
+    if (state() !== "connected") return;
+    callActions.setParticipantMic("peer", remoteMicOn());
   });
 
   // ----- the group (SFU) call -----------------------------------------------
@@ -3311,16 +3340,19 @@ export function CallHostView(): JSX.Element {
     sounds.dispose();
   });
 
+  // The 1x1 sink: the same binding, retry and console line as a group
+  // call's sinks (`RemoteAudio` below).
+  let oneToOneSink: RemoteAudioSinkController | null = null;
   createEffect(() => {
     const el = audioEl();
     const stream = internals.remoteStream();
     if (el === null) return;
-    el.srcObject = stream;
-    if (stream !== null) {
-      void el.play().catch(() => {
-        // Autoplay can be blocked until a gesture; Accept counts as one.
-      });
-    }
+    if (oneToOneSink === null) oneToOneSink = new RemoteAudioSinkController(el, "one-to-one");
+    oneToOneSink.setStream(stream);
+  });
+  onCleanup(() => {
+    oneToOneSink?.dispose();
+    oneToOneSink = null;
   });
 
   // The in-call Speaker control (docs/ux/calls.md section 4.1) moves the sound
@@ -3651,22 +3683,29 @@ function applyAudioOutput(el: HTMLAudioElement | null, deviceId: string | null):
   });
 }
 
-/** One hidden sink for one remote stream, following the Speaker control. */
+/**
+ * One hidden sink for one remote stream, following the Speaker control.
+ *
+ * Bound once it is in the document, with `play()` called and retried, and
+ * played through Web Audio where `calls/remote-audio.ts` says so (the desktop
+ * app on WebKit, where the element path was silent on 2026-11-07). Each sink
+ * writes a `[call] remote audio` line saying whether it plays.
+ */
 function RemoteAudio(props: { stream: MediaStream }): JSX.Element {
   const [el, setEl] = createSignal<HTMLAudioElement | null>(null);
   createEffect(() => {
     applyAudioOutput(el(), callUiSettings().selectedAudioOutput);
   });
-  return (
-    <audio
-      autoplay
-      style={{ display: "none" }}
-      ref={(node) => {
-        node.srcObject = props.stream;
-        setEl(node);
-      }}
-    />
-  );
+  onMount(() => {
+    const node = el();
+    if (node === null) return;
+    const sink = new RemoteAudioSinkController(node, "group");
+    createEffect(() => {
+      sink.setStream(props.stream);
+    });
+    onCleanup(() => sink.dispose());
+  });
+  return <audio autoplay style={{ display: "none" }} ref={(node) => setEl(node)} />;
 }
 
 /** The call store's device settings. A module-level reader so `RemoteAudio`

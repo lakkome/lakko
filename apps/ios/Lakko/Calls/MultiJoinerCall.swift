@@ -196,6 +196,10 @@ final class MultiJoinerCall {
     /// a track arrival only defers to it. `@MainActor`-confined like the
     /// rest of this class — no new concurrency.
     private var lastKnownCameraOn: [String: Bool] = [:]
+    /// The microphone each remote peer last announced, keyed like
+    /// ``lastKnownCameraOn``. A state that arrives before the peer's tile
+    /// exists is not lost: the tile is built from it.
+    private var lastKnownMicOn: [String: Bool] = [:]
     /// The sharers' screen tracks and their first-frame probes (ADR-0083).
     private let screenTracks = ScreenShareTracks()
     /// Who is speaking, read on this device from the call's own audio
@@ -311,6 +315,14 @@ final class MultiJoinerCall {
                 self.lastKnownCameraOn[id] = cameraOn
                 self.ui.setParticipantCamera(id, cameraOn)
             },
+            onRemoteMicrophoneState: { [weak self] from, microphoneOn in
+                // The person's own word on their microphone: the mute mark on
+                // their tile and in the participant list (group-call-grid 7.2).
+                guard let self else { return }
+                let id = "peer-\(from)"
+                self.lastKnownMicOn[id] = microphoneOn
+                self.ui.setParticipantMic(id, microphoneOn)
+            },
             onRemoteLightVideoTrack: { [weak self] track, peerId in
                 // The light companion of that peer's camera (``LightStream``):
                 // kept beside the main track for the peer's tile to draw, and
@@ -343,6 +355,10 @@ final class MultiJoinerCall {
                 guard let self else { return }
                 self.names.setCallName(peerId, name)
                 self.names.relabel(self.ui)
+            },
+            onCallChat: { [weak self] peerId, seq, text in
+                // A verified message in the call's chat (section 4.1.4).
+                self?.ui.chat.receive(peerId: peerId, seq: seq, text: text)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -365,6 +381,11 @@ final class MultiJoinerCall {
                 self.session.setOwnCallName(name)
                 self.ui.setParticipantName("local", self.localTileName())
             })
+        // The call's chat (`docs/ux/calls.md` section 4.1.4), for the
+        // owner, the members and guests alike.
+        ui.chat.setActions(
+            send: { [weak self] text in self?.session.sendCallChat(text) ?? (seq: 0, sent: false) },
+            resend: { [weak self] seq in self?.session.resendCallChat(seq: seq) ?? false })
         self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
         // What a tile shows of a person, for the SFU (``VideoWants``).
         ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in
@@ -557,6 +578,8 @@ final class MultiJoinerCall {
         clearRebroadcast()
         clearOwnerProbe()
         speaking.stop()
+        lastKnownCameraOn.removeAll()
+        lastKnownMicOn.removeAll()
         session.hangUp()
     }
 
@@ -651,6 +674,8 @@ final class MultiJoinerCall {
             }
         case .failed, .closed:
             speaking.stop()
+            // The call's chat ends with the call for this device.
+            ui.chat.callEnded()
             ui.clearRemoteVideoCopies()
             screenTracks.detachAll(ui: ui)
             ui.setScreenShare(nil)
@@ -712,6 +737,7 @@ final class MultiJoinerCall {
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
         lastKnownCameraOn.removeValue(forKey: id)
+        lastKnownMicOn.removeValue(forKey: id)
         // Their screen's picture goes with them; the share ends in the fold.
         screenTracks.attach(nil, sharer: id, ui: ui)
         names.peerLeft(peerId)
@@ -741,7 +767,7 @@ final class MultiJoinerCall {
             // must apply, or a member's sealed profile.
             onMaybeCommit(from: from, env.payload)
         case .mediaState:
-            // Camera-off-cleanup: a camera on/off signal is intercepted +
+            // Camera-off-cleanup: a camera / microphone signal is intercepted +
             // handled in `SfuCallSession.dispatchSignalRelay` (it fires
             // `onRemoteMediaState`, never `onSignalRelay`), so it never reaches
             // this multi-joiner dispatcher. The case is present only to keep the
@@ -785,9 +811,11 @@ final class MultiJoinerCall {
             // GROUP JOURNAL (opened in `ContactsRepository`), never the SFU
             // signal-relay. Out of place here — drop.
             break
-        case .channelReadKey:
-            // ADR-0087 section 6 — a channel read key rides a PublisherGroup
-            // journal, never the SFU signal-relay. Out of place here — drop.
+        case .channelReadKey, .channelEpochSeeds, .channelRotateRequest:
+            // ADR-0087 sections 6, 7 and 15 — a channel read key, a new
+            // publisher's earlier epoch seeds and a co-publisher's rotate
+            // request ride a PublisherGroup journal, never the SFU
+            // signal-relay. Out of place here — drop.
             break
         case .pin:
             // ADR-0052 decision 3 — a shared-pin envelope rides the GROUP
@@ -1145,7 +1173,9 @@ final class MultiJoinerCall {
             id: "\(peerPrefix)\(peerId)",
             displayName: name,
             isLocal: false,
-            micOn: true,
+            // What the person last announced; unmuted until their first
+            // media state arrives.
+            micOn: lastKnownMicOn["\(peerPrefix)\(peerId)"] ?? true,
             camOn: false,
             handRaised: false,
             quality: .good,

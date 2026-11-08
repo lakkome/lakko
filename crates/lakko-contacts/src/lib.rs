@@ -117,7 +117,9 @@ pub mod avatar;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
+pub mod channel_epoch_seeds;
 pub mod channel_read_key;
+pub mod channel_rotate_request;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
@@ -191,10 +193,22 @@ pub use call_welcome::{
     try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
     CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+pub use channel_epoch_seeds::{
+    channel_epoch_seeds_envelope_len, compose_channel_epoch_seeds, decode_channel_epoch_seeds,
+    try_unwrap_channel_epoch_seeds, ChannelEpochSeed, ChannelEpochSeedsEnvelope,
+    ChannelEpochSeedsError, CHANNEL_EPOCH_SEEDS_ENVELOPE_DOMAIN_V1,
+    CHANNEL_EPOCH_SEEDS_ENVELOPE_MAX_LEN, CHANNEL_EPOCH_SEEDS_ENVELOPE_MIN_LEN,
+    CHANNEL_EPOCH_SEEDS_MAX,
+};
 pub use channel_read_key::{
     compose_channel_read_key, decode_channel_read_key, try_unwrap_channel_read_key,
     ChannelReadKeyEnvelope, ChannelReadKeyError, CHANNEL_READ_KEY_ENVELOPE_DOMAIN_V1,
     CHANNEL_READ_KEY_ENVELOPE_LEN,
+};
+pub use channel_rotate_request::{
+    compose_channel_rotate_request, decode_channel_rotate_request,
+    try_unwrap_channel_rotate_request, ChannelRotateRequestError,
+    CHANNEL_ROTATE_REQUEST_ENVELOPE_DOMAIN_V1, CHANNEL_ROTATE_REQUEST_ENVELOPE_LEN,
 };
 pub use channel_text::{
     check_description as check_channel_description, check_name as check_channel_name,
@@ -342,7 +356,8 @@ pub use mailbox::{
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
-    MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
+    MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_FLAG_CAMERA, MEDIA_STATE_FLAG_MICROPHONE,
+    MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V2,
 };
 pub use pin::{
     compose_pin, decode_pin, pin_is_newer, try_unwrap_pin, PinAction, PinError, PinOp,
@@ -635,6 +650,35 @@ pub mod fuzz_api {
         let dispatched = matches!(
             crate::incoming_envelope::dispatch_incoming_envelope(bytes),
             Ok(crate::incoming_envelope::IncomingEnvelope::AdmissionSeed(_))
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel rotate-request envelope (ADR-0087 section
+    /// 15, amended 2026-11-08) and check the dispatcher agrees. `None` when
+    /// the decoder refuses; `Some(true)` when it re-composes to the same
+    /// bytes at the fixed length and dispatches as the same channel.
+    #[must_use]
+    pub fn channel_rotate_request_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::channel_rotate_request::fuzz_decode(bytes)?;
+        let channel = crate::channel_rotate_request::decode_channel_rotate_request(bytes).ok()?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ChannelRotateRequest(c)) if c == channel
+        );
+        Some(ok && dispatched)
+    }
+
+    /// Decode `bytes` as a channel epoch-seeds envelope (ADR-0087 section 7,
+    /// amended 2026-11-08) and check the dispatcher agrees. `None` when the
+    /// decoder refuses; `Some(true)` when it re-encodes to the same bytes at
+    /// the length its count names and dispatches as the same envelope.
+    #[must_use]
+    pub fn channel_epoch_seeds_decode(bytes: &[u8]) -> Option<bool> {
+        let ok = crate::channel_epoch_seeds::fuzz_decode(bytes)?;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::ChannelEpochSeeds(_))
         );
         Some(ok && dispatched)
     }

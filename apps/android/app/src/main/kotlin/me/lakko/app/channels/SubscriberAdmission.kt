@@ -218,19 +218,30 @@ private class ChannelsPort(
     // The epoch this screen state already knows, fetched when nothing has
     // learned it yet, so a delivery is never filed at a guessed 0 (ADR-0031 —
     // never a future one either: the cache only lags the server).
-    override suspend fun currentEpoch(channelIdHex: String): UInt =
-        state.epochByChannel.value[channelIdHex]
+    // Section 15 — the epoch a delivery is sealed and filed under: the one
+    // the composer's seed can serve and the service has reached, never the
+    // composer's epoch before the owner's reseal moved the channel there.
+    override suspend fun currentEpoch(channelIdHex: String): UInt {
+        val current = state.epochByChannel.value[channelIdHex]
             ?: client.fetchEpoch(channelIdHex).also { state.setEpoch(channelIdHex, it) }
+        return state.sealingSeed(channelIdHex, current)?.epoch
+            ?: throw IllegalStateException("no seed of an epoch the channel has reached")
+    }
 
     override suspend fun sealAndDeliver(channelIdHex: String, pubkeyHex: String, epoch: UInt) {
-        val keys = state.keysByChannel.value[channelIdHex]
-            ?: throw IllegalStateException("this device cannot post to this channel")
+        if (!state.keysByChannel.value.containsKey(channelIdHex)) {
+            throw IllegalStateException("this device cannot post to this channel")
+        }
+        // The seed of exactly [epoch] (the composer's only for the epoch it
+        // serves), never a seed of another epoch under its number.
+        val seed = state.readSeed(channelIdHex, epoch)
+            ?: throw IllegalStateException("no seed of this epoch on this device")
         val parsed = hexToBytes(pubkeyHex)
         val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
             subscriberPub = parsed,
             channelIdHex = channelIdHex,
             epochId = epoch,
-            seed = keys.seed,
+            seed = seed,
         )
         val pub = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
         // ADR-0059 section 9: signed with this account's publisher role.

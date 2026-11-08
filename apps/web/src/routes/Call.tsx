@@ -72,6 +72,7 @@ import {
 } from "../state/call-state";
 import { CallSoundController } from "../calls/CallSoundController";
 import {
+  encryptionSheetHint,
   encryptionSheetSentence,
   safetyNumberGroups,
   safetyNumberSpokenLabel,
@@ -101,7 +102,11 @@ import {
   TileFrameTally,
   type LayerShown,
 } from "../calls/layer-display";
-import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
+import {
+  BindingFrameGate,
+  canWatchVideoFrames,
+  watchVideoFrames,
+} from "../calls/video-frame-watch";
 import {
   askedQuality,
   coversHeavySwap,
@@ -177,6 +182,9 @@ const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; 
 );
 import { t } from "../l10n";
 import { callNameState } from "../calls/call-name";
+import { callChatActions, callChatState } from "../calls/call-chat";
+import { chatPanelShape, CHAT_COLUMN_MIN_WIDTH, previewAllowed } from "../calls/call-chat-panel-state";
+import { CallChatPanel } from "../calls/CallChatPanel";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { displayLocale } from "../l10n/display-locale";
@@ -372,7 +380,15 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
   </Show>
 );
 
-const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void }> = (props) => {
+const EncryptionSheet: Component<{
+  /** A group call or a call from a link: the sheet names nobody (§5). */
+  groupCall: boolean;
+  /** Other people in the call now. */
+  othersInCall: number;
+  /** The other person on a one-to-one call. */
+  peerName: string | null;
+  onClose: () => void;
+}> = (props) => {
   const [copied, setCopied] = createSignal(false);
   let doneButton: HTMLButtonElement | undefined;
 
@@ -424,7 +440,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
     >
       <div class="lk-call-modal lk-encryption-sheet">
         <h2 id="lk-encryption-sheet-title">{t("call.encryption.title")}</h2>
-        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
+        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props)}</p>
 
         {/* One atomic thing to a screen reader: `role="img"` with a label that
             pauses between the groups (§8), rather than sixteen digits run
@@ -439,7 +455,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
           </For>
         </p>
 
-        <p class="lk-encryption-sheet-hint">{t("call.encryption.compare_hint")}</p>
+        <p class="lk-encryption-sheet-hint">{encryptionSheetHint(props)}</p>
 
         <div class="lk-encryption-sheet-actions">
           <button type="button" class="ghost" onClick={copy}>
@@ -758,6 +774,13 @@ const ControlButton: Component<{
       >
         <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={26} />}>
           <Spinner size={26} />
+        </Show>
+        <Show when={props.spec.badge}>
+          {(badge) => (
+            <span class="lk-call-ctl-badge" aria-hidden="true">
+              {badge()}
+            </span>
+          )}
         </Show>
       </button>
       <span class="lk-call-ctl-label" aria-hidden="true">
@@ -1431,6 +1454,14 @@ const LocalVideo: Component<{
  * the same pictures were decoded. A little after each bind the element's
  * state and its place on screen are written to the console once
  * (`describeRemotePicture`).
+ *
+ * After each bind the element is transparent until the first frame of the
+ * stream it was given (`BindingFrameGate`, `calls/video-frame-watch.ts`):
+ * Firefox shows a remote track's last decoded frame at once, however old,
+ * and the SFU stops forwarding a camera track nobody wants, so a tile that
+ * switched to such a track showed a frame from minutes earlier. Frames that
+ * are not of the binding are not reported either. Where the element's frames
+ * cannot be observed at all it is never held transparent.
  */
 const LayerVideo: Component<{
   stream: MediaStream;
@@ -1455,11 +1486,22 @@ const LayerVideo: Component<{
   const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
     (track) => new MediaStream([track]),
   );
+  const gate = new BindingFrameGate();
+  /** Bound, and no frame of the binding presented yet: held transparent. */
+  const [awaitingFrame, setAwaitingFrame] = createSignal(false);
+  const trackOf = (): MediaStreamTrack | undefined => props.stream.getVideoTracks()[0];
   let diagTimer: ReturnType<typeof setTimeout> | undefined;
   const look = (): void => {
     if (el === undefined) return;
     if (!el.muted) el.muted = true;
-    if (!binder.sync(el, props.stream)) return;
+    const at = performance.now();
+    if (!binder.sync(el, props.stream)) {
+      // A browser whose frames cannot be observed is never held transparent.
+      if (awaitingFrame() && !canWatchVideoFrames(el, trackOf)) setAwaitingFrame(false);
+      return;
+    }
+    gate.bind(at);
+    setAwaitingFrame(canWatchVideoFrames(el, trackOf));
     if (PICTURES_THROUGH_CANVAS) picture.restart();
     if (diagTimer !== undefined) clearTimeout(diagTimer);
     if (binder.track() === null) return;
@@ -1494,9 +1536,14 @@ const LayerVideo: Component<{
     const timer = setInterval(look, PREVIEW_CHECK_MS);
     const stopFrames = watchVideoFrames(
       el,
-      (now) => props.onFrame(now),
+      (now, frame) => {
+        // A frame the track decoded before this element was given it.
+        if (!gate.admit(frame)) return;
+        if (awaitingFrame()) setAwaitingFrame(false);
+        props.onFrame(now);
+      },
       // Read each time: the stream this element plays can be replaced.
-      () => props.stream.getVideoTracks()[0],
+      trackOf,
     );
     onCleanup(() => {
       clearInterval(timer);
@@ -1508,10 +1555,17 @@ const LayerVideo: Component<{
       props.elRef(undefined);
     });
   });
+  /** Held transparent while awaiting the binding's first frame, whether or
+   *  not the element is one of two stacked pictures. */
+  const shown = (): boolean | undefined => (awaitingFrame() ? false : props.shown);
+  const cls = (): string =>
+    shown() !== undefined && !props.class.includes("lk-call-layer")
+      ? `${props.class} lk-call-layer`
+      : props.class;
   const video = (
     <video
-      class={props.class}
-      data-shown={props.shown === undefined ? undefined : String(props.shown)}
+      class={cls()}
+      data-shown={shown() === undefined ? undefined : String(shown())}
       aria-label={props.ariaLabel}
       aria-hidden={props.ariaHidden === true ? "true" : undefined}
       autoplay
@@ -1525,8 +1579,8 @@ const LayerVideo: Component<{
     <>
       {video}
       <canvas
-        class={`${props.class} lk-video-canvas`}
-        data-shown={props.shown === undefined ? undefined : String(props.shown)}
+        class={`${cls()} lk-video-canvas`}
+        data-shown={shown() === undefined ? undefined : String(shown())}
         aria-hidden="true"
         ref={canvasEl}
       />
@@ -2847,6 +2901,10 @@ const Call: Component<{
       othersPresent: remotes().length > 0,
       canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
+      chat:
+        callChatState.control() !== null
+          ? { open: callChatState.panel().open, unread: callChatState.panel().unread }
+          : undefined,
     }),
   );
 
@@ -2857,6 +2915,60 @@ const Call: Component<{
       msSinceInteraction: now() - lastInteraction(),
     }),
   );
+
+  // ----- the call's chat (section 4.1.4) --------------------------------------
+
+  /** Wide enough for the chat to be a column beside the call. */
+  const [wideScreen, setWideScreen] = createSignal(
+    typeof window !== "undefined" ? chatPanelShape(window.innerWidth) === "column" : false,
+  );
+  onMount(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(`(min-width: ${CHAT_COLUMN_MIN_WIDTH}px)`);
+    const sync = (): void => void setWideScreen(query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    onCleanup(() => query.removeEventListener?.("change", sync));
+  });
+  const chatOpen = (): boolean => callChatState.control() !== null && callChatState.panel().open;
+  const chatShape = (): "sheet" | "column" => (wideScreen() ? "column" : "sheet");
+
+  /** The name a sender's tile shows (section 4.4), and the last one it
+   *  showed once the person left. */
+  const chatNameOf = (peerId: string): string => {
+    const tile = callState.participants().find((p) => p.id === `peer-${peerId}`);
+    const name = tile?.displayName ?? callChatState.lastName(peerId) ?? "";
+    return name !== "" ? name : t("call.participant.unnamed");
+  };
+  createEffect(() => {
+    for (const p of callState.participants()) {
+      if (!p.isLocal && p.id.startsWith("peer-")) {
+        callChatActions.rememberName(p.id.slice("peer-".length), p.displayName);
+      }
+    }
+  });
+
+  /** Close the panel and give focus back to the `Chat` circle. */
+  function closeChat(): void {
+    callChatActions.close();
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('.lk-call [data-control="chat"] .lk-call-ctl-btn')?.focus();
+    });
+  }
+
+  /** The preview above the control bar, while the panel is closed. */
+  const chatPreview = createMemo(() => {
+    if (callChatState.control() === null) return null;
+    const p = callChatState.panel();
+    if (p.open || p.preview === null) return null;
+    const allowed = previewAllowed({
+      barFaded: barHidden(),
+      settingsOpen: settingsOpen() || encryptionSheetOpen(),
+      participantsOpen: callState.participantListOpen(),
+      menuOpen: inviteMenuOpen() || endMenuOpen(),
+    });
+    return allowed ? p.preview : null;
+  });
 
   // ----- actions ------------------------------------------------------------
 
@@ -2882,6 +2994,10 @@ const Call: Component<{
         // since a menu of one item is a second step for nothing.
         if (props.onCopyInviteLink !== undefined) setInviteMenuOpen(!inviteMenuOpen());
         else callActions.setParticipantListOpen(!callState.participantListOpen());
+        return;
+      case "chat":
+        if (callChatState.panel().open) closeChat();
+        else callChatActions.open();
         return;
       case "settings":
         void refreshCallDevices();
@@ -2935,14 +3051,13 @@ const Call: Component<{
    * order rather than on anything meaningful. Asking the state directly is
    * order-independent.
    *
-   * The participant list and the chat panel are deliberately NOT treated the
-   * same way: neither closes on `Esc` today, so guarding on them would make the
-   * key do nothing at all while one is open. They are panels inside the call and
-   * keep their state for when the person comes back.
+   * The participant list is deliberately NOT treated the same way: it does
+   * not close on `Esc`, so guarding on it would make the key do nothing at all
+   * while it is open. The chat panel does close on `Esc`, before the call is
+   * put away (section 4.1.4).
    */
   createEffect(() => {
     const collapse = props.onCollapse;
-    if (collapse === undefined) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       if (encryptionSheetOpen() || settingsOpen()) return;
@@ -2956,6 +3071,14 @@ const Call: Component<{
         setEndMenuOpen(false);
         return;
       }
+      // Section 4.1.4: `Esc` closes the chat first, and only then puts the
+      // call away.
+      if (chatOpen()) {
+        event.preventDefault();
+        closeChat();
+        return;
+      }
+      if (collapse === undefined) return;
       event.preventDefault();
       collapse();
     };
@@ -2964,8 +3087,10 @@ const Call: Component<{
   });
 
   return (
+    <>
     <div
       class="lk-call"
+      data-chat={chatOpen() ? chatShape() : undefined}
       data-surface={surface()}
       data-phase={phaseKind()}
       data-notice={callState.notice() !== null ? "" : undefined}
@@ -3172,6 +3297,24 @@ const Call: Component<{
 
       <ParticipantList />
 
+      {/* A message from someone else while the chat is closed: one line for
+          four seconds above the control bar (section 4.1.4). */}
+      <Show when={chatPreview()}>
+        {(preview) => (
+          <button
+            type="button"
+            class="lk-call-chat-preview"
+            onClick={(event): void => {
+              event.stopPropagation();
+              callChatActions.open();
+            }}
+          >
+            <span class="lk-call-chat-preview-name">{chatNameOf(preview().peerId)}</span>
+            <span class="lk-call-chat-preview-text">{preview().text}</span>
+          </button>
+        )}
+      </Show>
+
       {/* Participants: the list of who is here and the two ways to invite, in a
           menu of the app's own, never the system's share sheet
           (`docs/ux/call-links.md` section 3). */}
@@ -3285,7 +3428,11 @@ const Call: Component<{
 
       <Show when={encryptionSheetOpen()}>
         <EncryptionSheet
-          peerName={props.peerName ?? remotes()[0]?.displayName ?? null}
+          groupCall={props.group === true}
+          othersInCall={remotes().length}
+          peerName={
+            props.group === true ? null : (props.peerName ?? remotes()[0]?.displayName ?? null)
+          }
           onClose={(): void => {
             setEncryptionSheetOpen(false);
           }}
@@ -3300,6 +3447,10 @@ const Call: Component<{
         />
       </Show>
     </div>
+    <Show when={chatOpen() && phaseKind() !== "ended"}>
+      <CallChatPanel shape={chatShape()} nameOf={chatNameOf} onClose={closeChat} />
+    </Show>
+    </>
   );
 };
 

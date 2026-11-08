@@ -2538,6 +2538,20 @@ pub enum FfiIncomingEnvelopeKind {
     /// `openChannelReadKeyEnvelope` after checking the MLS sender resolved
     /// to the channel's owner. Never render it. Appended last.
     ChannelReadKey,
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). `payload` is the whole
+    /// envelope; open it with `openChannelEpochSeedsEnvelope` after checking
+    /// it came on this channel's PublisherGroup and the MLS sender resolved
+    /// to the channel's owner, then add only the seeds of epochs not held.
+    /// Never render it. Appended last.
+    ChannelEpochSeeds,
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08). `payload` is the 16-byte channel id. Only the
+    /// owner's device acts on it, when it came on that channel's
+    /// PublisherGroup and the MLS sender resolved at receipt to a current
+    /// publisher; requests before the next rotation collapse into it. Never
+    /// render it. Appended last.
+    ChannelRotateRequest,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2628,6 +2642,10 @@ pub struct FfiIncomingEnvelope {
     /// initialisers compile.
     #[uniffi(default = None)]
     pub group_reactions: Option<crate::conversation_meta::FfiGroupReactions>,
+    /// Set only for `MediaState`: whether the sender's microphone is on
+    /// (`false` = muted). `None` for every other kind.
+    #[uniffi(default = None)]
+    pub microphone_on: Option<bool>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2659,8 +2677,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::CallKeyPackage)
         },
-        IncomingEnvelope::MediaState { camera_on } => FfiIncomingEnvelope {
+        IncomingEnvelope::MediaState {
+            camera_on,
+            microphone_on,
+        } => FfiIncomingEnvelope {
             camera_on: Some(camera_on),
+            microphone_on: Some(microphone_on),
             ..FfiIncomingEnvelope::of(K::MediaState)
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => FfiIncomingEnvelope {
@@ -2764,6 +2786,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::GroupContactRequest)
         },
+        IncomingEnvelope::ChannelEpochSeeds(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::ChannelEpochSeeds)
+        },
+        IncomingEnvelope::ChannelRotateRequest(channel) => FfiIncomingEnvelope {
+            payload: channel.to_vec(),
+            ..FfiIncomingEnvelope::of(K::ChannelRotateRequest)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2796,54 +2826,59 @@ impl FfiIncomingEnvelope {
             link_founded: None,
             group_photo: None,
             group_reactions: None,
+            microphone_on: None,
         }
     }
 }
 
 // ===========================================================================
-// Media-state envelope — camera-off-cleanup (Phase 1)
-// (camera on/off signal over the opaque relay transport)
+// Media-state envelope — camera-off-cleanup, microphone since 2026-11-07
+// (camera and microphone signal over the sealed relay transport)
 // ===========================================================================
 
-/// Compose a camera on/off media-state envelope
-/// (camera-off-cleanup). The sender broadcasts the returned
-/// bytes over the opaque SFU `signal-relay` payload; receivers
-/// classify them (via [`dispatch_incoming_envelope`] or
-/// [`decode_media_state`]) and reset the sender's tile `camOn`
-/// state.
+/// Compose a media-state envelope: whether this device's camera is on and
+/// whether its microphone is on (`false` = muted). Sent on every change, on
+/// connect and when a peer joins; seal it under the call's relay key
+/// (`CallRelayKey::seal`) before relaying it.
 ///
-/// See [`lakko_contacts::media_state`] for the wire format and
-/// threat-model rationale (reuse the opaque relay-payload
-/// pattern; the SFU never parses the payload — invariant #2).
-///
-/// # Errors
-///
-/// Infallible — returns `Ok` unconditionally for shape
-/// symmetry with [`decode_media_state`].
+/// See [`lakko_contacts::media_state`] for the wire format (version `0x02`
+/// only since 2026-11-07).
 #[uniffi::export]
 #[must_use]
-pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
-    rust_compose_media_state(camera_on)
+pub fn compose_media_state(camera_on: bool, microphone_on: bool) -> Vec<u8> {
+    rust_compose_media_state(camera_on, microphone_on)
 }
 
-/// Strictly decode a media-state envelope, returning the
-/// camera flag (camera-off-cleanup). Fail-closed: rejects a
-/// plaintext that does not carry the media-state domain
-/// separator or whose payload is malformed.
+/// A decoded media state.
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfiCallMediaState {
+    /// Whether the sender's camera is on.
+    pub camera_on: bool,
+    /// Whether the sender's microphone is on (`false` = muted).
+    pub microphone_on: bool,
+}
+
+/// Strictly decode a media-state envelope, returning the camera and the
+/// microphone. Fail-closed: rejects a plaintext that does not carry the
+/// media-state domain separator or whose payload is malformed (the
+/// camera-only version `0x01` included).
 ///
-/// Use [`dispatch_incoming_envelope`] instead when the
-/// plaintext might be any relay-payload kind (it falls through
-/// to the other kinds rather than erroring).
+/// Use [`dispatch_incoming_envelope`] instead when the plaintext might be
+/// any relay-payload kind (it falls through to the other kinds rather than
+/// erroring).
 ///
 /// # Errors
 ///
-/// * [`FfiError::Contacts`] when `plaintext` is not a valid
-///   media-state envelope (wrong domain / bad length / unknown
-///   version / out-of-range flag byte).
+/// [`FfiError::Contacts`] when `plaintext` is not a valid media-state
+/// envelope (wrong domain / bad length / unknown version / unknown flag
+/// bit).
 #[uniffi::export]
-pub fn decode_media_state(plaintext: Vec<u8>) -> Result<bool, FfiError> {
+pub fn decode_call_media_state(plaintext: Vec<u8>) -> Result<FfiCallMediaState, FfiError> {
     rust_decode_media_state(&plaintext)
-        .map(|state| state.camera_on)
+        .map(|state| FfiCallMediaState {
+            camera_on: state.camera_on,
+            microphone_on: state.microphone_on,
+        })
         .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
@@ -4824,29 +4859,48 @@ mod tests {
     #[test]
     fn media_state_compose_then_decode_round_trips() {
         for camera_on in [true, false] {
-            let wrapped = compose_media_state(camera_on);
-            let decoded = decode_media_state(wrapped).expect("decode should succeed");
-            assert_eq!(decoded, camera_on);
+            for microphone_on in [true, false] {
+                let wrapped = compose_media_state(camera_on, microphone_on);
+                let state = decode_call_media_state(wrapped).expect("decode should succeed");
+                assert_eq!(
+                    state,
+                    FfiCallMediaState {
+                        camera_on,
+                        microphone_on
+                    }
+                );
+            }
         }
     }
 
     #[test]
     fn decode_media_state_rejects_non_media_state_plaintext() {
         let intro = b"hello alice".to_vec();
-        match decode_media_state(intro) {
+        match decode_call_media_state(intro) {
             Err(FfiError::Contacts(_)) => {},
             other => panic!("expected Contacts error, got {other:?}"),
         }
     }
 
     #[test]
+    fn decode_media_state_refuses_the_camera_only_version_1() {
+        let mut v1 = lakko_contacts::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1.to_vec();
+        v1.extend_from_slice(&[0x01, 0x01]);
+        assert!(decode_call_media_state(v1.clone()).is_err());
+        assert!(dispatch_incoming_envelope(v1).is_err());
+    }
+
+    #[test]
     fn dispatch_routes_media_state_envelope() {
         for camera_on in [true, false] {
-            let wrapped = compose_media_state(camera_on);
-            let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
-            assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
-            assert_eq!(result.camera_on, Some(camera_on));
-            assert!(result.payload.is_empty());
+            for microphone_on in [true, false] {
+                let wrapped = compose_media_state(camera_on, microphone_on);
+                let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+                assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
+                assert_eq!(result.camera_on, Some(camera_on));
+                assert_eq!(result.microphone_on, Some(microphone_on));
+                assert!(result.payload.is_empty());
+            }
         }
     }
 
@@ -4938,7 +4992,7 @@ mod tests {
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
         assert_eq!(result.mint_epoch, None);
 
-        let media = compose_media_state(true);
+        let media = compose_media_state(true, true);
         let result = dispatch_incoming_envelope(media).expect("dispatch should succeed");
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
         assert_eq!(result.mint_epoch, None);

@@ -351,13 +351,14 @@ public class DeviceGroupSyncRepository(
 
         // Seed the folded state from this device's own disk BEFORE the poll
         // starts. It used to begin empty on every launch, and the journal
-        // cannot refill it: the poll runs from cursor 0, but the MLS snapshot
-        // was restored above, so every row it re-fetches is one this state
-        // has already consumed. The snapshot is a head start, not an
-        // authority - the poll folds newer rows on top, so a sibling device's
-        // later write still wins. Bytes in an older format (encoding version
-        // 1, before the saved-message register) do not decode and are
-        // dropped: there is no migration (no production data). The state
+        // cannot refill it: the poll resumes from the stored cursor (0 on a
+        // first run), and the MLS snapshot was restored above, so any row it
+        // re-fetches is one this state has already consumed. The snapshot is
+        // a head start, not an authority - the poll folds newer rows on top,
+        // so a sibling device's later write still wins. Bytes in an older
+        // format (encoding version 1, before the saved-message register) do
+        // not decode and are dropped: there is no migration (no production
+        // data). The state
         // starts empty, and the persistence writer's first write replaces the
         // refused file.
         if (seedState) {
@@ -2037,7 +2038,13 @@ public class DeviceGroupSyncRepository(
         groupId: ByteArray,
         startCursor: Long = 0L,
     ) {
-        var cursor = startCursor
+        // Resume where the last persisted batch left off instead of re-reading
+        // the whole journal on every start (DeviceGroupJournalCursor).
+        val storedCursor = runCatching {
+            DeviceGroupJournalCursor.read(applicationContext, accountIdB64, groupId)
+        }.getOrDefault(0L)
+        var cursor = maxOf(startCursor, storedCursor)
+        val durableCursor = JournalCursorTracker(cursor)
         DsClient().use { ds ->
             while (currentCoroutineContextActive()) {
                 val result = try {
@@ -2112,6 +2119,10 @@ public class DeviceGroupSyncRepository(
                 // rule for this batch: own claims and notes judged at their
                 // rows, commits moving the journal's epoch.
                 var journal = loadJournalEpochs(group.get())
+                // This device's own rows coming back, counted for one line per
+                // batch: each is benign (its effect is already in the
+                // snapshot), and a stack per row flooded the log.
+                var ownRows = 0
                 for (message in result.messages) {
                     // The account this loop polls for is gone: the handles
                     // read below are nobody's, or the next account's.
@@ -2128,16 +2139,22 @@ public class DeviceGroupSyncRepository(
                         DeviceGroupJournalEnvelope.decode(message.payload)
                     } catch (cause: Throwable) {
                         Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
+                        // Never readable by any later pass either.
+                        durableCursor.passed(message.id)
                         continue
                     }
                     // ADR-0079 - this device's own claim or note, recognised
                     // by the sealed bytes it recorded before the publish and
                     // judged at this row's position; recorded before the
                     // cursor moves past it.
-                    if (journal != null && judgeOwnLinkRow(entry.first, message.id, journal.second)) continue
+                    if (journal != null && judgeOwnLinkRow(entry.first, message.id, journal.second)) {
+                        durableCursor.passed(message.id)
+                        continue
+                    }
                     val attestations: List<ByteArray> =
                         entry.second?.let { listOf(it) } ?: emptyList()
                     val devicesBeforeRow = runCatching { g.devices().map { it.signaturePublicKey } }.getOrNull()
+                    val epochBeforeRow = runCatching { g.epoch() }.getOrNull()
                     val processed: ProcessedMessage = try {
                         g.processIncomingVerifyingRemovals(
                             id,
@@ -2147,13 +2164,28 @@ public class DeviceGroupSyncRepository(
                             System.currentTimeMillis() / 1000,
                         )
                     } catch (cause: Throwable) {
-                        Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
+                        val own = me.lakko.app.push.isOwnMessageEcho(cause)
+                        if (own) {
+                            ownRows += 1
+                        } else {
+                            Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
+                        }
+                        durableCursor.refused(
+                            message.id,
+                            failedRowVerdict(
+                                isOwnEcho = own,
+                                sealedEpoch = runCatching { uniffi.lakko_ffi_uniffi.epochOfMessage(entry.first) }.getOrNull(),
+                                epochAfter = runCatching { uniffi.lakko_ffi_uniffi.epochAfterMessage(entry.first) }.getOrNull(),
+                                localEpoch = epochBeforeRow,
+                            ),
+                        )
                         // A commit that took effect (its own, merged early)
                         // still moves the journal's epoch.
                         journal = observeJournalRow(entry.first, message.id, g, journal)
                         continue
                     }
                     journal = observeJournalRow(entry.first, message.id, g, journal)
+                    durableCursor.passed(message.id)
                     mutated = true
                     if (processed is ProcessedMessage.Application) {
                         try {
@@ -2282,9 +2314,11 @@ public class DeviceGroupSyncRepository(
                     // mutation.
                 }
 
+                if (ownRows > 0) Log.i(LOG_TAG, "skipped $ownRows own rows of this device")
                 if (!bound.isCurrent) return
                 if (mutated) {
                     val id = identity.get()
+                    if (id == null) durableCursor.snapshotPersistFailed()
                     if (id != null) {
                         // ADR-0081 decision 3 — fail-closed and conditional on
                         // the generation this handle read: a handle another one
@@ -2293,14 +2327,26 @@ public class DeviceGroupSyncRepository(
                         // memory; the next batch writes it again.
                         try {
                             persistHandleOrThrow(id, accountIdB64)
+                            durableCursor.snapshotPersisted()
                             saveAdmissions(accountIdB64)
                             rosterChange.onPersisted()
                         } catch (_: DeviceGroupSnapshotStore.SnapshotChanged) {
                             scope.launch { reopenBehindDisk() }
                             return
                         } catch (cause: Throwable) {
+                            durableCursor.snapshotPersistFailed()
                             Log.w(LOG_TAG, "DeviceGroup snapshot persist failed (${cause.javaClass.simpleName})")
                         }
+                    }
+                }
+                // C-67 - the cursor goes to disk only after the snapshot that
+                // reflects every row up to it (DeviceGroupJournalCursor).
+                durableCursor.cursorToWrite()?.let { value ->
+                    try {
+                        DeviceGroupJournalCursor.write(applicationContext, accountIdB64, groupId, value)
+                        durableCursor.cursorWritten(value)
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "DeviceGroup journal cursor not stored (${cause.javaClass.simpleName})")
                     }
                 }
 

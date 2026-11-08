@@ -224,6 +224,10 @@ class MultiJoinerCall private constructor(
      *  scope, so no extra synchronisation is needed. */
     private val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+    /** What each remote peer last said about its microphone (keyed on
+     *  "peer-<peerId>", 2026-11-07), as [SfuCallUi]. */
+    private val remoteMics = RemoteMicStates()
+
     /** The call id, lower-case hex: the key of [RememberedCallNames]. */
     private val callIdHex: String = hexKey(opts.callId)
 
@@ -239,6 +243,10 @@ class MultiJoinerCall private constructor(
             sample = { session.sampleAudioLevels() },
             participantIdOf = { "$PEER_PREFIX$it" },
         )
+
+    /** The call's chat (`docs/ux/calls.md` section 4.1.4), for account
+     *  holders and guests alike; gone when the call ends for this device. */
+    private val chat = CallChatModel()
 
     init {
         localLeaf = initialLeaf
@@ -289,6 +297,11 @@ class MultiJoinerCall private constructor(
                     lastKnownCameraOn[id] = cameraOn
                     ui.setParticipantCamera(id, cameraOn)
                 },
+                onRemoteMicrophoneState = { peerId, microphoneOn ->
+                    // The peer's mute mark (group-call-grid 7.2), from the
+                    // same sealed media state. Mirrors SfuCallUi.
+                    remoteMics.record(ui, "$PEER_PREFIX$peerId", microphoneOn)
+                },
                 onLocalVideoTrack = { track -> ui.setLocalVideoTrack(track) },
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
                 // The name a peer typed for this call (`CallName.kt`): it
@@ -297,6 +310,11 @@ class MultiJoinerCall private constructor(
                     if (opts.names.callNamed(peerId, name)) {
                         ui.setParticipantName("$PEER_PREFIX$peerId", opts.names.name(peerId))
                     }
+                },
+                // A message of the call's chat, verified: the name over it is
+                // the one its sender's tile shows.
+                onCallChat = { peerId, seq, text ->
+                    chat.addReceived(peerId, seq, text, opts.names.name(peerId))
                 },
             ),
         )
@@ -322,6 +340,7 @@ class MultiJoinerCall private constructor(
             own = ownCallName,
             default = opts.localDisplayName,
         )
+        ui.setCallChat(CallChatHandle(chat, sessionChatControl(session, chat)))
     }
 
     companion object {
@@ -446,7 +465,10 @@ class MultiJoinerCall private constructor(
         clearRebroadcast()
         clearOwnerProbe()
         lastKnownCameraOn.clear()
+        remoteMics.clear()
         ui.setCallNameControl(null, own = "", default = "")
+        // Nothing of the call's chat is kept.
+        ui.setCallChat(null)
         session.hangUp()
     }
 
@@ -614,6 +636,8 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.FAILED,
             SfuCallSession.State.CLOSED -> {
                 speaking.stop()
+                // The chat goes with the call.
+                chat.clear()
                 // The call's tracks are gone with its connection.
                 ui.clearRemoteCopyVideoTracks()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
@@ -666,6 +690,7 @@ class MultiJoinerCall private constructor(
         opts.names.forget(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
         lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
+        remoteMics.forget("$PEER_PREFIX$peerId")
         // The committer may have left -> the next inbound KP is evaluated
         // against the fresh election (this client might now be it).
     }
@@ -764,6 +789,10 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.ADMISSION_SEED,
             FfiIncomingEnvelopeKind.GROUP_PHOTO,
             FfiIncomingEnvelopeKind.GROUP_REACTIONS,
+            // ADR-0087 — a channel's earlier seeds and a rotate request ride
+            // the PublisherGroup journal, never the SFU signal-relay. Dropped.
+            FfiIncomingEnvelopeKind.CHANNEL_EPOCH_SEEDS,
+            FfiIncomingEnvelopeKind.CHANNEL_ROTATE_REQUEST,
             -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.
@@ -1152,7 +1181,7 @@ class MultiJoinerCall private constructor(
             id = "$PEER_PREFIX$peerId",
             displayName = displayName,
             isLocal = false,
-            micOn = true,
+            micOn = remoteMics.micOn("$PEER_PREFIX$peerId"),
             camOn = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,

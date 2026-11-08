@@ -164,16 +164,48 @@ public enum ChannelPublisherCommits {
         )
     }
 
+    /// Section 13 — the epoch seed a commit is about to leave, and the server
+    /// epoch the posts sealed under it carry, kept like an older epoch's seed
+    /// so this device still opens them (the channel's record at creation
+    /// first). Without it the owner's own channel read "Earlier posts aren't
+    /// available." after every approve, removal or rotation. `nil` when there
+    /// is nothing to keep: no seed, or that epoch already held.
+    nonisolated static func outgoingSeedToKeep(
+        seed: Data?, serverEpoch: UInt32, held: [UInt32: Data]
+    ) -> (epoch: UInt32, seed: Data)? {
+        guard let seed, seed.count == 32, held[serverEpoch] == nil else { return nil }
+        return (serverEpoch, seed)
+    }
+
+    /// Keep the seed `group` derives NOW (before its commit) under
+    /// `serverEpoch`, the channels-service epoch read before the commit.
+    /// Called before the commit is created: a commit that is then refused
+    /// leaves the same epoch, so what was kept is still right.
+    static func keepOutgoingSeed(
+        state: ChannelsUiState?, channelIdHex: String, serverEpoch: UInt32,
+        group: PublisherGroup, identity: Identity
+    ) {
+        guard let state,
+              let kept = outgoingSeedToKeep(
+                  seed: try? group.channelSeed(identity: identity), serverEpoch: serverEpoch,
+                  held: state.subscribedSeeds(channelId: channelIdHex))
+        else { return }
+        state.setSubscribedSeed(channelId: channelIdHex, epoch: kept.epoch, seed: kept.seed)
+    }
+
     /// Write the group's CURRENT content seed back to `state` (the seed every
-    /// later post seals under). Best effort: a replay writes it again.
-    public static func refreshContentSeed(_ context: Context, state: ChannelsUiState?) {
-        guard let state, let old = state.keysByChannel[context.channelIdHex],
+    /// later post seals under), with the channel epoch it serves, the
+    /// replaced seed kept under its own. `landedEpoch`: the epoch this
+    /// owner's own reseal landed the channel at (a commit just run); `nil`
+    /// reads the group's epoch. Best effort: a replay writes it again.
+    public static func refreshContentSeed(
+        _ context: Context, state: ChannelsUiState?, landedEpoch: UInt32? = nil
+    ) {
+        guard let state, state.keysByChannel[context.channelIdHex] != nil,
               let opened = try? context.open(),
               let seed = try? opened.group.channelSeed(identity: opened.identity) else { return }
-        guard seed != old.seed else { return }
-        state.setKeys(
-            channelId: context.channelIdHex,
-            keys: ChannelPublisherKeys(seed: seed, signingKeySeed: old.signingKeySeed))
+        guard let epoch = landedEpoch ?? (try? opened.group.epoch()).map({ UInt32(clamping: $0) }) else { return }
+        state.notePublisherSeedAt(channelId: context.channelIdHex, epoch: epoch, seed: seed)
     }
 
     /// Resume every recorded commit of the account whose steps had not all
@@ -203,7 +235,7 @@ public enum ChannelPublisherCommits {
             case .replay:
                 do {
                     try await PublisherCommitRunner.run(entry, ports: ports(context, state: state))
-                    refreshContentSeed(context, state: state)
+                    refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
                 } catch {
                     NSLog("Channels: a recorded PublisherGroup commit did not finish; retried later: %@",
                           String(describing: error))

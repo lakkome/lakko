@@ -164,12 +164,12 @@ final class ChannelPostSync: ObservableObject {
     private func readableChannels() -> [Readable] {
         var out: [Readable] = []
         for c in channels.channels {
-            if let keys = channels.keysByChannel[c.id] {
-                // A publisher holds the current content seed only, as the
-                // channel view does; a post it cannot open under it is passed
-                // over.
-                let seed = keys.seed
-                out.append(Readable(idHex: c.id, seedForEpoch: { _ in seed }, newestSeedEpoch: .max))
+            if channels.keysByChannel[c.id] != nil {
+                // A publisher reads as the channel view does: the composer's
+                // seed for the one epoch it serves, the kept seeds for the
+                // others; a post it cannot open is passed over.
+                let map = channels.readSeeds(channelId: c.id)
+                out.append(Readable(idHex: c.id, seedForEpoch: { map[$0] }, newestSeedEpoch: .max))
                 continue
             }
             let map = channels.subscribedSeeds(channelId: c.id)

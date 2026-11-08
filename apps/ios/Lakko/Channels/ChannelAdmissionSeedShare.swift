@@ -22,6 +22,13 @@ import LakkoCore
 /// (ADR-0087 phase B), so a co-publisher can write the public seed envelope;
 /// a co-publisher never derives one of its own (it would be its lineage's,
 /// not the channel's).
+///
+/// And the channel's EARLIER epoch seeds (ADR-0087 section 7, amended
+/// 2026-11-08; UX 15.2.1): a new publisher joins the PublisherGroup at a
+/// later MLS epoch and could open no earlier post, not even the owner's
+/// epoch-0 record. The owner seals the newest ``maxEpochSeeds`` of its epoch
+/// map that it has not sent that publisher yet, one envelope per pass; a
+/// receiver adds a seed only for an epoch it holds none of.
 @MainActor
 enum ChannelAdmissionSeedShare {
 
@@ -39,6 +46,9 @@ enum ChannelAdmissionSeedShare {
         var sent: [String: [UInt16]] = [:]
         /// Publishers the read key was sealed to, by joiner key.
         var readKeySent: Set<String> = []
+        /// Epochs whose seed was sealed to each publisher, by joiner key.
+        /// Optional so a record written before it decodes.
+        var epochSeedsSent: [String: [UInt32]]?
     }
 
     private static func key(_ account: String, _ channelId: String) -> String {
@@ -72,22 +82,73 @@ enum ChannelAdmissionSeedShare {
         save(record, account, channelId)
     }
 
-    /// After an approve: the joiner is a publisher to send seeds to.
+    /// After an approve: the joiner is a publisher to send seeds to. A
+    /// publisher removed and approved again gets a fresh hand-over.
     static func notePublisher(channelId: String, joinerKey: Data) {
         guard let account = AcceptedContactsStore.boundAccountIdB64 else { return }
         var record = load(account, channelId)
-        guard let request = record.requests[hex(joinerKey)] else { return }
-        record.publishers[hex(joinerKey)] = request
+        let joinerHex = hex(joinerKey)
+        guard let request = record.requests[joinerHex] else { return }
+        record.publishers[joinerHex] = request
+        record.sent[joinerHex] = nil
+        record.readKeySent.remove(joinerHex)
+        record.epochSeedsSent?[joinerHex] = nil
         save(record, account, channelId)
+    }
+
+    /// After a removal: nothing more is sealed to that publisher.
+    static func forgetPublisher(channelId: String, accountKey: Data) {
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return }
+        var record = load(account, channelId)
+        let keyHex = hex(accountKey)
+        let gone = record.publishers.filter { $0.key == keyHex || $0.value.accountKeyHex == keyHex }.map(\.key)
+        guard !gone.isEmpty else { return }
+        for joinerHex in gone {
+            record.publishers[joinerHex] = nil
+            record.sent[joinerHex] = nil
+            record.readKeySent.remove(joinerHex)
+            record.epochSeedsSent?[joinerHex] = nil
+        }
+        save(record, account, channelId)
+    }
+
+    /// Most seeds in one hand-over (the core's bound).
+    static var maxEpochSeeds: Int { Int(channelEpochSeedsMax()) }
+
+    /// The seeds to send a publisher: the newest `max` of the owner's epoch
+    /// map that it was not sent yet, ascending by epoch.
+    nonisolated static func epochSeedsToSend(
+        held: [UInt32: Data], sent: Set<UInt32>, max: Int
+    ) -> [(epoch: UInt32, seed: Data)] {
+        held.filter { !sent.contains($0.key) && $0.value.count == 32 }
+            .sorted { $0.key > $1.key }
+            .prefix(max)
+            .sorted { $0.key < $1.key }
+            .map { (epoch: $0.key, seed: $0.value) }
+    }
+
+    /// The received seeds a publisher adds: only for an epoch it holds no
+    /// seed of; never one it holds replaced.
+    nonisolated static func epochSeedsToKeep(
+        received: [(epoch: UInt32, seed: Data)], held: [UInt32: Data]
+    ) -> [(epoch: UInt32, seed: Data)] {
+        var seen = Set(held.keys)
+        var out: [(epoch: UInt32, seed: Data)] = []
+        for item in received where !seen.contains(item.epoch) && item.seed.count == 32 {
+            seen.insert(item.epoch)
+            out.append(item)
+        }
+        return out
     }
 
     /// The owner's pass: seal what each publisher lacks. Best effort.
     static func sendOwed(
-        channelId: String, identity: Identity, group: PublisherGroup, ds: DsClient, readKey: Data? = nil
+        channelId: String, identity: Identity, group: PublisherGroup, ds: DsClient, readKey: Data? = nil,
+        epochSeeds: [UInt32: Data] = [:]
     ) async {
         guard let account = AcceptedContactsStore.boundAccountIdB64 else { return }
         let seeds = ChannelInvites.admissionSeeds(channelIdHex: channelId)
-        guard !seeds.isEmpty || readKey != nil else { return }
+        guard !seeds.isEmpty || readKey != nil || !epochSeeds.isEmpty else { return }
         var record = load(account, channelId)
         guard !record.publishers.isEmpty, let channelBytes = try? group.channelId(),
               let groupId = try? group.groupId() else { return }
@@ -95,7 +156,10 @@ enum ChannelAdmissionSeedShare {
             let already = Set(record.sent[joinerHex] ?? [])
             let owed = seeds.filter { !already.contains($0.version) }
             let readKeyOwed = readKey != nil && !record.readKeySent.contains(joinerHex)
-            guard !owed.isEmpty || readKeyOwed, let accountId = Data(channelHex: publisher.accountIdHex) else { continue }
+            let epochSeedsOwed = Self.epochSeedsToSend(
+                held: epochSeeds, sent: Set(record.epochSeedsSent?[joinerHex] ?? []), max: maxEpochSeeds)
+            guard !owed.isEmpty || readKeyOwed || !epochSeedsOwed.isEmpty,
+                  let accountId = Data(channelHex: publisher.accountIdHex) else { continue }
             let discovery = DiscoveryClient(sessionToken: AmbientSessionToken.shared.current)
             guard let bundle = try? await discovery.identityFetch(accountId: accountId),
                   let accountKey = Data(base64Encoded: bundle.signaturePubkey),
@@ -140,6 +204,27 @@ enum ChannelAdmissionSeedShare {
                     NSLog("[channels] a read key was not sealed to a publisher yet")
                 }
             }
+            if !epochSeedsOwed.isEmpty {
+                do {
+                    let envelope = try composeChannelEpochSeedsEnvelope(
+                        channelId: channelBytes, memberAccountKey: accountKey,
+                        memberX25519PublicKey: x25519,
+                        seeds: epochSeedsOwed.map { FfiChannelEpochSeed(epoch: $0.epoch, seed: $0.seed) })
+                    let message = try group.createApplicationMessage(identity: identity, plaintext: envelope)
+                    // The send ratchet moved: on disk before the message leaves, so a
+                    // crash never reuses a generation (the G-34 rule).
+                    try ChannelPublisherIdentity.shared.persistOrThrow()
+                    _ = try await ds.publishGroup(
+                        groupId: groupId, payload: message,
+                        auth: CoPublisher.auth(ds: ds, identity: identity, publisherGroup: group))
+                    var sentEpochs = record.epochSeedsSent ?? [:]
+                    sentEpochs[joinerHex, default: []].append(contentsOf: epochSeedsOwed.map(\.epoch))
+                    record.epochSeedsSent = sentEpochs
+                    save(record, account, channelId)
+                } catch {
+                    NSLog("[channels] earlier seeds were not sealed to a publisher yet")
+                }
+            }
         }
     }
 
@@ -181,6 +266,23 @@ enum ChannelAdmissionSeedShare {
             identities.append(lineage)
         }
         for plaintext in fromOwner {
+            // UX 15.2.1 — the channel's earlier seeds, addressed to this
+            // account: added only for epochs with no seed held.
+            if let envelope = try? decodeChannelEpochSeedsEnvelope(plaintext: plaintext) {
+                guard envelope.channelId == channelBytes, let state else { continue }
+                for identity in identities {
+                    if let opened = try? openChannelEpochSeedsEnvelope(plaintext: plaintext, accountIdentity: identity) {
+                        let keep = epochSeedsToKeep(
+                            received: opened.map { (epoch: $0.epoch, seed: $0.seed) },
+                            held: state.readSeeds(channelId: channelId))
+                        for item in keep {
+                            state.setSubscribedSeed(channelId: channelId, epoch: item.epoch, seed: item.seed)
+                        }
+                        break
+                    }
+                }
+                continue
+            }
             if let envelope = try? decodeChannelReadKeyEnvelope(plaintext: plaintext) {
                 guard envelope.channelId == channelBytes else { continue }
                 for identity in identities {

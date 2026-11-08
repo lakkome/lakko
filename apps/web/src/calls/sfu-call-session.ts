@@ -89,6 +89,7 @@ import { loadWasm } from "../wasm";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { bytesOfHex, CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { CallNameChannel } from "./call-name";
+import { CallChatChannel, type CallChatMessage } from "./call-chat";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -352,7 +353,7 @@ export interface SfuCallCallbacks {
    * `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
    *
    * A payload sealed under the call's relay key (ADR-0078 section 2: the
-   * camera media state and the peer announcements) is NOT delivered here -
+   * camera and microphone media state and the peer announcements) is NOT delivered here -
    * the session opens and consumes it and fires {@link onRemoteMediaState}
    * or {@link onPeerIdentified}. Everything it cannot open falls through to
    * this callback unchanged.
@@ -369,6 +370,13 @@ export interface SfuCallCallbacks {
    */
   onRemoteMediaState?(peerId: string, cameraOn: boolean): void;
   /**
+   * A peer said whether its microphone is on (`false` = muted), in the same
+   * sealed media-state envelope as the camera (`lakko_contacts::media_state`).
+   * Fired with every media state, after {@link onRemoteMediaState}. `peerId`
+   * is the sending peer's SFU peer id.
+   */
+  onRemoteMicrophoneState?(peerId: string, microphoneOn: boolean): void;
+  /**
    * A peer's signed screen-share state arrived, sealed under the call's relay
    * key (ADR-0083). `peerId` is the SFU's word for the sender; the caller
    * verifies the state against the leaf key that peer's announcement
@@ -382,6 +390,13 @@ export interface SfuCallCallbacks {
    * default naming.
    */
   onRemoteCallName?(peerId: string, name: string | null): void;
+  /**
+   * The call's chat changed (`docs/ux/calls.md` section 4.1.4,
+   * `call-chat.ts`): the whole list, oldest first.
+   */
+  onCallChatChanged?(messages: readonly CallChatMessage[]): void;
+  /** A message from someone else is now shown in the call's chat. */
+  onCallChatIncoming?(message: CallChatMessage): void;
   /**
    * The device did not have everything the call asked for, so the person
    * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
@@ -465,6 +480,9 @@ export class SfuCallSession {
   /** This device's name for the call and the newest one per peer
    *  (`call-name.ts`). Re-sent after every announcement. */
   private readonly callNames: CallNameChannel;
+  /** The call's chat (`call-chat.ts`): cleared when the call ends for this
+   *  device, kept across everything inside the call. */
+  private readonly callChat: CallChatChannel;
 
   /** Serializes SFU-initiated offers so two `setRemoteDescription`
    *  calls never overlap. Each entry is the offer SDP. */
@@ -583,6 +601,14 @@ export class SfuCallSession {
    * the payload; a peer only ever speaks for its own outbound frames).
    */
   private localCameraOn: boolean;
+  /**
+   * The person's microphone choice (`false` = muted), broadcast beside the
+   * camera state so the other tiles show the mute mark
+   * (`docs/ux/group-call-grid.md` 7.2). Recorded by
+   * {@link setMicrophoneEnabled} even before capture, and applied to the
+   * captured microphone, so what is announced is what is sent.
+   */
+  private localMicOn = true;
 
   /**
    * Signaling keepalive (`sfu-keepalive.ts`): a coarse tick pings the SFU on
@@ -633,12 +659,22 @@ export class SfuCallSession {
     this.activeSeed = config.seed ?? null;
     this.publishLeaf = config.localLeaf ?? 0;
     this.localCameraOn = config.media.video;
+    this.localMicOn = config.media.audio;
     this.nowMs = config.nowMs ?? Date.now;
     this.callNames = new CallNameChannel({
       signer: config.peerAnnouncer,
       sendSealed: (plaintext) => this.sendSealedRelay(plaintext),
       selfPeerId: () => this.selfPeerId,
       onName: (peerId, name) => this.callbacks.onRemoteCallName?.(peerId, name),
+    });
+    this.callChat = new CallChatChannel({
+      signer: config.peerAnnouncer,
+      sendSealed: (plaintext) => this.sendSealedRelay(plaintext),
+      selfPeerId: () => this.selfPeerId,
+      now: () => Date.now(),
+      onChange: (messages) => this.callbacks.onCallChatChanged?.(messages),
+      onIncoming: (message) => this.callbacks.onCallChatIncoming?.(message),
+      log: (line) => console.info(line),
     });
     this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
       now: () => this.nowMs(),
@@ -1249,11 +1285,16 @@ export class SfuCallSession {
   /** Mute / unmute the local microphone (local-only gate, no
    *  renegotiation). */
   setMicrophoneEnabled(on: boolean): void {
-    if (this.localStream === null) return;
-    for (const track of this.localStream.getAudioTracks()) {
-      track.enabled = on;
+    const changed = this.localMicOn !== on;
+    this.localMicOn = on;
+    if (this.localStream !== null) {
+      for (const track of this.localStream.getAudioTracks()) {
+        track.enabled = on;
+      }
+      this.noise?.setMuted(!on);
     }
-    this.noise?.setMuted(!on);
+    // The other tiles show the mute mark from this (group-call-grid 7.2).
+    if (changed) this.announceMediaState();
   }
 
   /** Enable / disable the local camera (local-only gate). Also broadcasts the
@@ -1294,20 +1335,23 @@ export class SfuCallSession {
   private setLocalCameraOn(on: boolean): void {
     if (this.localCameraOn === on) return;
     this.localCameraOn = on;
-    this.announceCameraState();
+    this.announceMediaState();
   }
 
   /**
-   * Broadcast the CURRENT local camera state to every other peer over the
-   * opaque SFU `signal-relay` (camera-off-cleanup). Best-effort + fire-and-
-   * forget: a compose failure or a closed socket is swallowed (the signal is
-   * a UI hint, never on the E2EE / media path — invariant #2). No-op when
-   * signaling is not open. `composeMediaState` needs the wasm module, which
-   * `connect()` has already loaded, so the cached module resolves immediately.
+   * Broadcast the CURRENT local camera and microphone state to every other
+   * peer over the sealed SFU `signal-relay` (camera-off-cleanup; the
+   * microphone since 2026-11-07, `lakko_contacts::media_state`).
+   * Best-effort + fire-and-forget: a compose failure or a closed socket is
+   * swallowed (the signal is a UI hint, never on the E2EE / media path —
+   * invariant #2). No-op when signaling is not open. `composeMediaState`
+   * needs the wasm module, which `connect()` has already loaded, so the
+   * cached module resolves immediately.
    */
-  private announceCameraState(): void {
+  private announceMediaState(): void {
     if (this.signaling === null) return;
-    const on = this.localCameraOn;
+    const camera = this.localCameraOn;
+    const microphone = this.localMicOn;
     void (async (): Promise<void> => {
       let sealed: Uint8Array | null;
       try {
@@ -1315,7 +1359,7 @@ export class SfuCallSession {
         // Sealed under the call's relay key (ADR-0078 section 2): the SFU
         // relays ciphertext only. No key yet (a link joiner before its
         // Welcome) means nothing is said.
-        sealed = this.relayFor(wasm).seal(wasm.composeMediaState(on));
+        sealed = this.relayFor(wasm).seal(wasm.composeMediaState(camera, microphone));
       } catch {
         return;
       }
@@ -1337,6 +1381,22 @@ export class SfuCallSession {
    */
   setOwnCallName(name: string): void {
     this.callNames.setOwnName(name);
+  }
+
+  /**
+   * Send a message to everyone in the call's chat (`docs/ux/calls.md`
+   * section 4.1.4). `text` has passed the core's rule. Shown at once; as not
+   * sent when it could not leave the device (no relay key, no socket).
+   */
+  sendCallChat(text: string): void {
+    if (this.isOver()) return;
+    this.callChat.send(text);
+  }
+
+  /** Send a chat message that was not sent again (the same bytes). */
+  resendCallChat(id: string): void {
+    if (this.isOver()) return;
+    this.callChat.sendAgain(id);
   }
 
   /** The relay keys, built on first use and seeded from the current seed. */
@@ -2156,6 +2216,8 @@ export class SfuCallSession {
     }
     this.relay?.dispose();
     this.relay = null;
+    // The call's chat goes with the call (section 4.1.4): nothing is kept.
+    this.callChat.clear();
     if (this.signaling !== null) {
       this.signaling.close();
       this.signaling = null;
@@ -2327,6 +2389,12 @@ export class SfuCallSession {
         stream.removeTrack(rawCamera);
         stream.addTrack(published);
       }
+    }
+    // A mute chosen before the capture finished (the person's choice reaches
+    // `setMicrophoneEnabled` as soon as the call exists) holds for the
+    // captured microphone: what is announced is what is sent.
+    if (!this.localMicOn) {
+      for (const track of stream.getAudioTracks()) track.enabled = false;
     }
     this.localStream = stream;
     // Surface the capture to the UI (group self-preview tile), mirroring the
@@ -2524,8 +2592,9 @@ export class SfuCallSession {
     // Announce the initial camera state to any peers already in the call
     // (camera-off-cleanup) — so a peer that joined camera-off is shown off
     // from the start, not only after the first toggle. A newcomer that joins
-    // LATER learns it via the peer-join re-announce in `onPeerJoined`.
-    this.announceCameraState();
+    // LATER learns it via the peer-join re-announce in `onPeerJoined`. The
+    // microphone rides the same envelope.
+    this.announceMediaState();
   }
 
   // -----------------------------------------------------------------
@@ -2608,8 +2677,9 @@ export class SfuCallSession {
     // right thing immediately (camera-off-cleanup) — deterministic initial
     // sync for a peer who toggled off/on before this peer arrived. The relay
     // is a broadcast; existing peers re-applying an unchanged state is a
-    // harmless no-op. And say who this device is, for the newcomer.
-    this.announceCameraState();
+    // harmless no-op. The microphone rides the same envelope. And say who
+    // this device is, for the newcomer.
+    this.announceMediaState();
     this.announceSelf();
   }
 
@@ -2649,6 +2719,7 @@ export class SfuCallSession {
     }
     this.onRosterChanged(false);
     this.callNames.onPeerLeft(frame.peer_id);
+    this.callChat.onPeerLeft(frame.peer_id);
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
@@ -2688,17 +2759,23 @@ export class SfuCallSession {
       if (opened !== null) {
         if (opened.kind === "media-state") {
           mediaCb?.(frame.from, opened.cameraOn);
+          this.callbacks.onRemoteMicrophoneState?.(frame.from, opened.microphoneOn);
         } else if (opened.kind === "announcement") {
           const identity = this.config.peerAnnouncer?.verify(frame.from, opened.bytes) ?? null;
           if (identity !== null) {
             identifiedCb?.(frame.from, identity);
             const key = bytesOfHex(identity.memberKeyHex);
-            if (key !== null) this.callNames.onPeerIdentified(frame.from, key);
+            if (key !== null) {
+              this.callNames.onPeerIdentified(frame.from, key);
+              this.callChat.onPeerIdentified(frame.from, key);
+            }
           }
         } else if (opened.kind === "screen-share") {
           this.callbacks.onRemoteScreenShareState?.(frame.from, opened.state);
         } else if (opened.kind === "call-name") {
           this.callNames.onReceived(frame.from, opened.bytes);
+        } else if (opened.kind === "call-chat") {
+          this.callChat.onReceived(frame.from, opened.bytes);
         }
         return;
       }

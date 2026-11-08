@@ -78,6 +78,7 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { PushedScreen } from "../ui/PushedScreen";
+import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 
@@ -260,6 +261,11 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   // another read.
   const readState = createMemo(() => channelReadStateOf(id));
   createEffect(on(readState, () => void load({ redecode: true }), { defer: true }));
+  // UX 15.2.1 — earlier seeds handed to a new publisher (or kept after a
+  // rotation) open what they cover in place: the posts appear and "Earlier
+  // posts aren't available." goes once every earlier item opens.
+  const heldSeedCount = createMemo(() => channelsState.subscribedSeedsByChannel().get(id)?.size ?? 0);
+  createEffect(on(heldSeedCount, () => void load({ redecode: true }), { defer: true }));
   const timeline = createMemo(() => channelTimeline(posts(), decoded()));
 
   // Reactions in view, one batched read (ADR-0087 section 13a).

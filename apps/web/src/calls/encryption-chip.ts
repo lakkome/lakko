@@ -74,14 +74,36 @@ export function showsEncryptionChip(e2ee: EncryptionChipInput): boolean {
 }
 
 /**
- * The sheet's one plain sentence (§5), naming the other person when this
- * device knows who they are. Word for word what
- * `callEncryptionSentence` says on Android and iOS.
+ * The call the encryption sheet describes, as its copy rules read it.
  *
- * A name is what makes the sentence worth reading, so it is used whenever
- * there is one. Where there is not — a group call, or a contact this device
- * has never been able to name — the sentence stays true rather than inventing
- * a person.
+ * `groupCall` is the kind of call: a group call or a call from a link. Those
+ * never name one person (§5): everyone in the call compares the same number,
+ * and naming the first roster entry claimed a two-person call (the defect of
+ * 2026-11-07, where the sheet read "Only you and <first participant>" on every
+ * group call). `othersInCall` is how many other people are in the call now; a
+ * call with more than one other person is read as a group call whatever it was
+ * placed as.
+ */
+export interface EncryptionSheetCall {
+  readonly groupCall: boolean;
+  readonly othersInCall: number;
+  /** The other person on a one-to-one call; ignored on a group call. */
+  readonly peerName: string | null | undefined;
+}
+
+/** `true` when the sheet speaks to two people rather than to a group. */
+export function isOneToOneSheet(call: EncryptionSheetCall): boolean {
+  return !call.groupCall && call.othersInCall <= 1;
+}
+
+/**
+ * The sheet's one plain sentence (§5). Word for word what
+ * `callEncryptionSentence` says on Android and `CallPeerName.encryptionSentence`
+ * on iOS.
+ *
+ * A one-to-one call names the other person when this device knows who they
+ * are. Where it does not, and on every group or link call, the sentence stays
+ * true rather than inventing a person.
  *
  * Web has one extra case the natives do not: its call roster falls back to the
  * literal words `Peer` and `Participant` for an unresolved participant, and
@@ -91,10 +113,22 @@ export function showsEncryptionChip(e2ee: EncryptionChipInput): boolean {
  * and as the interface language renders them, since the roster holds whichever
  * was current when the tile was built.
  */
-export function encryptionSheetSentence(peerName: string | null | undefined): string {
-  const name = peerName?.trim() ?? "";
+export function encryptionSheetSentence(call: EncryptionSheetCall): string {
+  if (!isOneToOneSheet(call)) return t("call.encryption.sentence_group");
+  const name = call.peerName?.trim() ?? "";
   if (name === "" || isStandInName(name)) return t("call.encryption.sentence_group");
   return t("call.encryption.sentence_named", { name });
+}
+
+/**
+ * The line under the number (§5): how the people in this call compare it. Two
+ * people read it to each other; in a group or link call everyone sees the same
+ * number. Never "phones": people join from computers and browsers too.
+ */
+export function encryptionSheetHint(call: EncryptionSheetCall): string {
+  return isOneToOneSheet(call)
+    ? t("call.encryption.compare_hint_one_to_one")
+    : t("call.encryption.compare_hint_group");
 }
 
 /** The roster's names for a participant it could not name. */

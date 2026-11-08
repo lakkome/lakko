@@ -28,8 +28,98 @@
 /** The part of `HTMLVideoElement` this reads; the DOM types this project
  *  builds against may not declare it. */
 interface FrameCallbackVideo {
-  requestVideoFrameCallback?: (callback: (now: number) => void) => number;
+  requestVideoFrameCallback?: (callback: (now: number, metadata?: unknown) => void) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
+}
+
+/**
+ * What is known of one presented frame beyond the moment it was shown: the
+ * parts of the `requestVideoFrameCallback` metadata read here. Each is
+ * `undefined` where the browser gives none (and always on the statistics
+ * path).
+ */
+export interface PresentedFrame {
+  /** When the frame's last packet arrived, on the `performance.now()`
+   *  clock. */
+  readonly receiveTime?: number | undefined;
+  /** The frame's RTP timestamp. */
+  readonly rtpTimestamp?: number | undefined;
+}
+
+/** The numeric fields of a callback's metadata, as a {@link PresentedFrame}. */
+export function presentedFrameOf(metadata: unknown): PresentedFrame {
+  if (typeof metadata !== "object" || metadata === null) return {};
+  const m = metadata as Record<string, unknown>;
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  return { receiveTime: num(m["receiveTime"]), rtpTimestamp: num(m["rtpTimestamp"]) };
+}
+
+/**
+ * Whether a frame an element presents belongs to the stream it was last
+ * given, or is a frame the track decoded before that.
+ *
+ * Firefox (159, checked 2026-11-07 against a loopback call) shows a remote
+ * track's last decoded frame the moment an element is given the track,
+ * however old that frame is, and reports it through
+ * `requestVideoFrameCallback`. A track the SFU stopped forwarding (a picture
+ * no tile wanted: the main or middle camera track of a person drawn small)
+ * keeps the frame it last decoded, possibly minutes earlier, so a tile that
+ * switched to that track showed that old frame until the first new one
+ * arrived. Chromium and WebKit present nothing until a new frame is decoded.
+ * The rule here is the same in every browser and asks none of them for
+ * either behaviour:
+ *
+ *   * the first frame presented after a bind is a leftover unless its
+ *     `receiveTime` is at or after the bind (a frame whose arrival time is
+ *     unknown is treated as a leftover: at worst one real frame is skipped);
+ *   * a frame presented again with the leftover's RTP timestamp is the same
+ *     leftover;
+ *   * any other frame belongs to the binding.
+ *
+ * A leftover is one frame: a track can only have one last frame, and every
+ * frame after it was decoded after the bind. So the rule cannot hold a
+ * picture back for more than one frame whatever the browser's clocks say.
+ */
+export class BindingFrameGate {
+  private boundAt: number | null = null;
+  private firstSeen = false;
+  private leftoverRtp: number | undefined;
+  private admittedSinceBind = false;
+
+  /** The element was given another stream at `at` (`performance.now()`). */
+  bind(at: number): void {
+    this.boundAt = at;
+    this.firstSeen = false;
+    this.leftoverRtp = undefined;
+    this.admittedSinceBind = false;
+  }
+
+  /** Whether a bind happened and no frame of it has been admitted yet. */
+  awaiting(): boolean {
+    return this.boundAt !== null && !this.admittedSinceBind;
+  }
+
+  /** `true` when `frame` belongs to the stream bound last. */
+  admit(frame: PresentedFrame): boolean {
+    if (this.boundAt === null) return true;
+    if (
+      this.leftoverRtp !== undefined &&
+      frame.rtpTimestamp !== undefined &&
+      frame.rtpTimestamp === this.leftoverRtp
+    ) {
+      return false;
+    }
+    if (!this.firstSeen) {
+      this.firstSeen = true;
+      if (frame.receiveTime === undefined || frame.receiveTime < this.boundAt) {
+        this.leftoverRtp = frame.rtpTimestamp;
+        return false;
+      }
+    }
+    this.admittedSinceBind = true;
+    return true;
+  }
 }
 
 /** One entry of a statistics report, as far as this module reads it. */
@@ -182,8 +272,10 @@ export function watchDecodedFrames(
 }
 
 /**
- * Call `onFrame(now)` for the frames `el` shows, `now` on the
- * `performance.now()` clock. Returns the function that stops it.
+ * Call `onFrame(now, frame)` for the frames `el` shows, `now` on the
+ * `performance.now()` clock and `frame` what the browser said of the frame
+ * ({@link PresentedFrame}; empty on the statistics path). Returns the
+ * function that stops it.
  *
  * With `requestVideoFrameCallback`: once per presented frame. Without it and
  * with `trackOf`: from the statistics of the receiver registered for the
@@ -191,20 +283,23 @@ export function watchDecodedFrames(
  */
 export function watchVideoFrames(
   el: object,
-  onFrame: (now: number) => void,
+  onFrame: (now: number, frame: PresentedFrame) => void,
   trackOf?: TrackOf,
 ): () => void {
   const video = el as FrameCallbackVideo;
   if (typeof video.requestVideoFrameCallback !== "function") {
     if (trackOf === undefined) return () => {};
-    return watchDecodedFrames(() => videoFrameSourceOf(trackOf()), onFrame);
+    return watchDecodedFrames(
+      () => videoFrameSourceOf(trackOf()),
+      (now) => onFrame(now, {}),
+    );
   }
   let stopped = false;
   let handle = 0;
   const request = (): void => {
-    handle = video.requestVideoFrameCallback?.call(video, (now: number) => {
+    handle = video.requestVideoFrameCallback?.call(video, (now: number, metadata?: unknown) => {
       if (stopped) return;
-      onFrame(now);
+      onFrame(now, presentedFrameOf(metadata));
       request();
     }) ?? 0;
   };

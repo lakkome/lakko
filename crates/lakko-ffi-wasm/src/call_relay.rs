@@ -19,6 +19,9 @@
 //!   one-share-per-call fold of ADR-0083 (`lakko_calls::screen_share`).
 //! - `composeCallName`, `verifyCallName`, `callNameIsNewer` - the name a
 //!   participant gives themself for one call (`lakko_calls::call_name`).
+//! - `composeCallChat`, `verifyCallChat`, `checkCallChatText`,
+//!   `clampCallChatText`, `callChatMaxTextBytes` - a message in the call's
+//!   own chat (`lakko_calls::call_chat`, `docs/ux/calls.md` section 4.1.4).
 //!
 //! A refusal throws an `Error` whose `callRelayError` own property is the
 //! frozen code (`badLength`, `unknownVersion`, `notOpened`, `wrongDomain`,
@@ -28,6 +31,7 @@
 //!
 //! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
+use lakko_calls::call_chat as chat;
 use lakko_calls::call_name as names;
 use lakko_calls::relay::{self as core, RelayError, RelayPayload, CALL_ID_LEN};
 use lakko_calls::screen_share::{self as share, ShareId, ShareStatus};
@@ -115,15 +119,17 @@ impl CallRelayKey {
 pub struct CallRelayPayload {
     kind: &'static str,
     camera_on: bool,
+    microphone_on: bool,
     announcement: Vec<u8>,
     state: Vec<u8>,
     call_name: Vec<u8>,
+    message: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl CallRelayPayload {
     /// `"peer-announcement"`, `"media-state"`, `"screen-share"`,
-    /// `"call-name"` or `"unknown"`.
+    /// `"call-name"`, `"call-chat"` or `"unknown"`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn kind(&self) -> String {
@@ -135,6 +141,13 @@ impl CallRelayPayload {
     #[must_use]
     pub fn camera_on(&self) -> bool {
         self.camera_on
+    }
+
+    /// For `"media-state"`: whether the microphone is on (`false` = muted).
+    #[wasm_bindgen(getter, js_name = microphoneOn)]
+    #[must_use]
+    pub fn microphone_on(&self) -> bool {
+        self.microphone_on
     }
 
     /// For `"peer-announcement"`: the whole announcement.
@@ -158,6 +171,14 @@ impl CallRelayPayload {
     pub fn call_name(&self) -> Vec<u8> {
         self.call_name.clone()
     }
+
+    /// For `"call-chat"`: the whole message; verify it with
+    /// `verifyCallChat`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn message(&self) -> Vec<u8> {
+        self.message.clone()
+    }
 }
 
 /// Classify an opened relay plaintext.
@@ -168,37 +189,59 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::PeerAnnouncement(announcement) => CallRelayPayload {
             kind: "peer-announcement",
             camera_on: false,
+            microphone_on: false,
             announcement,
             state: Vec::new(),
             call_name: Vec::new(),
+            message: Vec::new(),
         },
-        RelayPayload::MediaState { camera_on } => CallRelayPayload {
+        RelayPayload::MediaState {
+            camera_on,
+            microphone_on,
+        } => CallRelayPayload {
             kind: "media-state",
             camera_on,
+            microphone_on,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name: Vec::new(),
+            message: Vec::new(),
         },
         RelayPayload::ScreenShare(state) => CallRelayPayload {
             kind: "screen-share",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state,
             call_name: Vec::new(),
+            message: Vec::new(),
         },
         RelayPayload::CallName(call_name) => CallRelayPayload {
             kind: "call-name",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name,
+            message: Vec::new(),
+        },
+        RelayPayload::CallChat(message) => CallRelayPayload {
+            kind: "call-chat",
+            camera_on: false,
+            microphone_on: false,
+            announcement: Vec::new(),
+            state: Vec::new(),
+            call_name: Vec::new(),
+            message,
         },
         RelayPayload::Unknown => CallRelayPayload {
             kind: "unknown",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name: Vec::new(),
+            message: Vec::new(),
         },
     }
 }
@@ -563,6 +606,129 @@ pub fn call_name_is_newer(incoming_seq: u64, stored_seq: Option<u64>) -> bool {
     names::call_name_is_newer(incoming_seq, stored_seq)
 }
 
+/// The longest text of a call-chat message, in bytes.
+#[wasm_bindgen(js_name = callChatMaxTextBytes)]
+#[must_use]
+pub fn call_chat_max_text_bytes() -> u32 {
+    u32::try_from(chat::MAX_CALL_CHAT_TEXT_BYTES).unwrap_or(u32::MAX)
+}
+
+/// Why a text cannot be sent in the call chat: `undefined` when it can, else
+/// `"empty"`, `"blank"`, `"tooLong"` or `"controlCharacter"`.
+#[wasm_bindgen(js_name = checkCallChatText)]
+#[must_use]
+pub fn check_call_chat_text(text: &str) -> Option<String> {
+    chat::check_call_chat_text(text)
+        .err()
+        .map(|e| e.code().to_owned())
+}
+
+/// The longest prefix of `text` a call-chat message can carry, cut on a
+/// character boundary.
+#[wasm_bindgen(js_name = clampCallChatText)]
+#[must_use]
+pub fn clamp_call_chat_text(text: &str) -> String {
+    chat::clamp_call_chat_text(text).to_owned()
+}
+
+/// Compose a call-chat message: `text` numbered `seq` (1, 2, 3, ... for the
+/// life of `peerId`) for call `callId` under SFU `peerId`, signed with
+/// `identity`'s leaf key. Seal it with `CallRelayKey.seal`.
+///
+/// # Errors
+///
+/// `callIdLength`, `malformed` (a bad peer id, a seq of 0 or a text
+/// `checkCallChatText` refuses) or `identityKeyMismatch`.
+#[wasm_bindgen(js_name = composeCallChat)]
+pub fn compose_call_chat(
+    identity: &Identity,
+    call_id: &[u8],
+    peer_id: &str,
+    seq: u64,
+    text: &str,
+) -> Result<Vec<u8>, JsValue> {
+    chat::compose_call_chat(
+        identity.mls_identity(),
+        &call_id16(call_id)?,
+        peer_id,
+        seq,
+        text,
+    )
+    .map_err(relay_err)
+}
+
+/// A call-chat message that verified against the call's roster.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct VerifiedCallChat {
+    peer_id: String,
+    seq: u64,
+    text: String,
+    account_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl VerifiedCallChat {
+    /// The sender's peer id.
+    #[wasm_bindgen(getter, js_name = peerId)]
+    #[must_use]
+    pub fn peer_id(&self) -> String {
+        self.peer_id.clone()
+    }
+
+    /// The message's sequence number; show a message once per
+    /// `(peerId, seq)`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The text.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    /// The account key the signer's leaf resolves to: the person.
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+}
+
+/// Verify a call-chat message. `peerId` is the relay `from`,
+/// `peerSignerKey` the signature key of that peer's verified announcement.
+///
+/// # Errors
+///
+/// Any refusal (`wrongCall`, `wrongPeer`, `notAMember`, `noAccount`,
+/// `badSignature`, a decode code, `callIdLength`): drop it.
+#[wasm_bindgen(js_name = verifyCallChat)]
+pub fn verify_call_chat(
+    group: &Group,
+    call_id: &[u8],
+    peer_id: &str,
+    peer_signer_key: &[u8],
+    message: &[u8],
+) -> Result<VerifiedCallChat, JsValue> {
+    let call_id = call_id16(call_id)?;
+    let g = group
+        .mls_group()
+        .lock()
+        .map_err(|_| coded_error("group lock poisoned", PROPERTY, "lockPoisoned"))?;
+    let v = chat::verify_call_chat(&g, &call_id, peer_id, peer_signer_key, message)
+        .map_err(relay_err)?;
+    Ok(VerifiedCallChat {
+        peer_id: v.peer_id,
+        seq: v.seq,
+        text: v.text,
+        account_key: v.account_key,
+    })
+}
+
 /// The share a call is showing now.
 #[wasm_bindgen]
 pub struct CallCurrentScreenShare {
@@ -719,12 +885,13 @@ mod tests {
         let key = CallRelayKey {
             inner: core::RelayKey::from_call_seed(&[3; 32]),
         };
-        let state = lakko_contacts::media_state::compose_media_state(true);
+        let state = lakko_contacts::media_state::compose_media_state(true, false);
         let sealed = key.inner.seal(&state).expect("seal");
         let opened = key.inner.open(&sealed).expect("open");
         let payload = classify_call_relay_plaintext(&opened);
         assert_eq!(payload.kind, "media-state");
         assert!(payload.camera_on);
+        assert!(!payload.microphone_on);
         assert_eq!(classify_call_relay_plaintext(b"x").kind, "unknown");
     }
 
@@ -736,5 +903,19 @@ mod tests {
         assert_eq!(payload.kind, "call-name");
         assert_eq!(payload.call_name, wire);
         assert!(call_name_is_newer(1, None) && !call_name_is_newer(1, Some(1)));
+    }
+
+    #[test]
+    fn a_call_chat_message_classifies_as_call_chat() {
+        let alice = lakko_mls::Identity::from_seed(&[1; 32]).expect("alice");
+        let wire = chat::compose_call_chat(&alice, &[9; 16], "a", 1, "hi").expect("compose");
+        let payload = classify_call_relay_plaintext(&wire);
+        assert_eq!(payload.kind, "call-chat");
+        assert_eq!(payload.message, wire);
+        assert!(payload.call_name.is_empty());
+        assert_eq!(check_call_chat_text("hi"), None);
+        assert_eq!(check_call_chat_text(" ").as_deref(), Some("blank"));
+        assert_eq!(clamp_call_chat_text(&"я".repeat(500)).len(), 800);
+        assert_eq!(call_chat_max_text_bytes(), 800);
     }
 }

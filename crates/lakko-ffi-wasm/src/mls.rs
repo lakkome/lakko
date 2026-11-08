@@ -4713,6 +4713,9 @@ pub struct ParsedCallSignaling {
     joined_at_ms_val: u64,
     // ADR-0083 — the one-to-one screen-share state.
     screen_share_state_val: Vec<u8>,
+    // One-to-one camera and microphone state (2026-11-07).
+    camera_on_val: bool,
+    microphone_on_val: bool,
 }
 
 const CALL_KIND_OFFER: &str = "offer";
@@ -4723,12 +4726,14 @@ const CALL_KIND_GROUP_START: &str = "groupStart";
 const CALL_KIND_GROUP_JOIN: &str = "groupJoin";
 const CALL_KIND_GROUP_LEAVE: &str = "groupLeave";
 const CALL_KIND_SCREEN_SHARE: &str = "screenShare";
+const CALL_KIND_MEDIA_STATE: &str = "mediaState";
 
 #[wasm_bindgen]
 impl ParsedCallSignaling {
     /// One of `"offer"` / `"answer"` / `"iceCandidate"` /
-    /// `"end"`. JS reads this to decide which other fields
-    /// are meaningful.
+    /// `"end"` / `"groupStart"` / `"groupJoin"` / `"groupLeave"` /
+    /// `"screenShare"` / `"mediaState"`. JS reads this to decide which
+    /// other fields are meaningful.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind_val.to_string()
@@ -4819,6 +4824,19 @@ impl ParsedCallSignaling {
     #[wasm_bindgen(getter, js_name = screenShareState)]
     pub fn screen_share_state(&self) -> Vec<u8> {
         self.screen_share_state_val.clone()
+    }
+
+    /// `mediaState` only: whether the sender's camera is on.
+    #[wasm_bindgen(getter, js_name = cameraOn)]
+    pub fn camera_on(&self) -> bool {
+        self.camera_on_val
+    }
+
+    /// `mediaState` only: whether the sender's microphone is on (`false` =
+    /// muted).
+    #[wasm_bindgen(getter, js_name = microphoneOn)]
+    pub fn microphone_on(&self) -> bool {
+        self.microphone_on_val
     }
 }
 
@@ -4962,28 +4980,54 @@ pub fn compose_call_screen_share_signaling(
     lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
 }
 
+/// Compose a one-to-one `MediaState` call signal (2026-11-07): this
+/// device's camera and microphone (`false` = muted), sent on every change
+/// and once the call connects.
+#[wasm_bindgen(js_name = composeCallMediaStateSignaling)]
+pub fn compose_call_media_state_signaling(
+    call_id: &[u8],
+    camera_on: bool,
+    microphone_on: bool,
+) -> Result<Vec<u8>, JsValue> {
+    let body = lakko_calls::SignalingBody::MediaState {
+        call_id: take_call_id(call_id)?,
+        camera_on,
+        microphone_on,
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+impl ParsedCallSignaling {
+    /// Every field at its default; the parser fills in the kind's own.
+    fn empty() -> Self {
+        Self {
+            kind_val: CALL_KIND_OFFER,
+            call_id_val: Vec::new(),
+            sdp_val: String::new(),
+            created_at_ms_val: 0,
+            media_audio_val: false,
+            media_video_val: false,
+            candidate_val: String::new(),
+            sdp_mid_val: String::new(),
+            sdp_m_line_index_val: 0,
+            end_reason_val: "hungUp",
+            leaf_index_val: 0,
+            initiator_leaf_val: 0,
+            joined_at_ms_val: 0,
+            screen_share_state_val: Vec::new(),
+            camera_on_val: false,
+            microphone_on_val: false,
+        }
+    }
+}
+
 /// Parse plaintext bytes (the `Application` payload from
 /// `processIncoming`) into a typed
 /// [`ParsedCallSignaling`] (Phase 3a3).
 #[wasm_bindgen(js_name = parseCallSignaling)]
 pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsValue> {
     let body = lakko_calls::parse_signaling_payload(plaintext).map_err(calls_err)?;
-    let mut out = ParsedCallSignaling {
-        kind_val: CALL_KIND_OFFER,
-        call_id_val: Vec::new(),
-        sdp_val: String::new(),
-        created_at_ms_val: 0,
-        media_audio_val: false,
-        media_video_val: false,
-        candidate_val: String::new(),
-        sdp_mid_val: String::new(),
-        sdp_m_line_index_val: 0,
-        end_reason_val: "hungUp",
-        leaf_index_val: 0,
-        initiator_leaf_val: 0,
-        joined_at_ms_val: 0,
-        screen_share_state_val: Vec::new(),
-    };
+    let mut out = ParsedCallSignaling::empty();
     match body {
         lakko_calls::SignalingBody::Offer {
             call_id,
@@ -5057,6 +5101,16 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsV
             out.kind_val = CALL_KIND_SCREEN_SHARE;
             out.call_id_val = call_id.to_vec();
             out.screen_share_state_val = state;
+        },
+        lakko_calls::SignalingBody::MediaState {
+            call_id,
+            camera_on,
+            microphone_on,
+        } => {
+            out.kind_val = CALL_KIND_MEDIA_STATE;
+            out.call_id_val = call_id.to_vec();
+            out.camera_on_val = camera_on;
+            out.microphone_on_val = microphone_on;
         },
     }
     Ok(out)
@@ -5673,6 +5727,23 @@ fn key_32(key: &[u8]) -> Result<[u8; 32], JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_media_state_signal_round_trips() {
+        let call_id = [7u8; 16];
+        for camera_on in [false, true] {
+            for microphone_on in [false, true] {
+                let wire =
+                    super::compose_call_media_state_signaling(&call_id, camera_on, microphone_on)
+                        .expect("compose");
+                let parsed = super::parse_call_signaling(&wire).expect("parse");
+                assert_eq!(parsed.kind(), "mediaState");
+                assert_eq!(parsed.call_id(), call_id.to_vec());
+                assert_eq!(parsed.camera_on(), camera_on);
+                assert_eq!(parsed.microphone_on(), microphone_on);
+            }
+        }
+    }
+
     use super::*;
 
     /// Mirror of the lakko-mls integration test driven through the

@@ -456,5 +456,65 @@ final class ChannelConversationTests: XCTestCase {
         let group = ConversationListRow(id: "ef01", kind: .group, title: "G", preview: "", lastActivityMs: nil)
         XCTAssertEqual(group.tintIdentity, "ef01")
     }
-}
 
+    // MARK: - The seed a commit leaves (2026-11-08)
+
+    /// Section 13 — the seed a commit is about to leave is kept under the
+    /// server epoch its posts carry; nothing is kept twice, and a missing or
+    /// malformed seed keeps nothing.
+    func testTheOutgoingSeedIsKeptUnderItsServerEpoch() {
+        let seed = Data(repeating: 0x42, count: 32)
+        let kept = ChannelPublisherCommits.outgoingSeedToKeep(seed: seed, serverEpoch: 3, held: [:])
+        XCTAssertEqual(kept?.epoch, 3)
+        XCTAssertEqual(kept?.seed, seed)
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(
+            seed: seed, serverEpoch: 3, held: [3: Data(repeating: 0x01, count: 32)]))
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(seed: nil, serverEpoch: 3, held: [:]))
+        XCTAssertNil(ChannelPublisherCommits.outgoingSeedToKeep(
+            seed: Data(repeating: 0x42, count: 16), serverEpoch: 3, held: [:]))
+    }
+
+    /// The owner's own channel: after a rotation (an approve or a removal
+    /// moves the group the same way) the seed of the epoch it left still
+    /// opens that epoch's posts on this device, and the new seed is a
+    /// different one, so the channel's record at creation never reads as
+    /// "Earlier posts aren't available.".
+    @MainActor
+    func testTheOwnerStillHoldsTheSeedOfTheEpochARotationLeft() throws {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5B, count: 32))
+        let channelId = Data((0..<16).map { UInt8($0) &+ 0x30 })
+        let channelIdHex = channelId.map { String(format: "%02x", $0) }.joined()
+        let group = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+        let before = try group.channelSeed(identity: identity)
+        let channels = ChannelsUiState()
+
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: channels, channelIdHex: channelIdHex, serverEpoch: 0, group: group, identity: identity)
+        _ = try group.rotate(identity: identity)
+        let after = try group.channelSeed(identity: identity)
+
+        XCTAssertNotEqual(before, after)
+        XCTAssertEqual(channels.subscribedSeeds(channelId: channelIdHex), [0: before])
+
+        // A record sealed at epoch 0 under the old seed opens with what was kept.
+        let keys = ChannelPublisherKeys(seed: before, signingKeySeed: ChannelSigningKey.generate().toSeed())
+        let wire = try ChannelsComposer.compose(
+            keys: keys, channelIdHex: channelIdHex, epochId: 0, messageCounter: 1, plaintext: Data("record".utf8))
+        let kept = try XCTUnwrap(channels.subscribedSeeds(channelId: channelIdHex)[0])
+        let opened = try ChannelsComposer.verifyAndDecrypt(
+            seed: kept, channelIdHex: channelIdHex, postWireB64Url: Self.b64url(wire))
+        XCTAssertEqual(opened, Data("record".utf8))
+
+        // A second keep at the same epoch changes nothing.
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: channels, channelIdHex: channelIdHex, serverEpoch: 0, group: group, identity: identity)
+        XCTAssertEqual(channels.subscribedSeeds(channelId: channelIdHex), [0: before])
+    }
+
+    private static func b64url(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}

@@ -132,8 +132,10 @@ vi.mock("../wasm", () => {
           free: () => {},
         };
       },
-      composeMediaState: (on: boolean): Uint8Array =>
-        new TextEncoder().encode(on ? "compose:on" : "compose:off"),
+      // Camera and microphone, tagged so the send tests can read both flags
+      // back.
+      composeMediaState: (camera: boolean, mic: boolean): Uint8Array =>
+        new TextEncoder().encode(`compose:${camera ? "on" : "off"}:${mic ? "on" : "off"}`),
       // ADR-0078 section 2: a fake relay key. "Sealing" prefixes `sealed:`;
       // opening accepts only that prefix, so an unsealed payload never opens.
       CallRelayKey: {
@@ -151,11 +153,26 @@ vi.mock("../wasm", () => {
       classifyCallRelayPlaintext: (pt: Uint8Array) => {
         const t = new TextDecoder().decode(pt);
         const free = (): void => {};
-        if (t === "media:on" || t === "compose:on") {
-          return { kind: "media-state", cameraOn: true, announcement: new Uint8Array(), free };
+        // `media:on` / `media:off` name the camera with the microphone on;
+        // `media:<camera>:<mic>` and `compose:<camera>:<mic>` name both.
+        if (t === "media:on" || t === "media:off") {
+          return {
+            kind: "media-state",
+            cameraOn: t === "media:on",
+            microphoneOn: true,
+            announcement: new Uint8Array(),
+            free,
+          };
         }
-        if (t === "media:off" || t === "compose:off") {
-          return { kind: "media-state", cameraOn: false, announcement: new Uint8Array(), free };
+        const both = /^(?:compose|media):(on|off):(on|off)$/.exec(t);
+        if (both !== null) {
+          return {
+            kind: "media-state",
+            cameraOn: both[1] === "on",
+            microphoneOn: both[2] === "on",
+            announcement: new Uint8Array(),
+            free,
+          };
         }
         if (t.startsWith("ann:")) {
           return { kind: "peer-announcement", cameraOn: false, announcement: pt, free };
@@ -316,6 +333,35 @@ describe("SfuCallSession — relay classification", () => {
   });
 });
 
+describe("SfuCallSession — the microphone in a media state", () => {
+  it("a media state fires both the camera and the microphone", async () => {
+    const media: Array<[string, boolean]> = [];
+    const mic: Array<[string, boolean]> = [];
+    const session = new SfuCallSession(baseConfig(), {
+      onRemoteMediaState: (peerId, on) => media.push([peerId, on]),
+      onRemoteMicrophoneState: (peerId, on) => mic.push([peerId, on]),
+    });
+    await session.connect();
+
+    relay("peerX", "sealed:media:on:off");
+    await flush();
+    expect(media).toEqual([["peerX", true]]);
+    expect(mic).toEqual([["peerX", false]]);
+  });
+
+  it("never trusts an UNSEALED media state for the microphone", async () => {
+    const mic: Array<[string, boolean]> = [];
+    const session = new SfuCallSession(baseConfig(), {
+      onRemoteMicrophoneState: (peerId, on) => mic.push([peerId, on]),
+    });
+    await session.connect();
+
+    relay("peerX", "media:on:off");
+    await flush();
+    expect(mic).toEqual([]);
+  });
+});
+
 // ---- createSfuCallUi mapping (store level) -----------------------------
 
 describe("createSfuCallUi — media-state flips the roster tile", () => {
@@ -346,6 +392,56 @@ describe("createSfuCallUi — media-state flips the roster tile", () => {
     relay("peerX", "sealed:media:off");
     await flush();
     expect(camOn("peerX")).toBe(false);
+
+    handle.hangUp();
+  });
+
+  it("the microphone flag sets micOn", async () => {
+    const micOn = (peerId: string): boolean | undefined =>
+      callState.participants().find((p) => p.id === `peer-${peerId}`)?.micOn;
+    const handle = createSfuCallUi(baseConfig());
+    await handle.connect();
+    hooks.captured?.onWelcome?.({
+      kind: "welcome",
+      peer_id: "self",
+      room: "r",
+      roster: [{ peer_id: "peerX" }],
+      server_ts: 0,
+    });
+    // Unmuted until the person says otherwise.
+    expect(micOn("peerX")).toBe(true);
+
+    relay("peerX", "sealed:media:off:off");
+    await flush();
+    expect(micOn("peerX")).toBe(false);
+    expect(camOn("peerX")).toBe(false);
+
+    relay("peerX", "sealed:media:on:on");
+    await flush();
+    expect(micOn("peerX")).toBe(true);
+
+    handle.hangUp();
+  });
+
+  it("a mute that arrives before the peer's tile exists is applied to the tile", async () => {
+    const micOn = (peerId: string): boolean | undefined =>
+      callState.participants().find((p) => p.id === `peer-${peerId}`)?.micOn;
+    const handle = createSfuCallUi(baseConfig());
+    await handle.connect();
+    hooks.captured?.onWelcome?.({
+      kind: "welcome",
+      peer_id: "self",
+      room: "r",
+      roster: [],
+      server_ts: 0,
+    });
+
+    relay("late", "sealed:media:off:off");
+    await flush();
+    expect(micOn("late")).toBeUndefined();
+
+    hooks.captured?.onPeerJoined?.({ kind: "peer-joined", peer_id: "late" });
+    expect(micOn("late")).toBe(false);
 
     handle.hangUp();
   });
@@ -381,11 +477,14 @@ describe("SfuCallSession — send triggers", () => {
 
     session.setCameraEnabled(false);
     await flush();
-    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off"]);
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off:on"]);
 
     session.setCameraEnabled(true);
     await flush();
-    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off", "sealed:compose:on"]);
+    expect(hooks.broadcasts.map(decode)).toEqual([
+      "sealed:compose:off:on",
+      "sealed:compose:on:on",
+    ]);
   });
 
   it("does not re-broadcast when the camera state is unchanged", async () => {
@@ -434,6 +533,39 @@ describe("SfuCallSession — send triggers", () => {
     });
     await flush();
     // Local camera is on → re-announce "on" so the newcomer is shown on.
-    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:on"]);
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:on:on"]);
+  });
+
+  it("broadcasts on a microphone toggle, and not when it is unchanged", async () => {
+    const session = new SfuCallSession(baseConfig({ media: { audio: true, video: false } }));
+    await session.connect();
+    hooks.broadcasts = [];
+
+    session.setMicrophoneEnabled(true); // already on: nothing to say
+    await flush();
+    expect(hooks.broadcasts).toHaveLength(0);
+
+    session.setMicrophoneEnabled(false);
+    await flush();
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off:off"]);
+
+    session.setMicrophoneEnabled(true);
+    await flush();
+    expect(hooks.broadcasts.map(decode)).toEqual([
+      "sealed:compose:off:off",
+      "sealed:compose:off:on",
+    ]);
+  });
+
+  it("a mute chosen before anyone joined is in the re-announcement to a newcomer", async () => {
+    const session = new SfuCallSession(baseConfig({ media: { audio: true, video: true } }));
+    await session.connect();
+    session.setMicrophoneEnabled(false);
+    await flush();
+    hooks.broadcasts = [];
+
+    hooks.captured?.onPeerJoined?.({ kind: "peer-joined", peer_id: "newcomer" });
+    await flush();
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:on:off"]);
   });
 });

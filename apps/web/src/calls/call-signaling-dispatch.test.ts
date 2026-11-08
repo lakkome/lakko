@@ -145,6 +145,8 @@ describe("routeSignalingKind (C-11)", () => {
 
   it("a screen-share state routes to the 1x1 session, never rings (ADR-0083)", () => {
     expect(routeSignalingKind("screenShare")).toBe("oneToOne");
+    // The other person's camera and microphone state (2026-11-07).
+    expect(routeSignalingKind("mediaState")).toBe("oneToOne");
   });
 
   it("an unknown kind is dropped, not guessed at", () => {

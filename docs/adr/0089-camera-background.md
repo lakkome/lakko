@@ -10,7 +10,7 @@
 - **Date:** 2026-11-07
 - **Context:** requests from people in video calls; UX spec
   [`docs/ux/call-backgrounds.md`](../ux/call-backgrounds.md) and
-  [`docs/ux/calls.md`](../ux/calls.md) section 4.1.4; the camera copies of
+  [`docs/ux/calls.md`](../ux/calls.md) section 4.1.5; the camera copies of
   [ADR-0070](0070-call-media-through-a-loss-burst.md); the SFrame media path
   ([ADR-0035](0035-sframe-per-stream-kid-key.md),
   [ADR-0071](0071-codec-header-in-the-clear.md)); the pattern of

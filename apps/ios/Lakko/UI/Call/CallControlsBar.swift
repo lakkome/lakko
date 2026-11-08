@@ -81,6 +81,9 @@ struct CallControlButton: View {
     /// The spoken label, for a control whose name depends on more than its
     /// own state. `nil` is ``CallStatusText/spokenControlLabel(_:on:)``.
     var spokenLabel: String? = nil
+    /// A count drawn on the circle's top corner (the chat's unread badge,
+    /// `docs/ux/calls.md` section 4.1.4); `nil` draws none.
+    var badge: String? = nil
     let action: () -> Void
     @Environment(\.callControlFit) private var fit
 
@@ -101,6 +104,12 @@ struct CallControlButton: View {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .tint(.white)
+                    }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if let badge {
+                        CallChatBadge(text: badge)
+                            .offset(x: 4, y: -4)
                     }
                 }
                 // A group call's row on a phone carries no words

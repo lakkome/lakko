@@ -225,7 +225,7 @@ round icon button that toggles on press.
 | Call kind | The row, left to right |
 |---|---|
 | One-to-one, voice or video | Microphone · Camera · Share screen · Settings · End |
-| Group | Microphone · Camera · Share screen · Participants · Settings · End |
+| Group | Microphone · Camera · Share screen · Participants · Chat · Settings · End |
 
 `Share screen` exists only where the device can send a screen: the web client
 in a desktop browser and the desktop client; never on iOS, Android or a phone
@@ -288,10 +288,13 @@ portrait.
   list directly, and is absent while the person is alone. Participants and
   Invite were two buttons until 2026-10-02; alone in a call the first had
   nothing to list.
-- **There is no chat in a call.** The chat control that used to be here sent
-  nothing anywhere, and a control that does nothing is worse than none; a
-  person who wants to write opens the conversation, which the collapsed call
-  (section 4.5) leaves usable.
+- **A group call has its own chat** (section 4.1.4, maintainer 2026-11-07).
+  Until then there was none: the chat control of the first group screen sent
+  nothing anywhere and was removed on 2026-10-02, and a person was told to
+  collapse the call and write in the conversation. People in group calls asked
+  for one, and a guest in a link call has no conversation to write in at all.
+  A one-to-one call has no chat: the two people already share a conversation,
+  and the carrier the call chat uses exists only on a call through the SFU.
 - **The group row is always one line.** On a narrow screen (under 600 pt) or a
   short one (under 520 pt) the words under the circles go (each circle keeps
   its spoken name), and the circles are sized from the width and the number of
@@ -316,7 +319,7 @@ portrait.
   with a dark slashed icon. The old screen highlighted the off state in the accent
   colour, which read as "on".
 - One short muted label under each circle: `Microphone`, `Camera`, `Participants`,
-  `Settings`, `End`. The label names the thing, never the state, and does not change
+  `Chat`, `Settings`, `End`. The label names the thing, never the state, and does not change
   size when the state does.
 - Disabled is 40 percent opacity, never a hidden button. Touch targets stay at least
   44 pt. Spoken labels name the action and the resulting state (`Mute microphone`,
@@ -425,7 +428,138 @@ the person needs to know what it removes, not how.
 **Not here.** No strength slider, no per-participant suppression of what others
 send (each device cleans its own microphone), no "voice isolation" mode.
 
-### 4.1.4 Camera background
+### 4.1.4 Chat in a group call
+
+Decided by the maintainer on 2026-11-07, after people in group calls asked for
+it. One chat, the same on a group call placed in a conversation and on a link
+call (`call-links.md`), for account holders and guests alike.
+
+**What it is.** Text messages between the people in the call, for as long as
+the call lasts:
+
+- Seen only by the people in the call when the message is sent. Someone who
+  joins later does not see what was written before they came; someone who
+  left keeps what they saw until their call ends.
+- Gone when the call ends for this device (End, or the call ending). Nothing is
+  kept on the device after that, nothing is written into the conversation the
+  call came from, nothing is stored on any server. A connection that drops and
+  comes back inside the same call keeps the messages; joining the same call
+  again after End starts empty.
+- Sealed for the people in the call and signed by the sender; the server
+  forwards ciphertext and cannot read or forge a message.
+- Text only. No photos, files, voice messages, stickers, replies, reactions,
+  edits or deletions. Links in a message are live, by the rule of
+  [`message-links.md`](message-links.md).
+
+It is not the conversation the call came from, on purpose: a message written in
+the call reaches only the people in the call and leaves no trace in the group.
+A person who wants to write to the whole group collapses the call (section 4.5)
+and writes in the conversation, as before.
+
+**Entry.** The `Chat` circle in the group row, after `Participants`. It is
+there from the first second, alone in the call too (the panel then shows its
+empty state). Its label never changes; its spoken name is `Open chat` /
+`Close chat`.
+
+- **Unread count.** While the panel is closed, a message from someone else puts
+  a count on the circle: the accent badge of the design system, `1` to `9`,
+  then `9+`. Opening the panel clears it.
+- **A short preview.** While the panel is closed, a message from someone else
+  also shows for 4 seconds as one line above the control bar: the sender's name
+  in 13/600 and the start of the text, cut with an ellipsis. Tapping it opens
+  the panel. A second message replaces the first and restarts the 4 seconds.
+  The preview is not shown while the control bar is faded, and never over the
+  settings sheet or the participants list. No sound, no vibration, no system
+  notification.
+- **The collapsed bar** (section 4.5) does not change: one state, one place.
+  The count waits on the circle for when the call is expanded.
+
+**The panel.**
+
+| Width of the call screen | Shape |
+|---|---|
+| Under 900 (every phone, a narrow window) | A panel over the whole call screen, sliding up from the bottom. The call keeps running behind it |
+| 900 and wider (desktop, a wide browser window, an iPad in landscape) | A column 360 wide at the end side of the call screen (right in a left-to-right language). The tiles reflow into the width that is left, by the same grid rule |
+
+Units are pt (iOS), dp (Android), px (web).
+
+Top to bottom:
+
+1. **A header**: `Chat` (17/600), and two controls. Close (a chevron down on
+   the full panel, a cross on the column; spoken `Close chat`). And the round
+   mute button of the collapsed bar, drawn on and off exactly as the call
+   screen draws it, because muting is the one control a person needs in the
+   second they need it, and the full panel hides the control row. The column
+   (wide screens) leaves the control row visible and has no mute button.
+2. **The messages**, newest at the bottom, scrolled to the newest when the
+   panel opens and when a message arrives while the person is at the bottom;
+   while they have scrolled up, a new message does not move the list and a
+   small `New messages` pill at the bottom takes them there. Each message is a
+   message bubble of the design system: the person's own on the end side in the
+   accent fill, others' on the start side in the sunken fill. Above the first
+   of a run of bubbles from one other person, their name in 13/600 muted: the
+   same name their tile shows (section 4.4, steps 0-3), and it follows a later
+   change of that name. Inside the bubble corner the time the message arrived
+   on this device, `14:05`, 11 muted. No delivery or read state.
+3. **The composer**: the design system's composer without the attach button
+   and without the microphone: a growing text field (up to 5 lines, then it
+   scrolls) with the placeholder `Message everyone in the call`, and a send
+   button, disabled while the field is empty or only white space. On a
+   keyboard Enter sends and Shift+Enter starts a new line; on a phone the
+   keyboard's return key starts a new line and the button sends.
+
+**Empty state.** Centred in the message area, muted, two lines and no action:
+`Messages here are seen only by people in the call.` /
+`They disappear when the call ends.` The same two lines stay as a small muted
+note at the top of the list once there are messages, so a person who opens the
+chat late knows why they see nothing earlier.
+
+**States of one message.**
+
+| State | What the person sees |
+|---|---|
+| Sent | The bubble, nothing more. A sent message is shown at once and is not confirmed: the server forwards it to the people in the call and nothing comes back |
+| Could not be sent (the call is reconnecting, or the connection to the server is down) | The bubble at 60% opacity with `Not sent.` under it in 13 danger, followed by a ghost `Send again` button that sends it again. A message not sent when the call ends is gone with the rest |
+| Too long | The field takes no more text once the message reaches the limit, and one line under the field says `A message in a call can't be longer than this.` (13 muted). The limit is 800 bytes of text, which is about 800 Latin letters or 400 Cyrillic ones |
+| From someone the device cannot yet name | Held, not shown, until that person's announcement reaches the device (section 4.4: the same moment their tile gets a name), then shown in arrival order. A message from a sender the device never verifies is never shown |
+
+**Order.** Messages appear in the order they reach this device. Two people
+writing at the same moment may see the two messages in a different order on
+their two screens; that is accepted, as in every call chat people know. The same
+message never shows twice.
+
+**What a person can do with a message.** Long-press (phone) or right-click
+(web, desktop) opens the action sheet with one row, `Copy`. Nothing else: there
+is no edit, delete, reply, forward, pin, save or reaction in a call chat.
+
+**When the call ends** the panel closes with the call screen and every message
+goes with it. The `Call ended` overlay says nothing about the chat.
+
+**Copy** (catalog keys `call.control.chat*`, `call.chat.*`): `Chat`, `Open chat`,
+`Close chat`, `Open chat, 3 unread`, `Call chat` (the panel's spoken name),
+the two notice lines above, `Message everyone in the call`, `Send`, `Not sent.`,
+`Send again`, `A message in a call can't be longer than this.`, `New messages`,
+`Anna: text` (the announcement), `Copy` (the shared `common.copy`).
+
+**Keyboard and screen readers.** Web and desktop: `Esc` closes the panel when it
+is open (and only then collapses the call, section 4.5); focus moves to the text
+field when the panel opens and back to the `Chat` circle when it closes. A
+message that arrives while the panel is open is announced politely (VoiceOver,
+TalkBack, an ARIA live region) as `Anna: text`; with the panel closed only the
+count changes, read as part of the circle's spoken name
+(`Open chat, 3 unread`).
+
+**What the core must carry** (flagged for the ADR step):
+
+| Need | Why |
+|---|---|
+| A call-chat payload on the sealed call relay: call id, the sender's peer id, a sequence number per sender, the text | The relay already exists on every call through the SFU and reaches exactly the people in the call; a conversation journal would keep the messages and reach people who are not in the call |
+| Signed by the sender's MLS leaf key, verified against the peer's verified announcement, as the name for the call is | So the name over a bubble is the person who wrote it, and the server cannot write as anyone |
+| A text bound, checked by the composer and by every receiver | The relay carries at most 1024 bytes of plaintext |
+| De-duplication by (sender, sequence number) | A relay frame re-sent after a reconnect must not show twice |
+| The same verify and bound on every client, written once in the core | The three clients must agree on what a valid message is |
+
+### 4.1.5 Camera background
 
 Decided by the maintainer on 2026-11-07: blur, built-in backgrounds and the
 person's own photo behind them, chosen in a `Background` section of the Settings
@@ -745,10 +879,23 @@ occupies the most valuable line on the screen.
 
 - On the call, encryption is one chip: a lock and the word `Encrypted`.
 - Tapping the chip opens the **encryption sheet**: a title `This call is encrypted`, one
-  sentence in plain words (`Only you and Anna can hear this call.`), the safety number in
-  four groups of four digits, large and grouped for reading aloud, and one line telling
-  the user what it is for (`Read these numbers aloud. If they match on both phones, no
-  one is listening.`). Buttons: **Copy** and **Done**.
+  sentence in plain words, the safety number in four groups of four digits, large and
+  grouped for reading aloud, and one line telling the user what it is for. Buttons:
+  **Copy** and **Done**.
+- The sentence and the line depend on the kind of call, never on who happens to be
+  first in the roster:
+
+  | Call | Sentence | Line under the number |
+  |---|---|---|
+  | One-to-one, the other person has a name on this device | `Only you and Anna can hear this call.` | `Read the number aloud to each other. If it matches on both devices, no one else is listening.` |
+  | One-to-one, no name for the other person | `Only the people on this call can hear it.` | the one-to-one line above |
+  | Group call or call from a link, whatever the number of people in it | `Only the people on this call can hear it.` | `Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening.` |
+
+  A group or link call never names one person: every participant compares the same
+  number, and naming one of them claims the call has two people. A call is treated as
+  a group call as soon as more than one other person is in it, even if it was placed as
+  a one-to-one. The copy says "device", not "phone": people join from computers and
+  browsers too.
 - The same number is reachable outside a call from the contact screen as
   **Verify security code**, which is where the design system already puts it.
 - The chip is absent when the call's encryption is not armed, and the call refuses to
@@ -783,6 +930,7 @@ Flagged explicitly, because the current transport cannot support the spec:
 | An end reason (answered elsewhere, declined, missed, cancelled, failed) | Drives the transcript row and stops the other devices ringing |
 | A relay for media when a direct path fails | A call between two phones on different networks does not connect at all today |
 | A collapsed presentation on the app-level call host, and the capture fact widened to "a call is live" | Section 4.5 — the app stays usable during a call, and a chat other than the calling one must still refuse to record |
+| A call-chat payload on the sealed call relay | Section 4.1.4 — the chat in a group call |
 
 Platform mechanisms: on iOS the system call integration plus its dedicated call push, on
 Android the full-screen call notification plus the phone's call integration, on web a

@@ -1003,6 +1003,8 @@ const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
  *   field 15 (group_join)  → 0x7A
  *   field 16 (group_leave) → 0x82 0x01 (tag 130, a two-byte varint)
  *   field 17 (screen_share) → 0x8A 0x01 (tag 138, ADR-0083)
+ *   field 18 (media_state)  → 0x92 0x01 (tag 146, a one-to-one call's
+ *                             camera and microphone state, 2026-11-07)
  *
  * Without the three group-control arms a group-call start / join /
  * leave fell through to `parseBodyEnvelope`'s lossy-UTF-8 fallback and
@@ -1026,7 +1028,9 @@ function looksLikeCallSignaling(bytes) {
   ) {
     return true;
   }
-  return (first === 0x82 || first === 0x8a) && bytes.length > 1 && bytes[1] === 0x01;
+  return (
+    (first === 0x82 || first === 0x8a || first === 0x92) && bytes.length > 1 && bytes[1] === 0x01
+  );
 }
 
 /**
@@ -1197,6 +1201,11 @@ function isServiceEnvelope(wasm, bytes) {
   if (isDispatchKind(wasm, bytes, ["GroupPhoto", "GroupReactions", "ConversationHandle", "KnockSeed", "AdmissionSeed"])) {
     return true;
   }
+  // 12b. ADR-0087 sections 7 and 15 (amended 2026-11-08) — the earlier
+  //      channel seeds handed to a new publisher and a publisher's rotate
+  //      request. They belong on a PublisherGroup journal only; here they are
+  //      classified and never opened, kept or shown (C-59).
+  if (isDispatchKind(wasm, bytes, ["ChannelEpochSeeds", "ChannelRotateRequest"])) return true;
   // 13. A contact request sealed to one member of the group
   //     (`docs/ux/who-can-find-me.md` section 6.4). Suppressed, never opened:
   //     only the app tries it, and only the device it is sealed to can.

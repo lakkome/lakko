@@ -15,6 +15,7 @@ import {
   type DenoiserFactory,
 } from "./noise-suppression";
 import {
+  NOISE_SUPPRESSION_DEFAULT_ON,
   NOISE_SUPPRESSION_STORAGE_KEY,
   noiseSuppressionOn,
   onNoiseSuppressionChange,
@@ -228,8 +229,8 @@ describe("noise suppression setting", () => {
     };
   }
 
-  it("is on by default and when the storage cannot be read", () => {
-    expect(readNoiseSuppression(null)).toBe(true);
+  it("gives the default when nothing is stored or the storage cannot be read", () => {
+    expect(readNoiseSuppression(null)).toBe(NOISE_SUPPRESSION_DEFAULT_ON);
     const broken: SettingStorage = {
       getItem: () => {
         throw new Error("SecurityError");
@@ -238,13 +239,14 @@ describe("noise suppression setting", () => {
         throw new Error("SecurityError");
       },
     };
-    expect(readNoiseSuppression(broken)).toBe(true);
-    expect(readNoiseSuppression(memoryStorage())).toBe(true);
+    expect(readNoiseSuppression(broken)).toBe(NOISE_SUPPRESSION_DEFAULT_ON);
+    expect(readNoiseSuppression(memoryStorage())).toBe(NOISE_SUPPRESSION_DEFAULT_ON);
   });
 
   it("stores the choice and tells subscribers once per change", () => {
     const storage = memoryStorage();
     const heard: boolean[] = [];
+    setNoiseSuppression(true, storage);
     const off = onNoiseSuppressionChange((on) => heard.push(on));
     setNoiseSuppression(false, storage);
     setNoiseSuppression(false, storage);

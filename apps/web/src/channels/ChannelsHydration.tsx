@@ -28,11 +28,17 @@ import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import {
+  channelsActions,
   clearChannelsSession,
   hydrateChannelsState,
   markChannelsHydrationUnavailable,
 } from "../state/channels-state";
+import { notePublisherCommitLanded } from "./channel-access";
+import { republishChannelMeta } from "./channel-meta";
 import { replayPublisherCommits } from "./copublisher";
+import { withPublisherGroup } from "./publisher-group-registry";
+import { settleOwedRecord } from "./owed-record";
+import { afterReplayedPublisherCommits } from "./replayed-commit-followup";
 
 export const ChannelsHydration: Component = () => {
   const auth = useAuth();
@@ -97,7 +103,23 @@ export const ChannelsHydration: Component = () => {
         // G-50 — resume the PublisherGroup commits whose steps had not all
         // landed before the reload, against the provider just restored.
         if (mine !== generation) return;
-        await replayPublisherCommits(identity);
+        const landed = await replayPublisherCommits(identity);
+        if (mine !== generation || landed.length === 0) return;
+        // What the live approve, removal and rotation do after the reseal:
+        // the composer's seed and the channel record under the new epoch.
+        await afterReplayedPublisherCommits(landed, {
+          seedOf: (id) =>
+            withPublisherGroup(identity, id, async (g) => (g.isActive() ? g.channelSeed(identity) : null)),
+          landed: (id, epoch, seed) => {
+            notePublisherCommitLanded(id, epoch, seed);
+            channelsActions.notePublisherGroupChanged();
+          },
+          reissueRecord: async (id) => {
+            // Owed since the commit was recorded; a failure here is retried
+            // by the publisher pass.
+            await settleOwedRecord(id, () => republishChannelMeta(id, identity));
+          },
+        });
       })();
     });
   });

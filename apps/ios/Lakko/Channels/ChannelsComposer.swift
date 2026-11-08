@@ -41,6 +41,15 @@ public struct ChannelPublisherKeys: Equatable, Sendable {
     public let seed: Data
     /// 32-byte Ed25519 signing-key seed.
     public let signingKeySeed: Data
+    /// The channel epoch `seed` serves: the PublisherGroup epoch it was read
+    /// at (owner and co-publisher alike: only the owner commits, and each of
+    /// its commits has exactly one reseal moving the channel service by
+    /// one). Never stored: re-derived from the group whenever the keys are
+    /// built or refreshed. `nil`: not known yet (keys rebuilt at sign-in
+    /// before the group was opened); the seed then serves the channel's
+    /// current epoch, the rule before this field. See
+    /// ``ChannelPublisherSeed``.
+    public var seedEpoch: UInt32? = nil
 }
 
 /// Subscriber-side X25519 keypair (Phase 4b G4-3c).
@@ -152,6 +161,7 @@ public enum ChannelsComposer {
         // `crates/lakko-mls/src/publisher_group.rs` for the
         // Rust-core invariant.
         let seedBytes: Data
+        var groupEpoch: UInt64?
         do {
             // ADR-0057 — a PublisherGroup founded here is marked, so its first
             // journal claim may reset one the same root claimed before.
@@ -172,6 +182,7 @@ public enum ChannelsComposer {
                 CoPublisher.markFounded(group, accountIdB64: accountIdB64)
             }
             seedBytes = try group.channelSeed(identity: identity)
+            groupEpoch = try? group.epoch()
         } catch let FfiError.Group(msg) {
             // Retired v1 state refuses here and cannot be repaired.
             if msg.contains(LegacyChannelV1.rustRefusalMarker) {
@@ -204,7 +215,8 @@ public enum ChannelsComposer {
         }
         return ChannelPublisherKeys(
             seed: seed,
-            signingKeySeed: signer.toSeed()
+            signingKeySeed: signer.toSeed(),
+            seedEpoch: groupEpoch.map { UInt32(clamping: $0) }
         )
     }
 

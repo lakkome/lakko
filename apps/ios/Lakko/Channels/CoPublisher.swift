@@ -327,6 +327,8 @@ public enum CoPublisher {
     public struct JournalApplication: Equatable {
         public let data: Data
         public let senderAccount: Data?
+        /// The DS row's server time (ms), when it parses.
+        public var createdAtMs: Int64? = nil
     }
 
     /// One co-publisher request retained by a poll.
@@ -383,7 +385,9 @@ public enum CoPublisher {
                     let processed = try publisherGroup.processIncomingVerifyingRoles(
                         identity: identity, bytes: m.payload)
                     if case .application(let data, _, let sender) = processed {
-                        applications.append(JournalApplication(data: data, senderAccount: sender))
+                        applications.append(JournalApplication(
+                            data: data, senderAccount: sender,
+                            createdAtMs: DsTimestamp.parseMs(m.createdAt)))
                     }
                 } catch {
                     // A commit we have already merged (epoch mismatch) — skip.
@@ -529,6 +533,9 @@ public enum CoPublisher {
         // proven under it, live and on a replay after a restart.
         let proofEpoch = try group.epoch()
         let proofSeed = try group.dsAccessSeed(identity: identity)
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: state, channelIdHex: context.channelIdHex, serverEpoch: current,
+            group: group, identity: identity)
         let added = try group.approveExternalJoin(identity: identity, proposalRef: proposalRef)
         let entry = PublisherCommitEntry(
             kind: .approve,
@@ -544,7 +551,14 @@ public enum CoPublisher {
         try ChannelPublisherCommits.record(entry, accountIdB64: context.accountIdB64)
         try await PublisherCommitRunner.run(
             entry, ports: ChannelPublisherCommits.ports(context, state: state))
-        ChannelPublisherCommits.refreshContentSeed(context, state: state)
+        ChannelPublisherCommits.refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
+        // ADR-0051 section 4 — the record and ban list under the new epoch,
+        // the only one the newcomer can open.
+        if let state {
+            await ChannelPublisherLoops.shared.afterRotation(
+                channelId: context.channelIdHex, epoch: entry.serverTargetEpoch, channels: state,
+                client: context.channelsClient, seed: context.currentSeed)
+        }
         // ADR-0087 section 7 — the newcomer is a publisher the owner's pass
         // seals the admission seeds to.
         ChannelAdmissionSeedShare.notePublisher(channelId: context.channelIdHex, joinerKey: proposalRef)
@@ -569,6 +583,9 @@ public enum CoPublisher {
         let (identity, group) = try context.open()
         let proofEpoch = try group.epoch()
         let proofSeed = try group.dsAccessSeed(identity: identity)
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: state, channelIdHex: context.channelIdHex, serverEpoch: current,
+            group: group, identity: identity)
         let commit = try group.removePublisher(identity: identity, accountKey: accountKey)
         let entry = PublisherCommitEntry(
             kind: .removal,
@@ -583,8 +600,16 @@ public enum CoPublisher {
         try ChannelPublisherCommits.record(entry, accountIdB64: context.accountIdB64)
         try await PublisherCommitRunner.run(
             entry, ports: ChannelPublisherCommits.ports(context, state: state))
-        ChannelPublisherCommits.refreshContentSeed(context, state: state)
+        ChannelPublisherCommits.refreshContentSeed(context, state: state, landedEpoch: entry.serverTargetEpoch)
+        if let state {
+            await ChannelPublisherLoops.shared.afterRotation(
+                channelId: context.channelIdHex, epoch: entry.serverTargetEpoch, channels: state,
+                client: context.channelsClient, seed: context.currentSeed)
+        }
         refreshPublishers(identity: identity, group: group, channelIdHex: context.channelIdHex)
+        // Nothing more is sealed to them; approved again, they get a fresh
+        // hand-over.
+        ChannelAdmissionSeedShare.forgetPublisher(channelId: context.channelIdHex, accountKey: accountKey)
     }
 
     /// ADR-0087 section 15 — a co-publisher leaves as publisher: the

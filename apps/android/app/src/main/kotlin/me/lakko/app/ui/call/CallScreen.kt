@@ -6,6 +6,9 @@ package me.lakko.app.ui.call
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -131,6 +134,12 @@ import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.CallStage
 import me.lakko.app.calls.CameraVideoCapture
 import me.lakko.app.calls.callControlRow
+import me.lakko.app.calls.CALL_CHAT_COLUMN_WIDTH_DP
+import me.lakko.app.calls.CallChatButton
+import me.lakko.app.calls.CallChatPreview
+import me.lakko.app.calls.callBarMicControl
+import me.lakko.app.calls.callChatIsColumn
+import me.lakko.app.calls.callChatPreviewShown
 import me.lakko.app.calls.callScreenTitle
 import me.lakko.app.calls.callStage
 import me.lakko.app.calls.controlsMayAutoHide
@@ -143,11 +152,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import me.lakko.app.calls.CALL_ENCRYPTION_CHIP_LABEL
-import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_HINT
 import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_TITLE
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.callEncryptionHint
 import me.lakko.app.calls.callEncryptionSentence
 import me.lakko.app.calls.callClockOrigin
 import me.lakko.app.calls.callElapsedSecs
@@ -573,6 +582,12 @@ private fun InCallView(
     val participants by state.participants.collectAsState()
     val phase by state.phase.collectAsState()
     val drawerOpen by state.participantListOpen.collectAsState()
+    // docs/ux/calls.md section 4.1.4 — the call's chat, on a group call.
+    val chatHandle by state.callChat.collectAsState()
+    val chatModel = chatHandle?.model
+    val chatOpen by (chatModel?.panelOpen ?: NO_CHAT_OPEN).collectAsState()
+    val chatUnread by (chatModel?.unread ?: NO_CHAT_UNREAD).collectAsState()
+    val chatPreview by (chatModel?.preview ?: NO_CHAT_PREVIEW).collectAsState()
     val e2ee by state.e2ee.collectAsState()
     val localVideoTrack by state.localVideoTrack.collectAsState()
     val remoteVideoTrack by state.remoteVideoTrack.collectAsState()
@@ -686,6 +701,7 @@ private fun InCallView(
         ringing = phase is CallUiState.CallPhase.Calling,
         participants = participantsControl,
         participantsOpen = drawerOpen,
+        chat = chatModel?.let { CallChatButton(open = chatOpen, unread = chatUnread) },
     )
 
     // What the control bar takes at the bottom of the screen, its margins and
@@ -724,9 +740,16 @@ private fun InCallView(
     // the margins are its siblings here, not its children.
     val tileControls = rememberTileControlsHost()
 
+    // docs/ux/calls.md section 4.1.4 — at 900 dp and wider the chat is a
+    // column at the end side and the tiles reflow into the width that is
+    // left; below, a panel over the whole call screen.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().background(LakkoDark.background)) {
+    val chatColumn = callChatIsColumn(maxWidth.value)
+    Row(modifier = Modifier.fillMaxSize()) {
     Box(
         modifier = Modifier
-            .fillMaxSize()
+            .weight(1f)
+            .fillMaxHeight()
             .background(LakkoDark.background)
             .onSizeChanged { rootSize = it }
             .onGloballyPositioned { rootLeftInWindowRoot = it.positionInRoot().x }
@@ -935,7 +958,7 @@ private fun InCallView(
         // safe area with a margin. On a voice call it sits in the lower third
         // under the portrait rather than welded to the bottom edge, which is
         // what the extra padding buys.
-        AnimatedVisibility(
+        androidx.compose.animation.AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
@@ -972,6 +995,7 @@ private fun InCallView(
                             ParticipantsControl.LIST -> state.setParticipantListOpen(!drawerOpen)
                             ParticipantsControl.ABSENT -> Unit
                         }
+                        CallControlKind.CHAT -> chatModel?.togglePanel()
                         CallControlKind.SETTINGS -> settingsOpen = true
                         // Section 4.1.2 — for the starter, while anyone else
                         // is in the call, the first press opens the choice and
@@ -1140,9 +1164,72 @@ private fun InCallView(
             CallEncryptionSheet(
                 safetyNumber = e2ee.shortFingerprint,
                 otherName = remoteName,
+                groupCall = groupCall,
+                othersInCall = remotes.size,
                 onDismiss = { encryptionSheetOpen = false },
             )
         }
+
+        // docs/ux/calls.md section 4.1.4 — a message from someone else, for 4
+        // seconds, one line above the control bar while the panel is closed.
+        // Not while the bar is faded, nor over a sheet or a list.
+        val shownPreview = chatPreview
+        if (chatModel != null && shownPreview != null && callChatPreviewShown(
+                preview = shownPreview,
+                panelOpen = chatOpen,
+                controlsVisible = controlsVisible,
+                overlayOpen = settingsOpen || drawerOpen || participantsMenuOpen || endMenuOpen || encryptionSheetOpen,
+            )
+        ) {
+            CallChatPreviewLine(
+                preview = shownPreview,
+                model = chatModel,
+                participants = participants,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = barHeight + 4.dp, start = 16.dp, end = 16.dp),
+            )
+        }
+
+        // The full panel (under 900 dp): over the whole call screen, sliding
+        // up from the bottom. The call keeps running behind it.
+        val panelHandle = chatHandle
+        androidx.compose.animation.AnimatedVisibility(
+            visible = panelHandle != null && chatOpen && !chatColumn,
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            if (panelHandle != null) {
+                CallChatPanel(
+                    handle = panelHandle,
+                    participants = participants,
+                    column = false,
+                    micControl = callBarMicControl(
+                        micOn = local?.micOn != false,
+                        ringing = phase is CallUiState.CallPhase.Calling,
+                    ),
+                    onToggleMic = { onSetMic(local?.micOn != true) },
+                    onClose = { panelHandle.model.closePanel() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+    // The column (900 dp and wider): the control row stays visible beside it.
+    val columnHandle = chatHandle
+    if (columnHandle != null && chatOpen && chatColumn) {
+        CallChatPanel(
+            handle = columnHandle,
+            participants = participants,
+            column = true,
+            micControl = null,
+            onToggleMic = {},
+            onClose = { columnHandle.model.closePanel() },
+            modifier = Modifier.width(CALL_CHAT_COLUMN_WIDTH_DP.dp).fillMaxHeight(),
+        )
+    }
+    }
     }
 }
 
@@ -1603,6 +1690,8 @@ private fun CallEncryptionChip(onClick: () -> Unit) {
 private fun CallEncryptionSheet(
     safetyNumber: String?,
     otherName: String?,
+    groupCall: Boolean,
+    othersInCall: Int,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1631,7 +1720,7 @@ private fun CallEncryptionSheet(
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                callEncryptionSentence(otherName).text(),
+                callEncryptionSentence(otherName, groupCall, othersInCall).text(),
                 color = LakkoDark.textMuted,
                 fontSize = 14.sp,
             )
@@ -1654,7 +1743,7 @@ private fun CallEncryptionSheet(
                 }
             }
             Text(
-                CALL_ENCRYPTION_SHEET_HINT.text(),
+                callEncryptionHint(groupCall, othersInCall).text(),
                 color = LakkoDark.textMuted,
                 fontSize = 13.sp,
             )
@@ -1870,4 +1959,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
 
 /** What the Settings sheet reads where there is no audio route to ask. */
 private val NO_INPUTS: StateFlow<List<CallAudioInput>> = MutableStateFlow(emptyList())
+private val NO_CHAT_OPEN: StateFlow<Boolean> = MutableStateFlow(false)
+private val NO_CHAT_UNREAD: StateFlow<Int> = MutableStateFlow(0)
+private val NO_CHAT_PREVIEW: StateFlow<CallChatPreview?> = MutableStateFlow(null)
 private val NO_OUTPUTS: StateFlow<List<CallAudioOutput>> = MutableStateFlow(emptyList())

@@ -78,15 +78,44 @@ public enum CallPeerName {
             ?? (groupCall ? Localization.text("call.label.group") : placeholder)
     }
 
+    /// Whether the encryption sheet speaks to two people (`docs/ux/calls.md`
+    /// section 5). A group call or a call from a link never does, whatever its
+    /// size, and neither does a call with more than one other person in it,
+    /// whatever it was placed as.
+    ///
+    /// - Parameters:
+    ///   - groupCall: `true` for a group call or a call from a link.
+    ///   - othersInCall: the other people in the call now.
+    public static func isOneToOneEncryptionSheet(groupCall: Bool, othersInCall: Int) -> Bool {
+        !groupCall && othersInCall <= 1
+    }
+
     /// The encryption sheet's one plain sentence (`docs/ux/calls.md` section
-    /// 5). Names the other person when they have a name. With no name it says
-    /// something true of any call rather than inventing one — the nameless
-    /// case is both a 1x1 with a stranger and every group call, so the
-    /// sentence must not assume there are exactly two people.
-    public static func encryptionSentence(peerName: String?) -> String {
-        guard let name = resolve(profileName: peerName, chatTitle: nil) else {
+    /// 5). Word for word what `encryptionSheetSentence` says on web and
+    /// `callEncryptionSentence` on Android.
+    ///
+    /// A one-to-one call names the other person when they have a name. A group
+    /// or link call never names one person: everyone in it compares the same
+    /// number, and naming one participant claims a two-person call. With no
+    /// name the sentence says something true of any call rather than inventing
+    /// one.
+    public static func encryptionSentence(
+        peerName: String?, groupCall: Bool, othersInCall: Int
+    ) -> String {
+        guard isOneToOneEncryptionSheet(groupCall: groupCall, othersInCall: othersInCall),
+              let name = resolve(profileName: peerName, chatTitle: nil)
+        else {
             return Localization.text("call.encryption.sentence_group")
         }
         return Localization.text("call.encryption.sentence_named", texts: ["name": name])
+    }
+
+    /// The line under the safety number (`docs/ux/calls.md` section 5): two
+    /// people read it to each other; in a group or link call everyone sees the
+    /// same number. Never "phones": people join from computers too.
+    public static func encryptionHint(groupCall: Bool, othersInCall: Int) -> String {
+        isOneToOneEncryptionSheet(groupCall: groupCall, othersInCall: othersInCall)
+            ? Localization.text("call.encryption.compare_hint_one_to_one")
+            : Localization.text("call.encryption.compare_hint_group")
     }
 }

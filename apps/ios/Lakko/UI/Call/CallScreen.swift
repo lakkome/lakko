@@ -123,6 +123,10 @@ private struct EncryptionChip: View {
 private struct EncryptionSheet: View {
     @ObservedObject var l10n = Localization.shared
     let peerName: String?
+    /// A group call or a call from a link: the sheet names nobody.
+    let groupCall: Bool
+    /// The other people in the call now.
+    let othersInCall: Int
     let safetyNumber: String?
     let onDone: () -> Void
 
@@ -138,7 +142,8 @@ private struct EncryptionSheet: View {
                     .font(.title3)
                     .fontWeight(.semibold)
                     .foregroundColor(Color.lakkoText)
-                Text(CallPeerName.encryptionSentence(peerName: peerName))
+                Text(CallPeerName.encryptionSentence(
+                    peerName: peerName, groupCall: groupCall, othersInCall: othersInCall))
                     .font(.subheadline)
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -159,7 +164,7 @@ private struct EncryptionSheet: View {
                         texts: ["groups": Localization.joinList(
                             safetyNumber.split(separator: " ").map(String.init))]))
 
-                Text(l10n.t("call.encryption.compare_hint"))
+                Text(CallPeerName.encryptionHint(groupCall: groupCall, othersInCall: othersInCall))
                     .font(.footnote)
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -1151,6 +1156,9 @@ public struct CallScreen: View {
     /// The line under `Call ended` when the call's starter ended it for
     /// everyone, or `nil`.
     private let endedLine: String?
+    /// A Lakko link of this deployment tapped in the call's chat
+    /// (`docs/ux/message-links.md`): the app's own link intake.
+    private let onOwnLink: (URL) -> Void
     /// The choice behind `End` is open.
     /// The one group-call tile whose controls a tap brought up
     /// (`docs/ux/group-call-grid.md` section 6.2).
@@ -1206,6 +1214,7 @@ public struct CallScreen: View {
         self.invite = nil
         self.onEndForEveryone = nil
         self.endedLine = nil
+        self.onOwnLink = { _ in }
         self.onCollapse = onCollapse
         _connectedAt = State(initialValue: connectedAt)
         _cues = State(initialValue: CallSoundCues(groupCall: false))
@@ -1222,9 +1231,11 @@ public struct CallScreen: View {
         endedLine: String? = nil,
         onEndForEveryone: (() -> Void)? = nil,
         onCollapse: (() -> Void)? = nil,
+        onOwnLink: @escaping (URL) -> Void = { _ in },
         onExit: @escaping () -> Void
     ) {
         _state = StateObject(wrappedValue: externalState)
+        self.onOwnLink = onOwnLink
         self.session = nil
         self.externallyDriven = true
         self.peerName = nil
@@ -1330,7 +1341,8 @@ public struct CallScreen: View {
     /// leads somewhere.
     private var controls: [CallControl] {
         CallScreenPresentation.controls(
-            layout: layout, canInvite: invite != nil, hasOthers: !remoteParticipants.isEmpty)
+            layout: layout, canInvite: invite != nil, hasOthers: !remoteParticipants.isEmpty,
+            chat: externallyDriven && state.chatAvailable)
     }
 
     /// Where the call is, as the shared rules read it. A 1x1 call reads its
@@ -1514,6 +1526,16 @@ public struct CallScreen: View {
             )
     }
 
+    /// A Lakko link of this deployment tapped in the call's chat: the call is
+    /// put away (not ended) so the screen the link leads to is visible.
+    private func openOwnLink(_ url: URL) {
+        if let onCollapse {
+            collapsing = true
+            onCollapse()
+        }
+        onOwnLink(url)
+    }
+
     private func collapseIfSwipedDown(_ translation: CGSize) {
         guard let onCollapse, CallBarPresentation.isCollapseSwipe(translation) else { return }
         collapsing = true
@@ -1584,7 +1606,8 @@ public struct CallScreen: View {
     /// (section 5), and the call's settings (section 4.1).
     private var encryptionSheet: some ViewModifier {
         CallSheetsModifier(
-            state: state, settingsOpen: $settingsOpen, onCameraOn: { setCamera(true) })
+            state: state, groupCall: externallyDriven, settingsOpen: $settingsOpen,
+            onCameraOn: { setCamera(true) })
     }
 
     // MARK: - A group call
@@ -1594,9 +1617,16 @@ public struct CallScreen: View {
     /// tile area ends above the bar and starts below the status line, so no
     /// tile is ever drawn under either, and the bar never hides.
     private func groupCallView(size: CGSize) -> some View {
-        let margin = GroupCallLayout.sideMargin(screenWidth: size.width)
+        // The chat (section 4.1.4): from 900 pt on a 360 pt column at the end
+        // side, and the tiles and the row reflow into the width that is left;
+        // under 900 pt a panel over the whole call screen.
+        let chatColumn = CallChatModel.isColumn(screenWidth: size.width)
+        let columnOpen = chatColumn && state.chatPanelOpen
+        let mainWidth = size.width - (columnOpen ? CallChatModel.columnWidth : 0)
+        let mainSize = CGSize(width: mainWidth, height: size.height)
+        let margin = GroupCallLayout.sideMargin(screenWidth: mainWidth)
         let fit = CallScreenPresentation.fitGroupControlBar(
-            availableWidth: size.width - 2 * Self.barMargin, screenSize: size,
+            availableWidth: mainWidth - 2 * Self.barMargin, screenSize: mainSize,
             count: controls.count)
         // The compact bar hugs the bottom edge; the roomy one floats above it.
         let barBottom: CGFloat = fit.showsLabels ? 24 : 12
@@ -1608,45 +1638,72 @@ public struct CallScreen: View {
             // downward swipe that land beside them.
             tapLayer
 
-            InviteScope(offer: invite) { offer in
-                ZStack {
-                    VStack(spacing: 0) {
-                        groupHeader(inviteLine: offer?.statusLine)
-                        GroupCallArea(
-                            state: state, reveal: tileReveal, rules: rules,
-                            onOtherDrag: collapseIfSwipedDown
-                        )
-                        .padding(.horizontal, margin)
-                        .padding(.vertical, 8)
-                        groupControlsBar(fit: fit, offer: offer)
-                            .padding(.bottom, barBottom)
-                    }
-
-                    // Participants: a menu of the app's own above the bar,
-                    // over a scrim that closes it. Never the system's share
-                    // sheet.
-                    if let offer, offer.menuOpen {
-                        Color.black.opacity(0.001)
-                            .ignoresSafeArea()
-                            .contentShape(Rectangle())
-                            .onTapGesture { offer.closeMenu() }
-                            .accessibilityHidden(true)
-                            .zIndex(12)
-                        AnchoredBarMenu(
-                            buttonFrame: controlFrames[.participants],
-                            bottomInset: fit.barHeight + barBottom + 10,
-                            space: Self.menuSpace
-                        ) {
-                            CallParticipantsMenu(
-                                offer: offer,
-                                hasOthers: !remoteParticipants.isEmpty,
-                                onParticipants: {
-                                    offer.closeMenu()
-                                    state.setParticipantListOpen(true)
-                                })
+            HStack(spacing: 0) {
+                InviteScope(offer: invite) { offer in
+                    ZStack {
+                        VStack(spacing: 0) {
+                            groupHeader(inviteLine: offer?.statusLine)
+                            GroupCallArea(
+                                state: state, reveal: tileReveal, rules: rules,
+                                onOtherDrag: collapseIfSwipedDown
+                            )
+                            .padding(.horizontal, margin)
+                            .padding(.vertical, 8)
+                            groupControlsBar(fit: fit, offer: offer)
+                                .padding(.bottom, barBottom)
                         }
-                        .zIndex(13)
+
+                        // A message from someone else while the panel is closed:
+                        // one line above the bar for 4 seconds. Never over the
+                        // settings sheet, the list of people or a bar menu.
+                        if !state.chatPanelOpen, !settingsOpen, !state.participantListOpen,
+                           offer?.menuOpen != true, !endMenuOpen {
+                            VStack {
+                                Spacer(minLength: 0)
+                                CallChatPreviewLine(chat: state.chat, state: state)
+                                    .padding(.horizontal, 16)
+                                    .padding(.bottom, fit.barHeight + barBottom + 10)
+                            }
+                            .zIndex(11)
+                        }
+
+                        // Participants: a menu of the app's own above the bar,
+                        // over a scrim that closes it. Never the system's share
+                        // sheet.
+                        if let offer, offer.menuOpen {
+                            Color.black.opacity(0.001)
+                                .ignoresSafeArea()
+                                .contentShape(Rectangle())
+                                .onTapGesture { offer.closeMenu() }
+                                .accessibilityHidden(true)
+                                .zIndex(12)
+                            AnchoredBarMenu(
+                                buttonFrame: controlFrames[.participants],
+                                bottomInset: fit.barHeight + barBottom + 10,
+                                space: Self.menuSpace
+                            ) {
+                                CallParticipantsMenu(
+                                    offer: offer,
+                                    hasOthers: !remoteParticipants.isEmpty,
+                                    onParticipants: {
+                                        offer.closeMenu()
+                                        state.setParticipantListOpen(true)
+                                    })
+                            }
+                            .zIndex(13)
+                        }
                     }
+                }
+                .frame(width: mainWidth)
+                if columnOpen {
+                    CallChatPanel(
+                        chat: state.chat, state: state, column: true,
+                        micOn: local?.micOn ?? true,
+                        onToggleMic: { setMic(!(local?.micOn ?? true)) },
+                        onOwnLink: openOwnLink)
+                        .frame(width: CallChatModel.columnWidth)
+                        .environment(\.colorScheme, .dark)
+                        .transition(.move(edge: .trailing))
                 }
             }
 
@@ -1688,6 +1745,19 @@ public struct CallScreen: View {
                 .zIndex(20)
             }
 
+            // The chat over the whole call screen, under 900 pt; the call
+            // keeps running behind it.
+            if state.chatPanelOpen, !chatColumn {
+                CallChatPanel(
+                    chat: state.chat, state: state, column: false,
+                    micOn: local?.micOn ?? true,
+                    onToggleMic: { setMic(!(local?.micOn ?? true)) },
+                    onOwnLink: openOwnLink)
+                    .background(Color.lakkoSurface.ignoresSafeArea())
+                    .transition(.move(edge: .bottom))
+                    .zIndex(25)
+            }
+
             if case .ended = displayPhase {
                 CallEndedOverlay(
                     durationMs: endedDurationMs, reason: endedLine, onDismiss: onExit
@@ -1707,6 +1777,7 @@ public struct CallScreen: View {
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in tileReveal.pressBegan(at: value.startLocation) })
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
+        .animation(.easeInOut(duration: 0.25), value: state.chatPanelOpen)
         .modifier(encryptionSheet)
     }
 
@@ -2065,6 +2136,10 @@ public struct CallScreen: View {
                     case .nothing: break
                     }
                 })
+        case .chat:
+            // The call's own chat (section 4.1.4): opens and closes its
+            // panel; the unread count waits on the circle.
+            CallChatControlButton(chat: state.chat, enabled: enabled)
         case .settings:
             // Which microphone, camera and speaker the call uses. Live from
             // the first second: a person who cannot be heard wants it before
@@ -2224,6 +2299,8 @@ private struct InviteScope<Content: View>: View {
 /// group one present the same two sheets.
 private struct CallSheetsModifier: ViewModifier {
     @ObservedObject var state: CallUiState
+    /// A group call or a call from a link (section 5: the sheet names nobody).
+    let groupCall: Bool
     @Binding var settingsOpen: Bool
     /// Turn the call's camera on, as the camera button does.
     let onCameraOn: () -> Void
@@ -2237,6 +2314,8 @@ private struct CallSheetsModifier: ViewModifier {
             ) {
                 EncryptionSheet(
                     peerName: state.peerName,
+                    groupCall: groupCall,
+                    othersInCall: state.participants.filter { !$0.isLocal }.count,
                     safetyNumber: state.e2ee.shortFingerprint,
                     onDone: { state.setEncryptionSheetOpen(false) })
             }

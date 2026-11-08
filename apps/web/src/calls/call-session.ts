@@ -413,6 +413,13 @@ export class CallSession {
   private state: WebCallState = "idle";
   private isOfferer = false;
   private localStream: MediaStream | null = null;
+  /** The person's microphone choice (`false` = muted), recorded even before
+   *  capture and applied to the captured microphone, so what the other side
+   *  is told is what is sent. */
+  private localMicOn = true;
+  /** The camera and microphone state last told to the other side
+   *  (`mediaState` signal, 2026-11-07); `null` until the first one. */
+  private announcedMedia: { camera: boolean; microphone: boolean } | null = null;
   /** Which microphone track the sender carries, raw or noise-suppressed
    *  (ADR-0088). Created with the first capture, disposed in `dispose()`. */
   private noise: NoiseSuppressionController | null = null;
@@ -768,6 +775,48 @@ export class CallSession {
     if (this.videoPublishState === state) return;
     this.videoPublishState = state;
     this.callbacks.onVideoPublishState?.(state);
+    this.announceMediaStateIfChanged();
+  }
+
+  /** Whether this device sends a picture: a live, enabled camera track. */
+  private localCameraIsOn(): boolean {
+    return (
+      this.localStream?.getVideoTracks().some((t) => t.readyState === "live" && t.enabled) ===
+      true
+    );
+  }
+
+  /**
+   * Tell the other side this device's camera and microphone state (the
+   * one-to-one `mediaState` call signal, 2026-11-07), when it differs from
+   * what was last told: a mute is `track.enabled = false`, which fires no
+   * event on the other side, so this is how its tile shows the mute mark and
+   * the camera-off picture (`docs/ux/group-call-grid.md` 7.2). Only on a
+   * connected call; the transition to `connected` sends the first one. Never
+   * a wake. Best-effort: a compose failure is swallowed.
+   */
+  private announceMediaStateIfChanged(): void {
+    if (this.state !== "connected") return;
+    const next = { camera: this.localCameraIsOn(), microphone: this.localMicOn };
+    const last = this.announcedMedia;
+    if (last !== null && last.camera === next.camera && last.microphone === next.microphone) {
+      return;
+    }
+    this.announcedMedia = next;
+    void (async (): Promise<void> => {
+      try {
+        const wasm = await loadWasm();
+        if (this.state !== "connected") return;
+        const bytes = wasm.composeCallMediaStateSignaling(
+          this.callId,
+          next.camera,
+          next.microphone,
+        );
+        this.callbacks.onOutboundSignaling(bytes, "none");
+      } catch {
+        // A UI hint, never on the media path: nothing else depends on it.
+      }
+    })();
   }
 
   /**
@@ -1070,11 +1119,14 @@ export class CallSession {
    * ({@link addLocalVideo}) for a call that started audio-only.
    */
   setMicrophoneEnabled(on: boolean): void {
+    this.localMicOn = on;
     if (this.localStream === null) return;
     for (const track of this.localStream.getAudioTracks()) {
       track.enabled = on;
     }
     this.noise?.setMuted(!on);
+    // The other side's tile shows the mute mark from this.
+    this.announceMediaStateIfChanged();
   }
 
   /**
@@ -1091,6 +1143,7 @@ export class CallSession {
     }
     // The raw camera behind a background stops sending too.
     this.background?.setCameraEnabled(on);
+    this.announceMediaStateIfChanged();
   }
 
   /**
@@ -1441,6 +1494,11 @@ export class CallSession {
         stream.removeTrack(rawCamera);
         stream.addTrack(published);
       }
+    }
+    // A mute chosen before the capture finished holds for the captured
+    // microphone: what the other side is told is what is sent.
+    if (!this.localMicOn) {
+      for (const track of stream.getAudioTracks()) track.enabled = false;
     }
     this.localStream = stream;
     // Surface the local capture so the UI can render a self-preview
@@ -1937,6 +1995,8 @@ export class CallSession {
       this.startStatsPolling();
     }
     this.callbacks.onStateChange(state, reason);
+    // The first camera and microphone state of the call.
+    if (state === "connected") this.announceMediaStateIfChanged();
   }
 
   /**

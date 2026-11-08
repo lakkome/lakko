@@ -449,16 +449,40 @@
       "text": "Cerrar chat",
       "status": "machine"
     },
-    "call.chat.empty": {
-      "text": "Aún no hay mensajes. Los mensajes de aquí están cifrados de extremo a extremo.",
+    "call.chat.message_a11y": {
+      "text": "{name}: {text}",
       "status": "machine"
     },
-    "call.chat.joined": {
-      "text": "{name} se unió a la llamada",
+    "call.chat.new_messages": {
+      "text": "Mensajes nuevos",
       "status": "machine"
     },
-    "call.chat.left": {
-      "text": "Un participante salió de la llamada",
+    "call.chat.not_sent": {
+      "text": "No enviado.",
+      "status": "machine"
+    },
+    "call.chat.notice_ends": {
+      "text": "Desaparecen cuando termina la llamada.",
+      "status": "machine"
+    },
+    "call.chat.notice_people": {
+      "text": "Solo las personas que están en la llamada ven estos mensajes.",
+      "status": "machine"
+    },
+    "call.chat.placeholder": {
+      "text": "Mensaje para todos en la llamada",
+      "status": "machine"
+    },
+    "call.chat.send_a11y": {
+      "text": "Enviar",
+      "status": "machine"
+    },
+    "call.chat.send_again": {
+      "text": "Enviar de nuevo",
+      "status": "machine"
+    },
+    "call.chat.too_long": {
+      "text": "Un mensaje en una llamada no puede ser más largo.",
       "status": "machine"
     },
     "call.collapse_a11y": {
@@ -490,15 +514,15 @@
       "status": "machine"
     },
     "call.control.chat_hide_a11y": {
-      "text": "Ocultar chat",
+      "text": "Cerrar chat",
       "status": "machine"
     },
     "call.control.chat_show_a11y": {
-      "text": "Mostrar chat",
+      "text": "Abrir chat",
       "status": "machine"
     },
-    "call.control.chat_unread": {
-      "text": "{count, plural, one {Chat (# sin leer)} other {Chat (# sin leer)}}",
+    "call.control.chat_unread_a11y": {
+      "text": "{count, plural, one {Abrir chat, # sin leer} other {Abrir chat, # sin leer}}",
       "status": "machine"
     },
     "call.control.end": {
@@ -609,8 +633,12 @@
       "text": "Esta llamada está cifrada. Mostrar el número de seguridad",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "Lee estos números en voz alta con la otra persona. Si coinciden en ambos teléfonos, nadie está escuchando.",
+    "call.encryption.compare_hint_group": {
+      "text": "Todas las personas de esta llamada ven el mismo número. Léelo en voz alta. Si coincide en todos los dispositivos, nadie más está escuchando.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Lee el número en voz alta con la otra persona. Si coincide en los dos dispositivos, nadie más está escuchando.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

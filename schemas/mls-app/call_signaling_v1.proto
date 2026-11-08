@@ -61,8 +61,9 @@ message CallSignalingPayload {
         GroupCallJoin group_join = 15;
         GroupCallLeave group_leave = 16;
         ScreenShareSignal screen_share = 17;
+        CallMediaState media_state = 18;
     }
-    reserved 18 to 31;
+    reserved 19 to 31;
 }
 
 // "I am calling you" — SDP offer from the initiator.
@@ -212,4 +213,18 @@ message ScreenShareSignal {
     bytes call_id = 1;
     bytes state = 2;
     reserved 3 to 15;
+}
+
+// One-to-one call: the sender's own camera and microphone state
+// (2026-11-07). Sent on every change and once the call connects, so the
+// other side shows the camera-off picture and the mute mark
+// (`docs/ux/calls.md`, `docs/ux/group-call-grid.md` 7.2). A mute is
+// `track.enabled = false`, which fires no event on the receiver, so this is
+// the only way the other side learns it. Group calls carry the same state on
+// the sealed SFU relay (`lakko_contacts::media_state`), not here.
+message CallMediaState {
+    bytes call_id = 1;
+    bool camera_on = 2;
+    bool microphone_on = 3;
+    reserved 4 to 15;
 }

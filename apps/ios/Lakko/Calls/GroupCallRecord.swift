@@ -98,6 +98,10 @@ struct CallSignalingRoute: Equatable {
             // side only after `ChatRepository.routeCallSignaling` verified it
             // against the row's MLS sender.
             return CallSignalingRoute(groupSignal: nil, forwardToOneToOne: true)
+        case .mediaState:
+            // The other person's camera and microphone in a one-to-one call
+            // (2026-11-07): for the 1x1 side only, never a group record.
+            return CallSignalingRoute(groupSignal: nil, forwardToOneToOne: true)
         }
     }
 }

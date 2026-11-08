@@ -24,8 +24,8 @@
 //!    ferries the resulting Welcome back via
 //!    [`crate::call_welcome::wrap_call_welcome`].
 //! 3. [`crate::media_state::try_unwrap_media_state`] — the
-//!    camera on/off signal (camera-off-cleanup). Caller
-//!    resets the sender's tile `camOn` state.
+//!    camera and microphone signal (camera-off-cleanup). Caller
+//!    resets the sender's tile `camOn` and `micOn` state.
 //! 4. [`crate::push_routing::try_unwrap_push_routing_secret`]
 //!    — the in-group push-routing-secret distribution
 //!    envelope (ADR-0042). Caller persists the 32-byte
@@ -123,9 +123,13 @@ use thiserror::Error;
 use crate::admission_seed::{try_unwrap_admission_seed, AdmissionSeedEnvelope, AdmissionSeedError};
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::channel_epoch_seeds::{
+    try_unwrap_channel_epoch_seeds, ChannelEpochSeedsEnvelope, ChannelEpochSeedsError,
+};
 use crate::channel_read_key::{
     try_unwrap_channel_read_key, ChannelReadKeyEnvelope, ChannelReadKeyError,
 };
+use crate::channel_rotate_request::{try_unwrap_channel_rotate_request, ChannelRotateRequestError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
@@ -181,14 +185,17 @@ pub enum IncomingEnvelope<'a> {
     /// resulting Welcome back via
     /// `wrap_call_welcome(welcome)`.
     CallKeyPackage(&'a [u8]),
-    /// App-level camera on/off media-state signal
+    /// App-level camera and microphone media-state signal
     /// (camera-off-cleanup). Rides the same opaque relay
-    /// transport as the call envelopes but carries a fully
-    /// decoded flag rather than a byte slice. Caller resets
-    /// the sender's tile `camOn` state to `camera_on`.
+    /// transport as the call envelopes but carries fully
+    /// decoded flags rather than a byte slice. Caller resets
+    /// the sender's tile `camOn` state to `camera_on` and its
+    /// `micOn` state to `microphone_on`.
     MediaState {
         /// Whether the sender's camera is currently on.
         camera_on: bool,
+        /// Whether the sender's microphone is on (`false` = muted).
+        microphone_on: bool,
     },
     /// In-group push-routing-secret distribution envelope
     /// (ADR-0042, v2). Rides an MLS application message on the
@@ -433,6 +440,20 @@ pub enum IncomingEnvelope<'a> {
     /// contact, and otherwise hands the request to the ordinary
     /// incoming-request flow.
     GroupContactRequest(GroupContactRequest),
+    /// The seeds of earlier channel epochs sealed to one new publisher
+    /// (ADR-0087 section 7, amended 2026-11-08). Never a chat bubble. Kept
+    /// only under the rule in [`crate::channel_epoch_seeds`]: on the
+    /// channel's PublisherGroup journal, addressed to this account, sent by
+    /// the channel's owner resolved at receipt; a seed is added only for an
+    /// epoch the device holds none of.
+    ChannelEpochSeeds(ChannelEpochSeedsEnvelope),
+    /// A publisher asks the channel's owner to rotate (ADR-0087 section 15,
+    /// amended 2026-11-08), carrying the 16-byte channel id. Never a chat
+    /// bubble. Only the owner's device acts on it, under the rule in
+    /// [`crate::channel_rotate_request`]: on the channel's PublisherGroup
+    /// journal, sent by a current publisher resolved at receipt; requests
+    /// before the next rotation collapse into it.
+    ChannelRotateRequest([u8; 16]),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -540,6 +561,14 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     GroupContactRequest(#[from] GroupContactRequestError),
+    /// The channel epoch-seeds domain (ADR-0087, 2026-11-08) with a
+    /// malformed payload.
+    #[error(transparent)]
+    ChannelEpochSeeds(#[from] ChannelEpochSeedsError),
+    /// The channel rotate-request domain (ADR-0087, 2026-11-08) with a
+    /// malformed payload.
+    #[error(transparent)]
+    ChannelRotateRequest(#[from] ChannelRotateRequestError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -573,6 +602,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(state) = try_unwrap_media_state(plaintext)? {
         return Ok(IncomingEnvelope::MediaState {
             camera_on: state.camera_on,
+            microphone_on: state.microphone_on,
         });
     }
     // 4. Push-routing-secret — in-group secret distribution (ADR-0042).
@@ -660,6 +690,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7n2. Channel read key — ADR-0087 phase B.
     if let Some(key) = try_unwrap_channel_read_key(plaintext)? {
         return Ok(IncomingEnvelope::ChannelReadKey(key));
+    }
+    // 7n3. Earlier channel seeds to a new publisher — ADR-0087, 2026-11-08.
+    if let Some(seeds) = try_unwrap_channel_epoch_seeds(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelEpochSeeds(seeds));
+    }
+    // 7n4. A publisher asks the owner to rotate — ADR-0087, 2026-11-08.
+    if let Some(channel) = try_unwrap_channel_rotate_request(plaintext)? {
+        return Ok(IncomingEnvelope::ChannelRotateRequest(channel));
     }
     // 7o. Contact request inside a group — ADR-0086 §6.
     if let Some(envelope) = try_unwrap_group_contact_request(plaintext)? {
@@ -1184,16 +1222,28 @@ mod tests {
 
     #[test]
     fn dispatches_media_state_camera_on() {
-        let wrapped = crate::media_state::compose_media_state(true);
+        let wrapped = crate::media_state::compose_media_state(true, false);
         let result = dispatch_incoming_envelope(&wrapped).unwrap();
-        assert_eq!(result, IncomingEnvelope::MediaState { camera_on: true });
+        assert_eq!(
+            result,
+            IncomingEnvelope::MediaState {
+                camera_on: true,
+                microphone_on: false
+            }
+        );
     }
 
     #[test]
     fn dispatches_media_state_camera_off() {
-        let wrapped = crate::media_state::compose_media_state(false);
+        let wrapped = crate::media_state::compose_media_state(false, true);
         let result = dispatch_incoming_envelope(&wrapped).unwrap();
-        assert_eq!(result, IncomingEnvelope::MediaState { camera_on: false });
+        assert_eq!(
+            result,
+            IncomingEnvelope::MediaState {
+                camera_on: false,
+                microphone_on: true
+            }
+        );
     }
 
     #[test]
@@ -1202,11 +1252,11 @@ mod tests {
         // range — fail-closed, not an intro-message fallthrough.
         let mut wrapped = Vec::new();
         wrapped.extend_from_slice(crate::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1);
-        wrapped.extend_from_slice(&[crate::media_state::MEDIA_STATE_VERSION_V1, 0x02]);
+        wrapped.extend_from_slice(&[crate::media_state::MEDIA_STATE_VERSION_V2, 0x04]);
         let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
         assert_eq!(
             err,
-            DispatchError::MediaState(MediaStateError::BadFlag(0x02))
+            DispatchError::MediaState(MediaStateError::BadFlag(0x04))
         );
     }
 

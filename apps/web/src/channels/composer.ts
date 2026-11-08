@@ -106,6 +106,14 @@ export interface ChannelPublisherKeys {
    *  seed (not a key handle) so the JS side can re-build
    *  the WASM class after a page reload. */
   readonly signingKeySeed: Uint8Array;
+  /** The channel epoch `seed` serves: the PublisherGroup's epoch when the
+   *  seed was read from it (the group and the channel service both start at
+   *  0 and every PublisherGroup commit moves each by one: an approve, a
+   *  removal, a rotation, each with its reseal), or the epoch the owner's
+   *  own reseal landed at. Absent on keys built before it was tracked; the
+   *  channel's current epoch is used then. Never persisted (re-read from the
+   *  group with the seed). */
+  readonly seedEpoch?: number;
 }
 
 /**
@@ -169,8 +177,10 @@ export async function freshPublisherKeys(
     throw new Error("co-publisher: the joined PublisherGroup is not on this device");
   }
   let seed: Uint8Array;
+  let seedEpoch: number;
   try {
     seed = publisher.channelSeed(identity);
+    seedEpoch = Number(publisher.epoch());
   } finally {
     publisher.free();
   }
@@ -181,7 +191,7 @@ export async function freshPublisherKeys(
     try {
       const signer = new wasm.ChannelSigningKey(existingSigningSeed);
       signer.free();
-      return { seed, signingKeySeed: existingSigningSeed.slice() };
+      return { seed, signingKeySeed: existingSigningSeed.slice(), seedEpoch };
     } catch {
       // fall through to a fresh seed
     }
@@ -189,7 +199,7 @@ export async function freshPublisherKeys(
   const signer = wasm.ChannelSigningKey.generate();
   const signingKeySeed = signer.toSeed();
   signer.free();
-  return { seed, signingKeySeed };
+  return { seed, signingKeySeed, seedEpoch };
 }
 
 /**

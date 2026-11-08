@@ -109,14 +109,9 @@ final class ChannelConversationModel: ObservableObject {
 
     /// The seed of every epoch this device holds for the channel.
     private func seeds() -> [UInt32: Data] {
-        var map = state.subscribedSeeds(channelId: channelId)
-        if let keys = state.keysByChannel[channelId] {
-            // A publisher holds the current content seed; it opens the posts
-            // of the current epoch.
-            let epoch = state.epochByChannel[channelId] ?? 0
-            map[epoch] = keys.seed
-        }
-        return map
+        // A publisher's composer seed opens the one epoch it serves; every
+        // other epoch reads from the seeds kept per epoch.
+        state.readSeeds(channelId: channelId)
     }
 
     /// The seed `epoch` was sealed under, fetching a public channel's public
@@ -201,7 +196,13 @@ final class ChannelConversationModel: ObservableObject {
             if ChannelsApiError.isChannelDeleted(error) { endDeleted() }
             return false
         }
-        guard !fresh.isEmpty else { return false }
+        guard !fresh.isEmpty else {
+            // UX 15.2.1 — earlier seeds arrived (a new publisher's hand-over,
+            // a catch-up): the posts are opened again, so "Earlier posts
+            // aren't available." goes once every earlier post opens.
+            if Set(seeds().keys) != decodedSeedEpochs { await decodeAll() }
+            return false
+        }
         let held = Set(rawPosts.map(\.cursor))
         rawPosts.append(contentsOf: fresh.filter { !held.contains($0.cursor) })
         rawPosts.sort { $0.cursor < $1.cursor }
@@ -211,9 +212,13 @@ final class ChannelConversationModel: ObservableObject {
         return true
     }
 
+    /// The epochs this device held a seed for at the last decode.
+    private var decodedSeedEpochs: Set<UInt32> = []
+
     private func decodeAll() async {
         guard let id = channelIdBytes else { return }
         _ = id
+        decodedSeedEpochs = Set(seeds().keys)
         var next: [UInt64: ChannelDecodedPost] = [:]
         for post in rawPosts {
             if let held = decoded[post.cursor], case .body = held.state {
@@ -478,10 +483,18 @@ final class ChannelConversationModel: ObservableObject {
         sendError = nil
         defer { sending = false }
         do {
-            let epoch = state.epochByChannel[channelId] ?? 0
+            // The seed of an epoch the channel service has reached, never the
+            // composer's seed under an epoch it does not serve yet (a
+            // co-publisher that applied the owner's commit before the owner's
+            // reseal landed). None held: no post now; a retry posts once the
+            // reseal lands.
+            guard let sealing = state.composerSeed(channelId: channelId) else {
+                throw ChannelPublisherSeedUnavailable()
+            }
             let counter = try state.nextCounter(channelId: channelId)
             let wire = try ChannelsComposer.compose(
-                keys: keys, channelIdHex: channelId, epochId: epoch, messageCounter: counter, plaintext: plaintext)
+                keys: ChannelPublisherKeys(seed: sealing.seed, signingKeySeed: keys.signingKeySeed),
+                channelIdHex: channelId, epochId: sealing.epoch, messageCounter: counter, plaintext: plaintext)
             _ = try await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: identity)
             ChannelPostSync.requestSync()
             await refresh(quiet: true)

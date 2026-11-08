@@ -187,6 +187,12 @@ class SfuCallSession(
          *  fixing the mute case (a `videoTrack.setEnabled(false)` fires no
          *  track event, so its tile would otherwise freeze on the last frame). */
         val onRemoteMediaState: (peerId: String, cameraOn: Boolean) -> Unit = { _, _ -> },
+        /** A remote peer's microphone on/off, from the same sealed media
+         *  state as [onRemoteMediaState] (version 2, 2026-11-07): the
+         *  adapter maps it to that peer's roster `micOn`, the tile's mute
+         *  mark. A mute is `track.setEnabled(false)`, which fires nothing on
+         *  this side, so this is the only way the mark appears. */
+        val onRemoteMicrophoneState: (peerId: String, microphoneOn: Boolean) -> Unit = { _, _ -> },
         /** What the SFU says it gives this device of each person's video
          *  changed (ADR-0070 step 6, `VideoGiven.kt`): the whole set as it
          *  stands, by SFU peer id. A person it does not name is given what is
@@ -202,6 +208,10 @@ class SfuCallSession(
          *  went back to its default naming. Only names verified against the
          *  leaf key the peer's announcement named reach here. */
         val onRemoteCallName: (peerId: String, name: String?) -> Unit = { _, _ -> },
+        /** A message of the call's chat arrived (`CallChat.kt`,
+         *  `docs/ux/calls.md` section 4.1.4), verified against the leaf key
+         *  the peer's announcement named, once per `(peerId, seq)`. */
+        val onCallChat: (peerId: String, seq: ULong, text: String) -> Unit = { _, _, _ -> },
     )
 
     class SfuCallException(message: String) : Exception(message)
@@ -290,6 +300,40 @@ class SfuCallSession(
         ),
     )
 
+    /** The call's chat (`CallChat.kt`, section 4.1.4). Used on [scope]
+     *  only; cleared when the call ends for this device. */
+    private val callChat = CallChatChannel(
+        CallChatChannelDeps(
+            compose = { self, seq, text -> config.peerAnnouncer?.composeCallChat?.invoke(self, seq, text) },
+            verify = { from, key, bytes -> config.peerAnnouncer?.verifyCallChat?.invoke(from, key, bytes) },
+            sendSealed = { plaintext ->
+                val sealed = relay.seal(plaintext)
+                val sig = signaling
+                if (sealed != null && sig != null && !isOver()) {
+                    sig.sendSignalRelayToCall(sealed)
+                    true
+                } else {
+                    false
+                }
+            },
+            selfPeerId = { selfPeerId },
+            onMessage = { peerId, seq, text -> callbacks.onCallChat(peerId, seq, text) },
+            onRejected = { android.util.Log.w(MEDIA_LOG_TAG, CALL_CHAT_REJECTED_WARNING) },
+        ),
+    )
+
+    /** Send [text] (it passed the core's text rule) to everyone in the call;
+     *  [done] says on [scope] which number it got and whether it went. */
+    fun sendCallChat(text: String, done: (CallChatSendResult) -> Unit) {
+        scope.launch { done(callChat.send(text)) }
+    }
+
+    /** Send this device's message [seq] again, the same bytes; [done] says
+     *  on [scope] whether it went. */
+    fun resendCallChat(seq: ULong, done: (sent: Boolean) -> Unit) {
+        scope.launch { done(callChat.resend(seq)) }
+    }
+
     /**
      * This device's name for the call (`docs/ux/calls.md` section 4.1),
      * already normalised by the display-name rule; `""` goes back to the
@@ -340,16 +384,23 @@ class SfuCallSession(
     private var publishLeaf: Int = config.localLeaf
 
     /**
-     * This device's current camera on/off state (camera-off-cleanup),
-     * broadcast to peers over the opaque SFU `signal-relay` so their roster
-     * tile for us renders correctly even on a mute (which fires no track
-     * event). Seeded from [Config.video]; advanced by [setCameraEnabled] +
-     * the [publishVideo] LIVE transitions. `@Volatile` because
-     * [setCameraEnabled] may be called from a UI thread while the broadcast
-     * helpers read it on [scope].
+     * This device's current camera and microphone state (camera-off-cleanup,
+     * and the microphone since 2026-11-07), broadcast to peers over the
+     * opaque SFU `signal-relay` so their roster tile for us renders correctly
+     * even on a mute (which fires no track event). The camera is seeded from
+     * [Config.video] and advanced by [setCameraEnabled] + the [publishVideo]
+     * LIVE transitions; the microphone is seeded from [Config.audio] and
+     * recorded by [setMicrophoneEnabled] even before capture, so a mute
+     * chosen early holds for the captured microphone. Thread-safe reads: the
+     * setters may run on a UI thread while the broadcast helpers read it on
+     * [scope].
      */
-    @Volatile
-    private var localCameraOn: Boolean = config.video
+    private val mediaState: GroupMediaStateAnnouncer =
+        GroupMediaStateAnnouncer(
+            cameraOn = config.video,
+            microphoneOn = config.audio,
+            send = { flags -> broadcastMediaState(flags) },
+        )
 
     // ---- Perfect-negotiation state (piece B: mid-call add-track) ----------
     // The client is the POLITE peer relative to the SFU, but instead of the
@@ -845,9 +896,15 @@ class SfuCallSession(
         signaling?.sendSignalRelayToCall(payload)
     }
 
-    /** Mute / unmute the local microphone (local-only track gate). */
+    /**
+     * Mute / unmute the local microphone (local-only track gate). Recorded
+     * even before capture, so the captured microphone starts as chosen, and
+     * said to the other peers when it changed: their tile for this device
+     * shows the mute mark from it.
+     */
     fun setMicrophoneEnabled(on: Boolean) {
         pc?.setMicrophoneEnabled(on)
+        mediaState.setMicrophone(on)
     }
 
     /**
@@ -918,6 +975,8 @@ class SfuCallSession(
         peerSignerKeys.clear()
         pendingShareStates.clear()
         callNames.clear()
+        // The call's chat is gone when the call ends for this device.
+        callChat.clear()
         stopMediaCounters()
         // What was asked of the SFU and what it said go with the call.
         wantsSender.reset()
@@ -1001,7 +1060,9 @@ class SfuCallSession(
         // add-track post-offer is the deferred renegotiation path). So:
         // add audio -> (add video) -> arm SFrame -> offer, guaranteeing
         // the SFU never sees a plaintext frame on either track (#2/#4).
-        connection.addLocalAudioTrack(enabled = config.audio)
+        // A mute chosen before the capture holds for the captured
+        // microphone: what the other peers are told is what is sent.
+        connection.addLocalAudioTrack(enabled = mediaState.microphoneOn)
         if (config.video) {
             startLocalCameraCapture(connection)
         }
@@ -1033,7 +1094,7 @@ class SfuCallSession(
         // camera-off join has no track event to imply "off"). Runs on both
         // the normal connect path and the ADR-0032 deferred [publish] path,
         // since both funnel through here once media is actually published.
-        broadcastMediaState()
+        mediaState.announce()
     }
 
     /**
@@ -1095,8 +1156,7 @@ class SfuCallSession(
     fun setCameraEnabled(on: Boolean) {
         // The camera track and the tracks of its copies.
         pc?.setCameraEnabled(on)
-        localCameraOn = on
-        broadcastMediaState()
+        mediaState.setCamera(on)
         // The encodings are the SFU's and the roster's to switch, not this
         // toggle's ([cameraIsOn]); asked again all the same, in case the
         // platform reset a flag.
@@ -1148,8 +1208,8 @@ class SfuCallSession(
     }
 
     /**
-     * camera-off-cleanup — broadcast this device's current camera on/off
-     * state ([localCameraOn]) to every other peer over the opaque SFU
+     * camera-off-cleanup — broadcast this device's current camera and
+     * microphone state ([mediaState]) to every other peer over the opaque SFU
      * `signal-relay`. The receiver flips this peer's roster `camOn`
      * deterministically, fixing the mute case where
      * `videoTrack.setEnabled(false)` fires no track event (and the unmute
@@ -1157,12 +1217,23 @@ class SfuCallSession(
      * (invariant #2); it touches no SFrame / seed / MLS state. No-op if
      * signaling is not open.
      */
-    private fun broadcastMediaState() {
+    private fun broadcastMediaState(flags: MediaFlags) {
         // Sealed under the call's relay key (ADR-0078 section 2): the SFU
         // relays ciphertext only. No key yet (a link joiner before its
         // Welcome) means nothing is said.
-        val sealed = relay.seal(composeMediaState(localCameraOn)) ?: return
+        val sealed = sealMediaState(flags) ?: return
         signaling?.sendSignalRelayToCall(sealed)
+    }
+
+    /** The version-2 media state, sealed under the relay key; `null` with
+     *  no key or a compose failure (a UI hint, never the media path). */
+    private fun sealMediaState(flags: MediaFlags): ByteArray? {
+        val plaintext = try {
+            composeMediaState(flags.cameraOn, flags.microphoneOn)
+        } catch (_: Throwable) {
+            return null
+        }
+        return relay.seal(plaintext)
     }
 
     /** Broadcast this device's sealed peer announcement (ADR-0078 section
@@ -1215,8 +1286,7 @@ class SfuCallSession(
             setVideoPublishState(VideoPublishState.LIVE)
             // camera-off-cleanup — re-enabling an existing sender fires no
             // track event, so signal the camera-on so peers un-freeze our tile.
-            localCameraOn = true
-            broadcastMediaState()
+            mediaState.setCamera(true)
             syncSenderActivity()
             return
         }
@@ -1302,8 +1372,7 @@ class SfuCallSession(
             connection2.setCameraEnabled(true)
             setVideoPublishState(VideoPublishState.LIVE)
             callbacks.onLocalVideoTrack(connection2.currentLocalVideoTrack())
-            localCameraOn = true
-            broadcastMediaState()
+            mediaState.setCamera(true)
             // A replaced track keeps the sender and its parameters; asked
             // again all the same, in case the platform reset the encoding.
             connection2.syncSenderCodecs()
@@ -1343,8 +1412,7 @@ class SfuCallSession(
         // peers already subscribed after renegotiation, but broadcast the
         // camera-on too so the state is authoritative + a late newcomer's
         // peer-join re-announce reflects it.
-        localCameraOn = true
-        broadcastMediaState()
+        mediaState.setCamera(true)
 
         // 6. Renegotiate so the SFU learns about the new video m-line.
         driveRenegotiationOffer()
@@ -1605,15 +1673,15 @@ class SfuCallSession(
                     announceSelf()
                 }
                 callbacks.onPeerJoined(peerId)
-                // camera-off-cleanup — re-announce our current camera state
-                // directly to the newcomer (deterministic initial-sync): its
+                // camera-off-cleanup — re-announce our current camera and
+                // microphone state directly to the newcomer (deterministic initial-sync): its
                 // freshly-created tile for us defaults camera-off, and its
                 // subscribe to our still-present track would flip camOn true
                 // even if we are muted, so this asserts the true state.
                 // Targeted to the joiner, not the whole call, to avoid
                 // re-notifying existing peers.
                 scope.launch {
-                    relay.seal(composeMediaState(localCameraOn))?.let { sealed ->
+                    sealMediaState(mediaState.current)?.let { sealed ->
                         signaling?.sendSignalRelayToPeer(peerId, sealed)
                     }
                 }
@@ -1632,6 +1700,9 @@ class SfuCallSession(
                     peerSignerKeys.remove(peerId)?.let { key -> screenShare?.participantLeft(key) }
                     // What it called itself goes with it too.
                     callNames.onPeerLeft(peerId)
+                    // What it wrote and was shown stays; what was held, never
+                    // verified, goes.
+                    callChat.onPeerLeft(peerId)
                     onRosterChanged(joined = false)
                 }
                 callbacks.onPeerLeft(peerId)
@@ -1659,7 +1730,10 @@ class SfuCallSession(
                     // orchestrator (the multi-joiner KeyPackage / Welcome /
                     // commit handshake).
                     when (val opened = relay.open(bytes)) {
-                        is CallRelay.Opened.MediaState -> callbacks.onRemoteMediaState(from, opened.cameraOn)
+                        is CallRelay.Opened.MediaState -> {
+                            callbacks.onRemoteMediaState(from, opened.cameraOn)
+                            callbacks.onRemoteMicrophoneState(from, opened.microphoneOn)
+                        }
                         is CallRelay.Opened.Announcement -> {
                             config.peerAnnouncer?.verify?.invoke(from, opened.bytes)?.let { identity ->
                                 val signerKey = bytesOfHex(identity.memberKeyHex)
@@ -1668,10 +1742,13 @@ class SfuCallSession(
                                 pendingShareStates.remove(from)?.let { onScreenShareState(from, it) }
                                 // A name it sent before is read now.
                                 signerKey?.let { callNames.onPeerIdentified(from, it) }
+                                // What it wrote to the chat before is shown now.
+                                signerKey?.let { callChat.onPeerIdentified(from, it) }
                             }
                         }
                         is CallRelay.Opened.ScreenShare -> onScreenShareState(from, opened.state)
                         is CallRelay.Opened.CallName -> callNames.onReceived(from, opened.bytes)
+                        is CallRelay.Opened.CallChat -> callChat.onReceived(from, opened.bytes)
                         CallRelay.Opened.Unknown -> Unit
                         null -> callbacks.onSignalRelay(from, bytes)
                     }
@@ -1872,6 +1949,9 @@ class SfuCallSession(
 
         /** The log tag of the media-counter lines. */
         const val MEDIA_LOG_TAG = "SfuCallSession"
+
+        /** A chat message that did not verify: no text, no ids. */
+        const val CALL_CHAT_REJECTED_WARNING = "WARN call chat message dropped: verification failed"
     }
 }
 

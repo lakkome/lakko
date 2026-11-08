@@ -58,15 +58,15 @@ class ChannelsPresentationTest {
         channel: ChannelHandle,
         posts: List<PostView>? = null,
         count: Int? = null,
-        isOwner: Boolean = false,
-    ) = channelRowModel(channel, posts, count, isOwner, now, zone, use24h = true, locale = en, strings = strings)
+        role: ChannelViewerRole = ChannelViewerRole.SUBSCRIBER,
+    ) = channelRowModel(channel, posts, count, role, now, zone, use24h = true, locale = en, strings = strings)
 
     // --- row model -------------------------------------------------------------
 
     @Test
     fun `row carries name, handle plus subscriber count and the newest post time`() {
         val posts = listOf(post(1, "2026-09-16T07:03:00Z"), post(2, "2026-09-16T09:30:00Z"))
-        val r = row(channel(handle = "news"), posts, count = 12, isOwner = true)
+        val r = row(channel(handle = "news"), posts, count = 12, role = ChannelViewerRole.OWNER)
         assertEquals("Lakko news", r.title)
         assertEquals("@news", r.handle)
         assertEquals("@news · 12 subscribers", r.subtitle)
@@ -78,7 +78,8 @@ class ChannelsPresentationTest {
     fun `row without posts, handle or count falls back to the relation line and sorts by added time`() {
         val added = at("2026-09-10T10:00:00Z")
         assertEquals("Subscribed", row(channel(addedAtMs = added)).subtitle)
-        assertEquals("Your channel", row(channel(addedAtMs = added), isOwner = true).subtitle)
+        assertEquals("Your channel", row(channel(addedAtMs = added), role = ChannelViewerRole.OWNER).subtitle)
+        assertEquals("Publisher", row(channel(addedAtMs = added), role = ChannelViewerRole.PUBLISHER).subtitle)
         val r = row(channel(addedAtMs = added))
         assertNull(r.handle)
         assertNull(r.time)
@@ -98,26 +99,26 @@ class ChannelsPresentationTest {
         val byHandle = channel(name = "", handle = "lakkonews")
         assertEquals("lakkonews", row(byHandle).title)
         assertEquals("Subscribed", row(byHandle).subtitle)
-        assertEquals("3 subscribers", row(byHandle, count = 3, isOwner = true).subtitle)
-        assertNull(channelHeaderModel(byHandle, isOwner = false, strings).handleLine)
+        assertEquals("3 subscribers", row(byHandle, count = 3, role = ChannelViewerRole.OWNER).subtitle)
+        assertNull(channelHeaderModel(byHandle, role = ChannelViewerRole.SUBSCRIBER, strings).handleLine)
         // With a name the handle is informative and shown once, in the subtitle.
         val named = channel(name = "", handle = "lakkonews", sharedName = "Lakko News", sharedStamp = 1uL)
         assertEquals("@lakkonews", row(named).subtitle)
-        assertEquals("@lakkonews", channelHeaderModel(named, isOwner = false, strings).handleLine)
+        assertEquals("@lakkonews", channelHeaderModel(named, role = ChannelViewerRole.SUBSCRIBER, strings).handleLine)
     }
 
     @Test
     fun `header carries the shared description over the local one and the relation line`() {
         val h = channelHeaderModel(
             channel(name = "local", description = "old", sharedName = "Lakko News", sharedDescription = "Daily notes", sharedStamp = 5uL),
-            isOwner = true,
+            role = ChannelViewerRole.OWNER,
             strings,
         )
         assertEquals("Lakko News", h.title)
         assertEquals("Daily notes", h.description)
         assertEquals("Your channel", h.statusLine.en)
-        assertNull(channelHeaderModel(channel(description = "  "), isOwner = false, strings).description)
-        assertEquals("Subscribed", channelHeaderModel(channel(), isOwner = false, strings).statusLine.en)
+        assertNull(channelHeaderModel(channel(description = "  "), role = ChannelViewerRole.SUBSCRIBER, strings).description)
+        assertEquals("Subscribed", channelHeaderModel(channel(), role = ChannelViewerRole.SUBSCRIBER, strings).statusLine.en)
     }
 
     @Test
@@ -200,5 +201,15 @@ class ChannelsPresentationTest {
         assertFalse(channelPageReads(followed = false, pressed = false))
         assertTrue(channelPageReads(followed = false, pressed = true))
         assertTrue(channelPageReads(followed = true, pressed = false))
+    }
+
+    @Test
+    fun `publisher keys alone do not make the owner`() {
+        assertEquals(ChannelViewerRole.OWNER, channelViewerRole(holdsPublisherKeys = true, joinedAsCoPublisher = false))
+        assertEquals(ChannelViewerRole.PUBLISHER, channelViewerRole(holdsPublisherKeys = true, joinedAsCoPublisher = true))
+        assertEquals(ChannelViewerRole.SUBSCRIBER, channelViewerRole(holdsPublisherKeys = false, joinedAsCoPublisher = false))
+        // A stale co-publisher mark without keys (stepped down, removed) is a subscriber.
+        assertEquals(ChannelViewerRole.SUBSCRIBER, channelViewerRole(holdsPublisherKeys = false, joinedAsCoPublisher = true))
+        assertEquals("Publisher", channelStatusLine(ChannelViewerRole.PUBLISHER).renderWith(strings))
     }
 }

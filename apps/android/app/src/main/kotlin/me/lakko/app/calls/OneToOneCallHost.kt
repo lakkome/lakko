@@ -272,6 +272,9 @@ internal fun routeOneToOneSignaling(
         // ADR-0083 — a share state reaches a call only verified, through
         // [OneToOneCallHost.deliverScreenShare]; the raw body applies nothing.
         is FfiCallSignalingBody.ScreenShare -> return OneToOneRoute.DROP
+        // The other person's camera and microphone state (2026-11-07): for the
+        // call in the slot only, never a ring (only an offer rings).
+        is FfiCallSignalingBody.MediaState -> callIdHexOf(body.callId)
         // C-11 — group-control bodies never advance a 1x1 call.
         is FfiCallSignalingBody.GroupStart,
         is FfiCallSignalingBody.GroupJoin,
@@ -1380,6 +1383,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         is FfiCallSignalingBody.IceCandidate -> body.callId
         is FfiCallSignalingBody.End -> body.callId
         is FfiCallSignalingBody.ScreenShare -> body.callId
+        is FfiCallSignalingBody.MediaState -> body.callId
         is FfiCallSignalingBody.GroupStart -> body.callId
         is FfiCallSignalingBody.GroupJoin -> body.callId
         is FfiCallSignalingBody.GroupLeave -> body.callId

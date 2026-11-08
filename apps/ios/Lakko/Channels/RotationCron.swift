@@ -169,7 +169,8 @@ public actor RotationCron {
         //    provider snapshot, durably, before any of its
         //    steps runs. A refused record runs nothing.
         let entry = try await Self.recordRotation(
-            context.commits, serverTargetEpoch: newServerEpoch)
+            context.commits, state: context.state,
+            serverEpoch: currentEpoch, serverTargetEpoch: newServerEpoch)
 
         // 3. The steps: the N+1 epoch key and the rotation
         //    commit on the DS in one request (ADR-0057,
@@ -190,9 +191,15 @@ public actor RotationCron {
 
     @MainActor
     private static func recordRotation(
-        _ commits: ChannelPublisherCommits.Context, serverTargetEpoch: UInt32
+        _ commits: ChannelPublisherCommits.Context, state: ChannelsUiState?,
+        serverEpoch: UInt32, serverTargetEpoch: UInt32
     ) throws -> PublisherCommitEntry {
         let (identity, group) = try commits.open()
+        // Section 13 — the seed this rotation leaves still opens the posts of
+        // `serverEpoch` on this device.
+        ChannelPublisherCommits.keepOutgoingSeed(
+            state: state, channelIdHex: commits.channelIdHex, serverEpoch: serverEpoch,
+            group: group, identity: identity)
         // ADR-0081 — the proof of the epoch the rotation leaves, taken before
         // the eager merge and recorded with the rotation, so a replay after a
         // restart can still prove it.
@@ -218,7 +225,8 @@ public actor RotationCron {
     ) async throws {
         try await PublisherCommitRunner.run(
             entry, ports: ChannelPublisherCommits.ports(context.commits, state: context.state))
-        ChannelPublisherCommits.refreshContentSeed(context.commits, state: context.state)
+        ChannelPublisherCommits.refreshContentSeed(
+            context.commits, state: context.state, landedEpoch: entry.serverTargetEpoch)
     }
 
     /// Start a periodic rotation poller. Returns a `Task`

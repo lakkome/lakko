@@ -140,8 +140,10 @@ pub fn parse_call_signal(plaintext: Vec<u8>) -> Result<CallSignal, FfiError> {
         | SignalingBody::IceCandidate { .. }
         | SignalingBody::GroupLeave { .. }
         | SignalingBody::GroupJoin { .. }
-        // A one-to-one screen-share state (ADR-0083) never rings.
-        | SignalingBody::ScreenShare { .. } => CallSignal::Other { call_id },
+        // A one-to-one screen-share state (ADR-0083) never rings, nor does
+        // the other side's camera and microphone state (2026-11-07).
+        | SignalingBody::ScreenShare { .. }
+        | SignalingBody::MediaState { .. } => CallSignal::Other { call_id },
     })
 }
 
@@ -268,6 +270,11 @@ mod tests {
                 call_id: call_id(),
                 leaf_index: 1,
                 reason: EndReason::HungUp,
+            },
+            SignalingBody::MediaState {
+                call_id: call_id(),
+                camera_on: false,
+                microphone_on: false,
             },
         ];
         for body in bodies {
@@ -447,10 +454,11 @@ mod tests {
     /// Pinned as LITERALS so a `schemas/mls-app/call_signaling_v1.proto` field
     /// renumber fails in Rust CI. `group_leave` is field 16, whose tag needs two
     /// varint bytes (`0x82 0x01`) — which is why the peek cannot be a
-    /// first-byte rule for every kind.
+    /// first-byte rule for every kind. `screen_share` (17, `0x8a 0x01`) and
+    /// `media_state` (18, `0x92 0x01`, 2026-11-07) are two-byte tags too.
     #[test]
     fn golden_pins_every_body_tag_the_ios_peek_tabulates() {
-        let cases: [(&str, &[u8], SignalingBody); 8] = [
+        let cases: [(&str, &[u8], SignalingBody); 9] = [
             (
                 "offer",
                 &[0x52],
@@ -521,6 +529,15 @@ mod tests {
                 SignalingBody::ScreenShare {
                     call_id: call_id(),
                     state: vec![1],
+                },
+            ),
+            (
+                "media_state",
+                &[0x92, 0x01],
+                SignalingBody::MediaState {
+                    call_id: call_id(),
+                    camera_on: true,
+                    microphone_on: false,
                 },
             ),
         ];

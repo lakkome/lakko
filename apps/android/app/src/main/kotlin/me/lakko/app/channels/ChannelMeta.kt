@@ -201,13 +201,16 @@ public object ChannelMetaPublisher {
     ) {
         val keys = state.keysByChannel.value[channelId]
             ?: throw IllegalStateException("no publisher keys for this channel on this device")
-        val epoch = state.epochByChannel.value[channelId]
+        val current = state.epochByChannel.value[channelId]
             ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
+        // Section 15 — under an epoch the channel service has reached.
+        val sealing = state.sealingSeed(channelId, current)
+            ?: throw IllegalStateException("no seed of an epoch the channel has reached")
         val counter = state.nextCounter(channelId)
         val wire = ChannelsComposer.compose(
-            keys = keys,
+            keys = keys.copy(seed = sealing.seed),
             channelIdHex = channelId,
-            epochId = epoch,
+            epochId = sealing.epoch,
             messageCounter = counter,
             plaintext = plaintext,
         )
@@ -226,14 +229,15 @@ public object ChannelMetaPublisher {
      * Re-issue the record this device holds for [channelId] — after a rotation
      * (ADR-0051 §4) — with the STORED stamp verbatim, never a fresh clock read.
      * A channel created before records existed re-issues its local name and
-     * description under a fresh stamp instead. Best-effort: logs and returns
-     * `false` on failure.
+     * description under a fresh stamp instead. Returns `false` on a failed
+     * send (logged; the caller keeps it owed), `true` once it landed or when
+     * there is nothing to issue (the channel is gone, or has no name).
      */
     public suspend fun reissue(state: ChannelsUiState, client: ChannelsClient, channelId: String): Boolean {
-        val channel = state.channels.value.firstOrNull { it.id == channelId } ?: return false
+        val channel = state.channels.value.firstOrNull { it.id == channelId } ?: return true
         val shared = channel.sharedMeta()
         val name = shared?.name ?: channel.localName.trim()
-        if (name.isEmpty()) return false
+        if (name.isEmpty()) return true
         val description = shared?.description ?: channel.localDescription.trim()
         val stamp = shared?.updatedAtMs ?: System.currentTimeMillis().toULong()
         val stored = shared?.recordB64?.takeIf { it.isNotEmpty() }?.let {

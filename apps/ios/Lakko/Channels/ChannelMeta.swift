@@ -141,12 +141,16 @@ public enum ChannelMetaRecord {
             throw ChannelMetaError.notAPublisher
         }
         let plaintext = try composeChannelMeta(meta: meta.ffi)
-        let epoch = state.epochByChannel[channelId] ?? 0
+        // ADR-0087 section 15 — sealed under an epoch the channel service has
+        // reached (``ChannelPublisherSeed``).
+        guard let sealing = state.composerSeed(channelId: channelId) else {
+            throw ChannelPublisherSeedUnavailable()
+        }
         let counter = try state.nextCounter(channelId: channelId)
         let wire = try ChannelsComposer.compose(
-            keys: keys,
+            keys: ChannelPublisherKeys(seed: sealing.seed, signingKeySeed: keys.signingKeySeed),
             channelIdHex: channelId,
-            epochId: epoch,
+            epochId: sealing.epoch,
             messageCounter: counter,
             plaintext: plaintext
         )

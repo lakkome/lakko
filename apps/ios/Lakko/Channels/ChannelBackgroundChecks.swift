@@ -48,10 +48,8 @@ enum ChannelBackgroundChecks {
         else { return }
         let pendingChannels = Set(PendingChannelReactionStore.load().map(\.channelIdHex))
         for channelId in pendingChannels {
-            var seeds = state.subscribedSeeds(channelId: channelId)
-            if let keys = state.keysByChannel[channelId], let epoch = state.epochByChannel[channelId] {
-                seeds[epoch] = keys.seed
-            }
+            // The composer's seed for the one epoch it serves only.
+            let seeds = state.readSeeds(channelId: channelId)
             await flushReactions(channelId: channelId, seeds: seeds, client: client, writer: writer)
         }
     }

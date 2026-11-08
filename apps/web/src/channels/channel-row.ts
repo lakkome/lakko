@@ -21,8 +21,9 @@ export interface ChannelRowInput {
   readonly localName: string;
   /** The `@handle` the channel was created or found under, if any. */
   readonly localHandle?: string | undefined;
-  /** `true` when this device holds publisher keys for the channel. */
-  readonly isOwner: boolean;
+  /** This account's role in the channel (ADR-0087 section 15): the owner,
+   *  a publisher, or a subscriber. */
+  readonly role: "owner" | "publisher" | "subscriber";
   /** The subscriber count, when the device has fetched it. */
   readonly subscriberCount: number | null;
   /** The server stamp of the newest cached post, if any. */
@@ -71,7 +72,15 @@ export function channelRowModel(input: ChannelRowInput, now: Date = new Date()):
   if (handle.length > 0) parts.push(handle);
   if (input.subscriberCount !== null) parts.push(subscriberCountLabel(input.subscriberCount));
   if (parts.length === 0) {
-    parts.push(input.isOwner ? t("channels.row.own") : t("channels.subscribe.status.subscribed"));
+    // UX 15: a publisher is not merely subscribed; the line names the role
+    // the Publishers list names it by.
+    parts.push(
+      input.role === "owner"
+        ? t("channels.row.own")
+        : input.role === "publisher"
+          ? t("channels.publishers.role_publisher")
+          : t("channels.subscribe.status.subscribed"),
+    );
   }
   return { title, handle, subtitle: joinFacts(parts), time };
 }

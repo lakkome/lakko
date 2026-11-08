@@ -114,6 +114,24 @@ enum CoPublisherJoin {
     struct Failure: Equatable {
         let message: UiText
         let offersRetry: Bool
+        /// What it was, for the card's `Ask again` (UX 15.2.2).
+        var kind: Kind = .other
+
+        enum Kind: Equatable {
+            /// The link no longer works (revoked, expired, not a co-publisher
+            /// link, damaged).
+            case linkDead
+            /// No connection reached Lakko.
+            case offline
+            case other
+        }
+
+        /// No connection reached the server: the DS or the directory said so.
+        static func isOffline(_ error: Error) -> Bool {
+            if case .network = error as? DsClientError { return true }
+            if case .network = error as? DiscoveryClientError { return true }
+            return error is URLError
+        }
     }
 
     /// Poll attempts (every 3 s) a screen waits before it shows the request
@@ -190,9 +208,12 @@ enum CoPublisherJoin {
             // Not a co-publisher link at all: the link itself is the problem,
             // which no retry fixes — the invite page's invalid-link copy.
             NSLog("Channels: co-publish link rejected: %@", String(describing: err))
-            throw Failure(message: UiText { groupInviteInvalidMessage }, offersRetry: false)
+            throw Failure(message: UiText { groupInviteInvalidMessage }, offersRetry: false, kind: .linkDead)
         } catch {
             NSLog("Channels: co-publish request failed: %@", String(describing: error))
+            if Failure.isOffline(error) {
+                throw Failure(message: .key("common.error.offline"), offersRetry: true, kind: .offline)
+            }
             let classified = JoinRequestFailure.classify(error)
             throw Failure(message: UiText { classified.message }, offersRetry: classified.offersRetry)
         }
@@ -276,6 +297,50 @@ final class CoPublisherAcceptance: ObservableObject {
         case sending
         case waiting
         case failed(CoPublisherJoin.Failure)
+        /// `Ask again` found the link no longer works; the earlier request
+        /// stays, so a late approval still lands.
+        case linkDead
+    }
+
+    /// UX 15.2.2 — `Ask again` shows once a request has waited this long
+    /// (7 days), at most once per channel per 7 days (asking restarts it).
+    nonisolated static let askAgainAfterMs: Int64 = 7 * 24 * 60 * 60 * 1000
+
+    /// What the card in the one-to-one shows.
+    enum CardState: Equatable {
+        /// This device publishes the channel: `Open`.
+        case open
+        /// No request yet: `Accept`.
+        case accept
+        /// Being sent: the waiting line, nothing to press.
+        case sending
+        /// Sent under 7 days ago: the waiting line.
+        case waiting
+        /// Sent 7 days ago or more: "No answer yet." and `Ask again`.
+        case noAnswer
+        /// The link no longer works.
+        case linkDead
+        /// A failure, with `Try again` (or `Ask again` when a request was
+        /// sent before) when it can help.
+        case failed(CoPublisherJoin.Failure, askAgain: Bool)
+    }
+
+    /// The card's state, pure. Never tells of a refusal: an unanswered
+    /// request reads as waiting, then as "No answer yet.".
+    nonisolated static func cardState(
+        isPublisher: Bool, phase: Phase?, requestedAtMs: Int64?, nowMs: Int64
+    ) -> CardState {
+        if isPublisher { return .open }
+        switch phase {
+        case .sending?: return .sending
+        case .linkDead?: return .linkDead
+        case .failed(let failure)?:
+            if failure.kind == .linkDead, requestedAtMs != nil { return .linkDead }
+            return .failed(failure, askAgain: requestedAtMs != nil)
+        case .waiting?, nil:
+            guard let requestedAtMs else { return phase == nil ? .accept : .waiting }
+            return nowMs - requestedAtMs >= askAgainAfterMs ? .noAnswer : .waiting
+        }
     }
 
     @Published private(set) var phases: [String: Phase] = [:]
@@ -296,9 +361,23 @@ final class CoPublisherAcceptance: ObservableObject {
 
     /// A request to publish to the channel was sent and waits for the owner.
     func isPending(_ channelIdHex: String) -> Bool {
+        requestedAtMs(channelIdHex) != nil
+    }
+
+    /// When the pending request for the channel was sent, `nil` when none.
+    func requestedAtMs(_ channelIdHex: String) -> Int64? {
         _ = pendingRevision
-        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return false }
-        return PendingPublisherRequests.isPending(channelIdHex: channelIdHex, accountIdB64: account)
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return nil }
+        return PendingPublisherRequests.load(accountIdB64: account)
+            .first { $0.channelIdHex == channelIdHex }?.requestedAtMs
+    }
+
+    /// What the card shows now.
+    func cardState(_ facts: CoPublisherCardFacts) -> CardState {
+        Self.cardState(
+            isPublisher: isPublisher(facts.channelIdHex), phase: phases[facts.link.absoluteString],
+            requestedAtMs: requestedAtMs(facts.channelIdHex),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
     }
 
     func accept(_ facts: CoPublisherCardFacts) {
@@ -328,7 +407,10 @@ final class CoPublisherAcceptance: ObservableObject {
                     self?.phases[key] = .waiting
                 }
             } catch let failure as CoPublisherJoin.Failure {
-                self?.phases[key] = .failed(failure)
+                // `Ask again` on a link that no longer works: the earlier
+                // request stays (a late approval still lands).
+                let askedBefore = self.map { $0.isPending(facts.channelIdHex) } ?? false
+                self?.phases[key] = failure.kind == .linkDead && askedBefore ? .linkDead : .failed(failure)
                 self?.running[key] = nil
             } catch {
                 self?.phases[key] = .failed(.init(message: .key("group.join.request_failed"), offersRetry: true))

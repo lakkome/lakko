@@ -162,6 +162,10 @@ enum CallHostRouting {
             // and only once verified (``InboundCallRow/verifiedScreenShare``).
             // It never rings.
             return forActive && row.verifiedScreenShare != nil ? .apply : .drop
+        case .mediaState:
+            // The other person's camera and microphone (2026-11-07): applied
+            // to the call in the slot only. It never rings.
+            return forActive ? .apply : .drop
         case .offer:
             // The call in the slot: a renegotiation offer (camera turned on).
             if forActive { return .apply }

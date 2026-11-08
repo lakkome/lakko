@@ -53,6 +53,7 @@ import { screenShareActions } from "./screen-share-store";
 import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { callNameActions, rememberCallName, rememberedCallName } from "./call-name";
+import { callChatActions } from "./call-chat";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
@@ -157,12 +158,18 @@ function peerParticipantId(peerId: string): string {
 /** Build a store `Participant` for a remote peer. Camera starts off
  *  (no video track yet); `addStream` flips it on when a video track
  *  arrives, keyed by the SFU's MSID-stream-id-to-peer mapping. */
-function remoteParticipant(displayName: string, peerId: string): Participant {
+function remoteParticipant(
+  displayName: string,
+  peerId: string,
+  micOn = true,
+): Participant {
   return {
     id: peerParticipantId(peerId),
     displayName,
     isLocal: false,
-    micOn: true,
+    // What the person last announced; unmuted until their first media state
+    // arrives.
+    micOn,
     camOn: false,
     quality: "good",
     speaking: false,
@@ -205,6 +212,10 @@ export function createSfuCallUi(
   // `callActions.setParticipantCamera` calls already run on — no new
   // concurrency; the whole handle (and this map) is discarded on `hangUp`.
   const lastKnownCameraOn = new Map<string, boolean>();
+  // The microphone each remote peer last announced, keyed like the camera
+  // map. A state that arrives before the peer's tile exists is not lost: the
+  // tile is built from it.
+  const lastKnownMicOn = new Map<string, boolean>();
 
   // The person (base64 account key) behind every remote peer whose sealed
   // announcement verified (ADR-0078 section 2), keyed by the roster tile id.
@@ -362,6 +373,8 @@ export function createSfuCallUi(
         case "closed":
           share.dispose();
           screenShareActions.reset();
+          // The chat goes with the call (docs/ux/calls.md section 4.1.4).
+          callChatActions.reset();
           callActions.setPhase({ kind: "ended", endedAt: Date.now() });
           break;
         case "idle":
@@ -376,14 +389,20 @@ export function createSfuCallUi(
         .filter((p: SfuPeerSnapshot) => p.peer_id !== selfPeerId)
         .map((p: SfuPeerSnapshot) => {
           peerPersons.set(peerParticipantId(p.peer_id), null);
-          return remoteParticipant(nameOf(null), p.peer_id);
+          return remoteParticipant(
+            nameOf(null),
+            p.peer_id,
+            lastKnownMicOn.get(peerParticipantId(p.peer_id)),
+          );
         });
       callActions.setParticipants([localParticipant(), ...remotes]);
     },
     onPeerJoined: (peerId): void => {
       share.onPeerJoined();
       peerPersons.set(peerParticipantId(peerId), null);
-      callActions.participantJoined(remoteParticipant(nameOf(null), peerId));
+      callActions.participantJoined(
+        remoteParticipant(nameOf(null), peerId, lastKnownMicOn.get(peerParticipantId(peerId))),
+      );
     },
     onPeerIdentified: (peerId, identity): void => {
       // ADR-0078 section 2: the peer's sealed announcement verified against
@@ -401,6 +420,7 @@ export function createSfuCallUi(
       // Forget the departed peer's sticky camera state so a later rejoin under
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
+      lastKnownMicOn.delete(id);
       peerPersons.delete(id);
       peerCallNames.delete(id);
       share.onPeerLeft(peerId);
@@ -423,6 +443,12 @@ export function createSfuCallUi(
     onRemoteScreenShareState: (peerId, state): void => {
       share.onState(peerId, state);
     },
+    onCallChatChanged: (messages): void => {
+      callChatActions.setMessages(messages);
+    },
+    onCallChatIncoming: (message): void => {
+      callChatActions.incoming(message);
+    },
     onVideoGiven: (given): void => {
       setRemoteVideoGiven(given);
     },
@@ -438,6 +464,13 @@ export function createSfuCallUi(
       // `addStream`).
       lastKnownCameraOn.set(id, cameraOn);
       callActions.setParticipantCamera(id, cameraOn);
+    },
+    onRemoteMicrophoneState: (peerId, microphoneOn): void => {
+      // The person's own word on their microphone: the mute mark on their
+      // tile and in the participant list (group-call-grid 7.2).
+      const id = peerParticipantId(peerId);
+      lastKnownMicOn.set(id, microphoneOn);
+      callActions.setParticipantMic(id, microphoneOn);
     },
     onLocalStream: (stream): void => {
       setLocalStream(stream);
@@ -471,6 +504,14 @@ export function createSfuCallUi(
     },
   });
 
+  // The call's chat (`docs/ux/calls.md` section 4.1.4): there from the first
+  // second, alone in the call too.
+  callChatActions.reset();
+  callChatActions.setControl({
+    send: (text: string): void => session.sendCallChat(text),
+    sendAgain: (id: string): void => session.resendCallChat(id),
+  });
+
   return {
     session,
     remoteStreams,
@@ -489,6 +530,7 @@ export function createSfuCallUi(
       screenShareActions.reset();
       callNameActions.reset();
       session.hangUp();
+      callChatActions.reset();
       peerPersons.clear();
       peerCallNames.clear();
       setRemoteStreams(new Map());

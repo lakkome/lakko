@@ -4856,6 +4856,15 @@ pub enum FfiCallSignalingBody {
     /// One-to-one screen-share state (ADR-0083): verify `state` with
     /// [`call_relay::verify_call_screen_share`] against the MLS sender's leaf.
     ScreenShare { call_id: Vec<u8>, state: Vec<u8> },
+    /// One-to-one call: the sender's own camera and microphone state
+    /// (2026-11-07), sent on every change and once the call connects. Set the
+    /// other person's camera picture and mute mark from it. Appended last:
+    /// uniffi lowers a variant by its ordinal.
+    MediaState {
+        call_id: Vec<u8>,
+        camera_on: bool,
+        microphone_on: bool,
+    },
 }
 
 fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingBody, FfiError> {
@@ -4936,6 +4945,15 @@ fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingB
                 state,
             }
         },
+        FfiCallSignalingBody::MediaState {
+            call_id,
+            camera_on,
+            microphone_on,
+        } => lakko_calls::SignalingBody::MediaState {
+            call_id: take_id(call_id)?,
+            camera_on,
+            microphone_on,
+        },
     })
 }
 
@@ -5005,6 +5023,15 @@ fn body_from_inner(body: lakko_calls::SignalingBody) -> FfiCallSignalingBody {
                 call_id: call_id.to_vec(),
                 state,
             }
+        },
+        lakko_calls::SignalingBody::MediaState {
+            call_id,
+            camera_on,
+            microphone_on,
+        } => FfiCallSignalingBody::MediaState {
+            call_id: call_id.to_vec(),
+            camera_on,
+            microphone_on,
         },
     }
 }
@@ -6268,6 +6295,32 @@ pub fn peek_welcome_founder(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_media_state_call_signal_round_trips() {
+        for camera_on in [false, true] {
+            for microphone_on in [false, true] {
+                let body = super::FfiCallSignalingBody::MediaState {
+                    call_id: vec![7; 16],
+                    camera_on,
+                    microphone_on,
+                };
+                let wire = super::compose_call_signaling(body).expect("compose");
+                assert_eq!(&wire[..2], &[0x92, 0x01]);
+                match super::parse_call_signaling(wire).expect("parse") {
+                    super::FfiCallSignalingBody::MediaState {
+                        call_id,
+                        camera_on: camera,
+                        microphone_on: microphone,
+                    } => {
+                        assert_eq!(call_id, vec![7; 16]);
+                        assert_eq!((camera, microphone), (camera_on, microphone_on));
+                    },
+                    _ => panic!("expected a media state"),
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// 2026-11-07: a peek of bytes that are not a Welcome is an error.

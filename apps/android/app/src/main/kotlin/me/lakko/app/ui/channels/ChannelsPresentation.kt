@@ -56,13 +56,13 @@ public data class ChannelRowModel(
 /**
  * The row for [channel]. Subscriber count and posts are optional inputs — an
  * owner learns the count from its fan-out, a reader never does; posts are
- * known once the channel has been opened. [isOwner] picks the fallback line.
+ * known once the channel has been opened. [role] picks the fallback line.
  */
 public fun channelRowModel(
     channel: ChannelHandle,
     posts: List<PostView>?,
     subscriberCount: Int?,
-    isOwner: Boolean,
+    role: ChannelViewerRole,
     nowMs: Long,
     zone: ZoneId,
     use24h: Boolean,
@@ -74,7 +74,7 @@ public fun channelRowModel(
         id = channel.id,
         title = channelTitle(channel, strings),
         handle = channelHandleLabel(channel.handle),
-        subtitle = channelSubtitle(channel, subscriberCount, isOwner, strings),
+        subtitle = channelSubtitle(channel, subscriberCount, role, strings),
         time = newest?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         sortMs = newest ?: channel.addedAtMs.toLong(),
     )
@@ -99,20 +99,20 @@ public fun channelDescription(channel: ChannelHandle): String? {
 
 /**
  * "@handle · 12 subscribers", "@handle", "12 subscribers", or the fallback
- * "Your channel" / "Subscribed". The handle is left out when the title is
+ * "Your channel" / "Publisher" / "Subscribed". The handle is left out when the title is
  * already the handle, so a channel with no name never shows it twice.
  */
 public fun channelSubtitle(
     channel: ChannelHandle,
     subscriberCount: Int?,
-    isOwner: Boolean,
+    role: ChannelViewerRole,
     strings: Strings,
 ): String {
     val parts = ArrayList<String>(2)
     val handle = channelHandleLabel(channel.handle)
     if (handle != null && !titleIsHandle(channel, strings)) parts += handle
     subscriberCountLine(subscriberCount)?.let { parts += it.renderWith(strings) }
-    if (parts.isEmpty()) parts += channelStatusLine(isOwner).renderWith(strings)
+    if (parts.isEmpty()) parts += channelStatusLine(role).renderWith(strings)
     return joinFacts(parts, strings)
 }
 
@@ -122,9 +122,30 @@ public fun titleIsHandle(channel: ChannelHandle, strings: Strings): Boolean {
     return bare.isNotEmpty() && channelTitle(channel, strings) == bare
 }
 
+/** The viewer's relation to a channel (ADR-0087 section 15). */
+public enum class ChannelViewerRole { OWNER, PUBLISHER, SUBSCRIBER }
+
+/**
+ * The role from what this device holds: publisher keys mean the account
+ * publishes there; [joinedAsCoPublisher] (a PublisherGroup this account
+ * joined through a co-publisher link, `ChannelsUiState.joinedGroupIdOf`)
+ * means it is a publisher who is not the owner. The owner's channel is the
+ * one whose group its own seed derives, so it has no joined group id.
+ */
+public fun channelViewerRole(holdsPublisherKeys: Boolean, joinedAsCoPublisher: Boolean): ChannelViewerRole = when {
+    !holdsPublisherKeys -> ChannelViewerRole.SUBSCRIBER
+    joinedAsCoPublisher -> ChannelViewerRole.PUBLISHER
+    else -> ChannelViewerRole.OWNER
+}
+
 /** The one-line standing status on a channel: the viewer's relation to it. */
-public fun channelStatusLine(isOwner: Boolean): UiText =
-    UiText(if (isOwner) "channels.row.own" else "channels.subscribe.status.subscribed")
+public fun channelStatusLine(role: ChannelViewerRole): UiText = UiText(
+    when (role) {
+        ChannelViewerRole.OWNER -> "channels.row.own"
+        ChannelViewerRole.PUBLISHER -> "channels.publishers.role_publisher"
+        ChannelViewerRole.SUBSCRIBER -> "channels.subscribe.status.subscribed"
+    },
+)
 
 /** What the reader's header card shows. */
 public data class ChannelHeaderModel(
@@ -133,17 +154,17 @@ public data class ChannelHeaderModel(
     val handleLine: String?,
     /** The description, or `null` when blank. */
     val description: String?,
-    /** "Subscribed" / "Your channel". */
+    /** "Subscribed" / "Publisher" / "Your channel". */
     val statusLine: UiText,
 )
 
-/** The header card for [channel] as [isOwner] sees it. */
-public fun channelHeaderModel(channel: ChannelHandle, isOwner: Boolean, strings: Strings): ChannelHeaderModel =
+/** The header card for [channel] as a viewer of [role] sees it. */
+public fun channelHeaderModel(channel: ChannelHandle, role: ChannelViewerRole, strings: Strings): ChannelHeaderModel =
     ChannelHeaderModel(
         title = channelTitle(channel, strings),
         handleLine = channelHandleLabel(channel.handle)?.takeIf { !titleIsHandle(channel, strings) },
         description = channelDescription(channel),
-        statusLine = channelStatusLine(isOwner),
+        statusLine = channelStatusLine(role),
     )
 
 /** "@handle" for a non-empty handle (with or without the "@" typed), else `null`. */

@@ -106,15 +106,21 @@ final class SubscriberAdmission: ObservableObject {
     func admit(
         channelId: String, pubkeyHex: String, state: ChannelsUiState, accountIdentity: Identity
     ) async throws {
-        guard let keys = state.keysByChannel[channelId] else { throw AdmissionError.noKeys }
-        let epoch = try await currentEpoch(channelId: channelId, state: state)
+        guard state.keysByChannel[channelId] != nil else { throw AdmissionError.noKeys }
+        _ = try await currentEpoch(channelId: channelId, state: state)
+        // ADR-0087 section 15 — the seed of an epoch the channel has reached,
+        // never the composer's seed under an epoch it does not serve (a
+        // co-publisher that applied the owner's commit before the owner's
+        // reseal landed); none held: nobody is let in this pass.
+        guard let sealing = state.composerSeed(channelId: channelId) else { throw AdmissionError.noKeys }
+        let epoch = sealing.epoch
         do {
             guard let subPub = Data(channelHex: pubkeyHex) else { throw AdmissionError.badKey }
             let wire = try ChannelsComposer.sealSubscriberSeedEnvelope(
                 subscriberPub: subPub,
                 channelIdHex: channelId,
                 epochId: epoch,
-                seed: keys.seed
+                seed: sealing.seed
             )
             // ADR-0031: filed under the exact epoch it was sealed for.
             try await client.deliverEnvelope(
