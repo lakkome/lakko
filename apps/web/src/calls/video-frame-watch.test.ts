@@ -4,15 +4,18 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  BindingFrameGate,
   canWatchVideoFrames,
   DecodedFrameCounter,
   FRAME_STATS_POLL_MS,
   framesDecodedOf,
+  presentedFrameOf,
   registerVideoFrameSource,
   watchDecodedFrames,
   watchVideoFrames,
   type FrameStatsDeps,
   type FrameStatsSource,
+  type PresentedFrame,
 } from "./video-frame-watch";
 
 /** A receiver whose report says `decoded.value` frames were decoded. */
@@ -265,5 +268,112 @@ describe("watchVideoFrames (one interface, two ways)", () => {
     const stop = watchVideoFrames({}, (now) => frames.push(now));
     stop();
     expect(frames).toEqual([]);
+  });
+});
+
+describe("presentedFrameOf", () => {
+  it("reads the arrival time and RTP timestamp of the callback's metadata", () => {
+    expect(
+      presentedFrameOf({ receiveTime: 1234.5, rtpTimestamp: 90000, presentedFrames: 3, width: 640 }),
+    ).toEqual({ receiveTime: 1234.5, rtpTimestamp: 90000 });
+  });
+
+  it("leaves out what the browser did not give, or gave as something other than a number", () => {
+    expect(presentedFrameOf(undefined)).toEqual({});
+    expect(presentedFrameOf(null)).toEqual({});
+    expect(presentedFrameOf({ width: 640 })).toEqual({ receiveTime: undefined, rtpTimestamp: undefined });
+    expect(presentedFrameOf({ receiveTime: "1", rtpTimestamp: Number.NaN })).toEqual({
+      receiveTime: undefined,
+      rtpTimestamp: undefined,
+    });
+  });
+});
+
+describe("BindingFrameGate (a frame decoded before the bind is not the new picture's)", () => {
+  it("admits every frame before anything was bound", () => {
+    const g = new BindingFrameGate();
+    expect(g.awaiting()).toBe(false);
+    expect(g.admit({})).toBe(true);
+    expect(g.admit({ receiveTime: 1, rtpTimestamp: 1 })).toBe(true);
+  });
+
+  it("refuses the track's old last frame Firefox shows at once, and admits the first new one", () => {
+    // The numbers of the 2026-11-07 loopback run in Firefox 159: bound at
+    // 7092, the leftover was received 5040 ms before, the first new frame
+    // 1503 ms after the bind once the sender was resumed.
+    const g = new BindingFrameGate();
+    g.bind(7092);
+    expect(g.awaiting()).toBe(true);
+    expect(g.admit({ receiveTime: 7092 - 5040, rtpTimestamp: 449125856 })).toBe(false);
+    expect(g.awaiting()).toBe(true);
+    expect(g.admit({ receiveTime: 7092 + 1503, rtpTimestamp: 449711576 })).toBe(true);
+    expect(g.awaiting()).toBe(false);
+    expect(g.admit({ receiveTime: 7092 + 1544, rtpTimestamp: 449717606 })).toBe(true);
+  });
+
+  it("admits the first frame at once when it arrived after the bind (Chromium, WebKit)", () => {
+    const g = new BindingFrameGate();
+    g.bind(1000);
+    expect(g.admit({ receiveTime: 1000, rtpTimestamp: 7 })).toBe(true);
+    expect(g.awaiting()).toBe(false);
+  });
+
+  it("refuses the leftover again if it is presented again", () => {
+    const g = new BindingFrameGate();
+    g.bind(1000);
+    expect(g.admit({ receiveTime: 10, rtpTimestamp: 42 })).toBe(false);
+    expect(g.admit({ receiveTime: 10, rtpTimestamp: 42 })).toBe(false);
+    expect(g.admit({ receiveTime: 1040, rtpTimestamp: 43 })).toBe(true);
+  });
+
+  it("holds back at most one frame whatever the clocks say", () => {
+    // An arrival time on a clock that runs behind the page's would make
+    // every frame look older than the bind; only the first is held back.
+    const g = new BindingFrameGate();
+    g.bind(1_000_000);
+    expect(g.admit({ receiveTime: 5, rtpTimestamp: 1 })).toBe(false);
+    expect(g.admit({ receiveTime: 6, rtpTimestamp: 2 })).toBe(true);
+    expect(g.admit({ receiveTime: 7, rtpTimestamp: 3 })).toBe(true);
+  });
+
+  it("treats a first frame of unknown arrival as a leftover, and admits the next", () => {
+    const g = new BindingFrameGate();
+    g.bind(100);
+    const unknown: PresentedFrame = {};
+    expect(g.admit(unknown)).toBe(false);
+    expect(g.admit(unknown)).toBe(true);
+  });
+
+  it("starts again at every bind", () => {
+    const g = new BindingFrameGate();
+    g.bind(100);
+    expect(g.admit({ receiveTime: 150, rtpTimestamp: 1 })).toBe(true);
+    g.bind(5000);
+    expect(g.awaiting()).toBe(true);
+    // The frame received under the previous binding is now the leftover.
+    expect(g.admit({ receiveTime: 150, rtpTimestamp: 1 })).toBe(false);
+    expect(g.admit({ receiveTime: 5030, rtpTimestamp: 2 })).toBe(true);
+  });
+});
+
+describe("watchVideoFrames hands on what the browser said of each frame", () => {
+  it("passes the callback metadata through, and nothing on the statistics path", async () => {
+    const callbacks: ((now: number, meta?: unknown) => void)[] = [];
+    const el = {
+      requestVideoFrameCallback(cb: (now: number, meta?: unknown) => void): number {
+        callbacks.push(cb);
+        return callbacks.length;
+      },
+      cancelVideoFrameCallback: (): void => {},
+    };
+    const seen: [number, PresentedFrame][] = [];
+    const stop = watchVideoFrames(el, (now, frame) => seen.push([now, frame]));
+    callbacks[0]?.(16, { receiveTime: 12, rtpTimestamp: 3000, width: 320 });
+    callbacks[1]?.(33);
+    stop();
+    expect(seen).toEqual([
+      [16, { receiveTime: 12, rtpTimestamp: 3000 }],
+      [33, {}],
+    ]);
   });
 });

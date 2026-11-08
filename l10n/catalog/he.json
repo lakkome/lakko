@@ -557,8 +557,12 @@
       "text": "השיחה הזו מוצפנת. הצגת מספר הבטיחות",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "הקריאו את המספרים האלה בקול. אם הם זהים בשני הטלפונים, אף אחד לא מאזין.",
+    "call.encryption.compare_hint_group": {
+      "text": "כל מי שבשיחה הזו רואה את אותו המספר. הקריאו אותו בקול. אם הוא זהה בכל המכשירים, אף אחד אחר לא מאזין.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "הקריאו את המספר בקול זה לזה. אם הוא זהה בשני המכשירים, אף אחד אחר לא מאזין.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

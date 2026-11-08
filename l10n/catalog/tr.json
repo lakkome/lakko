@@ -557,8 +557,12 @@
       "text": "Bu arama şifreli. Güvenlik numarasını göster",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "Bu numaraları yüksek sesle okuyun. İki telefonda da aynıysa kimse dinlemiyor demektir.",
+    "call.encryption.compare_hint_group": {
+      "text": "Bu aramadaki herkes aynı numarayı görür. Yüksek sesle okuyun. Her cihazda aynıysa başka kimse dinlemiyor demektir.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "Numarayı birbirinize yüksek sesle okuyun. İki cihazda da aynıysa başka kimse dinlemiyor demektir.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

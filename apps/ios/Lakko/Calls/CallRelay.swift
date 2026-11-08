@@ -15,7 +15,7 @@ import LakkoCore
 /// seed (`CallRelayKey`), and every receiver checks the signature against the
 /// leaf in the call's MLS roster (`verifyCallPeerAnnouncement`). The leaf is
 /// account-bound (ADR-0050), so a verified announcement names the person. The
-/// camera on/off media state rides the same sealed channel.
+/// camera and microphone media state rides the same sealed channel.
 ///
 /// The relay key changes with the call seed (every MLS epoch, ADR-0029); the
 /// previous epoch's key is kept for opening.
@@ -24,7 +24,7 @@ final class CallRelay {
     /// What an opened relay payload carries.
     enum Opened: Equatable {
         case announcement(Data)
-        case mediaState(cameraOn: Bool)
+        case mediaState(cameraOn: Bool, microphoneOn: Bool)
         /// A signed screen-share state (ADR-0083), still to be verified with
         /// ``CallPeerAnnouncer/verifyScreenShare``.
         case screenShare(Data)
@@ -65,7 +65,8 @@ final class CallRelay {
             guard let plaintext = try? key.open(sealed: sealed) else { continue }
             switch classifyCallRelayPlaintext(plaintext: plaintext) {
             case .peerAnnouncement(let announcement): return .announcement(announcement)
-            case .mediaState(let cameraOn): return .mediaState(cameraOn: cameraOn)
+            case .mediaState(let cameraOn, let microphoneOn):
+                return .mediaState(cameraOn: cameraOn, microphoneOn: microphoneOn)
             case .screenShare(let state): return .screenShare(state)
             case .callName(let name): return .callName(name)
             case .callChat(let message): return .callChat(message)

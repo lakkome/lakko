@@ -44,14 +44,18 @@ final class MediaStateRosterTests: XCTestCase {
     /// the sender's flag intact, for both on and off.
     func testMediaStateRoundTripsAndClassifies() throws {
         for cameraOn in [true, false] {
-            // Send side (mirrors `broadcastMediaState` -> `sendSignalRelayToCall`,
-            // whose compose helper base64s the bytes into the relay payload).
-            let payloadB64 = sfuEncodePayload(payload: composeMediaState(cameraOn: cameraOn))
-            // Receive side (mirrors `dispatchSignalRelay`).
-            let payload = try sfuDecodePayload(payloadB64: payloadB64)
-            let env = try dispatchIncomingEnvelope(plaintext: payload)
-            XCTAssertEqual(env.kind, .mediaState)
-            XCTAssertEqual(env.cameraOn, cameraOn)
+            for microphoneOn in [true, false] {
+                // Send side (mirrors `broadcastMediaState` -> `sendSignalRelayToCall`,
+                // whose compose helper base64s the bytes into the relay payload).
+                let payloadB64 = sfuEncodePayload(
+                    payload: composeMediaState(cameraOn: cameraOn, microphoneOn: microphoneOn))
+                // Receive side (mirrors `dispatchSignalRelay`).
+                let payload = try sfuDecodePayload(payloadB64: payloadB64)
+                let env = try dispatchIncomingEnvelope(plaintext: payload)
+                XCTAssertEqual(env.kind, .mediaState)
+                XCTAssertEqual(env.cameraOn, cameraOn)
+                XCTAssertEqual(env.microphoneOn, microphoneOn)
+            }
         }
     }
 
@@ -102,7 +106,8 @@ final class MediaStateRosterTests: XCTestCase {
     /// peer `from` broadcasts `composeMediaState(cameraOn:)`, and the receiver
     /// classifies + applies it to the roster.
     private func applyMediaState(cameraOn: Bool, from: String, to state: CallUiState) throws {
-        let payloadB64 = sfuEncodePayload(payload: composeMediaState(cameraOn: cameraOn))
+        let payloadB64 = sfuEncodePayload(
+            payload: composeMediaState(cameraOn: cameraOn, microphoneOn: true))
         let payload = try sfuDecodePayload(payloadB64: payloadB64)
         let env = try dispatchIncomingEnvelope(plaintext: payload)
         guard env.kind == .mediaState, let flag = env.cameraOn else {

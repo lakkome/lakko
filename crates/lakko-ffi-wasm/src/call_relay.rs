@@ -119,6 +119,7 @@ impl CallRelayKey {
 pub struct CallRelayPayload {
     kind: &'static str,
     camera_on: bool,
+    microphone_on: bool,
     announcement: Vec<u8>,
     state: Vec<u8>,
     call_name: Vec<u8>,
@@ -140,6 +141,13 @@ impl CallRelayPayload {
     #[must_use]
     pub fn camera_on(&self) -> bool {
         self.camera_on
+    }
+
+    /// For `"media-state"`: whether the microphone is on (`false` = muted).
+    #[wasm_bindgen(getter, js_name = microphoneOn)]
+    #[must_use]
+    pub fn microphone_on(&self) -> bool {
+        self.microphone_on
     }
 
     /// For `"peer-announcement"`: the whole announcement.
@@ -181,14 +189,19 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::PeerAnnouncement(announcement) => CallRelayPayload {
             kind: "peer-announcement",
             camera_on: false,
+            microphone_on: false,
             announcement,
             state: Vec::new(),
             call_name: Vec::new(),
             message: Vec::new(),
         },
-        RelayPayload::MediaState { camera_on } => CallRelayPayload {
+        RelayPayload::MediaState {
+            camera_on,
+            microphone_on,
+        } => CallRelayPayload {
             kind: "media-state",
             camera_on,
+            microphone_on,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name: Vec::new(),
@@ -197,6 +210,7 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::ScreenShare(state) => CallRelayPayload {
             kind: "screen-share",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state,
             call_name: Vec::new(),
@@ -205,6 +219,7 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::CallName(call_name) => CallRelayPayload {
             kind: "call-name",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name,
@@ -221,6 +236,7 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
         RelayPayload::Unknown => CallRelayPayload {
             kind: "unknown",
             camera_on: false,
+            microphone_on: false,
             announcement: Vec::new(),
             state: Vec::new(),
             call_name: Vec::new(),
@@ -868,12 +884,13 @@ mod tests {
         let key = CallRelayKey {
             inner: core::RelayKey::from_call_seed(&[3; 32]),
         };
-        let state = lakko_contacts::media_state::compose_media_state(true);
+        let state = lakko_contacts::media_state::compose_media_state(true, false);
         let sealed = key.inner.seal(&state).expect("seal");
         let opened = key.inner.open(&sealed).expect("open");
         let payload = classify_call_relay_plaintext(&opened);
         assert_eq!(payload.kind, "media-state");
         assert!(payload.camera_on);
+        assert!(!payload.microphone_on);
         assert_eq!(classify_call_relay_plaintext(b"x").kind, "unknown");
     }
 

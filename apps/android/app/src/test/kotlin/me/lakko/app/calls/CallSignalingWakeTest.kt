@@ -47,6 +47,7 @@ class CallSignalingWakeTest {
         CallSignalingBodyKind.GROUP_JOIN to 15,
         CallSignalingBodyKind.GROUP_LEAVE to 16,
         CallSignalingBodyKind.SCREEN_SHARE to 17,
+        CallSignalingBodyKind.MEDIA_STATE to 18,
     )
 
     private val callId: ByteArray = ByteArray(16) { (0xA0 + it).toByte() }
@@ -142,6 +143,27 @@ class CallSignalingWakeTest {
         assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(short))
         assertEquals(CallSignalingBodyKind.SCREEN_SHARE, callSignalingBodyKind(long))
         assertFalse(shouldWakeForCallSignaling(long, CallSignalingWake.CALL))
+    }
+
+    /** A one-to-one call's camera and microphone state (field 18,
+     *  2026-11-07): the two-byte tag 0x92 0x01. Without it the frame fell
+     *  through to the chat parser and rendered as a garbage bubble or
+     *  notification. It never wakes. */
+    @Test
+    fun media_state_is_call_signaling_and_never_wakes() {
+        // camera_on = 2 (0x10 0x01), microphone_on = 3 (0x18 0x01).
+        val both = frame(CallSignalingBodyKind.MEDIA_STATE, byteArrayOf(0x10, 0x01, 0x18, 0x01))
+        val muted = frame(CallSignalingBodyKind.MEDIA_STATE)
+        assertEquals(0x92, both[0].toInt() and 0xFF)
+        assertEquals(0x01, both[1].toInt() and 0xFF)
+        assertEquals(CallSignalingBodyKind.MEDIA_STATE, callSignalingBodyKind(both))
+        assertEquals(CallSignalingBodyKind.MEDIA_STATE, callSignalingBodyKind(muted))
+        assertTrue(me.lakko.app.chat.looksLikeCallSignaling(both))
+        assertFalse(shouldWakeForCallSignaling(both, CallSignalingWake.CALL))
+        assertFalse(shouldWakeForCallSignaling(muted, CallSignalingWake.CALL))
+        // A lone or wrongly continued 0x92 is not the tag.
+        assertNull(callSignalingBodyKind(byteArrayOf(0x92.toByte())))
+        assertNull(callSignalingBodyKind(byteArrayOf(0x92.toByte(), 0x02, 0x16, 0x0A, 0x10)))
     }
 
     // -----------------------------------------------------------------

@@ -557,8 +557,12 @@
       "text": "این تماس رمزگذاری شده است. نمایش شماره امنیتی",
       "status": "machine"
     },
-    "call.encryption.compare_hint": {
-      "text": "این شماره‌ها را بلند بخوانید. اگر روی هر دو گوشی یکسان باشند، کسی گوش نمی‌دهد.",
+    "call.encryption.compare_hint_group": {
+      "text": "همه افراد این تماس همین شماره را می‌بینند. آن را بلند بخوانید. اگر روی همه دستگاه‌ها یکسان باشد، کس دیگری گوش نمی‌دهد.",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint_one_to_one": {
+      "text": "این شماره را برای هم بلند بخوانید. اگر روی هر دو دستگاه یکسان باشد، کس دیگری گوش نمی‌دهد.",
       "status": "machine"
     },
     "call.encryption.copy_a11y": {

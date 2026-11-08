@@ -50,6 +50,10 @@ private final class VideoPublishStateRelay {
 /// calls already run on — no new concurrency.
 private final class CameraStateTracker {
     var lastKnownCameraOn: [String: Bool] = [:]
+    /// The microphone each remote peer last announced, keyed like the camera
+    /// map (`"peer-<peerId>"`). A state that arrives before the peer's tile
+    /// exists is not lost: the tile is built from it.
+    var lastKnownMicOn: [String: Bool] = [:]
 }
 
 /// Per-participant remote-video probes, and which participants have actually
@@ -106,6 +110,9 @@ final class SfuCallUi {
     /// Who is speaking, read on this device from the call's own audio
     /// (`docs/ux/group-call-grid.md` section 7.3).
     private let speaking: GroupSpeakingMonitor
+    /// The remote camera / microphone states last announced, cleared on
+    /// hang-up.
+    private let mediaTracker: CameraStateTracker
 
     /// Optional observer for the mid-call camera-on lifecycle (piece B) —
     /// the analog of the web `onVideoPublishState`. Set it to drive a
@@ -133,6 +140,7 @@ final class SfuCallUi {
         // Sticky last-known remote camera state (join-race guard, below).
         // Captured by the media-state / track / peer-left closures, not `self`.
         let cameraTracker = CameraStateTracker()
+        self.mediaTracker = cameraTracker
         // Per-participant video probes — what makes a two-person group call
         // able to reach the video layout at all (see `RemotePictureTracker`).
         let pictureTracker = RemotePictureTracker()
@@ -182,7 +190,11 @@ final class SfuCallUi {
                     audio: audio, video: video)
                 let remotePeers = roster.map(\.peerId).filter { $0 != selfPeerId }
                 peerNames?.setRoster(remotePeers)
-                let remotes = remotePeers.map { Self.remoteParticipant("", peerId: $0) }
+                let remotes = remotePeers.map {
+                    Self.remoteParticipant(
+                        "", peerId: $0,
+                        micOn: cameraTracker.lastKnownMicOn[Self.participantId(forPeer: $0)] ?? true)
+                }
                 ui.setParticipants([local] + remotes)
                 NSLog("SfuCallUi: roster from welcome remotes=%d", remotes.count)
                 // The roster decides whether there is a SOLE remote, which is
@@ -192,7 +204,9 @@ final class SfuCallUi {
             },
             onPeerJoined: { peerId in
                 peerNames?.peerJoined(peerId)
-                ui.participantJoined(Self.remoteParticipant("", peerId: peerId))
+                ui.participantJoined(Self.remoteParticipant(
+                    "", peerId: peerId,
+                    micOn: cameraTracker.lastKnownMicOn[Self.participantId(forPeer: peerId)] ?? true))
                 // A second remote turns a sole-remote call into a gallery.
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
@@ -213,6 +227,7 @@ final class SfuCallUi {
                 // Forget the departed peer's sticky camera state so a later
                 // rejoin under the same id starts from a clean slate.
                 cameraTracker.lastKnownCameraOn.removeValue(forKey: id)
+                cameraTracker.lastKnownMicOn.removeValue(forKey: id)
                 Self.detachProbe(id: id, tracker: pictureTracker)
                 // Drop the departed peer's video track first so its tile
                 // stops rendering a stale last frame before the roster
@@ -321,6 +336,14 @@ final class SfuCallUi {
                 cameraTracker.lastKnownCameraOn[id] = cameraOn
                 ui.setParticipantCamera(id, cameraOn)
             },
+            onRemoteMicrophoneState: { from, microphoneOn in
+                // The person's own word on their microphone: the mute mark on
+                // their tile and in the participant list (group-call-grid
+                // 7.2). Recorded so a tile built later starts from it.
+                let id = Self.participantId(forPeer: from)
+                cameraTracker.lastKnownMicOn[id] = microphoneOn
+                ui.setParticipantMic(id, microphoneOn)
+            },
             onUndecryptableReceiver: { streamId, _ in
                 // One peer's stream will never decode. Mark that peer so its
                 // tile says "Can't decrypt" rather than sitting blank, which is
@@ -415,6 +438,8 @@ final class SfuCallUi {
     /// state callback). Idempotent.
     func hangUp() {
         speaking.stop()
+        mediaTracker.lastKnownCameraOn.removeAll()
+        mediaTracker.lastKnownMicOn.removeAll()
         session.hangUp()
     }
 
@@ -548,15 +573,18 @@ final class SfuCallUi {
         )
     }
 
-    private static func remoteParticipant(
+    /// A remote peer's tile. `micOn` is what the person last announced;
+    /// unmuted until their first media state arrives.
+    static func remoteParticipant(
         _ name: String,
-        peerId: String
+        peerId: String,
+        micOn: Bool = true
     ) -> CallUiState.Participant {
         CallUiState.Participant(
             id: participantId(forPeer: peerId),
             displayName: name,
             isLocal: false,
-            micOn: true,
+            micOn: micOn,
             camOn: false,
             handRaised: false,
             quality: .good,

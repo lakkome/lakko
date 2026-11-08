@@ -652,3 +652,263 @@ final class RemoteLayerControllerTests: XCTestCase {
         XCTAssertLessThan(after.lightMs, before.lightMs + 1_000)
     }
 }
+
+// MARK: - A heavy track that was just bound
+
+/// After each bind of a heavy track the heavy view stays out of sight until
+/// that binding's first frame (the web client's `BindingFrameGate`): the view
+/// cannot be cleared and holds whatever it drew before the bind.
+final class HeavyBindingGateTests: XCTestCase {
+
+    func testABoundTrackIsHiddenUntilItsFirstFrameIsRevealed() {
+        var gate = HeavyBindingGate()
+        let generation = gate.bind(hasTrack: true)
+        XCTAssertFalse(gate.visible)
+
+        XCTAssertTrue(gate.firstFrame(generation: generation))
+        XCTAssertFalse(gate.visible, "shown only after the reveal delay")
+        XCTAssertTrue(gate.reveal(generation: generation))
+        XCTAssertTrue(gate.visible)
+
+        // Later frames and a second reveal change nothing.
+        XCTAssertFalse(gate.firstFrame(generation: generation))
+        XCTAssertFalse(gate.reveal(generation: generation))
+        XCTAssertTrue(gate.visible)
+    }
+
+    func testARebindHidesTheViewAgainAndIgnoresTheEarlierBinding() {
+        var gate = HeavyBindingGate()
+        let first = gate.bind(hasTrack: true)
+        XCTAssertTrue(gate.firstFrame(generation: first))
+        XCTAssertTrue(gate.reveal(generation: first))
+        XCTAssertTrue(gate.visible)
+
+        // The tile shows the light picture alone, then asks for the heavy
+        // one again.
+        _ = gate.bind(hasTrack: false)
+        XCTAssertFalse(gate.visible)
+        let again = gate.bind(hasTrack: true)
+        XCTAssertFalse(gate.visible)
+
+        // A frame or a reveal of the earlier binding, arriving late, is not
+        // this binding's.
+        XCTAssertFalse(gate.firstFrame(generation: first))
+        XCTAssertFalse(gate.reveal(generation: first))
+        XCTAssertFalse(gate.visible)
+
+        XCTAssertTrue(gate.firstFrame(generation: again))
+        XCTAssertTrue(gate.reveal(generation: again))
+        XCTAssertTrue(gate.visible)
+    }
+
+    func testARevealWithoutAFirstFrameShowsNothing() {
+        var gate = HeavyBindingGate()
+        let generation = gate.bind(hasTrack: true)
+        XCTAssertFalse(gate.reveal(generation: generation))
+        XCTAssertFalse(gate.visible)
+    }
+
+    func testNoTrackIsNeverVisible() {
+        var gate = HeavyBindingGate()
+        let generation = gate.bind(hasTrack: false)
+        XCTAssertFalse(gate.firstFrame(generation: generation))
+        XCTAssertFalse(gate.reveal(generation: generation))
+        XCTAssertFalse(gate.visible)
+    }
+
+    func testTheLatchLetsOneCallThrough() {
+        let latch = FirstFrameLatch()
+        XCTAssertTrue(latch.take())
+        XCTAssertFalse(latch.take())
+        XCTAssertFalse(latch.take())
+    }
+}
+
+final class LayeredPictureArrangementTests: XCTestCase {
+
+    func testAHeavyPictureNotYetPlayingIsBehindTheLightOneWhateverTheRuleSays() {
+        for shown in [ShownLayer.full, .light] {
+            XCTAssertEqual(
+                LayeredPictureArrangement(shown: shown, heavyVisible: false, hasLight: true).front,
+                .light)
+        }
+    }
+
+    func testAPlayingHeavyPictureFollowsTheRule() {
+        XCTAssertEqual(
+            LayeredPictureArrangement(shown: .full, heavyVisible: true, hasLight: true).front,
+            .heavy)
+        XCTAssertEqual(
+            LayeredPictureArrangement(shown: .light, heavyVisible: true, hasLight: true).front,
+            .light)
+    }
+
+    func testWithoutALightPictureTheHeavyOneIsInFrontAndHiddenUntilItPlays() {
+        let waiting = LayeredPictureArrangement(shown: .full, heavyVisible: false, hasLight: false)
+        XCTAssertEqual(waiting.front, .heavy)
+        XCTAssertFalse(waiting.heavyVisible)
+        let playing = LayeredPictureArrangement(shown: .full, heavyVisible: true, hasLight: false)
+        XCTAssertEqual(playing.front, .heavy)
+        XCTAssertTrue(playing.heavyVisible)
+    }
+}
+
+final class RemoteLayerControllerResyncTests: XCTestCase {
+
+    func testAReplacedHeavyTrackStartsTheRuleAgainOnTheFullPicture() {
+        var now: UInt64 = 1_000
+        let controller = RemoteLayerController(
+            lightAvailable: true, clock: { now }, onMain: { $0() })
+        var told: [ShownLayer] = []
+        controller.onShown = { told.append($0) }
+        while now < 2_000 {
+            controller.mainFrame()
+            controller.lightFrame()
+            controller.tick()
+            now += 50
+        }
+        for _ in 0..<6 {
+            controller.lightFrame()
+            controller.tick()
+            now += 50
+        }
+        XCTAssertEqual(controller.shown, .light)
+
+        controller.resync()
+
+        XCTAssertEqual(controller.shown, .full)
+        XCTAssertEqual(told, [.light, .full])
+    }
+
+    func testInTheBackgroundAResyncTellsNothing() {
+        var now: UInt64 = 1_000
+        let controller = RemoteLayerController(
+            lightAvailable: true, clock: { now }, onMain: { $0() })
+        var told: [ShownLayer] = []
+        controller.onShown = { told.append($0) }
+        while now < 2_000 {
+            controller.mainFrame()
+            controller.lightFrame()
+            controller.tick()
+            now += 50
+        }
+        for _ in 0..<6 {
+            controller.lightFrame()
+            controller.tick()
+            now += 50
+        }
+        controller.suspend()
+
+        controller.resync()
+
+        XCTAssertEqual(controller.shown, .light)
+        XCTAssertEqual(told, [.light])
+    }
+}
+
+/// The tile itself, over real libwebrtc tracks fed by hand: a frame pushed into
+/// a track's source reaches the tile's sinks as a decoded frame would.
+final class LayeredRemoteVideoUIViewBindingTests: XCTestCase {
+
+    private static let factory = RTCPeerConnectionFactory()
+
+    private struct Feed {
+        let source: RTCVideoSource
+        let track: RTCVideoTrack
+    }
+
+    private func feed(_ id: String) -> Feed {
+        let source = Self.factory.videoSource()
+        return Feed(source: source, track: Self.factory.videoTrack(with: source, trackId: id))
+    }
+
+    private var frameCount: Int64 = 0
+
+    /// Push one 64x64 frame into `feed`'s track.
+    private func push(_ feed: Feed) {
+        var pixelBuffer: CVPixelBuffer?
+        CVPixelBufferCreate(
+            kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            nil, &pixelBuffer)
+        guard let pixelBuffer else { return XCTFail("no pixel buffer") }
+        frameCount += 1
+        let frame = RTCVideoFrame(
+            buffer: RTCCVPixelBuffer(pixelBuffer: pixelBuffer),
+            rotation: ._0,
+            timeStampNs: Int64(DispatchTime.now().uptimeNanoseconds) + frameCount)
+        feed.source.capturer(RTCVideoCapturer(delegate: feed.source), didCapture: frame)
+    }
+
+    /// Let the main queue run past the reveal delay.
+    private func settle() {
+        let done = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(Int(HeavyBindingGate.revealDelayMs) + 100)
+        ) { done.fulfill() }
+        wait(for: [done], timeout: 2)
+    }
+
+    @MainActor
+    func testAHeavyTrackBoundAgainStaysBehindTheLightOneUntilItPlaysAgain() {
+        let main = feed("main")
+        let light = feed("light")
+        let view = LayeredRemoteVideoUIView(peerId: "p1", contentMode: .scaleAspectFill)
+        defer { view.teardown() }
+
+        view.setTracks(heavy: main.track, light: light.track)
+        XCTAssertEqual(view.arrangement.front, .light, "nothing played yet")
+        XCTAssertFalse(view.arrangement.heavyVisible)
+
+        push(main)
+        push(light)
+        settle()
+        XCTAssertTrue(view.arrangement.heavyVisible)
+        XCTAssertEqual(view.arrangement.front, .heavy)
+
+        // The tile shows the light picture alone for a while.
+        view.setTracks(heavy: nil, light: light.track)
+        push(light)
+        settle()
+        XCTAssertEqual(view.arrangement.front, .light)
+        XCTAssertFalse(view.arrangement.heavyVisible)
+
+        // It asks for the heavy picture again: the view still holds the frame
+        // it drew before, so it stays behind until the track plays.
+        view.setTracks(heavy: main.track, light: light.track)
+        settle()
+        XCTAssertEqual(view.arrangement.front, .light)
+        XCTAssertFalse(view.arrangement.heavyVisible)
+
+        push(main)
+        push(light)
+        settle()
+        XCTAssertTrue(view.arrangement.heavyVisible)
+        XCTAssertEqual(view.arrangement.front, .heavy)
+    }
+
+    @MainActor
+    func testWithoutACompanionAReplacedHeavyTrackIsTransparentUntilItPlays() {
+        let main = feed("main")
+        let middle = feed("middle")
+        let view = LayeredRemoteVideoUIView(peerId: "p2", contentMode: .scaleAspectFill)
+        defer { view.teardown() }
+
+        view.setTracks(heavy: main.track, light: nil)
+        push(main)
+        settle()
+        XCTAssertTrue(view.arrangement.heavyVisible)
+
+        view.setTracks(heavy: middle.track, light: nil)
+        XCTAssertFalse(view.arrangement.heavyVisible)
+        XCTAssertEqual(view.arrangement.front, .heavy)
+
+        // A frame of the track it left is not this binding's.
+        push(main)
+        settle()
+        XCTAssertFalse(view.arrangement.heavyVisible)
+
+        push(middle)
+        settle()
+        XCTAssertTrue(view.arrangement.heavyVisible)
+    }
+}

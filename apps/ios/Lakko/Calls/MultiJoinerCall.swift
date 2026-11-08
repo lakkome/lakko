@@ -196,6 +196,10 @@ final class MultiJoinerCall {
     /// a track arrival only defers to it. `@MainActor`-confined like the
     /// rest of this class — no new concurrency.
     private var lastKnownCameraOn: [String: Bool] = [:]
+    /// The microphone each remote peer last announced, keyed like
+    /// ``lastKnownCameraOn``. A state that arrives before the peer's tile
+    /// exists is not lost: the tile is built from it.
+    private var lastKnownMicOn: [String: Bool] = [:]
     /// The sharers' screen tracks and their first-frame probes (ADR-0083).
     private let screenTracks = ScreenShareTracks()
     /// Who is speaking, read on this device from the call's own audio
@@ -310,6 +314,14 @@ final class MultiJoinerCall {
                 // track arrival for a muted peer defers to it (join-race guard).
                 self.lastKnownCameraOn[id] = cameraOn
                 self.ui.setParticipantCamera(id, cameraOn)
+            },
+            onRemoteMicrophoneState: { [weak self] from, microphoneOn in
+                // The person's own word on their microphone: the mute mark on
+                // their tile and in the participant list (group-call-grid 7.2).
+                guard let self else { return }
+                let id = "peer-\(from)"
+                self.lastKnownMicOn[id] = microphoneOn
+                self.ui.setParticipantMic(id, microphoneOn)
             },
             onRemoteLightVideoTrack: { [weak self] track, peerId in
                 // The light companion of that peer's camera (``LightStream``):
@@ -566,6 +578,8 @@ final class MultiJoinerCall {
         clearRebroadcast()
         clearOwnerProbe()
         speaking.stop()
+        lastKnownCameraOn.removeAll()
+        lastKnownMicOn.removeAll()
         session.hangUp()
     }
 
@@ -723,6 +737,7 @@ final class MultiJoinerCall {
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
         lastKnownCameraOn.removeValue(forKey: id)
+        lastKnownMicOn.removeValue(forKey: id)
         // Their screen's picture goes with them; the share ends in the fold.
         screenTracks.attach(nil, sharer: id, ui: ui)
         names.peerLeft(peerId)
@@ -752,7 +767,7 @@ final class MultiJoinerCall {
             // must apply, or a member's sealed profile.
             onMaybeCommit(from: from, env.payload)
         case .mediaState:
-            // Camera-off-cleanup: a camera on/off signal is intercepted +
+            // Camera-off-cleanup: a camera / microphone signal is intercepted +
             // handled in `SfuCallSession.dispatchSignalRelay` (it fires
             // `onRemoteMediaState`, never `onSignalRelay`), so it never reaches
             // this multi-joiner dispatcher. The case is present only to keep the
@@ -1156,7 +1171,9 @@ final class MultiJoinerCall {
             id: "\(peerPrefix)\(peerId)",
             displayName: name,
             isLocal: false,
-            micOn: true,
+            // What the person last announced; unmuted until their first
+            // media state arrives.
+            micOn: lastKnownMicOn["\(peerPrefix)\(peerId)"] ?? true,
             camOn: false,
             handRaised: false,
             quality: .good,

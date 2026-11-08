@@ -66,22 +66,60 @@ final class CallPeerNameTests: XCTestCase {
         XCTAssertEqual(CallPeerName.placeholder, ResolvedDisplayName.placeholderMember)
     }
 
-    // MARK: - The encryption sheet's sentence
+    // MARK: - The encryption sheet's sentence and line
 
-    func testTheEncryptionSentenceNamesTheOtherPerson() {
-        XCTAssertEqual(
-            l10nPlain(CallPeerName.encryptionSentence(peerName: "Anna")),
-            "Only you and Anna can hear this call.")
+    private static let groupSentence = "Only the people on this call can hear it."
+    private static let oneToOneHint =
+        "Read the number aloud to each other. If it matches on both devices, no one else is listening."
+    private static let groupHint =
+        "Everyone in this call sees the same number. Read it aloud. If it matches on every device, no one else is listening."
+
+    func testTheEncryptionSentenceNamesTheOtherPersonOnAOneToOneCall() {
+        for others in [0, 1] {
+            XCTAssertEqual(
+                l10nPlain(CallPeerName.encryptionSentence(
+                    peerName: "Anna", groupCall: false, othersInCall: others)),
+                "Only you and Anna can hear this call.")
+        }
     }
 
-    /// With no name the sentence must stay true for a group call too, where
-    /// there is no single "other person".
+    /// With no name the sentence must stay true rather than inventing one.
     func testTheEncryptionSentenceInventsNoNameWhenThereIsNone() {
         XCTAssertEqual(
-            CallPeerName.encryptionSentence(peerName: nil),
-            "Only the people on this call can hear it.")
+            CallPeerName.encryptionSentence(peerName: nil, groupCall: false, othersInCall: 1),
+            Self.groupSentence)
         XCTAssertEqual(
-            CallPeerName.encryptionSentence(peerName: "  "),
-            "Only the people on this call can hear it.")
+            CallPeerName.encryptionSentence(peerName: "  ", groupCall: false, othersInCall: 1),
+            Self.groupSentence)
+    }
+
+    /// The 2026-11-07 defect: a group call's sheet named one participant,
+    /// claiming a two-person call. A group or link call names nobody, and a
+    /// call with more than one other person reads as a group call.
+    func testTheEncryptionSentenceNeverNamesOnePersonInAGroupCall() {
+        for others in [0, 1, 2, 7] {
+            XCTAssertEqual(
+                CallPeerName.encryptionSentence(peerName: "Anna", groupCall: true, othersInCall: others),
+                Self.groupSentence)
+        }
+        XCTAssertEqual(
+            CallPeerName.encryptionSentence(peerName: "Anna", groupCall: false, othersInCall: 2),
+            Self.groupSentence)
+    }
+
+    func testTheEncryptionHintFollowsTheKindOfCall() {
+        XCTAssertEqual(
+            CallPeerName.encryptionHint(groupCall: false, othersInCall: 1), Self.oneToOneHint)
+        XCTAssertEqual(
+            CallPeerName.encryptionHint(groupCall: false, othersInCall: 0), Self.oneToOneHint)
+        for others in [0, 1, 4] {
+            XCTAssertEqual(
+                CallPeerName.encryptionHint(groupCall: true, othersInCall: others), Self.groupHint)
+        }
+        XCTAssertEqual(
+            CallPeerName.encryptionHint(groupCall: false, othersInCall: 3), Self.groupHint)
+        for hint in [Self.oneToOneHint, Self.groupHint] {
+            XCTAssertFalse(hint.lowercased().contains("phone"))
+        }
     }
 }

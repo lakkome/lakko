@@ -143,6 +143,9 @@ internal enum class CallSignalingBodyKind {
     GROUP_LEAVE,
     /** ADR-0083: a one-to-one call's screen-share state (field 17). */
     SCREEN_SHARE,
+    /** A one-to-one call's camera and microphone state (field 18,
+     *  2026-11-07). Never a wake. */
+    MEDIA_STATE,
 }
 
 /**
@@ -161,6 +164,8 @@ internal enum class CallSignalingBodyKind {
  *   field 17 (screen_share) -> 0x8A 0x01 (tag 138, ADR-0083; missing here until
  *                            2026-10-29, so a one-to-one call's share state
  *                            rendered as a garbage chat bubble)
+ *   field 18 (media_state) -> 0x92 0x01 (tag 146; a one-to-one call's camera
+ *                            and microphone state, 2026-11-07)
  *
  * A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...` service
  * envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -209,6 +214,11 @@ internal fun callSignalingBodyKind(bytes: ByteArray): CallSignalingBodyKind? {
         // The share state carries a signature, so this body can pass 127 bytes
         // and its length is then a two-byte varint.
         return if (opensWithCallIdAfterVarint(bytes, 2)) CallSignalingBodyKind.SCREEN_SHARE else null
+    }
+    if (first == 0x92 && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01) {
+        // `call_id` plus two booleans: always far below 128 bytes, so the
+        // length is one varint byte.
+        return if (opensWithCallId(bytes, 2)) CallSignalingBodyKind.MEDIA_STATE else null
     }
     return null
 }

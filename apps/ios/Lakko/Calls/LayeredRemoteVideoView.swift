@@ -18,10 +18,22 @@ import WebRTC
 /// each attached to its own track for as long as the tile lives, and the one
 /// ``RemoteLayerController`` names is in front.
 ///
-/// When the heavy track is replaced by another (a tile that changed size, a
-/// middle track arriving), the heavy view keeps the frame it last drew until
-/// the new track's first frame; if that takes long enough for the shared rule
-/// to call the picture standing, the light one comes to the front meanwhile.
+/// ## A heavy track that was just bound shows nothing until it plays
+///
+/// `RTCMTLVideoView` cannot be cleared (`renderFrame(nil)` draws nothing), so
+/// the heavy view holds the last frame it drew, from whatever track it was on,
+/// for as long as it lives. After each bind of a heavy track (a tile that
+/// changed size, a middle track arriving, the tile asking for its main or
+/// middle picture again after showing the light one alone, possibly minutes
+/// later) the heavy view is therefore kept out of sight until the first frame
+/// that binding delivers (``HeavyBindingGate``): behind the light view when
+/// there is one, transparent when there is not. The web client does the same
+/// (`BindingFrameGate`, `apps/web/src/calls/video-frame-watch.ts`).
+/// libwebrtc does not replay a track's last frame to a newly added renderer,
+/// so the first frame a binding's sink reports was decoded after the bind.
+///
+/// A replaced heavy track also starts the shared rule again, as for a new tile
+/// (``RemoteLayerController/resync()``), as the web and Android clients do.
 /// With no heavy track the light one is in front whatever the rule says.
 ///
 /// ## Why stacking order, not alpha and not one renderer fed from two tracks
@@ -34,8 +46,9 @@ import WebRTC
 /// last frame of the hidden track and re-sent its size, which is a second
 /// renderer written by hand. Alpha would work as well as order; order leaves
 /// both views fully opaque, so nothing about how a transparent Metal layer is
-/// composited is being relied on. Neither view is ever hidden or removed by a
-/// switch.
+/// composited is being relied on. Neither view is hidden or removed by a
+/// switch; the heavy view's alpha changes only around a bind, and only when
+/// there is no light view to put in front of it.
 ///
 /// One type for every SFU remote picture, companion or not, so a companion
 /// that arrives after the main track adds a view beside the main one instead
@@ -78,6 +91,14 @@ final class LayeredRemoteVideoUIView: UIView {
 
     private var mainTrack: RTCVideoTrack?
     private var lightTrack: RTCVideoTrack?
+    /// Whether the heavy view may be seen for the track bound to it now.
+    private var heavyGate = HeavyBindingGate()
+    /// Whether ``setTracks(heavy:light:)`` ran before: the first tracks of a
+    /// new tile replace nothing.
+    private var attachedOnce = false
+    /// What the tile shows now: read by tests.
+    private(set) var arrangement = LayeredPictureArrangement(
+        shown: .full, heavyVisible: false, hasLight: false)
     private var mainSink: LayerFrameSink?
     private var lightSink: LayerFrameSink?
 
@@ -148,17 +169,29 @@ final class LayeredRemoteVideoUIView: UIView {
     /// renderer keeps the picture it has.
     func setTracks(heavy: RTCVideoTrack?, light: RTCVideoTrack?) {
         var changed = false
-        if mainTrack !== heavy {
+        if mainTrack !== heavy || !attachedOnce {
             detachMain()
+            let generation = heavyGate.bind(hasTrack: heavy != nil)
             if let heavy {
-                let sink = LayerFrameSink { [controller] in controller.mainFrame() }
+                // Only the binding's first frame crosses to the main thread;
+                // every frame goes to the rule.
+                let first = FirstFrameLatch()
+                let sink = LayerFrameSink { [weak self, controller] in
+                    controller.mainFrame()
+                    guard first.take() else { return }
+                    DispatchQueue.main.async { self?.heavyFirstFrame(generation) }
+                }
                 heavy.add(mainView)
                 heavy.add(sink)
                 mainTrack = heavy
                 mainSink = sink
             }
+            // A heavy picture that takes the place of another starts the rule
+            // again, as on web and Android.
+            if attachedOnce { controller.resync() }
             changed = true
         }
+        attachedOnce = true
         if lightTrack !== light {
             detachLight()
             if let light {
@@ -232,13 +265,117 @@ final class LayeredRemoteVideoUIView: UIView {
         lightSink = nil
     }
 
+    /// The heavy binding `generation` delivered its first frame. It is shown
+    /// a little later, so the view has drawn that frame by then and not the
+    /// one it held from before the bind.
+    private func heavyFirstFrame(_ generation: UInt64) {
+        guard heavyGate.firstFrame(generation: generation) else { return }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(Int(HeavyBindingGate.revealDelayMs))
+        ) { [weak self] in
+            guard let self, self.heavyGate.reveal(generation: generation) else { return }
+            self.apply(self.controller.shown)
+        }
+    }
+
     /// Put the named picture in front. A hard cut: no fade, no badge. With
-    /// no heavy track there is only the light picture to show.
+    /// no heavy track, or one that has not played since it was bound, there
+    /// is only the light picture to show.
     private func apply(_ layer: ShownLayer) {
-        if layer == .light || mainTrack == nil, let lightView {
+        let arrangement = LayeredPictureArrangement(
+            shown: layer, heavyVisible: heavyGate.visible, hasLight: lightView != nil)
+        self.arrangement = arrangement
+        mainView.alpha = arrangement.heavyVisible ? 1 : 0
+        if arrangement.front == .light, let lightView {
             bringSubviewToFront(lightView)
         } else {
             bringSubviewToFront(mainView)
         }
+    }
+}
+
+/// Whether a remote tile's heavy view may be seen for the track bound to it:
+/// not from the bind until shortly after the first frame that binding
+/// delivered (`docs/ux/group-call-grid.md` section 7.5; the web client's
+/// `BindingFrameGate`). Before that the view holds a frame drawn before the
+/// bind, from this track or another one. Main thread only.
+struct HeavyBindingGate {
+
+    /// How long after a binding's first frame reaches the main thread the
+    /// heavy view is shown. `RTCMTLVideoView` stores a frame on the decoder
+    /// thread and draws it on its own draw cycle, so a view shown at once
+    /// could still present the frame it held; this covers more than one draw
+    /// cycle at 30 per second. Chosen from that reading, not measured.
+    static let revealDelayMs: UInt64 = 40
+
+    /// Counts binds; a report from an earlier binding names an older one.
+    private(set) var generation: UInt64 = 0
+    private var bound = false
+    private var firstFrameSeen = false
+    private var revealed = false
+
+    /// A track was bound to the heavy view, or none (`hasTrack` false).
+    /// Returns the binding's generation, for its frame reports.
+    mutating func bind(hasTrack: Bool) -> UInt64 {
+        generation &+= 1
+        bound = hasTrack
+        firstFrameSeen = false
+        revealed = false
+        return generation
+    }
+
+    /// The binding `generation` delivered a frame. `true` when it is the
+    /// current binding's first, so the caller schedules ``reveal(generation:)``.
+    mutating func firstFrame(generation: UInt64) -> Bool {
+        guard bound, generation == self.generation, !firstFrameSeen else { return false }
+        firstFrameSeen = true
+        return true
+    }
+
+    /// The delay after the first frame has passed. `true` when this made the
+    /// heavy view visible.
+    mutating func reveal(generation: UInt64) -> Bool {
+        guard bound, generation == self.generation, firstFrameSeen, !revealed else {
+            return false
+        }
+        revealed = true
+        return true
+    }
+
+    /// The heavy view may be seen.
+    var visible: Bool { bound && revealed }
+}
+
+/// What a remote tile puts in front and whether its heavy view may be seen.
+struct LayeredPictureArrangement: Equatable {
+
+    enum Front: Equatable {
+        case heavy
+        case light
+    }
+
+    let front: Front
+    let heavyVisible: Bool
+
+    /// `shown` is what the shared rule names; `heavyVisible` what
+    /// ``HeavyBindingGate`` allows; `hasLight` whether there is a light view.
+    init(shown: ShownLayer, heavyVisible: Bool, hasLight: Bool) {
+        self.heavyVisible = heavyVisible
+        self.front = hasLight && (shown == .light || !heavyVisible) ? .light : .heavy
+    }
+}
+
+/// Lets one call through, from any thread.
+final class FirstFrameLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    /// `true` the first time only.
+    func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
     }
 }

@@ -430,6 +430,14 @@ export const callActions = {
   setParticipantCamera(id: string, on: boolean): void {
     patchParticipant(id, { camOn: on });
   },
+  /** Set a REMOTE participant's microphone flag from the state that person
+   *  announced (the sealed media-state envelope): `false` shows the mute
+   *  mark on their tile and in the participant list
+   *  (`docs/ux/group-call-grid.md` 7.2). The LOCAL microphone uses `setMic`.
+   *  No-op on unknown id. */
+  setParticipantMic(id: string, on: boolean): void {
+    patchParticipant(id, { micOn: on });
+  },
   /** ADR-0084 - name the person behind a tile (their profile key), for the
    *  photo shown while their camera is off. No-op on unknown id. */
   setParticipantPerson(id: string, personKeyB64: string | null): void {

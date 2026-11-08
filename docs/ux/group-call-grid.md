@@ -388,6 +388,18 @@ is only their name.
 - **Muted**: a mic-off glyph in the danger colour, at the start of the strip. The
   mic-off disc over the middle of the tile (web today) goes: it covers the face,
   and the strip already says it.
+  The same glyph, in the same colour, stands after the person's name in the
+  participants list. **Where the state comes from** (2026-11-07): each person's
+  device says whether its own microphone is on, end-to-end encrypted, in the
+  same call message that carries its camera state, when the person mutes or
+  unmutes, when it connects, and when someone joins (in a one-to-one call, once
+  the call connects and on every change). A remote tile shows no mark until that
+  person's device has said it is muted, and keeps the last state it heard. The
+  message changed form on that date for every client at once (no deployment to
+  stay compatible with): a device built before it and one built after it do not
+  exchange camera or microphone state at all. Before this the mark was drawn
+  only on your own tile: a remote person was created unmuted and nothing ever
+  changed it (seen on a live group call, 2026-11-07).
 - **Name**: one line, truncated with an ellipsis. On tiles narrower than 150 pt
   the first name only.
 - **Connection**: shown only for **Fair** or worse, as a small signal glyph with
@@ -647,6 +659,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 | A **server-announced "peer reconnecting"** with the grace period | 8.2 |
 | A **session resume** for this device, and a clean re-admission path | 8.1. Today a lost connection ends the call (`calls.md` 4.3) |
 | **Video pause / resume per track**, sent by the receiver to the call server, plus a preferred simulcast layer by tile size | 4.5, 6.1, 7.4. The server already selects simulcast layers by bandwidth; asking per track by visibility does not exist |
+| The **remote person's microphone state** (muted or not) | 7.2. Carried, end-to-end encrypted, beside the camera state: in a group call in the sealed relay media-state message (`lakko_contacts::media_state`, version `0x02` only), in a one-to-one call in the call-signalling `MediaState` body (`lakko_calls::signaling`, field 18). Built 2026-11-07 in the core, both FFI surfaces and the web client; iOS and Android to follow. Never inferred from silence: a quiet room and a muted microphone look the same in the audio |
 | A way for the receiver to tell **"not sent to me"** from **"camera off"** | 7.4. Camera off is already signalled by the person themself (the call media-state signal); "not sent" has to come from the server or from this device's own pause request |
 | **Join order** as a stable roster property | 4.4, 5.1 |
 | **Which track is a screen** and whose it is | 6.3. The per-stream index already separates a screen from a camera in the media key (ADR-0035); the roster must expose it |

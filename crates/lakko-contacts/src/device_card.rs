@@ -954,7 +954,7 @@ mod tests {
             .unwrap()
             .is_none());
         for sibling in [
-            crate::media_state::compose_media_state(true),
+            crate::media_state::compose_media_state(true, true),
             crate::committer_beacon::compose_committer_beacon(),
             crate::push_routing::compose_push_routing_secret(7, &[0x11; 32]),
         ] {

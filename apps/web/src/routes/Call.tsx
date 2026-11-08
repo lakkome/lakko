@@ -72,6 +72,7 @@ import {
 } from "../state/call-state";
 import { CallSoundController } from "../calls/CallSoundController";
 import {
+  encryptionSheetHint,
   encryptionSheetSentence,
   safetyNumberGroups,
   safetyNumberSpokenLabel,
@@ -101,7 +102,11 @@ import {
   TileFrameTally,
   type LayerShown,
 } from "../calls/layer-display";
-import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
+import {
+  BindingFrameGate,
+  canWatchVideoFrames,
+  watchVideoFrames,
+} from "../calls/video-frame-watch";
 import {
   askedQuality,
   coversHeavySwap,
@@ -373,7 +378,15 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
   </Show>
 );
 
-const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void }> = (props) => {
+const EncryptionSheet: Component<{
+  /** A group call or a call from a link: the sheet names nobody (§5). */
+  groupCall: boolean;
+  /** Other people in the call now. */
+  othersInCall: number;
+  /** The other person on a one-to-one call. */
+  peerName: string | null;
+  onClose: () => void;
+}> = (props) => {
   const [copied, setCopied] = createSignal(false);
   let doneButton: HTMLButtonElement | undefined;
 
@@ -425,7 +438,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
     >
       <div class="lk-call-modal lk-encryption-sheet">
         <h2 id="lk-encryption-sheet-title">{t("call.encryption.title")}</h2>
-        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
+        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props)}</p>
 
         {/* One atomic thing to a screen reader: `role="img"` with a label that
             pauses between the groups (§8), rather than sixteen digits run
@@ -440,7 +453,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
           </For>
         </p>
 
-        <p class="lk-encryption-sheet-hint">{t("call.encryption.compare_hint")}</p>
+        <p class="lk-encryption-sheet-hint">{encryptionSheetHint(props)}</p>
 
         <div class="lk-encryption-sheet-actions">
           <button type="button" class="ghost" onClick={copy}>
@@ -1429,6 +1442,14 @@ const LocalVideo: Component<{
  * the same pictures were decoded. A little after each bind the element's
  * state and its place on screen are written to the console once
  * (`describeRemotePicture`).
+ *
+ * After each bind the element is transparent until the first frame of the
+ * stream it was given (`BindingFrameGate`, `calls/video-frame-watch.ts`):
+ * Firefox shows a remote track's last decoded frame at once, however old,
+ * and the SFU stops forwarding a camera track nobody wants, so a tile that
+ * switched to such a track showed a frame from minutes earlier. Frames that
+ * are not of the binding are not reported either. Where the element's frames
+ * cannot be observed at all it is never held transparent.
  */
 const LayerVideo: Component<{
   stream: MediaStream;
@@ -1453,11 +1474,22 @@ const LayerVideo: Component<{
   const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
     (track) => new MediaStream([track]),
   );
+  const gate = new BindingFrameGate();
+  /** Bound, and no frame of the binding presented yet: held transparent. */
+  const [awaitingFrame, setAwaitingFrame] = createSignal(false);
+  const trackOf = (): MediaStreamTrack | undefined => props.stream.getVideoTracks()[0];
   let diagTimer: ReturnType<typeof setTimeout> | undefined;
   const look = (): void => {
     if (el === undefined) return;
     if (!el.muted) el.muted = true;
-    if (!binder.sync(el, props.stream)) return;
+    const at = performance.now();
+    if (!binder.sync(el, props.stream)) {
+      // A browser whose frames cannot be observed is never held transparent.
+      if (awaitingFrame() && !canWatchVideoFrames(el, trackOf)) setAwaitingFrame(false);
+      return;
+    }
+    gate.bind(at);
+    setAwaitingFrame(canWatchVideoFrames(el, trackOf));
     if (PICTURES_THROUGH_CANVAS) picture.restart();
     if (diagTimer !== undefined) clearTimeout(diagTimer);
     if (binder.track() === null) return;
@@ -1492,9 +1524,14 @@ const LayerVideo: Component<{
     const timer = setInterval(look, PREVIEW_CHECK_MS);
     const stopFrames = watchVideoFrames(
       el,
-      (now) => props.onFrame(now),
+      (now, frame) => {
+        // A frame the track decoded before this element was given it.
+        if (!gate.admit(frame)) return;
+        if (awaitingFrame()) setAwaitingFrame(false);
+        props.onFrame(now);
+      },
       // Read each time: the stream this element plays can be replaced.
-      () => props.stream.getVideoTracks()[0],
+      trackOf,
     );
     onCleanup(() => {
       clearInterval(timer);
@@ -1506,10 +1543,17 @@ const LayerVideo: Component<{
       props.elRef(undefined);
     });
   });
+  /** Held transparent while awaiting the binding's first frame, whether or
+   *  not the element is one of two stacked pictures. */
+  const shown = (): boolean | undefined => (awaitingFrame() ? false : props.shown);
+  const cls = (): string =>
+    shown() !== undefined && !props.class.includes("lk-call-layer")
+      ? `${props.class} lk-call-layer`
+      : props.class;
   const video = (
     <video
-      class={props.class}
-      data-shown={props.shown === undefined ? undefined : String(props.shown)}
+      class={cls()}
+      data-shown={shown() === undefined ? undefined : String(shown())}
       aria-label={props.ariaLabel}
       aria-hidden={props.ariaHidden === true ? "true" : undefined}
       autoplay
@@ -1523,8 +1567,8 @@ const LayerVideo: Component<{
     <>
       {video}
       <canvas
-        class={`${props.class} lk-video-canvas`}
-        data-shown={props.shown === undefined ? undefined : String(props.shown)}
+        class={`${cls()} lk-video-canvas`}
+        data-shown={shown() === undefined ? undefined : String(shown())}
         aria-hidden="true"
         ref={canvasEl}
       />
@@ -3331,7 +3375,11 @@ const Call: Component<{
 
       <Show when={encryptionSheetOpen()}>
         <EncryptionSheet
-          peerName={props.peerName ?? remotes()[0]?.displayName ?? null}
+          groupCall={props.group === true}
+          othersInCall={remotes().length}
+          peerName={
+            props.group === true ? null : (props.peerName ?? remotes()[0]?.displayName ?? null)
+          }
           onClose={(): void => {
             setEncryptionSheetOpen(false);
           }}

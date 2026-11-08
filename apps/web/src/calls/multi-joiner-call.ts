@@ -328,6 +328,10 @@ export class MultiJoinerCall {
    *  both callbacks are delivered on the same session scope, so no extra
    *  synchronisation is needed. Cleared on `hangUp`. */
   private readonly lastKnownCameraOn = new Map<string, boolean>();
+  /** The microphone each remote peer last announced (keyed like
+   *  {@link lastKnownCameraOn}); a tile built after the state arrived starts
+   *  from it. Cleared on `hangUp`. */
+  private readonly lastKnownMicOn = new Map<string, boolean>();
 
   private constructor(
     private readonly wasm: WasmModule,
@@ -449,6 +453,13 @@ export class MultiJoinerCall {
           const id = `${PEER_PREFIX}${peerId}`;
           this.lastKnownCameraOn.set(id, cameraOn);
           if (this.current()) callActions.setParticipantCamera(id, cameraOn);
+        },
+        onRemoteMicrophoneState: (peerId, microphoneOn): void => {
+          // The person's own word on their microphone: the mute mark on
+          // their tile and in the participant list (group-call-grid 7.2).
+          const id = `${PEER_PREFIX}${peerId}`;
+          this.lastKnownMicOn.set(id, microphoneOn);
+          if (this.current()) callActions.setParticipantMic(id, microphoneOn);
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
         onRemoteScreenShareState: (peerId, state): void => this.share.onState(peerId, state),
@@ -740,6 +751,7 @@ export class MultiJoinerCall {
     this.clearRebroadcast();
     this.clearOwnerProbe();
     this.lastKnownCameraOn.clear();
+    this.lastKnownMicOn.clear();
     this.share.dispose();
     if (this.current()) screenShareActions.reset();
     if (this.current()) callNameActions.reset();
@@ -900,6 +912,7 @@ export class MultiJoinerCall {
     // Forget the departed peer's sticky camera state so a later rejoin under
     // the same id starts from a clean slate (join-race guard).
     this.lastKnownCameraOn.delete(id);
+    this.lastKnownMicOn.delete(id);
     this.peerNames.delete(peerId);
     this.peerCallNames.delete(peerId);
     this.peerUsernames.delete(peerId);
@@ -1461,7 +1474,8 @@ export class MultiJoinerCall {
       id: `${PEER_PREFIX}${peerId}`,
       displayName,
       isLocal: false,
-      micOn: true,
+      // What the person last announced; unmuted until they say otherwise.
+      micOn: this.lastKnownMicOn.get(`${PEER_PREFIX}${peerId}`) ?? true,
       camOn: false,
       quality: "good",
       speaking: false,
