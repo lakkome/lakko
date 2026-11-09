@@ -110,6 +110,36 @@ public final class LocalCameraCapture {
     /// The camera this capture is on, by its `uniqueID`.
     public var deviceId: String? { device?.uniqueID }
 
+    /// Told on the main queue when iOS interrupts this capture's camera
+    /// (`true`: the app left the screen without multitasking camera access,
+    /// another app took the camera) and when the interruption ends (`false`).
+    ///
+    /// `docs/ux/calls.md` section 4.5.4: the moment the camera is interrupted
+    /// the call tells the others it is off, so they see the avatar rather than
+    /// a frozen frame, and turns it back on by itself when the camera returns.
+    /// The camera button on this device keeps saying on.
+    public var onInterruptionChanged: ((Bool) -> Void)?
+
+    /// The capture session's interruption observers.
+    private var interruptionObservers: [NSObjectProtocol] = []
+
+    private func observeInterruptions() {
+        let center = NotificationCenter.default
+        let session = capturer.captureSession
+        interruptionObservers.append(center.addObserver(
+            forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main
+        ) { [weak self] _ in
+            NSLog("camera capture: interrupted")
+            self?.onInterruptionChanged?(true)
+        })
+        interruptionObservers.append(center.addObserver(
+            forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: .main
+        ) { [weak self] _ in
+            NSLog("camera capture: interruption ended")
+            self?.onInterruptionChanged?(false)
+        })
+    }
+
     /// Construct with the source frames should be delivered
     /// into. The source's lifetime must outlive this
     /// capturer — the standard pattern is to hold both on the
@@ -141,6 +171,7 @@ public final class LocalCameraCapture {
         let picked = Self.pickFormat(for: device)
         self.format = picked.format
         self.targetFps = picked.fps
+        observeInterruptions()
     }
 
     /// The video source the `kind` copy of the camera is sent from in a
@@ -343,6 +374,7 @@ public final class LocalCameraCapture {
     }
 
     deinit {
+        interruptionObservers.forEach(NotificationCenter.default.removeObserver)
         // Safety net: if the consumer forgot to call stop(),
         // tell libwebrtc to release the camera here.
         // stopCapture with no completion-handler is the

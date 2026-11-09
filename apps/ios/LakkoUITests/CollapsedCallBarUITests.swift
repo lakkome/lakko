@@ -3,7 +3,11 @@
 
 import XCTest
 
-/// `docs/ux/calls.md` section 4.5 — the collapsed call bar, on a screen.
+/// `docs/ux/calls.md` section 4.5 — the collapsed call, on a screen. Since
+/// 2026-11-09 it is a small floating window rather than a bar; the file keeps
+/// its name and the fixture its launch value, and the window keeps every one
+/// of the bar's behaviours checked below, plus the drag to a corner and the
+/// tuck past an edge.
 ///
 /// Why this exists next to ``CollapsedCallBarTests``. That file pins the bar as
 /// VALUES — which phase it sees, how long a collapse lasts, the four words, the
@@ -34,7 +38,9 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// The bar's accessibility identifier, so "the bar is on screen" is a
     /// question that can be asked without knowing what state it is in, or in
     /// which language its sentence is read.
-    private let barIdentifier = "collapsed-call-bar"
+    private let barIdentifier = "collapsed-call-window"
+    /// The strip a tucked window leaves at the edge.
+    private let stripIdentifier = "collapsed-call-strip"
     /// `CallStatusText.spokenControlLabel(.microphone, on:)`, both faces.
     private let muteLabel = "Mute microphone"
     private let unmuteLabel = "Unmute microphone"
@@ -76,7 +82,7 @@ final class CollapsedCallBarUITests: XCTestCase {
         let bar = bar()
         XCTAssertTrue(
             bar.waitForExistence(timeout: 20),
-            "the fixture did not present the collapsed call bar")
+            "the fixture did not present the collapsed call window")
 
         XCTAssertTrue(
             bar.label.contains("Connecting"),
@@ -101,7 +107,7 @@ final class CollapsedCallBarUITests: XCTestCase {
     func testAConnectedBarSaysTheRunningTimeInsteadOfAState() throws {
         XCTAssertTrue(
             bar().waitForExistence(timeout: 20),
-            "the fixture did not present the collapsed call bar")
+            "the fixture did not present the collapsed call window")
 
         app.buttons["fixture: connect"].tap()
 
@@ -130,7 +136,7 @@ final class CollapsedCallBarUITests: XCTestCase {
     func testTheBarCarriesNoEndControl() throws {
         XCTAssertTrue(
             bar().waitForExistence(timeout: 20),
-            "the fixture did not present the collapsed call bar")
+            "the fixture did not present the collapsed call window")
         XCTAssertTrue(
             app.buttons[muteLabel].exists,
             "the bar's one control is missing, so 'no End' would be true of an empty bar too")
@@ -153,7 +159,7 @@ final class CollapsedCallBarUITests: XCTestCase {
         let bar = bar()
         XCTAssertTrue(
             bar.waitForExistence(timeout: 20),
-            "the fixture did not present the collapsed call bar")
+            "the fixture did not present the collapsed call window")
         XCTAssertFalse(app.staticTexts["fixture: expanded"].exists)
 
         bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
@@ -182,6 +188,91 @@ final class CollapsedCallBarUITests: XCTestCase {
         XCTAssertFalse(
             app.staticTexts["fixture: expanded"].exists,
             "pressing mute on the bar also brought the call screen back")
+    }
+
+    /// Section 4.5.2 — *"It can be dragged anywhere and lands in the nearest
+    /// corner."* A drag from the top right corner down to the bottom left
+    /// leaves the window in the bottom left quarter of the screen.
+    func testDraggingTheWindowLandsItInTheNearestCorner() throws {
+        let window = bar()
+        XCTAssertTrue(
+            window.waitForExistence(timeout: 20),
+            "the fixture did not present the collapsed call window")
+        let screen = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(
+            window.frame.midX, screen.midX, "the window does not start on the right")
+        XCTAssertLessThan(
+            window.frame.midY, screen.midY, "the window does not start at the top")
+
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        let target = app.windows.firstMatch.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.3, dy: 0.75))
+        start.press(forDuration: 0.1, thenDragTo: target)
+
+        let landed = bar()
+        XCTAssertTrue(landed.waitForExistence(timeout: 5), "the window went away after a drag")
+        // The landing animates; give it a moment to settle.
+        let settled = expectation(for: NSPredicate { _, _ in
+            landed.frame.midX < screen.midX && landed.frame.midY > screen.midY
+        }, evaluatedWith: nil)
+        wait(for: [settled], timeout: 5)
+    }
+
+    /// Section 4.5.2 — *"On a phone, a flick past the left or right edge
+    /// tucks it away"*, leaving a strip; tapping the strip returns the window.
+    func testFlickingPastTheEdgeTucksTheWindowAndTheStripBringsItBack() throws {
+        let window = bar()
+        XCTAssertTrue(
+            window.waitForExistence(timeout: 20),
+            "the fixture did not present the collapsed call window")
+
+        // Grabbed near its left edge and thrown to the screen's right edge, so
+        // the window's centre travels past that edge (a synthesized drag stops
+        // at the screen, and its predicted run-out is short).
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.7))
+        let past = app.windows.firstMatch.coordinate(
+            withNormalizedOffset: CGVector(dx: 1.0, dy: 0.2))
+        start.press(forDuration: 0.05, thenDragTo: past, withVelocity: .fast, thenHoldForDuration: 0)
+
+        let strip = app.descendants(matching: .any)[stripIdentifier].firstMatch
+        XCTAssertTrue(
+            strip.waitForExistence(timeout: 5),
+            "a flick past the right edge did not tuck the window into a strip")
+        XCTAssertFalse(bar().exists, "the window is still on screen beside its strip")
+
+        strip.tap()
+        XCTAssertTrue(
+            bar().waitForExistence(timeout: 5),
+            "tapping the strip did not bring the window back")
+        XCTAssertFalse(
+            app.staticTexts["fixture: expanded"].exists,
+            "untucking the window also brought the call screen back")
+    }
+
+    /// A drag that starts on the mute button moves the window and never
+    /// toggles the microphone (the window moves with the finger, so the
+    /// finger never leaves the button; only the whole touch can tell).
+    func testADragStartingOnMuteMovesTheWindowAndLeavesMuteAlone() throws {
+        let mute = app.buttons[muteLabel]
+        XCTAssertTrue(mute.waitForExistence(timeout: 20), "the window did not offer a mute button")
+        let screen = app.windows.firstMatch.frame
+
+        let start = mute.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let target = app.windows.firstMatch.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.3, dy: 0.75))
+        start.press(forDuration: 0.1, thenDragTo: target)
+
+        let window = bar()
+        let landed = expectation(for: NSPredicate { _, _ in
+            window.frame.midX < screen.midX && window.frame.midY > screen.midY
+        }, evaluatedWith: nil)
+        wait(for: [landed], timeout: 5)
+        XCTAssertTrue(
+            app.buttons[muteLabel].exists,
+            "the microphone's state changed: a drag started on mute toggled it")
+        XCTAssertFalse(app.buttons[unmuteLabel].exists)
+        XCTAssertFalse(
+            app.staticTexts["fixture: expanded"].exists, "the drag also brought the call back")
     }
 
     // MARK: - Harness

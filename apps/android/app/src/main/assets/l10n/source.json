@@ -1121,6 +1121,14 @@
       "text": "Incoming call",
       "comment": "Body of the web notification for a call when the call's details could not be read in the background."
     },
+    "call.ongoing.channel_name": {
+      "text": "Ongoing calls",
+      "comment": "Name of the Android notification category for the notification that stays up while a call runs and Lakko is not on the screen, shown in the phone's notification settings."
+    },
+    "call.ongoing.return": {
+      "text": "Tap to return to the call",
+      "comment": "Second line of the notification that stays up while a call runs and Lakko is not on the screen; the first line is who the call is with. Tapping it brings the call back."
+    },
     "call.participant.hand_raised": {
       "text": "Hand raised",
       "comment": "Screen reader label of the hand icon on a participant's tile or row: they want to speak."

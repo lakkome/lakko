@@ -45,7 +45,9 @@ enum UiTestFixture: String {
     /// reporting silence, so a test can see whether the notice reaches a screen.
     case micSilence
 
-    /// `docs/ux/calls.md` section 4.5 — the collapsed call bar on its own.
+    /// `docs/ux/calls.md` section 4.5 — the collapsed call window on its own,
+    /// floating over an empty screen. (The launch value keeps the name it had
+    /// when the collapsed call was a bar.)
     case callBar
 
     /// `docs/ux/message-actions.md` sections 2 and 3 — two messages and the
@@ -364,40 +366,44 @@ private struct MicrophoneSilenceFixture: View {
     }
 }
 
-/// `docs/ux/calls.md` section 4.5 — the production ``CollapsedCallBar`` with
-/// nothing else on screen.
+/// `docs/ux/calls.md` section 4.5 — the production ``FloatingCallWindow``
+/// over an otherwise empty screen.
 ///
-/// Needs no seam: the bar already takes its whole state as arguments, which is
-/// what makes it the one piece of the collapsed call that a test can look at
-/// directly. What the fixture supplies is exactly what ``CallHostOverlay``
-/// supplies from a live call — and the mute toggle mirrors the same shape, since
-/// the production bar shows a value the session publishes rather than one it
-/// keeps.
+/// What the fixture supplies is exactly what ``CallHostOverlay`` supplies from
+/// a live call: a ``CallUiState`` with this device and one other person in it,
+/// the phase, when the call connected, and the two actions. The mute toggle
+/// writes the local participant's `micOn`, which is the whole mute control on
+/// the group path too.
 ///
-/// Everything under test — the one line, the absence of an End control, the tap
-/// that brings the call back, the mute button's two faces — is the shipping
-/// view's own.
+/// Everything under test — the one line, the absence of an End control, the
+/// tap that brings the call back, the mute button's two faces, the drag to a
+/// corner and the tuck — is the shipping view's own.
 private struct CallBarFixture: View {
 
+    @StateObject private var state = CallBarFixture.makeState()
     @State private var phase: CallBarPhase = .connecting
     @State private var connectedAt: Date?
-    @State private var micOn = true
     @State private var expanded = false
+
+    private static func makeState() -> CallUiState {
+        let state = CallUiState()
+        state.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: nil))
+        state.setParticipants([
+            CallUiState.Participant(
+                id: "local", displayName: "", isLocal: true, micOn: true, camOn: false,
+                handRaised: false, quality: .good, speaking: false, screenSharing: false),
+            CallUiState.Participant(
+                id: "remote", displayName: "Anna", isLocal: false, micOn: true, camOn: false,
+                handRaised: false, quality: .good, speaking: false, screenSharing: false),
+        ])
+        return state
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("UI test fixture")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            CollapsedCallBar(
-                label: "Anna",
-                phase: phase,
-                connectedAt: connectedAt,
-                encrypted: true,
-                cameraSending: false,
-                micOn: micOn,
-                onExpand: { expanded = true },
-                onToggleMic: { micOn.toggle() })
             // Standing in for the call screen coming back, which is all
             // `onExpand` does in production (it flips `CallBarHost.collapsed`).
             if expanded {
@@ -412,6 +418,20 @@ private struct CallBarFixture: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .overlay {
+            FloatingCallWindow(
+                state: state,
+                groupCall: false,
+                label: "Anna",
+                phase: phase,
+                connectedAt: connectedAt,
+                peerKey: nil,
+                onExpand: { expanded = true },
+                onToggleMic: {
+                    let micOn = state.participants.first(where: { $0.isLocal })?.micOn ?? true
+                    state.setMic(!micOn)
+                })
+        }
     }
 }
 

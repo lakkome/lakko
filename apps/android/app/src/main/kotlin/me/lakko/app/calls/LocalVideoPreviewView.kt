@@ -49,6 +49,14 @@ public fun LocalVideoPreviewView(
     mirrored: Boolean = true,
     scalingType: RendererCommon.ScalingType =
         RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+    /**
+     * Draw this surface above other video surfaces in the same window (the
+     * own-camera inset of the collapsed call window, `docs/ux/calls.md`
+     * section 4.5.1, which sits over the shown person's picture). Without it
+     * the order of two overlapping surface views is not defined. Read once,
+     * when the view is created.
+     */
+    mediaOverlay: Boolean = false,
 ) {
     // `track` and `mirrored` may flip during the lifetime of
     // the preview (camera switch, remote track swap, etc.).
@@ -66,6 +74,7 @@ public fun LocalVideoPreviewView(
         modifier = modifier,
         factory = { ctx ->
             val view = SurfaceViewRenderer(ctx)
+            if (mediaOverlay) view.setZOrderMediaOverlay(true)
             view.init(eglContext, null)
             view.setScalingType(currentScaling)
             view.setMirror(currentMirrored)

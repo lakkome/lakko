@@ -82,11 +82,10 @@ public fun BoxScope.OneToOneCallOverlay(
     val state by call.session.state.collectAsStateWithLifecycle()
     val name = nameForGroup(call.groupIdHex)
     val personKey = keyForGroup(call.groupIdHex)
-    // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar
-    // across the top of the app, so its screen is not drawn. "One state, one
-    // place": the same flag that hides this screen is what the bar's visibility
-    // rule is handed as `callScreenUp`, so the two can never both be up or both
-    // be gone.
+    // `docs/ux/calls.md` section 4.5 — the call has been put away into the
+    // floating window over the app, so its screen is not drawn. "One state,
+    // one place": the same flag that hides this screen is the one the window
+    // is drawn on, so the two can never both be up or both be gone.
     //
     // This gate covers the ended state too, deliberately. A collapsed call that
     // ends must not throw its `Call ended` screen across whatever the person
@@ -94,13 +93,14 @@ public fun BoxScope.OneToOneCallOverlay(
     // to be interrupted by it." The flag stays set until the next call takes
     // the slot, which is what makes that hold.
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
+    val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
     // Section 4.5 — the CALL's connect moment, so the screen's running time
     // survives being put away and brought back. The screen creates its own
     // `CallUiState`, whose latch is the MOUNT moment in disguise, so this must
     // come from the host. See [me.lakko.app.calls.callClockOrigin].
     val connectedSince by host.connectedSinceMs.collectAsStateWithLifecycle()
     // Which cues this call has played, held here and not by the call screen:
-    // the screen is rebuilt every time the call comes back from the bar and
+    // the screen is rebuilt every time the call comes back from the window and
     // would play the connected sound again on each return.
     val cues = remember(call.session) { me.lakko.app.calls.CallCueTracker() }
     // What the person chose in the call's Settings sheet, for the same reason.
@@ -149,7 +149,10 @@ public fun BoxScope.OneToOneCallOverlay(
                 onDecline = { host.decline() },
             )
         }
-        OneToOneCallPresentation.IN_CALL_SCREEN -> if (collapsed) {
+        // Section 4.5.4 — while the app is in the system's picture-in-picture
+        // window the call's picture is drawn there; the screen comes back as
+        // it was left when the app returns.
+        OneToOneCallPresentation.IN_CALL_SCREEN -> if (collapsed || inPictureInPicture) {
             Unit
         } else Dialog(
             // Section 4.5 — the system back COLLAPSES the call and never ends

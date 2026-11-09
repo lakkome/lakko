@@ -254,7 +254,7 @@ import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { uiRules } from "../chat/ui-rules";
-import { CallBar } from "./CallBar";
+import { CallWindow, type CallWindowSources } from "./CallWindow";
 import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
 import { onCameraBackgroundFailure } from "./background-status";
@@ -397,13 +397,13 @@ export interface CallHostApi {
    *  status elsewhere meanwhile. Returns the release. */
   claimLinkCallView(): () => void;
   /**
-   * The call in the slot has been put away into the bar across the top of the
-   * app (`docs/ux/calls.md` section 4.5).
+   * The call in the slot has been put away into the small window floating
+   * over the app (`docs/ux/calls.md` section 4.5).
    *
    * A property of the CALL, not of a screen: it lives beside the session here
    * rather than in any route, so a navigation cannot touch it and the call
    * stays collapsed across every screen until the person brings it back. It
-   * says nothing about whether the bar is on screen — that is the shared rule's
+   * says nothing about whether the window is on screen — that is the shared rule's
    * answer to this plus the phase (`calls/call-bar-model.ts`).
    */
   readonly callCollapsed: Accessor<boolean>;
@@ -3420,6 +3420,41 @@ export function CallHostView(): JSX.Element {
     if (host.callCollapsed() && callScreenWanted() && !collapsible()) host.expandCall();
   });
 
+  /**
+   * The live call's pictures for the collapsed window (section 4.5.1): the
+   * same functions each kind of call hands its call screen, so the window
+   * draws a person from exactly what their tile would.
+   */
+  const oneToOneWindowSources: CallWindowSources = {
+    remoteStreamFor: (participantId) =>
+      participantId === "peer" ? (internals.remoteStream() ?? undefined) : undefined,
+    localStream: () => internals.localStream() ?? undefined,
+  };
+  const groupWindowSources: CallWindowSources = groupTiles;
+  const linkWindowSources: CallWindowSources = {
+    remoteStreamFor: (participantId) => internals.linkHandle()?.remoteStreamFor(participantId),
+    remoteLightStreamFor: (participantId) => internals.linkHandle()?.remoteLightStreamFor(participantId),
+    remoteMiddleStreamFor: (participantId) =>
+      internals.linkHandle()?.remoteMiddleStreamFor(participantId),
+    remoteVideoGivenFor: (participantId) => internals.linkHandle()?.remoteVideoGivenFor(participantId),
+    reportTileVideoQuality: (tile, participantId, quality) => {
+      internals.linkHandle()?.reportTileVideoQuality(tile, participantId.replace(/^peer-/, ""), quality);
+    },
+    localStream: () => internals.linkHandle()?.localStream() ?? undefined,
+    remoteAudioReceiverFor: (participantId) => internals.linkHandle()?.remoteAudioReceiverFor(participantId),
+  };
+  const windowSources = (): CallWindowSources => {
+    switch (host.callOccupant()) {
+      case "group":
+        return groupWindowSources;
+      case "one-to-one":
+      case null:
+        return oneToOneWindowSources;
+      default:
+        return linkWindowSources;
+    }
+  };
+
   return (
     <>
       {/* Stable slot for the whole call, so remote audio does not cut out when
@@ -3581,16 +3616,21 @@ export function CallHostView(): JSX.Element {
         onInvite={(row) => host.sendLinkCallInvite({ keyB64: row.keyB64, name: row.name })}
       />
 
-      {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the
-          fragment so it paints over the app and under nothing that matters:
-          the call screen it replaces is not up while it is, and the ringing
-          screen and the group-call banner sit above it by z-index. It renders
-          nothing at all without a collapsed call. */}
-      <CallBar
+      {/* The call, put away (`docs/ux/calls.md` section 4.5): one small
+          window floating over the app. Last in the fragment so it paints over
+          the app and under nothing that matters: the call screen it replaces
+          is not up while it is, and the ringing screen and the group-call
+          banner sit above it by z-index. It renders nothing at all without a
+          collapsed call. */}
+      <CallWindow
         peerName={
           host.callOccupant() === "one-to-one"
             ? internals.nameFor(host.callGroupIdB64())
             : null
+        }
+        peerId={host.callOccupant() === "one-to-one" ? host.callGroupIdB64() : null}
+        peerPersonKey={
+          host.callOccupant() === "one-to-one" ? internals.personKeyFor(host.callGroupIdB64()) : null
         }
         groupCall={host.callOccupant() !== null && host.callOccupant() !== "one-to-one"}
         groupName={
@@ -3601,6 +3641,7 @@ export function CallHostView(): JSX.Element {
         ringing={host.state() === "ringing"}
         callScreenUp={callScreenUp()}
         onExpand={() => host.expandCall()}
+        sources={windowSources()}
       />
 
       <LinkCallNoticeView />

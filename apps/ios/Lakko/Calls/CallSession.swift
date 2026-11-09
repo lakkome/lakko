@@ -125,7 +125,30 @@ public final class CallSession: ObservableObject {
     /// SwiftUI view recompose. Nil when the call is audio-
     /// only or before `completeDial` / `completeAccept` has
     /// fired.
-    private var localCameraCapture: LocalCameraCapture?
+    private var localCameraCapture: LocalCameraCapture? {
+        didSet {
+            guard oldValue !== localCameraCapture else { return }
+            oldValue?.onInterruptionChanged = nil
+            localCameraCapture?.onInterruptionChanged = { [weak self] interrupted in
+                MainActor.assumeIsolated { self?.setCameraInterrupted(interrupted) }
+            }
+            if localCameraCapture == nil { setCameraInterrupted(false) }
+        }
+    }
+
+    /// iOS interrupted the camera (`docs/ux/calls.md` section 4.5.4): the app
+    /// left the screen and may not keep the camera. While it lasts the other
+    /// side is told the camera is off, so they see the avatar rather than a
+    /// frozen frame; `cameraEnabled`, and so the camera button here, is left
+    /// alone, because the person did not turn the camera off.
+    private var cameraInterrupted = false
+
+    /// The camera was interrupted (`true`) or came back (`false`).
+    func setCameraInterrupted(_ interrupted: Bool) {
+        guard cameraInterrupted != interrupted else { return }
+        cameraInterrupted = interrupted
+        announceMediaStateIfChanged()
+    }
 
     /// G3-1-video-ui — observable for the SwiftUI preview
     /// overlay. The CallScreenView reads this via @ObservedObject
@@ -602,7 +625,7 @@ public final class CallSession: ObservableObject {
     /// Whether this device sends a picture: a camera track that exists and
     /// is switched on.
     private var localCameraIsOn: Bool {
-        cameraEnabled && localVideoTrack != nil
+        cameraEnabled && localVideoTrack != nil && !cameraInterrupted
     }
 
     /// Tell the other side this device's camera and microphone state (the

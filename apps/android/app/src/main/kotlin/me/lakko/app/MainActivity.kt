@@ -192,6 +192,9 @@ class MainActivity : ComponentActivity() {
         // getMethod calls) and the result is cached for the
         // process lifetime.
         me.lakko.sframe.SFrameAvailability.bootProbe()
+        // docs/ux/calls.md section 4.5.4 — an activity recreated while in the
+        // system's picture-in-picture window starts out knowing it.
+        me.lakko.app.calls.CallPictureInPicture.setActive(isInPictureInPictureMode)
 
         // One set per process, not per Activity: a configuration change
         // recreates this Activity, and a second set built here would run
@@ -440,6 +443,24 @@ class MainActivity : ComponentActivity() {
     override fun onUserInteraction() {
         super.onUserInteraction()
         me.lakko.app.devices.DeviceCardCenter.noteAction()
+    }
+
+    /**
+     * `docs/ux/calls.md` section 4.5.4 — on Android 8 to 11 the system window
+     * is entered when the person leaves the app with home or a switch during a
+     * call; on 12 and later the platform enters it by itself.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        me.lakko.app.calls.CallPictureInPicture.onUserLeaveHint(this)
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: android.content.res.Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        me.lakko.app.calls.CallPictureInPicture.setActive(isInPictureInPictureMode)
     }
 
     override fun onPause() {
@@ -878,18 +899,6 @@ private fun AppRoot(
             val updateDecision by releaseChecker.decision.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
             val shownUpdate = updateDecision as? UpdateBannerDecision.Shown
-            // docs/ux/calls.md section 4.5 — the live call, put away. Resolved
-            // here rather than inside `SessionRoot` so that "no bar" is a `null`
-            // slot and the top strip reserves nothing when there is no call.
-            // The name resolvers are the ones the call screens use, so the bar
-            // says exactly what the screen it came from says.
-            val callBarModel = me.lakko.app.ui.call.rememberCollapsedCallBar(
-                oneToOne = callHost,
-                group = me.lakko.app.calls.AppCallHost.group,
-                link = me.lakko.app.calls.AppCallHost.link,
-                nameForOneToOne = resolveOneToOneName,
-                groupNameFor = resolveGroupName,
-            )
             // Everything a session's screens keep (their ViewModels, the back
             // stack) belongs to ONE account's session: see [SessionViewModels].
             SessionViewModels(accountIdB64 = current.account.accountIdB64) {
@@ -918,17 +927,6 @@ private fun AppRoot(
                                 onDismiss = { releaseChecker.dismiss() },
                             )
                         }
-                    }
-                },
-                callBar = callBarModel?.let { bar ->
-                    {
-                        me.lakko.app.ui.call.CollapsedCallBar(
-                            model = bar,
-                            onExpand = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
-                            onToggleMute = { on ->
-                                me.lakko.app.calls.AppCallHost.setCurrentCallMicrophoneEnabled(on)
-                            },
-                        )
                     }
                 },
             )
@@ -1065,6 +1063,36 @@ private fun AppRoot(
                 }
             },
         )
+        // docs/ux/calls.md section 4.5 — the live call, put away into one
+        // small window over every screen (it replaced the bar across the top
+        // of the app), and, when the app leaves the screen during a call, the
+        // same picture in the system's own picture-in-picture window (4.5.4).
+        // The name resolvers are the ones the call screens use, so the window
+        // says exactly what the screen it came from says. Drawn last, so it
+        // floats over every session screen; the call screens are their own
+        // windows and are never up at the same time as it.
+        val miniWindow = me.lakko.app.ui.call.rememberCallMiniWindow(
+            oneToOne = callHost,
+            group = me.lakko.app.calls.AppCallHost.group,
+            link = me.lakko.app.calls.AppCallHost.link,
+            nameForOneToOne = resolveOneToOneName,
+            keyForOneToOne = { chatRepository.oneToOnePeerKey(it) },
+            groupNameFor = resolveGroupName,
+        )
+        me.lakko.app.ui.call.CallPictureInPictureEffect(miniWindow)
+        // Section 4.5.4 — the call keeps running, with its ongoing
+        // notification, while Lakko is not on the screen.
+        me.lakko.app.ui.call.OngoingCallServiceEffect(miniWindow)
+        val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+        if (inPictureInPicture && miniWindow != null) {
+            me.lakko.app.ui.call.CallPictureInPictureContent(miniWindow)
+        } else {
+            me.lakko.app.ui.call.CallMiniWindowHost(
+                model = miniWindow,
+                onExpand = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
+                onToggleMute = { on -> me.lakko.app.calls.AppCallHost.setCurrentCallMicrophoneEnabled(on) },
+            )
+        }
     }
 
     // ADR-0037 (G-11) — rollback-gate overlays, shown OVER any auth state (the
@@ -1286,16 +1314,6 @@ private fun SessionRoot(
     forgetDeviceSlot: ForgetDeviceSlot,
     /** The security / update banners, drawn above the tab content. */
     banners: (@Composable () -> Unit)?,
-    /**
-     * `docs/ux/calls.md` section 4.5 — the collapsed call bar, drawn across the
-     * top of the app above every screen and above [banners].
-     *
-     * `null` when there is no bar, which is what keeps the status-bar inset from
-     * being reserved for nothing. It sits ABOVE the notices rather than under
-     * them because it is a live control and not a notice: a person reaching for
-     * Mute must not have it move because an update notice appeared underneath.
-     */
-    callBar: (@Composable () -> Unit)?,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
     // identity-secrets value lands. The first non-null emission
@@ -2222,14 +2240,14 @@ private fun SessionRoot(
                 .padding(padding)
                 .consumeWindowInsets(padding),
         ) {
-            // One strip at the top of the app: the collapsed call bar first,
-            // then the notices. It carries the status-bar inset and the NavHost
-            // consumes it, so nothing here covers the status bar and no screen
-            // pads for it twice.
-            val topStrip = callBar != null || banners != null
+            // The notices at the top of the app. The strip carries the
+            // status-bar inset and the NavHost consumes it, so nothing here
+            // covers the status bar and no screen pads for it twice. A call
+            // that was put away is not here: it floats over the app
+            // (`docs/ux/calls.md` section 4.5, `CallMiniWindowHost`).
+            val topStrip = banners != null
             if (topStrip) {
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-                    callBar?.invoke()
                     banners?.invoke()
                 }
             }

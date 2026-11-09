@@ -471,7 +471,7 @@ empty state). Its label never changes; its spoken name is `Open chat` /
   The preview is not shown while the control bar is faded, and never over the
   settings sheet or the participants list. No sound, no vibration, no system
   notification.
-- **The collapsed bar** (section 4.5) does not change: one state, one place.
+- **The collapsed window** (section 4.5) does not change: one state, one place.
   The count waits on the circle for when the call is expanded.
 
 **The panel.**
@@ -773,101 +773,183 @@ never set; the rule must read the same when it is always false.
 
 ### 4.5 Putting the call away without ending it
 
-A call that owns the whole screen owns the whole app. Today an answered call covers
-everything on all three clients and nothing brings the app back except hanging up: on
-Android the system back does not even collapse it, the timer simply keeps running
-behind the same picture. So a person on a call cannot look up the address they are
-being asked for, cannot read the message that just arrived, and cannot answer the one
-question the call is about. Every messenger people already use solves this the same
-way, and so does this one.
+A call that owns the whole screen owns the whole app. A person on a call has to be able
+to look up the address they are being asked for, read the message that just arrived and
+answer the one question the call is about, without hanging up. The first answer to that
+was a bar across the top of the app. It kept the call reachable but hid every face: a
+person who put a video call away to look something up could no longer see who was
+talking. Every video-calling app people already use answers with a small window that
+keeps the picture, and since 2026-11-09 so does this one (maintainer decision: the window
+always, for voice calls too; the top bar is removed on all three clients).
 
-**A live call collapses into one bar across the top of the app.** It sits above
-whatever screen is showing and survives every navigation: another chat, Contacts,
-Calls, Settings. The call is owned by the app-level host and not by a screen, so
-collapsing changes nothing about the call itself — the media, the keys and the timer
-are untouched, only the picture is put away.
+**A live call collapses into one small window that floats over the app.** It sits above
+whatever screen is showing and survives every navigation: another chat, Contacts, Calls,
+Settings. The call is owned by the app-level host and not by a screen, so collapsing
+changes nothing about the call itself: the media, the keys and the timer are untouched,
+only the picture gets smaller.
 
-**What the bar says**, left to right:
+#### 4.5.1 What the window shows
 
-- who is on the call: **the same label the call screen uses**, read from the same
-  function rather than composed a second time. That sentence is the whole rule and it
-  has teeth; an earlier draft of it also named the words ("the person's name, the
-  group's name, or `Call` for a link call with no name yet"), and the third of those was
-  already untrue - the screen says `Group call` for a link call. Naming the words invited
-  a client to satisfy the list and break the invariant, which is the more valuable of the
-  two. If the word for a nameless link call is wrong it is wrong on the screen, and that
-  is where to change it;
-- the state or the running time, in the words of the status line and never two at
-  once: `Calling...`, `Connecting...`, `Reconnecting...`, `12:04`;
-- a small lock, and only when the call screen would show its chip. The bar never
-  carries the word on its own: a claim about encryption belongs where the person can
-  open it and read the safety number, and that is one tap away;
-- a camera glyph while your own camera is sending, so a collapsed video call is never
-  a camera you forgot about;
-- one round mute button, drawn on and off exactly as the call screen draws it.
+- **The picture is the person the call screen would put on the stage**, chosen by the
+  same rule (`call_stage`, section 4.4): the pinned person, else a screen being shared,
+  else whoever is speaking, else the most recent speaker, and so on. In a one-to-one call
+  that is the other person. It is their camera when it is sending, else their avatar on
+  the call surface, drawn exactly as their tile draws it. A person alone in a call sees
+  themselves, as on the call screen.
+- **Your own camera, while it sends, is a small inset** in the bottom corner of the
+  window away from the screen edge it sits on, mirrored as on the call screen. It is the
+  reminder that a collapsed video call is still a camera, so no separate camera glyph
+  is needed. No inset when your camera is off, and none when the picture already is you.
+- **At the bottom, the name of the person shown**, from the same label their tile uses,
+  and in a group call `+N` for everyone else beyond that person and you (`+16` with 18
+  people).
+- **At the top left, the state or the running time**, in the words of the status line
+  and never two at once: `Calling...`, `Connecting...`, `Reconnecting...`, `12:04`. The
+  call's label (the one the call screen uses) is not printed in the window: the picture
+  and the name say who it is with, and the label stays the window's spoken name.
+- **A small lock beside the time, only when the call screen would show its chip.** The
+  window never carries the word.
+- **One round mute button at the top right**, drawn on and off exactly as the call screen
+  draws it.
 
-**Tapping the bar anywhere else brings the call back.**
+**Tapping the window anywhere but the mute button brings the call back.**
 
-**There is no End on the bar.** Ending is the one irreversible control in a call; the
-call screen sets it apart by twice the gap and paints it the only red on the screen,
-and a strip a thumb crosses on the way to a chat is the wrong place for it. Coming
-back costs one tap and the End button is where it has always been. Mute is on the bar
-because it is the control a person needs in the second they need it, and because
-pressing it the wrong way round is undone by pressing it again.
+**There is no End on the window.** Ending is the one irreversible control in a call; the
+call screen sets it apart and paints it the only red on the screen, and a small window a
+thumb crosses on the way to a chat is the wrong place for it. Coming back costs one tap.
 
-**Collapsing and coming back**, each the idiom its platform already teaches:
+**The window asks for the picture at the size it draws it.** While collapsed, the client
+tells the SFU it wants the shown person only, at the quality `tile_video_quality` gives
+for the window's width (section 4.4: under 240 px that is the light picture), and asks
+nothing more for anyone else, who then arrive only as the light picture the SFU always
+forwards. A collapsed group call therefore costs about what a voice call costs
+plus one small picture. When the shown person changes, the wants change with it.
+
+#### 4.5.2 Size and place
+
+| | Shape | Size |
+|---|---|---|
+| Phone (the narrow side of the screen under 600 points) | 3:4, upright | 36% of the screen width, at least 120 points |
+| Tablet, desktop browser, a wide web window | 16:9, lying | 320 points wide |
+| Any client, while the picture is a screen share | 16:9 | the width above |
+
+Corners are rounded with `--radius-md` (12) and the window carries `--shadow-2`, the
+dialog shadow, because it floats over content the same way. The call surface colour
+fills it behind an avatar; it does not follow the light theme, as the call screen does
+not.
+
+**It starts in the top right corner**, 16 points in from the safe edges and below the
+screen's own header, so it covers neither the composer nor the send button.
+
+**It can be dragged anywhere and lands in the nearest corner.** On release it moves to
+the closest of the four corners, measured from where it would come to rest given how
+fast it was moving, so a flick towards a corner reaches it. The corner it lands in is
+kept while the app runs and is where the next collapsed call opens.
+
+**On a phone, a flick past the left or right edge tucks it away.** Only a strip with a
+chevron stays at that edge, as the system's own picture-in-picture does; the call goes on
+and the mute state is unchanged. Tapping the strip, or dragging it back, returns the
+window to the corner it came from. Web has no tuck: a pointer does not throw.
+
+**It never covers the system bars or the software keyboard.** When the keyboard opens and
+the window sits in a bottom corner, it moves up with the keyboard and goes back when the
+keyboard closes.
+
+Where a window lands is a fact about one device and one hand, never shared with another
+device or person, so each client writes its own placement in its own gesture system; the
+numbers above are the rule all three follow. What is shown in the window is shared
+information and comes from the shared rules (`call_stage`, `tile_video_quality`).
+
+#### 4.5.3 Collapsing and coming back
 
 | | Collapse | Expand |
 |---|---|---|
-| iOS | a chevron at the top left of the call screen, or a downward swipe on the screen | tap the bar |
-| Android | the same chevron, or the system back, which collapses and never ends | tap the bar |
-| Web | the same chevron, or `Esc` | tap the bar, or `Enter` when it has focus |
+| iOS | a chevron at the top left of the call screen, or a downward swipe on the screen | tap the window |
+| Android | the same chevron, or the system back, which collapses and never ends | tap the window |
+| Web | the same chevron, or `Esc` | click the window, or `Enter` when it has focus |
 
-Android's back is the change people will feel first: a call is not a dialog to
-dismiss, and back has never meant hang up anywhere else in the app.
+Android's back collapses: a call is not a dialog to dismiss, and back has never meant
+hang up anywhere else in the app.
 
-**The bar is never shown over the call screen.** One state, one place — the same rule
-that keeps a floating pill off the call screen in section 4.
+**The window is never shown over the call screen.** One state, one place.
 
 **A call that is only ringing does not collapse.** An incoming call is answered or
 declined, and a muted conversation's call is already offered without covering anything
-(section 2.1.1), so there is nothing to put away. An outgoing call collapses from the
-moment it is placed, and the bar reads `Calling...`.
+(section 2.1.1). An outgoing call collapses from the moment it is placed, and the window
+shows the person called, their avatar and `Calling...`.
 
-**When a collapsed call ends, the bar goes away and the conversation gets its usual
-row.** Nothing is thrown across the screen: the `Call ended` overlay belongs to the
-call screen, and a person who put the call away asked not to be interrupted by it. A
-call that ends badly is not silent either way — the row and, when it was missed, the
-notification say so exactly as they do now.
+**A guest who joined from a link has no app to collapse into.** The guest root shows the
+call and nothing else (section 9 of `call-links.md`), so the chevron is absent there; the
+system window of 4.5.4 still applies.
 
-**The recorder stays blocked, and for the first time a person can watch it happen.** A
-live call holds the microphone, so the composer records neither a voice message nor a
-video note while one is running. That was already the rule; until the bar existed
-there was no screen on which anyone could see it refuse. Two things follow. The
-disabled recorder must say why when it is pressed, in one line, instead of sitting dim
-and silent. And the fact behind the rule widens: it asks today whether a call is live
-**in this chat**, which was the same question while a call owned the screen and is the
-wrong one the moment a person can stand in chat B with a call running from chat A. The
-microphone is just as busy. The rule's shape does not change — a call that is only
-being offered still holds nothing, an outgoing one holds capture from the moment it is
-placed — only what the clients feed it.
+**When a collapsed call ends, the window goes away and the conversation gets its usual
+row.** Nothing is thrown across the screen: the `Call ended` overlay belongs to the call
+screen, and a person who put the call away asked not to be interrupted by it. A call that
+ends badly is not silent either way: the row and, when it was missed, the notification
+say so exactly as they do now.
 
-**What each client has to expose.** The call already lives in an app-level host on all
-three — `CallHostContext` on web, `CallHostOverlay` on iOS, `HostedCallOverlays` and
-`OneToOneCallOverlay` on Android — so the bar needs no new owner, only a field beside
-the session:
+#### 4.5.4 Leaving the app during a call: the system window (iOS, Android)
+
+**When the app leaves the screen during a call** (home, the app switcher, another app,
+following a link out), whether the call was full screen or collapsed, the same picture
+goes into the system's own floating window, over the home screen and other apps. It shows
+what 4.5.1 shows: the stage person, your own inset while your camera sends, the name and
+`+N`. Coming back into the app returns the call exactly as it was left, full screen or
+collapsed. A call that is only ringing has no system window, the same as it does not
+collapse.
+
+| | How it opens | Its controls |
+|---|---|---|
+| iOS | by itself when the app goes to the background, through the system's video-call picture-in-picture | the system's own: back to the app, close. Mute is in the system call controls the call already has (lock screen, the call indicator), not in the window |
+| Android | by itself on Android 12 and later; on 8 to 11 when the person leaves the app with home or a switch | one action, `Mute` / `Unmute`, drawn on and off. No End, for the reason in 4.5.1 |
+
+**Closing the system window never ends the call.** The call goes on with sound; the
+system's call indicator (iOS) or the ongoing-call notification (Android) brings it back.
+
+**Your own camera while the app is not on the screen.** iOS stops the camera of an app
+that is not in front unless the app is allowed to keep it (multitasking camera access,
+which Apple grants per app). Without it, the moment iOS interrupts the camera the client
+tells the call your camera is off, so the others see your avatar and not a frozen frame,
+and turns it back on by itself when you return; the camera button on your screen keeps
+saying on, because you did not turn it off. Android keeps the camera running while its
+window is on screen. Neither client ever shows the others a still picture of you as if it
+were live.
+
+**A voice call gets the system window too**, showing the stage person's avatar, because
+the maintainer chose the window for every call. On iOS this rests on the system drawing
+an avatar view in its call window; it has not been tried on a device, and if it does not
+draw, a voice call on iOS has no system window and goes on with sound and the call
+indicator only.
+
+#### 4.5.5 The recorder stays blocked
+
+A live call holds the microphone, so the composer records neither a voice message nor a
+video note while one is running, collapsed or not. The disabled recorder says why when it
+is pressed, in one line. The fact behind the rule is "a call is live", not "a call is live
+in this chat": a person can stand in chat B with a call running from chat A.
+
+#### 4.5.6 What each client has to expose
+
+The call lives in an app-level host on all three (`CallHostContext` on web,
+`CallHostOverlay` on iOS, `HostedCallOverlays` and `OneToOneCallOverlay` on Android), so
+the window needs no new owner:
 
 | Need | Why |
 |---|---|
-| `collapsed` on the call host, with an expand and a collapse | The presentation mode is a property of the call, not of a screen; a route change must never touch it |
-| The bar's label, phase, elapsed seconds, mic state, camera state and whether encryption is armed | The bar shows a subset of the call screen and reads it from the same state, so the two can never disagree |
-| The capture fact widened from "a call in this chat" to "a call is live" | The paragraph above; the shared rule itself is unchanged |
-| A collapse that is reachable without the pointer | Keyboard on web, the back gesture on Android, the swipe on iOS |
+| The shared `call_bar` rule (`crates/lakko-ui-rules/src/call_bar.rs`), kept under its name: whether the window is on screen and which one thing its status line says | Written once; the window replaces the bar's picture, not its decisions |
+| `collapsed` on the call host, with an expand and a collapse (kept from the bar) | The presentation mode is a property of the call, not of a screen; a route change must never touch it |
+| The stage choice, the shown person's track or avatar, the own camera track, the people count, phase, elapsed seconds, mic state and whether encryption is armed | The window shows a subset of the call screen and reads it from the same state, so the two can never disagree |
+| The window's width fed to the same `video-wants` path the grid uses | 4.5.1: one small picture, not the grid's |
+| iOS: a video-call picture-in-picture controller whose view draws the remote picture from frames (a sample-buffer layer), started automatically from the call host | 4.5.4 |
+| iOS: the camera interruption mapped to the camera-off signal, and back | 4.5.4 |
+| Android: `supportsPictureInPicture` on the activity that hosts calls, auto-enter parameters while a call is live, a compact layout in picture-in-picture mode, and the mute action | 4.5.4 |
+| A collapse reachable without the pointer | Keyboard on web, the back gesture on Android, the swipe on iOS |
 
-**Spoken.** The bar is one button whose label names who is on the call and how long it
-has been running (`Call with Anna, 12 minutes 4 seconds, return to call`), with the
-mute button separate and naming the action and its result. State changes announce
-through it as a live region, so `Reconnecting...` is heard and not only seen.
+**Spoken.** The window is one button whose label names who is on the call and how long it
+has been running (`Call with Anna, 12 minutes 4 seconds, return to call`), with the mute
+button separate and naming the action and its result. State changes announce as a live
+region, so `Reconnecting...` is heard and not only seen. The tucked strip is a button
+named `Return to call`.
 
 ## 5. The safety number
 
@@ -947,8 +1029,7 @@ word).
 ## 9. Out of scope here
 
 Group call redesign beyond the shared call screen and the tile rule of section
-4.4, a floating video window (section 4.5 collapses a call to a bar; a picture-in-
-picture of the other person is a separate decision, including the system one
-each platform offers), call recording, call links
+4.4, a call window outside the browser tab (Document Picture-in-Picture, Chrome
+and Edge only; the web window of section 4.5 stays inside the page), call recording, call links
 (they keep the behaviour of [ADR-0032](../adr/0032-multi-joiner-call-links.md)),
 and call history sync between devices.
