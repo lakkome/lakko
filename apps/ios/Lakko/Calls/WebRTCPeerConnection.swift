@@ -154,9 +154,16 @@ public final class WebRTCPeerConnection: NSObject {
         // no extra config required here.
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
+        // ADR-0088: the default audio processing module with Lakko's noise
+        // suppressor as its capture post-processing stage. Voice processing
+        // is NOT bypassed: the voice-processing I/O unit (the platform's echo
+        // canceller) still runs, ahead of the suppressor. With `false` this
+        // initialiser builds the same audio device module as the plain one.
         return RTCPeerConnectionFactory(
+            bypassVoiceProcessing: false,
             encoderFactory: encoderFactory,
-            decoderFactory: decoderFactory
+            decoderFactory: decoderFactory,
+            audioProcessingModule: CaptureNoiseSuppression.audioProcessingModule()
         )
     }()
 
@@ -318,6 +325,9 @@ public final class WebRTCPeerConnection: NSObject {
     /// once. Safe to call multiple times.
     public func close() {
         guard let p = peer else { return }
+        // ADR-0088: this call's noise suppressor goes with it (a no-op when
+        // another call has armed since).
+        CaptureNoiseSuppression.processor.disarm(forOwner: self)
         // Off the main thread for the reason `libwebrtcQueue` gives: `close`
         // blocks on the signaling thread, which tears the audio unit down.
         Self.libwebrtcQueue.async { p.close() }
@@ -358,6 +368,12 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localAudioTrack = track
         self.localAudioSender = sender
+        // ADR-0088: this call's microphone gets a fresh noise suppressor when
+        // the switch is on; the line it logs says which processing applies.
+        CaptureNoiseSuppression.processor.arm(
+            forOwner: self,
+            on: NoiseSuppressionSetting.shared.currentChoice,
+            platform: CaptureNoiseSuppression.platformEffects)
     }
 
     /// Toggle the local audio track's `isEnabled` flag.
@@ -1267,7 +1283,11 @@ public final class WebRTCPeerConnection: NSObject {
                     cont.resume(returning: video.count); return
                 }
                 for transceiver in video {
-                    transceiver.setCodecPreferences(preferences)
+                    // webrtc-sdk declares `codecPreferences` as a property whose
+                    // setter is `setCodecPreferences:`, so Swift sees only the
+                    // property. Only ever written: the binary implements no
+                    // getter for it.
+                    transceiver.codecPreferences = preferences
                 }
                 cont.resume(returning: 0)
             }

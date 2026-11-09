@@ -33,8 +33,8 @@ import LakkoCore
 
 /// What Lakko can set on a receiver's playout delay in this process.
 ///
-/// `RTCRtpReceiver.h` of the app's libwebrtc binding (stasel/WebRTC 125.0.0)
-/// declares `receiverId`, `parameters`, `track` and `delegate` and no delay
+/// `RTCRtpReceiver.h` of the app's libwebrtc binding (webrtc-sdk 125.6422.07
+/// since 2026-11-09; stasel/WebRTC 125.0.0 before, the same surface) declares `receiverId`, `parameters`, `track` and `delegate` and no delay
 /// of any kind. The engine behind it has one,
 /// `RtpReceiverInterface::SetJitterBufferMinimumDelay`, and Lakko's native
 /// shim reaches it (``LakkoReceiverDelay``, `Calls/SFrameAttach.mm`; the
@@ -43,7 +43,8 @@ import LakkoCore
 /// in this process is the binary that evidence was read from, and stops for
 /// the whole process if the engine's object fails its probe. For any other
 /// image the rule runs observe-only: it is fed, the skew is measured and
-/// logged, and nothing is written.
+/// logged, and nothing is written. The binary linked since 2026-11-09
+/// (webrtc-sdk 125.6422.07) is such an image until its slices are read.
 ///
 /// Decided here, in Lakko's code, and never assumed from the engine. Both
 /// kinds go through the same engine method, so they have one answer; it is

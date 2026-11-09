@@ -427,11 +427,13 @@ targets:
       # exported library product (1.14b).
       - package: LakkoCore
         product: LakkoCore
-      # G3-1 — WebRTC pod via stasel/WebRTC SPM. The package
-      # ships Google's WebRTC C++ engine as an XCFramework
-      # (stasel maintains the binary build because Google
-      # stopped publishing one in 2022). The single library
-      # product is named `WebRTC`. The on-device API
+      # G3-1 — WebRTC via the webrtc-sdk SPM distribution
+      # (`webrtc-sdk/Specs`), the same vendor and version as the
+      # Android client (`io.github.webrtc-sdk:android:125.6422.07`).
+      # It ships the WebRTC C++ engine as an XCFramework plus the
+      # capture post-processing hook ADR-0088's noise suppressor
+      # needs (`RTCDefaultAudioProcessingModule`). The single
+      # library product is named `WebRTC`. The on-device API
       # (`RTCPeerConnectionFactory`, `RTCPeerConnection`,
       # `RTCAudioTrack`, `RTCVideoTrack`) is consumed by
       # `apps/ios/Lakko/Calls/WebRTCPeerConnection.swift`.
@@ -786,20 +788,35 @@ targets:
 packages:
   LakkoCore:
     path: "."
-  # G3-1 — remote SPM: stasel/WebRTC, pinned to ONE version. stasel
-  # uses one major per upstream WebRTC milestone and every release is a
-  # different binary. Lakko's native shim calls into that binary's C++
-  # objects by vtable slot (`Calls/SFrameAttach.mm`: the frame
-  # encryptor / decryptor attach and, since ADR-0070's note of
-  # 2026-10-12, a receiver's playout delay), and the evidence for those
-  # slots was read from the machine code of 125.0.0 exactly. A bump is a
-  # deliberate change that lands with that evidence redone
-  # (`apps/shared/sframe-bridge/receiver-delay.h`) and the new binary's
-  # identities pinned; until then the shim refuses the playout-delay
-  # setter at run time and `AvAlignmentTests` fails.
+  # G3-1 — remote SPM: webrtc-sdk/Specs, pinned to ONE version
+  # (125.6422.07, the version the Android client uses; switched from
+  # stasel/WebRTC 125.0.0 on 2026-11-09 for ADR-0088's capture hook).
+  # Every release is a different binary. Lakko's native shim calls into
+  # that binary's C++ objects:
+  #   * the frame encryptor / decryptor attach (`Calls/SFrameAttach.mm`)
+  #     through `setFrameEncryptor:` / `setFrameDecryptor:`. For this
+  #     binary the six attach methods (three slices x two selectors) were
+  #     compared instruction by instruction with stasel 125.0.0's and are
+  #     identical apart from addresses: the argument is read through a
+  #     pointer to a scoped_refptr, AddRef / Release go through absolute
+  #     8-byte slots 0 and 1 of Lakko's object, and the engine setter is
+  #     slot +0x88 (sender) / +0x78 (receiver). The C++ headers the bridge
+  #     is compiled against are byte-identical in the fork. A bump is a
+  #     deliberate change that redoes that comparison.
+  #   * a receiver's playout delay (ADR-0070, note of 2026-10-12), by
+  #     vtable slot, keyed on the image's LC_UUID
+  #     (`apps/shared/sframe-bridge/receiver-delay.h`). That evidence was
+  #     read from stasel 125.0.0 only; it has NOT been redone for this
+  #     binary, so the shim refuses the setter at run time (observe-only)
+  #     and `AvAlignmentTests` pins that.
+  #
+  # SwiftPM reads the tag as 125.6422.7 and resolves it to commit
+  # 72d8d5b1837a85ed4f9de244b6a39f0ce13ba44d, whose Package.swift pins
+  # WebRTC.xcframework.zip by sha256
+  # 827cc2f508c341367c9b0e4f6def46e5f6834251082047d5d1da5bc8fd379263.
   WebRTC:
-    url: https://github.com/stasel/WebRTC.git
-    exactVersion: 125.0.0
+    url: https://github.com/webrtc-sdk/Specs.git
+    exactVersion: 125.6422.07
 
 # Schemes — xcodegen auto-generates one per target, but we
 # pin the explicit form so the build / archive / test actions

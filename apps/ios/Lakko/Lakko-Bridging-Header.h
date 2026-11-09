@@ -15,6 +15,7 @@
 #define LAKKO_BRIDGING_HEADER_H_
 
 #import "Calls/SFrameAttach.h"
+#import "Calls/CaptureNoiseProcessor.h"
 
 // ADR-0089 — the camera background's per-frame C ABI (`lakko_segment_*`)
 // in the same `liblakko_sframe_native.a` the SFrame shim links. Plain C.

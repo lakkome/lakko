@@ -399,7 +399,7 @@ public final class CallSession: ObservableObject {
         // the RTCPeerConnection so its initial RTCConfiguration
         // already lists the relay candidate. Doing it after
         // construction would require an `setConfiguration:` call
-        // mid-flight, which the stasel/WebRTC pod accepts but
+        // mid-flight, which the WebRTC pod accepts but
         // some libwebrtc forks have known footguns around (the
         // ICE agent may have already started gathering, in which
         // case the new TURN server is ignored).

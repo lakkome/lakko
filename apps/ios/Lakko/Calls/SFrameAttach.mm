@@ -548,11 +548,18 @@ const char * const kNativeRtpReceiverTypeEncoding =
 // `ReleaseEngineRef`.
 using NativeRtpReceiverIMP = lakko::receiver_delay::ReturnedRef (*)(id, SEL);
 
-// The package version and the LC_UUID of each slice whose machine code the
-// slot and the calling convention were read from (stasel/WebRTC 125.0.0,
+// The package and the LC_UUID of each slice whose machine code the slot and
+// the calling convention were read from (stasel/WebRTC 125.0.0,
 // WebRTC-M125.xcframework.zip, sha256
 // 4da2f9c7b7481a82249ea61dfcceae7caac6890e0a0412389684765435113ae8).
-NSString * const kVerifiedPackageVersion = @"125.0.0";
+//
+// Since 2026-11-09 the app links webrtc-sdk 125.6422.07 instead (ADR-0088's
+// capture hook). Its slices (device arm64 4C4C4476-5555-3144-A12E-
+// D71FF8AA38BD, simulator arm64 4C4C44CD-5555-3144-A1A9-7A0C4DFC7DD7,
+// simulator x86_64 4C4C440C-5555-3144-A1E2-AEA9B0483609) are deliberately NOT
+// listed: the setter's slot and calling convention have not been read from
+// them, so the setter stays observe-only on this build.
+NSString * const kVerifiedPackageVersion = @"stasel/WebRTC 125.0.0";
 NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4485-5555-3144-A186-7570B405EE6A";
 NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CF-5555-3144-A1B7-95616B307988";
 NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33";

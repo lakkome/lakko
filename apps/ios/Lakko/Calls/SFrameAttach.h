@@ -4,7 +4,8 @@
 // LakkoSFrameAttach — Objective-C++ shim that attaches the
 // `apps/shared/sframe-bridge` LakkoFrameEncryptor /
 // LakkoFrameDecryptor (G3-sframe-native N-3) to a libwebrtc
-// `RTCRtpSender` / `RTCRtpReceiver` from stasel/WebRTC 125.0.0
+// `RTCRtpSender` / `RTCRtpReceiver` from webrtc-sdk 125.6422.07
+// (stasel/WebRTC 125.0.0 until 2026-11-09)
 // on iOS (G3-sframe-native N-4).
 //
 // This header is the ONLY surface the Swift call layer ever
@@ -24,7 +25,7 @@
 //                              FrameEncryptorInterface>)encryptor
 //
 // (and a symmetric `-[RTCRtpReceiver setFrameDecryptor:]`).
-// stasel/WebRTC 125.0.0 is an upstream-binary repackaging of the
+// webrtc-sdk 125.6422.07, like stasel/WebRTC 125.0.0 before it, builds the
 // branch-heads/6422 milestone, so the same selector ships in the
 // .framework binary; what is NOT pinned is whether the public
 // Obj-C header re-exports it. The selector probe in
@@ -289,10 +290,12 @@ typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
 /// was read from the binary of stasel/WebRTC 125.0.0, so the setter is
 /// offered only when the loaded WebRTC image IS that binary, by its
 /// Mach-O `LC_UUID`; for any other image the answer is "not available"
-/// and Lakko measures without setting.
+/// and Lakko measures without setting. The app has linked webrtc-sdk
+/// 125.6422.07 since 2026-11-09, whose slices were not read, so on this
+/// build the setter is not available.
 @interface LakkoReceiverDelay : NSObject
 
-/// The WebRTC package version the evidence was gathered for.
+/// The WebRTC package (name and version) the evidence was gathered for.
 @property(class, nonatomic, readonly) NSString *verifiedPackageVersion;
 
 /// The `LC_UUID` of every slice of that package the evidence covers

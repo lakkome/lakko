@@ -35,7 +35,8 @@ Three reasons:
    `curl` is incompatible with that posture.
 3. **Pin-to-binary.** The headers are pinned to **chromium /
    external / webrtc, M125 (branch-heads/6422)** — the exact
-   milestone stasel/WebRTC 125.0.0 and io.github.webrtc-sdk:android
+   milestone webrtc-sdk 125.6422.07 (iOS, since 2026-11-09; stasel/WebRTC
+   125.0.0 before) and io.github.webrtc-sdk:android
    125.6422.07 statically link. A vendored copy makes that
    pin loud at PR-review time.
 
