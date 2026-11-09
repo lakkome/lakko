@@ -87,12 +87,12 @@ pub use reality::{
     extract_server_hello_random, make_self_signed_cert, patch_client_hello_session_id,
     patch_server_hello_random, verify_authenticator as verify_reality_authenticator,
     verify_server_response, AcceptedClient, RealityAuthError, RealityAuthenticator, RealityConfig,
-    RealityConfigError, RealityConnection, RealityListener, RealityServerConnection,
-    RealityServerDriverError, RealityServerDriverResult, RealityShortId, RealityTagSecret,
-    RealityTimestamp, RealityTransport, AUTHENTICATOR_LEN as REALITY_AUTHENTICATOR_LEN,
-    HKDF_LABEL as REALITY_HKDF_LABEL, SERVER_RESPONSE_LEN as REALITY_SERVER_RESPONSE_LEN,
-    SHORT_ID_LEN as REALITY_SHORT_ID_LEN, TAG_SECRET_LEN as REALITY_TAG_SECRET_LEN,
-    TIMESTAMP_LEN as REALITY_TIMESTAMP_LEN,
+    RealityConfigError, RealityConnection, RealityHandshaker, RealityListener,
+    RealityServerConnection, RealityServerDriverError, RealityServerDriverResult, RealityShortId,
+    RealityTagSecret, RealityTimestamp, RealityTransport,
+    AUTHENTICATOR_LEN as REALITY_AUTHENTICATOR_LEN, HKDF_LABEL as REALITY_HKDF_LABEL,
+    SERVER_RESPONSE_LEN as REALITY_SERVER_RESPONSE_LEN, SHORT_ID_LEN as REALITY_SHORT_ID_LEN,
+    TAG_SECRET_LEN as REALITY_TAG_SECRET_LEN, TIMESTAMP_LEN as REALITY_TIMESTAMP_LEN,
 };
 pub use rendezvous::{
     BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec, ISSUED_AT_CLOCK_SKEW_SECS,

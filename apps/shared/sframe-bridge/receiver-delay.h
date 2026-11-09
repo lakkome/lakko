@@ -59,6 +59,17 @@
 //     is at +0x34. Chromium's build sets this for Android arm64 only
 //     (`use_relative_vtables_abi` in build/config/compiler/compiler.gni).
 //
+// Since 2026-11-09 iOS links webrtc-sdk 125.6422.07 (ADR-0088's capture
+// hook) instead of stasel/WebRTC 125.0.0. Its three iOS slices have NOT been
+// read for this setter, so the iOS shim does not pin them and refuses the
+// setter there (observe-only). What was compared on them, for the frame
+// encryptor / decryptor attach only: the six `setFrameEncryptor:` /
+// `setFrameDecryptor:` methods are instruction-identical to stasel's (the
+// framework calls AddRef / Release of Lakko's object through absolute 8-byte
+// slots), and a scan of the device arm64 slice finds an `ldrsw` within three
+// instructions before a `blr` exactly twice, as in stasel's: neither binary
+// is built with relative vtables.
+//
 // The argument: `absl::optional<double>` is `std::optional<double>` in these
 // builds (`ABSL_OPTION_USE_STD_OPTIONAL 2`, C++17 and later). Read from the
 // callee (`JitterBufferDelay::Set`) in every slice: the value arrives as two

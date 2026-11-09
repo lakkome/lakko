@@ -438,34 +438,61 @@ impl Socket {
         let (out, mut outgoing) = mpsc::channel::<String>(FRAME_QUEUE);
         let (incoming, frames) = mpsc::channel(FRAME_QUEUE);
         tauri::async_runtime::spawn(async move {
-            loop {
-                tokio::select! {
-                    next = outgoing.recv() => {
-                        let Some(text) = next else {
-                            let _ = ws.close().await;
-                            return;
-                        };
-                        if ws.send(Message::Text(text)).await.is_err() {
-                            return;
-                        }
-                    }
-                    next = ws.next() => match next {
-                        Some(Ok(Message::Text(text))) => {
-                            if incoming.send(text).await.is_err() {
-                                return;
-                            }
-                        }
-                        Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                        // Control frames are the codec's; the signaling
-                        // protocol has no binary frames.
-                        Some(Ok(_)) => {}
-                    },
-                }
-            }
+            info!("tunnelled socket opened");
+            let (sent, received, end) = pump(&mut ws, &mut outgoing, &incoming).await;
+            info!(sent, received, end, "tunnelled socket ended");
         });
         Self {
             out,
             frames: AsyncMutex::new(frames),
+        }
+    }
+}
+
+/// Moves frames between the page's queues and the socket until one side
+/// ends. Returns the frames sent and received and why it ended (one ASCII
+/// word, for the log).
+async fn pump<S>(
+    ws: &mut S,
+    outgoing: &mut mpsc::Receiver<String>,
+    incoming: &mpsc::Sender<String>,
+) -> (u64, u64, &'static str)
+where
+    S: futures::Stream<Item = Result<Message, lakko_transport::tungstenite::Error>>
+        + futures::Sink<Message, Error = lakko_transport::tungstenite::Error>
+        + Unpin,
+{
+    let (mut sent, mut received) = (0u64, 0u64);
+    loop {
+        tokio::select! {
+            next = outgoing.recv() => {
+                let Some(text) = next else {
+                    let _ = ws.close().await;
+                    return (sent, received, "page-dropped");
+                };
+                if let Err(e) = ws.send(Message::Text(text)).await {
+                    warn!(error = %e, "tunnelled socket send failed");
+                    return (sent, received, "send-failed");
+                }
+                sent += 1;
+            }
+            next = ws.next() => match next {
+                Some(Ok(Message::Text(text))) => {
+                    received += 1;
+                    if incoming.send(text).await.is_err() {
+                        return (sent, received, "page-gone");
+                    }
+                }
+                Some(Ok(Message::Close(_))) => return (sent, received, "server-closed"),
+                Some(Err(e)) => {
+                    warn!(error = %e, "tunnelled socket read failed");
+                    return (sent, received, "read-failed");
+                }
+                None => return (sent, received, "stream-ended"),
+                // Control frames are the codec's; the signaling
+                // protocol has no binary frames.
+                Some(Ok(_)) => {}
+            },
         }
     }
 }
@@ -560,6 +587,7 @@ async fn on_socket(
 ) -> Response<Vec<u8>> {
     match (method, verb) {
         (&Method::POST, "close") => {
+            info!("page closed its tunnelled socket");
             tunnel.forget_socket(id);
             plain(StatusCode::NO_CONTENT, "")
         },

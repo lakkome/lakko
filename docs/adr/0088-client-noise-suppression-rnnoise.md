@@ -18,7 +18,9 @@
   (`src/noise.rs`), JNI `noise_jni.cc` in `libsframe_jni.so`, the switch
   in the call Settings sheet; Rust tests and Android host unit tests only
   (a fake native suppressor); never run on a device, an emulator or a
-  call, and nothing was heard. iOS is not built.
+  call, and nothing was heard. iOS is not built; on 2026-11-09 the
+  maintainer chose section 5 option 2 (the webrtc-sdk binary and its
+  capture post-processing delegate), in progress.
 - **Date:** 2026-11-07
 - **Context:** the call test of 2026-11-07 (typing and room noise reached
   every participant), the investigation behind it (call-audio report of the
@@ -326,6 +328,24 @@ none chosen here:
 The recommendation is to ship web, desktop and Android first and to decide
 iOS after the web build has been heard on real calls, since that is also
 when the model question (open question 1) is answered.
+
+**Decided 2026-11-09 (maintainer): option 2.** Checked that day in the
+webrtc-sdk sources (branch `m125_release`): the iOS build exposes the same
+stage as the Android AAR, `RTCDefaultAudioProcessingModule` with a
+`capturePostProcessingDelegate` conforming to
+`RTCAudioCustomProcessingDelegate` (`audioProcessingInitialize`,
+`audioProcessingProcess(audioBuffer:)`, `audioProcessingRelease`), passed to
+`RTCPeerConnectionFactory initWithBypassVoiceProcessing:encoderFactory:decoderFactory:audioProcessingModule:`;
+its Swift package is `webrtc-sdk/Specs`, tag `125.6422.07`, the version the
+Android AAR pins. iOS moves from stasel/WebRTC 125.0.0 to that binary and
+runs `lakko_noise_*` in the capture post-processing delegate, after Apple's
+voice processing, as Android does. The move is gated on re-checking, against
+the new binary's machine code, every assumption the native shim makes about
+the old one: the frame encryptor and decryptor attach (security invariant
+#4) and the receiver playout-delay slots of
+`apps/shared/sframe-bridge/receiver-delay.h`, which stay observe-only for an
+image they were not read from. Option 1 was rejected as the costliest and
+riskiest; option 3 as leaving iOS the one client without the switch.
 
 ## Alternatives
 

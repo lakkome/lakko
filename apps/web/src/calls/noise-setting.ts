@@ -18,7 +18,7 @@
 export const NOISE_SUPPRESSION_STORAGE_KEY = "lakko.call.noise-suppression";
 
 /** The default when nothing is stored. */
-export const NOISE_SUPPRESSION_DEFAULT_ON = false;
+export const NOISE_SUPPRESSION_DEFAULT_ON = true;
 
 /** The part of `Storage` the switch uses. */
 export interface SettingStorage {

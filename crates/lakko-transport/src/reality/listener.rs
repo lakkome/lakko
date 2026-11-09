@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustls::ServerConnection;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
@@ -118,12 +118,68 @@ impl RealityListener {
     /// - [`Error::PeerClosed`] if the peer dropped before
     ///   the handshake completed.
     pub async fn accept(&mut self) -> Result<(Box<dyn Connection>, AcceptedClient)> {
-        let (mut tcp, _peer_addr) = self
+        let tcp = self.accept_tcp().await?;
+        self.handshaker().handshake(tcp).await
+    }
+
+    /// Accept the next inbound TCP socket without running the handshake.
+    ///
+    /// A server runs [`RealityHandshaker::handshake`] for each socket in a
+    /// task of its own with a timeout, so a client that connects and sends
+    /// nothing never stops the listener accepting everyone else.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on TCP accept failure.
+    pub async fn accept_tcp(&self) -> Result<TcpStream> {
+        let (tcp, _peer_addr) = self
             .tcp
             .accept()
             .await
             .map_err(|e| Error::Io(format!("tcp accept: {e}")))?;
+        Ok(tcp)
+    }
 
+    /// What a handshake task needs: the TLS config and the allow-list.
+    #[must_use]
+    pub fn handshaker(&self) -> RealityHandshaker {
+        RealityHandshaker {
+            tls_config: self.tls_config.clone(),
+            allowed_pairs: Arc::new(self.allowed_pairs.clone()),
+            tolerance_secs: self.tolerance_secs,
+        }
+    }
+}
+
+/// Runs the REALITY v2 server handshake on one accepted TCP socket. Cheap to
+/// clone; one per handshake task.
+#[derive(Clone)]
+pub struct RealityHandshaker {
+    tls_config: Arc<rustls::ServerConfig>,
+    allowed_pairs: Arc<Vec<(RealityShortId, RealityTagSecret)>>,
+    tolerance_secs: u64,
+}
+
+impl std::fmt::Debug for RealityHandshaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The allow-list holds secrets: only its size is shown.
+        f.debug_struct("RealityHandshaker")
+            .field("pairs", &self.allowed_pairs.len())
+            .field("tolerance_secs", &self.tolerance_secs)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RealityHandshaker {
+    /// Drive the handshake on `tcp`. The caller bounds it with a timeout.
+    ///
+    /// # Errors
+    ///
+    /// As [`RealityListener::accept`], minus the TCP accept failure.
+    pub async fn handshake(
+        self,
+        mut tcp: TcpStream,
+    ) -> Result<(Box<dyn Connection>, AcceptedClient)> {
         let mut conn = ServerConnection::new(self.tls_config.clone())
             .map_err(|e| Error::Tls(format!("rustls ServerConnection::new: {e}")))?;
 

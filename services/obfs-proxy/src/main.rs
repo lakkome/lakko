@@ -30,6 +30,10 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+/// How long one client's obfs handshake may take before its socket is
+/// dropped. Chosen, not measured: a real client finishes in a few round trips.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     #[cfg(debug_assertions)]
@@ -87,20 +91,34 @@ async fn spawn_reality_listener(
         .map_err(|e| anyhow::anyhow!("build cover cert: {e}"))?;
     let tls = lakko_transport::build_reality_server_config(cert_chain, key)
         .map_err(|e| anyhow::anyhow!("build REALITY server config: {e}"))?;
-    let mut listener = lakko_transport::reality::listener::RealityListener::new(
+    let listener = lakko_transport::reality::listener::RealityListener::new(
         tcp,
         std::sync::Arc::new(tls),
         reality.allowed_pairs,
         reality.tolerance_secs,
     );
+    let handshaker = listener.handshaker();
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((tunnel, _accepted)) => {
-                    info!("accepted REALITY tunnel; relaying to internal target");
+            match listener.accept_tcp().await {
+                // Each handshake runs in its own task, bounded: a client that
+                // connects and sends nothing must not stop the loop accepting
+                // everyone else (it did: the accept queue filled and REALITY
+                // stopped answering anyone).
+                Ok(tcp) => {
+                    let handshaker = handshaker.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = relay::relay(tunnel, internal_target).await {
-                            warn!(%error, "relay ended with error");
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshaker.handshake(tcp))
+                            .await
+                        {
+                            Ok(Ok((tunnel, _accepted))) => {
+                                info!("accepted REALITY tunnel; relaying to internal target");
+                                if let Err(error) = relay::relay(tunnel, internal_target).await {
+                                    warn!(%error, "relay ended with error");
+                                }
+                            },
+                            Ok(Err(error)) => warn!(%error, "REALITY handshake failed"),
+                            Err(_) => warn!("REALITY handshake timed out"),
                         }
                     });
                 },
@@ -130,9 +148,17 @@ async fn spawn_shadowsocks_listener(
                 Ok((stream, _peer)) => {
                     let window = window.clone();
                     tokio::spawn(async move {
-                        let tunnel = {
+                        // The replay window is held for the whole handshake,
+                        // so it is bounded: a client that connects and stalls
+                        // must not hold every other handshake behind it.
+                        let tunnel = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
                             let mut w = window.lock().await;
                             lakko_transport::shadowsocks_accept_inbound(stream, &psk, &mut w).await
+                        })
+                        .await;
+                        let Ok(tunnel) = tunnel else {
+                            warn!("SS-2022 handshake timed out");
+                            return;
                         };
                         match tunnel {
                             Ok(conn) => {

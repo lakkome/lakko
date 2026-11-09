@@ -89,7 +89,29 @@ public object SFrameAvailability {
 
         // CAS so two threads racing on first call agree on the
         // same result. Whoever wins, both return the same value.
-        cached.compareAndSet(null, ok)
+        cached.compareAndSet(null, ok && nativeShimLoads())
         return cached.get() == true
+    }
+
+    /**
+     * Whether `libsframe_jni.so`, which every frame encryptor and
+     * decryptor lives in, loads at all. The libwebrtc setters can
+     * be present while the shim is not: a shim linked against a
+     * Rust archive that lacks one of its symbols fails `dlopen`
+     * with "cannot locate symbol", and without this check the
+     * person is let into a call that then refuses to publish and
+     * drops (seen on a device on 2026-11-09).
+     */
+    private fun nativeShimLoads(): Boolean = try {
+        System.loadLibrary("sframe_jni")
+        true
+    } catch (e: UnsatisfiedLinkError) {
+        Log.w(
+            TAG,
+            "bootProbe: libsframe_jni.so did not load: ${e.message} — " +
+                "calling will be disabled per security invariant #4 " +
+                "(no fallback to non-E2EE).",
+        )
+        false
     }
 }
