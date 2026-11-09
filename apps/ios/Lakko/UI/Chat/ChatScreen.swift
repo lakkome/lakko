@@ -4315,7 +4315,10 @@ private struct ChatTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: personKey?.base64EncodedString() ?? identity, size: 32, isGroup: isGroup,
-                photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil))
+                photo: personKey.map(AvatarPhoto.person) ?? (isGroup ? AvatarPhoto.group(identity) : nil),
+                // UX profile-screen section 7: the chat header plays the
+                // video always on a touch platform.
+                playsVideo: true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.headline)

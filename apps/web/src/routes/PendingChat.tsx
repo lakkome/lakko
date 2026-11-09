@@ -145,7 +145,7 @@ export default function PendingChat(): JSX.Element {
               <Icon name="back" size={20} />
             </button>
             <div class="lk-chat-title">
-              <Avatar label={name()} id={c().signaturePubkeyB64} size="sm" personKey={c().signaturePubkeyB64} />
+              <Avatar label={name()} id={c().signaturePubkeyB64} size="sm" personKey={c().signaturePubkeyB64} playVideo="header" />
               <div class="lk-chat-title-text">
                 <h1>{name()}</h1>
                 <Show when={c().username.length > 0}>

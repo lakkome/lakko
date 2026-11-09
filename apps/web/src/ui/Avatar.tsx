@@ -6,14 +6,21 @@
  * hash of the id so the same person always gets the same colour on every
  * device; and, for a person (`personKey`), their profile photo when this
  * device holds it (ADR-0084, docs/ux/profile-screen.md section 7). A profile
- * video plays muted and looped only where the caller asks (`playVideo`: the
- * large views); everywhere else its still is shown.
+ * video never has sound; it plays looped when the caller's `playVideo` mode
+ * says so (`ui/avatar-video.ts`): always in the large views, while the
+ * pointer is over the row in Chats and Contacts, in the chat header while
+ * hovered (always on a touch-only device). Everywhere else its still.
  */
-import { createSignal, Match, Switch, type JSX } from "solid-js";
+import { createSignal, Match, onCleanup, onMount, Switch, type JSX } from "solid-js";
 
 import { avatarMediaFor, conversationAvatarMediaFor, type AvatarMedia } from "../profile/avatar-runtime";
 import { wasmSync } from "../wasm";
 import { paintVideoBehind } from "../media/video-overlay";
+import { avatarVideoPlays, deviceCanHover, pointerHovers, type AvatarVideoMode } from "./avatar-video";
+
+/** What a hover over counts for: the circle's row or header button, else the
+ *  circle itself. */
+const HOVER_TARGET = ".lk-row, .lk-chat-title";
 
 /**
  * The initials of a display label: the shared rule in the core
@@ -53,20 +60,44 @@ export function Avatar(props: {
   /** Media to show instead of the looked-up photo (a pending change on the
    *  profile screen); `null` forces the initials. */
   media?: AvatarMedia | null | undefined;
-  /** Play a profile video (large views only). */
-  playVideo?: boolean;
+  /** When a profile video plays (`ui/avatar-video.ts`): `true` always (large
+   *  views), `"hover"` while the row is hovered, `"header"` the chat header. */
+  playVideo?: AvatarVideoMode;
 }): JSX.Element {
   const [broken, setBroken] = createSignal<string | null>(null);
+  const [hovering, setHovering] = createSignal(false);
+  const canHover = deviceCanHover();
+  let circle: HTMLSpanElement | undefined;
+  onMount(() => {
+    const mode = props.playVideo;
+    if ((mode !== "hover" && mode !== "header") || !canHover || circle === undefined) return;
+    const target: Element = circle.closest(HOVER_TARGET) ?? circle;
+    const enter = (e: Event): void => {
+      if (pointerHovers((e as PointerEvent).pointerType)) setHovering(true);
+    };
+    const leave = (): void => {
+      setHovering(false);
+    };
+    target.addEventListener("pointerenter", enter);
+    target.addEventListener("pointerleave", leave);
+    onCleanup(() => {
+      target.removeEventListener("pointerenter", enter);
+      target.removeEventListener("pointerleave", leave);
+    });
+  });
+  // Asking for the video is what downloads it, so it is asked for only
+  // while it is to play.
+  const plays = (): boolean => avatarVideoPlays(props.playVideo, hovering(), canHover);
   const media = (): AvatarMedia | null => {
     if (props.media !== undefined) return props.media;
     if (props.conversationKey !== undefined) {
-      return conversationAvatarMediaFor(props.conversationKey, props.playVideo === true);
+      return conversationAvatarMediaFor(props.conversationKey, plays());
     }
-    return avatarMediaFor(props.personKey, props.playVideo === true);
+    return avatarMediaFor(props.personKey, plays());
   };
   const video = (): string | null => {
     const m = media();
-    return props.playVideo === true && m?.videoUrl !== null && m?.videoUrl !== undefined && broken() !== m.videoUrl
+    return plays() && m?.videoUrl !== null && m?.videoUrl !== undefined && broken() !== m.videoUrl
       ? m.videoUrl
       : null;
   };
@@ -76,6 +107,7 @@ export function Avatar(props: {
   };
   return (
     <span
+      ref={circle}
       class={`lk-avatar ${props.size ?? ""} ${props.class ?? ""}`}
       data-tone={toneOf(props.personKey ?? props.id ?? props.label)}
       data-photo={video() !== null || still() !== null ? "true" : undefined}

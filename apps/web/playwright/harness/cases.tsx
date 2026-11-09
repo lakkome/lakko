@@ -30,6 +30,7 @@ import { RecordButton, RecordingBar, RecorderNotices, recorderBusy } from "../..
 import { createRecorder, type Recorder } from "../../src/media/recording-controller";
 import type { CaptureResult } from "../../src/media/media-capture";
 import { setRecordMode } from "../../src/media/media-prefs";
+import { Avatar } from "../../src/ui/Avatar";
 
 /** What a spec can read that is not in the DOM. Deliberately thin: everything
  *  a person could see is asserted through the rendered tree instead. */
@@ -619,6 +620,37 @@ function replyCase(): JSX.Element {
 
 // ---------------------------------------------------------------------------
 
+/** A grey 2x2 PNG, the still of the avatar case. */
+const AVATAR_STILL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNoaGhgYAAABDgBAfXzKRQAAAAASUVORK5CYII=";
+
+/** docs/ux/profile-screen.md section 7 — a contact's profile video in a list
+ *  row and in a chat header, the production avatar with its media handed in
+ *  (the lookup and the download are not what is measured here). */
+function avatarVideoCase(): JSX.Element {
+  const media = { stillUrl: AVATAR_STILL, videoUrl: "/playwright/fixtures/avatar.mp4" };
+  // Returned as a thunk so the avatars are created inside the harness's
+  // render root: their hover listeners are attached on mount, and a
+  // component built before `render` is never mounted.
+  return (() => (
+    <div>
+      <div class="lk-row" data-testid="avatar-row">
+        <Avatar label="Alice Doe" media={media} playVideo="hover" />
+        <div class="lk-row-body">
+          <span class="lk-row-title">Alice Doe</span>
+        </div>
+      </div>
+      <div style={{ height: "120px" }} data-testid="avatar-away" />
+      <button type="button" class="lk-chat-title" data-testid="avatar-header">
+        <Avatar label="Alice Doe" size="sm" media={media} playVideo="header" />
+        <div class="lk-chat-title-text">
+          <h1>Alice Doe</h1>
+        </div>
+      </button>
+    </div>
+  )) as unknown as JSX.Element;
+}
+
 export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   /** A voice message alone in its bubble: items 1, 2, 3, 4 and 6. */
   "voice-only": () => voiceCase(""),
@@ -637,6 +669,8 @@ export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   /** ADR-0052 — an incoming reply and an outgoing reply, each quoting the
    *  plain message above them, for the quote block and the Reply row. */
   reply: () => replyCase(),
+  /** A profile video in a list row (plays on hover) and a chat header. */
+  "avatar-video": () => avatarVideoCase(),
 };
 
 // The spec side reads it through the ambient `LakkoHarness` declaration in

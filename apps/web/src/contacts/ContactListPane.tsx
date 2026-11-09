@@ -206,7 +206,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
               return (
                 <div class="lk-row lk-request-row">
-                  <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
+                  <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} playVideo="hover" />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r(), "a contact request row")}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
@@ -263,6 +263,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       label={sentRowLines(record).title}
                       id={record.recipientAccountIdHex}
                       personKey={record.recipientKeyB64}
+                      playVideo="hover"
                     />
                     <div class="lk-row-body">
                       <span class="lk-row-title">{sentRowLines(record).title}</span>
@@ -329,7 +330,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                             }
                           }}
                         >
-                          <Avatar label={row.name} id={key} personKey={key} />
+                          <Avatar label={row.name} id={key} personKey={key} playVideo="hover" />
                           <div class="lk-row-body">
                             <span class="lk-row-title">{row.name}</span>
                             <Show when={row.username}>

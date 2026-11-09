@@ -498,9 +498,13 @@ private fun LetterHeader(letter: String) {
 
 @Composable
 private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
+    // UX profile-screen section 7: a contacts list row plays a profile video
+    // while a pointer hovers it; a finger never counts as hovering.
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -510,6 +514,7 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
             seed = row.key,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(row.personKey ?: row.key),
+            playVideo = playVideo,
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -537,8 +542,12 @@ private fun RequestRow(
 ) {
     // The resolver's "Someone" placeholder is a data value; the screen says it in the interface language.
     val title = if (name.isPlaceholder) t("contacts.request.someone") else requestSenderLabel(name)
+    // UX profile-screen section 7: every contacts list row plays a profile
+    // video while a pointer hovers it.
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Column(
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
@@ -548,6 +557,7 @@ private fun RequestRow(
                 seed = contactRouteKey(req.fromPubkey),
                 size = 40.dp,
                 personKey = req.fromPubkey,
+                playVideo = playVideo,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -620,9 +630,11 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
 
 @Composable
 private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
@@ -632,6 +644,7 @@ private fun SentRow(s: SentContactRequest, onDismiss: () -> Unit) {
             seed = s.recipientAccountIdB64,
             size = 40.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
+            playVideo = playVideo,
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {

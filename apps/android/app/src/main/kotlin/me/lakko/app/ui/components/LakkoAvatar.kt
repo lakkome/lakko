@@ -6,6 +6,9 @@ package me.lakko.app.ui.components
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -52,8 +55,14 @@ import java.io.File
  * profile); [localStill] / [localVideo] show bytes not yet uploaded (the
  * pending photo on the profile screen).
  *
- * A profile video plays muted and looped only when [large] (contact detail,
- * a person's info sheet, Settings > Profile); everywhere else its still.
+ * A profile video never has sound and plays looped only when [playVideo]
+ * (UX `docs/ux/profile-screen.md` section 7): always in the large views
+ * (contact detail, a person's info sheet, Settings > Profile, where [large]
+ * turns it on) and in a chat header; in a chat list or contacts list row only
+ * while a mouse or stylus pointer hovers the row (see
+ * [rememberRowHoverPlaysVideo]); everywhere else the still. The video is
+ * downloaded the first time it is to play, and the still stays until it is
+ * ready.
  */
 @Composable
 public fun LakkoAvatar(
@@ -65,6 +74,9 @@ public fun LakkoAvatar(
     personKey: ByteArray? = null,
     avatar: AvatarRefs? = null,
     large: Boolean = false,
+    /** Whether a profile video plays over the still; the large views play
+     *  it, so this follows [large] unless the caller says otherwise. */
+    playVideo: Boolean = large,
     localStill: Bitmap? = null,
     localVideo: File? = null,
     /** ADR-0087 4.5.4 — for a group, its id (hex): the circle shows the
@@ -111,11 +123,25 @@ public fun LakkoAvatar(
         when {
             localStill != null -> {
                 AvatarBitmap(localStill)
-                if (large && localVideo != null) AvatarVideo(localVideo)
+                if (playVideo && localVideo != null) AvatarVideo(localVideo)
             }
-            refs != null && !inspection -> StoredAvatar(refs, large)
+            refs != null && !inspection -> StoredAvatar(refs, playVideo)
         }
     }
+}
+
+/**
+ * The hover state of a list row whose avatar plays its profile video while a
+ * pointer is over the row (UX `docs/ux/profile-screen.md` section 7). Attach
+ * the returned modifier to the row and pass the returned flag as the avatar's
+ * `playVideo`. Compose reports hover for a mouse or stylus pointer only, never
+ * for a finger, so on a touch screen the still stays.
+ */
+@Composable
+public fun rememberRowHoverPlaysVideo(enabled: Boolean = true): Pair<Modifier, Boolean> {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    return Modifier.hoverable(interaction, enabled = enabled) to (enabled && hovered)
 }
 
 /** The stored photo of the group [groupIdHex] (ADR-0087 18.1). */
@@ -146,7 +172,7 @@ private fun personAvatar(key: ByteArray?): AvatarRefs? {
 }
 
 @Composable
-private fun StoredAvatar(refs: AvatarRefs, large: Boolean) {
+private fun StoredAvatar(refs: AvatarRefs, playVideo: Boolean) {
     val context = LocalContext.current
     val revision by AvatarImages.revision.collectAsState()
     val still by produceState(AvatarImages.cachedBitmap(refs.still), refs.still.blobIdHex, revision) {
@@ -155,7 +181,7 @@ private fun StoredAvatar(refs: AvatarRefs, large: Boolean) {
     val bitmap = still ?: return
     AvatarBitmap(bitmap)
     val video = refs.video
-    if (large && video != null) {
+    if (playVideo && video != null) {
         val file by produceState<File?>(null, video.blobIdHex, revision) {
             value = AvatarImages.videoFile(context, video)
         }

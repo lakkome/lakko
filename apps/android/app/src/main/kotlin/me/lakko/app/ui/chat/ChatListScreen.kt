@@ -844,9 +844,13 @@ private fun ConversationList(
 @Composable
 private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClick: () -> Unit) {
     val title = me.lakko.app.contacts.PendingContacts.name(contact) ?: t("invite.contact.page.unnamed")
+    // UX profile-screen section 7: a chat list row plays a profile video
+    // while a pointer hovers it.
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo()
     androidx.compose.foundation.layout.Row(
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         modifier = Modifier
+            .then(hover)
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -856,6 +860,7 @@ private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClic
             seed = contact.accountIdHex,
             size = 48.dp,
             personKey = me.lakko.app.ui.components.personKeyBytes(contact.signaturePubkeyB64),
+            playVideo = playVideo,
         )
         androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
         androidx.compose.foundation.layout.Column {
@@ -886,6 +891,7 @@ private fun ChannelRow(row: ConversationListRow, menu: RowMenuModel, onClick: ()
                 onClick = onClick,
                 onLongClick = { if (menu.hasItems) menuOpen = true },
             ),
+            hoverPlaysVideo = true,
         )
         RowMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, model = menu)
     }
@@ -1296,6 +1302,7 @@ private fun ThreadRow(
                     onClick = onClick,
                     onLongClick = { menuOpen = true },
                 ),
+                hoverPlaysVideo = true,
             )
             // docs/ux/calls.md section 2.1.1 — the muted conversation's call is
             // answerable from the row, which is where the person is already
@@ -1479,10 +1486,18 @@ private fun MenuHelperLine(text: String) {
  * is — a channel simply has no flags and no badge to draw.
  */
 @Composable
-internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = Modifier) {
+internal fun ConversationRowBody(
+    row: ConversationListRow,
+    modifier: Modifier = Modifier,
+    /** UX profile-screen section 7: in the chat list a profile video plays
+     *  while a pointer hovers the row; pickers keep the still. */
+    hoverPlaysVideo: Boolean = false,
+) {
+    val (hover, playVideo) = me.lakko.app.ui.components.rememberRowHoverPlaysVideo(hoverPlaysVideo)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
+            .then(hover)
             .fillMaxWidth()
             .alpha(if (row.archived) 0.6f else 1f)
             .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -1494,6 +1509,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
             group = row.kind != ConversationRowKind.CHAT,
             personKey = me.lakko.app.ui.components.personKeyBytes(row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }),
             groupIdHex = row.id.takeIf { row.kind != ConversationRowKind.CHAT },
+            playVideo = playVideo,
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {

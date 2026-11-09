@@ -7725,6 +7725,7 @@ function ChatView(props: {
             size="sm"
             personKey={isGroupChat() ? undefined : (peerKeyB64() ?? undefined)}
             conversationKey={isGroupChat() ? props.entry.groupIdB64 : undefined}
+            playVideo="header"
           />
           <div class="lk-chat-title-text">
             {/* ADR-0021 follow-up: show the linked contact's user-chosen

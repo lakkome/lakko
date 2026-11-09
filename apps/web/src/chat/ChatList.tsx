@@ -206,7 +206,7 @@ function ChannelRow(props: {
       onPointerLeave={press.onPointerLeave}
       onClick={(e) => press.swallowClick(e)}
     >
-      <Avatar label={props.row.title} id={props.row.id} conversationKey={channelAvatarKey(props.row.id)} />
+      <Avatar label={props.row.title} id={props.row.id} conversationKey={channelAvatarKey(props.row.id)} playVideo="hover" />
       <div class="lk-row-body">
         <div class="lk-row-line">
           <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
@@ -757,6 +757,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     id={conversationIdB64Of(g)}
                     personKey={row.personKey}
                     conversationKey={row.personKey === undefined ? g.groupIdB64 : undefined}
+                    playVideo="hover"
                   />
                   <div class="lk-row-body">
                     <div class="lk-row-line">

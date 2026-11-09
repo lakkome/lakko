@@ -1530,6 +1530,9 @@ private fun Header(
                     group = isGroup,
                     personKey = personKey,
                     groupIdHex = avatarSeed.takeIf { isGroup },
+                    // UX profile-screen section 7: the chat header plays a
+                    // profile video always on a touch device.
+                    playVideo = true,
                 )
                 Spacer(Modifier.width(10.dp))
                 Column {

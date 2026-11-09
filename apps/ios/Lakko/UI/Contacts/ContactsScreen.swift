@@ -346,6 +346,9 @@ private struct SentRequestRow: View {
     @ObservedObject private var l10n = Localization.shared
     let request: SentContactRequest
     let onDismiss: () -> Void
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let line = ContactListPresentation.sentRow(request)
@@ -355,7 +358,8 @@ private struct SentRequestRow: View {
                 identity: request.recipientAccountIdB64,
                 size: 40,
                 placeholderSymbol: "person.fill",
-                photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) }
+                photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) },
+                playsVideo: hovering
             )
             VStack(alignment: .leading, spacing: 2) {
                 Text(line.name ?? l10n.t("contacts.request.someone"))
@@ -374,6 +378,8 @@ private struct SentRequestRow: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel(l10n.t("contacts.list.sent_dismiss"))
         }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 
@@ -404,6 +410,9 @@ enum ContactRowId: Hashable {
 private struct InvitedRow: View {
     @ObservedObject private var l10n = Localization.shared
     let contact: PendingContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let stated = PendingContacts.name(contact)
@@ -414,7 +423,8 @@ private struct InvitedRow: View {
                     identity: base64Encode(contact.signaturePubkey),
                     size: 40,
                     placeholderSymbol: "person.fill",
-                    photo: .person(contact.signaturePubkey)
+                    photo: .person(contact.signaturePubkey),
+                    playsVideo: hovering
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(stated ?? l10n.t("invite.contact.page.unnamed"))
@@ -427,6 +437,8 @@ private struct InvitedRow: View {
                 }
             }
             .padding(.vertical, 2)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
     }
 }
@@ -435,6 +447,9 @@ private struct InvitedRow: View {
 /// detail through the tab's route table.
 private struct ContactRow: View {
     let contact: AcceptedContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
@@ -445,7 +460,8 @@ private struct ContactRow: View {
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
                         placeholderSymbol: "person.fill",
-                        photo: .person(contact.request.fromPubkey)
+                        photo: .person(contact.request.fromPubkey),
+                        playsVideo: hovering
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
@@ -458,6 +474,8 @@ private struct ContactRow: View {
                     }
                 }
                 .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
             }
         }
     }
@@ -499,6 +517,9 @@ struct IncomingRequestRow: View {
     let accepting: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         ResolvedName(signatureKey: request.fromPubkey) { resolved in
@@ -508,7 +529,8 @@ struct IncomingRequestRow: View {
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
                     placeholderSymbol: "person.fill",
-                    photo: .person(request.fromPubkey)
+                    photo: .person(request.fromPubkey),
+                    playsVideo: hovering
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)
@@ -553,6 +575,8 @@ struct IncomingRequestRow: View {
                 }
             }
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
     }
 }

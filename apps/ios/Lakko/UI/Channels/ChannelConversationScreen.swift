@@ -642,7 +642,10 @@ struct ChannelTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: channelId, size: 32,
-                placeholderSymbol: "megaphone.fill", photo: .group(channelId))
+                placeholderSymbol: "megaphone.fill", photo: .group(channelId),
+                // UX profile-screen section 7: the chat header plays the
+                // video always on a touch platform.
+                playsVideo: true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title).font(.headline).lineLimit(1)
                 if let subtitle {
