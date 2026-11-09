@@ -805,10 +805,12 @@ packages:
   #     deliberate change that redoes that comparison.
   #   * a receiver's playout delay (ADR-0070, note of 2026-10-12), by
   #     vtable slot, keyed on the image's LC_UUID
-  #     (`apps/shared/sframe-bridge/receiver-delay.h`). That evidence was
-  #     read from stasel 125.0.0 only; it has NOT been redone for this
-  #     binary, so the shim refuses the setter at run time (observe-only)
-  #     and `AvAlignmentTests` pins that.
+  #     (`apps/shared/sframe-bridge/receiver-delay.h`). The slots and the
+  #     calling convention were read from this binary's three iOS slices
+  #     (2026-11-09; the same as stasel 125.0.0's) and their LC_UUIDs are
+  #     pinned in `Calls/SFrameAttach.mm`. A bump loads another binary: the
+  #     shim then refuses the setter at run time (observe-only) and
+  #     `AvAlignmentTests` fails until the evidence is redone.
   #
   # SwiftPM reads the tag as 125.6422.7 and resolves it to commit
   # 72d8d5b1837a85ed4f9de244b6a39f0ce13ba44d, whose Package.swift pins

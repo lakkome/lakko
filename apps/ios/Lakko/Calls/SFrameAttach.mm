@@ -548,21 +548,32 @@ const char * const kNativeRtpReceiverTypeEncoding =
 // `ReleaseEngineRef`.
 using NativeRtpReceiverIMP = lakko::receiver_delay::ReturnedRef (*)(id, SEL);
 
-// The package and the LC_UUID of each slice whose machine code the slot and
-// the calling convention were read from (stasel/WebRTC 125.0.0,
-// WebRTC-M125.xcframework.zip, sha256
-// 4da2f9c7b7481a82249ea61dfcceae7caac6890e0a0412389684765435113ae8).
+// The package version and the LC_UUID of each slice whose machine code the
+// slot and the calling convention were read from (webrtc-sdk/Specs
+// 125.6422.07, WebRTC.xcframework.zip, sha256
+// 827cc2f508c341367c9b0e4f6def46e5f6834251082047d5d1da5bc8fd379263; read
+// 2026-11-09, see `receiver-delay.h`). Per slice, the vtable address points
+// found by type name and the functions at the slots the probe and the setter
+// use:
 //
-// Since 2026-11-09 the app links webrtc-sdk 125.6422.07 instead (ADR-0088's
-// capture hook). Its slices (device arm64 4C4C4476-5555-3144-A12E-
-// D71FF8AA38BD, simulator arm64 4C4C44CD-5555-3144-A1A9-7A0C4DFC7DD7,
-// simulator x86_64 4C4C440C-5555-3144-A1E2-AEA9B0483609) are deliberately NOT
-// listed: the setter's slot and calling convention have not been read from
-// them, so the setter stays observe-only on this build.
-NSString * const kVerifiedPackageVersion = @"stasel/WebRTC 125.0.0";
-NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4485-5555-3144-A186-7570B405EE6A";
-NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CF-5555-3144-A1B7-95616B307988";
-NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C44D7-5555-3144-A1AF-2ABA8DEDBD33";
+//   device arm64:     proxy vtable 0x96acd0 (slot 1 0xfeb5c, slot 8 0x7e58c0,
+//                     slot 13 0x7e5b14, slot 16 0x7e5d38); VideoRtpReceiver
+//                     0x96b078 (slot 8 0x7534, slot 13 0x7eae4c);
+//                     JitterBufferDelay::Set 0x38c76c
+//   simulator arm64:  proxy 0x972cd0 (slot 1 0xfc2bc, slot 8 0x7ebfc0,
+//                     slot 13 0x7ec214, slot 16 0x7ec438); VideoRtpReceiver
+//                     0x973078 (slot 8 0x47d8, slot 13 0x7f14bc); Set 0x38ee5c
+//   simulator x86_64: proxy 0xd98968 (slot 1 0x227e40, slot 8 0xbe9190,
+//                     slot 13 0xbe9420, slot 16 0xbe9760); VideoRtpReceiver
+//                     0xd98d10 (slot 8 0x4ba0, slot 13 0xbf0800); Set 0x6b1a20
+//
+// stasel/WebRTC 125.0.0, which iOS linked until 2026-11-09, had the same
+// slots and convention; its identities are no longer listed because it is no
+// longer the binary the app links.
+NSString * const kVerifiedPackageVersion = @"125.6422.07";
+NSString * const kVerifiedUuidDeviceArm64 = @"4C4C4476-5555-3144-A12E-D71FF8AA38BD";
+NSString * const kVerifiedUuidSimulatorArm64 = @"4C4C44CD-5555-3144-A1A9-7A0C4DFC7DD7";
+NSString * const kVerifiedUuidSimulatorX8664 = @"4C4C440C-5555-3144-A1E2-AEA9B0483609";
 
 // 0: not decided. 1: the static conditions hold. 2: they do not.
 std::atomic<int> g_receiver_delay_static{0};

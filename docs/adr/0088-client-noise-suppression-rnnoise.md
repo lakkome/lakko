@@ -20,7 +20,7 @@
   (a fake native suppressor); never run on a device, an emulator or a
   call, and nothing was heard. iOS is not built; on 2026-11-09 the
   maintainer chose section 5 option 2 (the webrtc-sdk binary and its
-  capture post-processing delegate), in progress.
+  capture post-processing delegate), built the same day, not yet run in a call.
 - **Date:** 2026-11-07
 - **Context:** the call test of 2026-11-07 (typing and room noise reached
   every participant), the investigation behind it (call-audio report of the
@@ -346,6 +346,18 @@ the old one: the frame encryptor and decryptor attach (security invariant
 `apps/shared/sframe-bridge/receiver-delay.h`, which stay observe-only for an
 image they were not read from. Option 1 was rejected as the costliest and
 riskiest; option 3 as leaving iOS the one client without the switch.
+
+**Built 2026-11-09 on iOS** (`Calls/CaptureNoiseProcessor.{h,mm}`,
+`Calls/CaptureNoiseSuppression.swift`, the `Sound` section of the call
+Settings sheet). Checked against the new binary's machine code, all three
+slices: the frame encryptor and decryptor attach is instruction-identical to
+stasel 125.0.0's, and the playout-delay slots, slot encoding and argument
+convention are the same; the three new image identities are pinned in
+`receiver-delay.h` / `SFrameAttach.mm`. Run: LakkoTests on a simulator (the
+setter offered on the simulator arm64 slice); the device app installed and
+launched on an iPhone with no crash. Not yet run in a call: neither the
+encryptor on this binary, nor the setter on a real receiver, nor the
+suppressor heard.
 
 ## Alternatives
 

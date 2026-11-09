@@ -287,15 +287,15 @@ typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
 /// `nativeRtpReceiver` accessor and called by vtable slot
 /// (`apps/shared/sframe-bridge/receiver-delay.h`, where the evidence for
 /// the slot and the calling convention is written down). That evidence
-/// was read from the binary of stasel/WebRTC 125.0.0, so the setter is
-/// offered only when the loaded WebRTC image IS that binary, by its
-/// Mach-O `LC_UUID`; for any other image the answer is "not available"
-/// and Lakko measures without setting. The app has linked webrtc-sdk
-/// 125.6422.07 since 2026-11-09, whose slices were not read, so on this
-/// build the setter is not available.
+/// was read from the binary of webrtc-sdk/Specs 125.6422.07 (and before
+/// 2026-11-09 from stasel/WebRTC 125.0.0, which the app linked until then),
+/// so the setter is offered only when the loaded WebRTC image IS that
+/// binary, by its Mach-O `LC_UUID`; for any other image the answer is "not
+/// available" and Lakko measures without setting.
 @interface LakkoReceiverDelay : NSObject
 
-/// The WebRTC package (name and version) the evidence was gathered for.
+/// The WebRTC package version the evidence was gathered for
+/// (webrtc-sdk/Specs).
 @property(class, nonatomic, readonly) NSString *verifiedPackageVersion;
 
 /// The `LC_UUID` of every slice of that package the evidence covers

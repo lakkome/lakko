@@ -44,7 +44,7 @@ import LakkoCore
 /// the whole process if the engine's object fails its probe. For any other
 /// image the rule runs observe-only: it is fed, the skew is measured and
 /// logged, and nothing is written. The binary linked since 2026-11-09
-/// (webrtc-sdk 125.6422.07) is such an image until its slices are read.
+/// (webrtc-sdk 125.6422.07) has been read and its slices are pinned.
 ///
 /// Decided here, in Lakko's code, and never assumed from the engine. Both
 /// kinds go through the same engine method, so they have one answer; it is

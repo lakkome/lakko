@@ -40,14 +40,41 @@
 //
 // Read from the machine code of every slice Lakko ships (not reasoned):
 //
-//   * iOS device arm64, simulator arm64, simulator x86_64
-//     (WebRTC.framework of stasel/WebRTC 125.0.0): 8-byte absolute slots.
-//     The framework's own Objective-C methods call `id` at +0x48,
+//   * iOS device arm64, simulator arm64, simulator x86_64 (WebRTC.framework
+//     of webrtc-sdk/Specs 125.6422.07, linked since 2026-11-09 for ADR-0088's
+//     capture hook; read 2026-11-09). This binary keeps RTTI, so each
+//     vtable was found by its type name (typeinfo -> vtable address point,
+//     slot pointers from the image's chained fixups) rather than inferred:
+//       - `RefCountedObject<RtpReceiverProxyWithInternal<RtpReceiverInternal>>`,
+//         the object `-[RTCRtpReceiver nativeRtpReceiver]` returns: 8-byte
+//         absolute slots. Slot 0 / 1 are the atomic increment / decrement of
+//         the count at +0x20 (AddRef / Release). Slot 8 (`media_type`) loads
+//         the internal receiver from +0x18 and tail-calls its +0x40. Slot 13
+//         (+0x68) stores its argument words (arm64 `x1`/`x2`, x86_64
+//         `rsi`/`dl`) and marshals a call through the member pointer
+//         {ptr 0x68, adj 1} (arm64) / {ptr 0x69, adj 0} (x86_64), i.e.
+//         slot 13 of the internal receiver. Slot 16 (`GetFrameDecryptor`)
+//         takes its result slot in `x8` (arm64) / as the hidden first
+//         argument `rdi` (x86_64) and marshals through {0x80, 1} / {0x81, 0}.
+//       - `RefCountedObject<VideoRtpReceiver>`: slot 8 returns 1
+//         (`MEDIA_TYPE_VIDEO`); slot 13 passes its argument registers
+//         untouched to `JitterBufferDelay::Set` on the member at +0xa0, then,
+//         with a media channel (+0x40) and a signaled ssrc (+0x48, engaged
+//         byte +0x4c), tail-calls the channel's +0x80 with `GetMs()` (the
+//         stored seconds times 1000.0).
+//       - `RtpReceiverInterface`'s own vtable: slots 0-17 in the order of the
+//         table above (the entry that reports "Pure virtual function called!"
+//         at 0, 1, 4, 8, 9, 10, 12, 13; the default bodies at the others).
+//       - The Objective-C methods call `id` at +0x48 and `GetParameters` at
+//         +0x50 and set the decryptor at +0x78.
+//     Slot offsets, slot encoding and the calling convention are the same as
+//     those read from stasel/WebRTC 125.0.0, which iOS linked until then:
+//     8-byte absolute slots, the Objective-C methods calling `id` at +0x48,
 //     `GetParameters` at +0x50, `SetObserver` at +0x60 and
-//     `SetFrameDecryptor` at +0x78; the `VideoRtpReceiver` vtable's slot 13
-//     (+0x68) is a function that stores its argument into the cached delay
-//     and forwards `GetMs()` to the media channel, and slot 14 takes a
-//     struct-return pointer (`GetSources`).
+//     `SetFrameDecryptor` at +0x78, the `VideoRtpReceiver` vtable's slot 13
+//     (+0x68) of the same shape. That build carries no type-name strings
+//     (no RTTI), so its vtables could not be found by name. The image
+//     identities and the addresses are in the iOS shim (`SFrameAttach.mm`).
 //   * Android x86_64 (libjingle_peerconnection_so.so of 125.6422.07): the
 //     same 8-byte absolute slots (`nativeGetId` +0x48, `nativeGetParameters`
 //     +0x50, `nativeSetObserver` +0x60, `nativeSetFrameDecryptor` +0x78;
@@ -59,16 +86,13 @@
 //     is at +0x34. Chromium's build sets this for Android arm64 only
 //     (`use_relative_vtables_abi` in build/config/compiler/compiler.gni).
 //
-// Since 2026-11-09 iOS links webrtc-sdk 125.6422.07 (ADR-0088's capture
-// hook) instead of stasel/WebRTC 125.0.0. Its three iOS slices have NOT been
-// read for this setter, so the iOS shim does not pin them and refuses the
-// setter there (observe-only). What was compared on them, for the frame
-// encryptor / decryptor attach only: the six `setFrameEncryptor:` /
-// `setFrameDecryptor:` methods are instruction-identical to stasel's (the
-// framework calls AddRef / Release of Lakko's object through absolute 8-byte
-// slots), and a scan of the device arm64 slice finds an `ldrsw` within three
-// instructions before a `blr` exactly twice, as in stasel's: neither binary
-// is built with relative vtables.
+// The frame encryptor / decryptor attach on those same slices: the six
+// `setFrameEncryptor:` / `setFrameDecryptor:` methods are
+// instruction-identical to stasel's (the framework calls AddRef / Release of
+// Lakko's object through absolute 8-byte slots), and a scan of the device
+// arm64 slice finds an `ldrsw` within three instructions before a `blr`
+// exactly twice, as in stasel's: neither binary is built with relative
+// vtables.
 //
 // The argument: `absl::optional<double>` is `std::optional<double>` in these
 // builds (`ABSL_OPTION_USE_STD_OPTIONAL 2`, C++17 and later). Read from the
