@@ -53,6 +53,9 @@ final class CallPictureInPicture: NSObject, ObservableObject {
     /// keep it). The own inset then shows nothing rather than a frozen frame.
     private var cameraInterrupted = false
     private var interruptionObservers: [NSObjectProtocol] = []
+    /// `isPictureInPicturePossible` of the current controller, logged when it
+    /// changes: the system says nothing when it declines to start the window.
+    private var possibleObservation: NSKeyValueObservation?
 
     override init() {
         super.init()
@@ -88,6 +91,28 @@ final class CallPictureInPicture: NSObject, ObservableObject {
                 }
             })
         }
+        // What the system window can do when the app leaves the screen: the
+        // system starts it or declines silently, so the state is logged.
+        interruptionObservers.append(center.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.logState("app leaving the screen") }
+        })
+    }
+
+    /// One line on whether the system window could start now, and why not.
+    private func logState(_ moment: String) {
+        guard live else { return }
+        let source = activeSource
+        NSLog(
+            "call pip: %@: controller=%@ possible=%@ auto=%@ active=%@ source=%@ sourceSize=%.0fx%.0f",
+            moment,
+            controller == nil ? "none" : "yes",
+            controller?.isPictureInPicturePossible == true ? "yes" : "no",
+            controller?.canStartPictureInPictureAutomaticallyFromInline == true ? "yes" : "no",
+            controller?.isPictureInPictureActive == true ? "yes" : "no",
+            source == nil ? "none" : (source?.window == nil ? "not-in-window" : "in-window"),
+            source?.bounds.width ?? 0, source?.bounds.height ?? 0)
     }
 
     /// A person's camera is upright on a phone.
@@ -119,12 +144,56 @@ final class CallPictureInPicture: NSObject, ObservableObject {
         self.groupCall = groupCall
         model.label = label
         model.peerKey = peerKey
+        if liveNow != self.live {
+            NSLog("call pip: %@", liveNow ? "armed for a live call" : "disarmed, no live call")
+        }
         self.live = liveNow
-        controller?.canStartPictureInPictureAutomaticallyFromInline = liveNow
-        if !liveNow, controller?.isPictureInPictureActive == true {
-            controller?.stopPictureInPicture()
+        if liveNow {
+            makeController()
+        } else {
+            dropController()
         }
         refresh()
+    }
+
+    /// The system controller exists only while a call is live. On a phone
+    /// with no call it was seen starting the window by itself when the app
+    /// left the screen (an iPhone on iOS 27.2, 2026-11-10), with
+    /// `canStartPictureInPictureAutomaticallyFromInline` false as far as the
+    /// app's own state says; with no controller there is nothing to start.
+    private func makeController() {
+        guard let source = activeSource else { return }
+        if let controller {
+            controller.canStartPictureInPictureAutomaticallyFromInline = true
+            return
+        }
+        guard AVPictureInPictureController.isPictureInPictureSupported() else {
+            NSLog("call pip: picture in picture not supported on this device")
+            return
+        }
+        let pip = AVPictureInPictureController(
+            contentSource: AVPictureInPictureController.ContentSource(
+                activeVideoCallSourceView: source, contentViewController: callController))
+        pip.delegate = self
+        pip.canStartPictureInPictureAutomaticallyFromInline = true
+        controller = pip
+        possibleObservation = pip.observe(\.isPictureInPicturePossible, options: [.initial, .new]) {
+            controller, _ in
+            let possible = controller.isPictureInPicturePossible
+            DispatchQueue.main.async {
+                NSLog("call pip: possible=%@", possible ? "yes" : "no")
+            }
+        }
+    }
+
+    /// Stop the window if it is up and let the controller go.
+    private func dropController() {
+        guard let controller else { return }
+        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        if controller.isPictureInPictureActive { controller.stopPictureInPicture() }
+        controller.delegate = nil
+        possibleObservation = nil
+        self.controller = nil
     }
 
     /// A source view joined or left a window.
@@ -135,20 +204,15 @@ final class CallPictureInPicture: NSObject, ObservableObject {
             next !== activeSource
         else { return }
         activeSource = next
-        guard AVPictureInPictureController.isPictureInPictureSupported() else {
-            NSLog("call pip: picture in picture not supported on this device")
-            return
-        }
-        let source = AVPictureInPictureController.ContentSource(
-            activeVideoCallSourceView: next, contentViewController: callController)
-        if let controller {
-            controller.contentSource = source
-        } else {
-            let pip = AVPictureInPictureController(contentSource: source)
-            pip.delegate = self
-            pip.canStartPictureInPictureAutomaticallyFromInline = live
-            controller = pip
-        }
+        // A new source view gets a new controller rather than a new content
+        // source on the old one: with the content source replaced, the system
+        // reported the window possible and never started it when the app left
+        // the screen (an iPhone on iOS 27.2, 2026-11-10). Not while the window
+        // is up: it keeps its view until it closes.
+        guard live, controller?.isPictureInPictureActive != true else { return }
+        dropController()
+        makeController()
+        logState("source view changed")
     }
 
     /// Recompute what the window shows from the call's state.
@@ -520,10 +584,18 @@ final class SampleBufferDisplayView: UIView {
             origin: .zero,
             size: quarterTurn ? CGSize(width: bounds.height, height: bounds.width) : bounds.size)
         displayLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-        var transform = CATransform3DMakeRotation(angle, 0, 0, 1)
-        if mirrored { transform = CATransform3DScale(transform, -1, 1, 1) }
-        displayLayer.transform = transform
+        displayLayer.transform = Self.layerTransform(angle: angle, mirrored: mirrored)
         CATransaction.commit()
+    }
+
+    /// The frame turned upright by `angle`, then mirrored left to right on
+    /// the screen. The mirror comes after the turn: before it, a front-camera
+    /// frame (turned a quarter) was flipped upside down instead (seen in the
+    /// picture-in-picture window on an iPhone, 2026-11-10).
+    static func layerTransform(angle: CGFloat, mirrored: Bool) -> CATransform3D {
+        let turn = CATransform3DMakeRotation(angle, 0, 0, 1)
+        guard mirrored else { return turn }
+        return CATransform3DConcat(turn, CATransform3DMakeScale(-1, 1, 1))
     }
 }
 
