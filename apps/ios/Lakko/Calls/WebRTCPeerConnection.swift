@@ -336,6 +336,8 @@ public final class WebRTCPeerConnection: NSObject {
         if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         cameraCopies = [:]
+        sframeSenders = []
+        sframeReceivers = []
     }
 
     // MARK: - Local tracks
@@ -692,6 +694,22 @@ public final class WebRTCPeerConnection: NSObject {
     /// kind; empty on the one-to-one path.
     private var cameraCopies: [CameraCopyKind: CameraCopy] = [:]
 
+    /// The exact sender and receiver objects an SFrame transform was attached
+    /// to (the bridge keeps it as an associated object on that object). A
+    /// rekey and a prune walk these, never `peer.senders` / `peer.receivers`:
+    /// those build new wrapper objects on every read, which carry no
+    /// association, so a rekey over them was a silent no-op. Found on an
+    /// iPhone on 2026-11-10: in a call link the owner's senders kept sealing
+    /// under the seed of before the web joiner's admission and the web opened
+    /// none of its frames, while the owner, whose decryptor for the joiner was
+    /// armed after the rekey, opened the joiner's.
+    private var sframeSenders: [RTCRtpSender] = []
+    private var sframeReceivers: [RTCRtpReceiver] = []
+
+    private func rememberSFrame(sender: RTCRtpSender) {
+        if !sframeSenders.contains(where: { $0 === sender }) { sframeSenders.append(sender) }
+    }
+
     /// Add the camera of an SFU call (group and link calls) as its main
     /// sender: the picture as captured, one encoding, SFrame stream index 1
     /// as before. Created with `add(_:streamIds:)`, the way the one-to-one
@@ -849,6 +867,7 @@ public final class WebRTCPeerConnection: NSObject {
             kind.rawValue, reason)
         copy.track.isEnabled = false
         LakkoSFrameAttach.detach(fromSender: copy.sender)
+        sframeSenders.removeAll { $0 === copy.sender }
         if let peer = peer {
             _ = peer.removeTrack(copy.sender)
         }
@@ -1107,6 +1126,8 @@ public final class WebRTCPeerConnection: NSObject {
             )
             if status != .OK {
                 allOk = false
+            } else {
+                rememberSFrame(sender: sender)
             }
         }
         armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
@@ -1129,6 +1150,8 @@ public final class WebRTCPeerConnection: NSObject {
             )
             if status != .OK {
                 removeCameraCopy(kind, reason: "its SFrame encryptor could not be attached")
+            } else {
+                rememberSFrame(sender: copy.sender)
             }
         }
     }
@@ -1162,6 +1185,7 @@ public final class WebRTCPeerConnection: NSObject {
             localLeaf: localLeaf,
             streamIndex: CameraSender.streamIndexCamera
         ) == .OK else { return false }
+        rememberSFrame(sender: sender)
         armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
         return true
     }
@@ -1186,6 +1210,9 @@ public final class WebRTCPeerConnection: NSObject {
             toReceiver: receiver,
             seed: seed
         )
+        if status == .OK, !sframeReceivers.contains(where: { $0 === receiver }) {
+            sframeReceivers.append(receiver)
+        }
         return status == .OK
     }
 
@@ -1201,10 +1228,10 @@ public final class WebRTCPeerConnection: NSObject {
     /// the decryptors' retained previous key.
     ///
     /// Called by `SfuCallSession.rekey(newSeed:)` when a commit advances
-    /// the group's epoch during a live call. Enumerates the live senders
-    /// / receivers off the peer connection, so a receiver added by a
-    /// later renegotiation is covered too; a sender / receiver that was
-    /// never SFrame-armed is a benign skip.
+    /// the group's epoch during a live call. Walks the senders and
+    /// receivers this connection attached a transform to
+    /// (``sframeSenders`` / ``sframeReceivers``); a receiver added by a
+    /// later renegotiation joins them when it is armed.
     ///
     /// A rekey never downgrades to plaintext: if the rotation itself
     /// fails (bad seed), the bridge retains the current key (still
@@ -1216,16 +1243,16 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        guard let peer = peer else { return false }
+        guard peer != nil else { return false }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let overlapMs = Self.sframeOverlapMs
         var allOk = true
-        for sender in peer.senders {
+        for sender in sframeSenders {
             if !LakkoSFrameAttach.rekeyEncryptor(onSender: sender, seed: seed) {
                 allOk = false
             }
         }
-        for receiver in peer.receivers {
+        for receiver in sframeReceivers {
             if !LakkoSFrameAttach.rekeyDecryptor(
                 onReceiver: receiver,
                 seed: seed,
@@ -1248,12 +1275,11 @@ public final class WebRTCPeerConnection: NSObject {
     }
 
     /// Drop each decryptor's retained previous key once the overlap
-    /// window has elapsed (G-18, ADR-0029). Re-enumerates the live
-    /// receivers so the set reflects any mid-window renegotiation.
+    /// window has elapsed (G-18, ADR-0029), on every receiver armed so far.
     private func pruneSFrameDecryptors() {
-        guard let peer = peer else { return }
+        guard peer != nil else { return }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        for receiver in peer.receivers {
+        for receiver in sframeReceivers {
             LakkoSFrameAttach.pruneDecryptor(onReceiver: receiver, nowMs: now)
         }
     }
