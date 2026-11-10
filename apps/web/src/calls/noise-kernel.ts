@@ -110,7 +110,10 @@ export class NoiseKernel {
     this.views();
     this.input.set(input);
     if (this.exports.lakko_ns_process(n) !== 1) return false;
-    // `lakko_ns_process` does not allocate, so the views are still valid.
+    // `lakko_ns_process` should not allocate (the suppressor builds
+    // RNNoise's shared tables when it is made), but a grown memory would
+    // detach the views, so they are checked again before reading.
+    this.views();
     output.set(this.output.subarray(0, n));
     return true;
   }

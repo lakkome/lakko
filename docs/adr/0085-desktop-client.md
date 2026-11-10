@@ -335,6 +335,17 @@ clock.
   five-second slow requests through the handler ran without a break (23 in
   120 s). `document.visibilityState` reported `hidden`. Longer hidden periods
   (App Nap after minutes) are not measured.
+- **Measured again 2026-11-10 on macOS 27.2, window minimised, no call**
+  (the probe's `LAKKO_DESKTOP_PROBE_HIDE=minimize`, `_THROTTLING=default`,
+  `_LOCK=1`): a 50 ms page timer fired once a second; worker timers fired
+  5.3 (100 ms), 7.3 (50 ms) and 8.3 (33 ms) times a second; neither the
+  inactive scheduling policy `none` nor a held Web Lock changed any rate. With
+  WebKit's default policy the page stopped altogether about four minutes after
+  it was minimised (no report, a request waiting 177 s) until the window came
+  back; with `none` it ran for the seven minutes measured. So the main window
+  keeps the policy `none` for the whole run, and the collapsed call window's
+  clock runs in a worker. Windows and Linux are not measured; a call (with the
+  microphone in use) is not measured.
 - **Call media (section 6):** WKWebView has `RTCRtpScriptTransform`, and one
   attaches to an audio sender; `createEncodedStreams` is absent; an offer
   carries audio and video with Opus and VP8. `getUserMedia` exists but was not

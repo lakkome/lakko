@@ -34,6 +34,9 @@ import {
  *  (`styles.css` `.lk-call-window`). */
 const SURFACE_BG = "#0f1220";
 
+/** How often the feed rate is logged. */
+const RATE_LOG_MS = 10_000;
+
 export interface CallWindowRelayOptions {
   /** The hidden picture the frames are drawn from. */
   readonly root: HTMLElement;
@@ -59,6 +62,9 @@ interface Slot {
 export function startCallWindowRelay(options: CallWindowRelayOptions): () => void {
   let stopped = false;
   let lastView: CallWindowView | null = null;
+  // Counts only, logged every 10 s: how fast the window is fed, so the first
+  // run on an OS whose hidden-page throttling is not measured shows it.
+  const rate = { ticks: 0, frames: 0, since: performance.now() };
   const slots: Slot[] = [
     { name: "picture", schedule: new FrameSchedule(), sent: false, canvas: null },
     { name: "inset", schedule: new FrameSchedule(), sent: false, canvas: null },
@@ -98,7 +104,10 @@ export function startCallWindowRelay(options: CallWindowRelayOptions): () => voi
           .then(async (buffer) => {
             if (stopped) return;
             const ok = await postCallWindowFrame(slot.name, new Uint8Array(buffer));
-            if (ok) slot.sent = true;
+            if (ok) {
+              slot.sent = true;
+              rate.frames += 1;
+            }
             // Not taken (it raced the window being shown or hidden): a photo
             // is sent again rather than counted as delivered.
             else slot.schedule.reset();
@@ -202,20 +211,90 @@ export function startCallWindowRelay(options: CallWindowRelayOptions): () => voi
 
   const tick = (): void => {
     if (stopped) return;
+    rate.ticks += 1;
+    const now = performance.now();
+    if (now - rate.since >= RATE_LOG_MS) {
+      const secs = (now - rate.since) / 1000;
+      console.info(
+        `[call-window] ${(rate.ticks / secs).toFixed(1)} ticks/s ${(rate.frames / secs).toFixed(1)} frames/s hidden=${document.hidden}`,
+      );
+      rate.ticks = 0;
+      rate.frames = 0;
+      rate.since = now;
+    }
     postView();
     const [picture, inset] = slots;
     if (picture !== undefined) tickPicture(picture);
     if (inset !== undefined) tickInset(inset);
   };
 
-  // Ticks at half the frame interval so a frame is never late by a whole one;
-  // the schedule keeps the rate.
-  const timer = globalThis.setInterval(tick, FRAME_INTERVAL_MS / 2);
+  // Ticks at a third of the frame interval so a frame is never late by a
+  // whole one; the schedule keeps the rate.
+  const stopClock = startClock(tick, Math.round(FRAME_INTERVAL_MS / 3));
+  const releaseLock = holdLock();
   tick();
 
   return () => {
     stopped = true;
-    globalThis.clearInterval(timer);
+    stopClock();
+    releaseLock();
     void postCallWindowView(null);
+  };
+}
+
+/**
+ * Call `onTick` every `everyMs`, from a worker's clock
+ * (`desktop-call-window-ticker.ts`): the page's own timers fire once a second
+ * while Lakko is minimised, and the collapsed call's window is there to be
+ * watched while it is. Without a worker, the page's own timer.
+ */
+function startClock(onTick: () => void, everyMs: number): () => void {
+  let worker: Worker | null = null;
+  try {
+    worker = new Worker(new URL("./desktop-call-window-ticker.ts", import.meta.url), { type: "module" });
+  } catch {
+    worker = null;
+  }
+  if (worker === null) {
+    const timer = globalThis.setInterval(onTick, everyMs);
+    return () => globalThis.clearInterval(timer);
+  }
+  const w = worker;
+  let fallback: ReturnType<typeof setInterval> | null = null;
+  w.onmessage = () => onTick();
+  // A worker that fails to load is replaced by the page's own timer.
+  w.onerror = () => {
+    w.terminate();
+    if (fallback === null) fallback = globalThis.setInterval(onTick, everyMs);
+  };
+  w.postMessage({ every: everyMs });
+  return () => {
+    w.terminate();
+    if (fallback !== null) globalThis.clearInterval(fallback);
+  };
+}
+
+/**
+ * Hold a Web Lock while the window is relayed: the workaround Tauri names for
+ * a hidden page being suspended on Windows and Linux (a page holding a lock
+ * is not frozen in Chromium). On macOS 27.2 it changed no timer rate in the
+ * probe; Windows and Linux are not measured.
+ */
+function holdLock(): () => void {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (locks === undefined) return () => {};
+  let release: (() => void) | null = null;
+  let released = false;
+  locks
+    .request("lakko-call-window", () => new Promise<void>((resolve) => {
+      if (released) resolve();
+      else release = resolve;
+    }))
+    .catch(() => {
+      // No lock: the relay runs without one.
+    });
+  return () => {
+    released = true;
+    release?.();
   };
 }

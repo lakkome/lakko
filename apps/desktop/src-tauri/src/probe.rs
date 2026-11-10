@@ -43,6 +43,28 @@ pub const ERROR_REPORTER: &str = r#"
 "#;
 const WORKER: &str = include_str!("../probe/probe-worker.js");
 
+/// The probe page's path: `?lock=1` when `LAKKO_DESKTOP_PROBE_LOCK=1`, so the
+/// page holds a Web Lock for the whole run.
+pub fn start_path() -> String {
+    if std::env::var("LAKKO_DESKTOP_PROBE_LOCK").is_ok_and(|v| v == "1") {
+        format!("{PROBE_PATH}?lock=1")
+    } else {
+        PROBE_PATH.to_owned()
+    }
+}
+
+/// Whether the probe window keeps the app's throttling setting;
+/// `LAKKO_DESKTOP_PROBE_THROTTLING=default` measures the webview's own.
+pub fn keep_throttling_off() -> bool {
+    !std::env::var("LAKKO_DESKTOP_PROBE_THROTTLING").is_ok_and(|v| v == "default")
+}
+
+/// Whether the probe minimises the window (`LAKKO_DESKTOP_PROBE_HIDE=minimize`)
+/// instead of hiding it.
+fn minimise() -> bool {
+    std::env::var("LAKKO_DESKTOP_PROBE_HIDE").is_ok_and(|v| v == "minimize")
+}
+
 fn host_started() -> Instant {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     *START.get_or_init(Instant::now)
@@ -64,14 +86,20 @@ pub fn schedule_hide<R: Runtime>(app: AppHandle<R>, label: String) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(visible)).await;
         if let Some(w) = app.get_webview_window(&label) {
-            match w.hide() {
-                Ok(()) => info!(t = elapsed(), "probe: window hidden"),
+            let done = if minimise() { w.minimize() } else { w.hide() };
+            match done {
+                Ok(()) => info!(
+                    t = elapsed(),
+                    minimised = minimise(),
+                    "probe: window hidden"
+                ),
                 Err(e) => warn!(error = %e, "probe: hide failed"),
             }
         }
         tokio::time::sleep(Duration::from_secs(hidden)).await;
         if let Some(w) = app.get_webview_window(&label) {
-            match w.show() {
+            let done = if minimise() { w.unminimize() } else { w.show() };
+            match done {
                 Ok(()) => info!(t = elapsed(), "probe: window shown"),
                 Err(e) => warn!(error = %e, "probe: show failed"),
             }

@@ -130,6 +130,29 @@ setInterval(() => {
   last = now;
 }, 1000);
 
+// The collapsed call window's frame loop (calls.md 4.5.4a) ticks every 50 ms:
+// count, per 10 s, how often a main-thread timer fires, how often a tick a
+// worker posts arrives, and how often a frame-drawing step runs, with and
+// without a Web Lock held, so the log shows what a hidden window keeps.
+const counts = { main: 0, worker: 0, worker100: 0, worker33: 0 };
+setInterval(() => { counts.main++; }, 50);
+const ticker = new Worker("/__probe/worker.js", { type: "module" });
+ticker.onmessage = (e) => { if (e.data === "tick") counts.worker++; };
+ticker.postMessage("tick-start");
+for (const ms of [100, 33]) {
+  const w = new Worker("/__probe/worker.js", { type: "module" });
+  w.onmessage = (e) => { if (e.data === "tick") counts["worker" + ms]++; };
+  w.postMessage({ tickEvery: ms });
+}
+let lockHeld = false;
+if (new URLSearchParams(location.search).get("lock") === "1" && navigator.locks) {
+  navigator.locks.request("lakko-probe-lock", () => { lockHeld = true; return new Promise(() => {}); });
+}
+setInterval(() => {
+  report({ kind: "rates", per10s: { ...counts }, hidden: document.hidden, lockHeld });
+  for (const k of Object.keys(counts)) counts[k] = 0;
+}, 10_000);
+
 let poll = 0;
 (async function loop() {
   for (;;) {

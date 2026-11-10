@@ -9,4 +9,7 @@ self.onrtctransform = (event) => {
 };
 self.onmessage = (event) => {
   if (event.data === "ping") self.postMessage("pong");
+  // The rate probe: a 50 ms timer in the worker, posted to the page.
+  if (event.data === "tick-start") setInterval(() => self.postMessage("tick"), 50);
+  if (event.data && event.data.tickEvery) setInterval(() => self.postMessage("tick"), event.data.tickEvery);
 };

@@ -152,8 +152,8 @@ fn main() {
                 }
             }
 
-            let start = if probe_mode { probe::PROBE_PATH } else { "/" };
-            let url = app_url(start).parse()?;
+            let start = if probe_mode { probe::start_path() } else { "/".to_owned() };
+            let url = app_url(&start).parse()?;
             // Links the person shares name the public origin, never the app's
             // internal scheme (`apps/web/src/platform/index.ts`).
             let public_origin = serde_json::to_string(&setup_config.api_origin.origin().ascii_serialization())?;
@@ -168,6 +168,24 @@ fn main() {
                         call_window::reset(w.app_handle());
                     }
                 });
+            if !probe_mode || probe::keep_throttling_off() {
+                // The page must keep running while this window is minimised
+                // or hidden: the collapsed call's own window draws frames it
+                // sends (`call_window.rs`), and it holds the delivery socket.
+                // On macOS 14 and later this sets WebKit's inactive
+                // scheduling policy to none. Measured with the probe on
+                // macOS 27.2, window minimised, no call: with WebKit's default
+                // the page stopped altogether about four minutes after it was
+                // hidden (no timer, no request) until it was shown again;
+                // with none it ran for the seven minutes measured. Timers are
+                // throttled either way (a page timer fires once a second, a
+                // worker's about eight times), so the call window's clock
+                // runs in a worker (`desktop-call-window-ticker.ts`). The
+                // setting applies to the whole run, not only during a call;
+                // its battery cost is not measured. Older macOS, Windows and
+                // Linux ignore it (wry applies it on WKWebView only).
+                builder = builder.background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+            }
             if cfg!(debug_assertions) {
                 // Debug builds only: page errors and console errors reach the
                 // host log, since the window has no devtools.
@@ -177,16 +195,6 @@ fn main() {
             // screen-sharing pickers read it (`desktop.md` section 2).
             let window = builder
                 .title("Lakko")
-                // The collapsed call's own window draws frames this page
-                // sends (`call_window.rs`), so the page must keep running at
-                // its rate while this window is minimised, hidden or behind
-                // other windows. On macOS 14 and later this sets WebKit's
-                // inactive scheduling policy to none: no timer throttling and
-                // no suspension of a hidden view, for the whole page and at
-                // all times, so a Lakko in the background spends more battery
-                // than a throttled one. Older macOS, Windows and Linux ignore
-                // it (wry applies it on WKWebView only).
-                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
                 // The page's own drop targets take a dragged file; the host's
                 // handler would swallow the event before them.
                 .disable_drag_drop_handler()

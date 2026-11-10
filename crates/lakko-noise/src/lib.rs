@@ -112,6 +112,12 @@ impl Default for NoiseSuppressor {
 impl NoiseSuppressor {
     /// A fresh suppressor. Allocates every buffer it will ever use.
     pub fn new() -> Self {
+        // nnnoiseless builds its shared tables (a process-wide `OnceCell`) on
+        // the first frame any state processes: 54 allocations, about 32 KB,
+        // counted 2026-11-10. One frame of silence through a throwaway state
+        // builds them here, so the audio thread never does (in the web's
+        // wasm it would grow the memory under the page's buffer views).
+        DenoiseState::new().process_frame(&mut [0.0; FRAME_SIZE], &[0.0; FRAME_SIZE]);
         let mut ready = VecDeque::with_capacity(LATENCY_SAMPLES + MAX_BLOCK + FRAME_SIZE);
         ready.extend(std::iter::repeat(0.0).take(LATENCY_SAMPLES));
         Self {
