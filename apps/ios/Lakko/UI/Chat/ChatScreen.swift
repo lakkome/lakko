@@ -4097,6 +4097,19 @@ struct GroupInfoScreen: View {
             }
             .onAppear { viewModel.groupInfoAppeared() }
             .onDisappear { viewModel.groupInfoDisappeared() }
+            // The conversation's receive loop is a `.task` of the chat screen,
+            // which this screen covers, so it stops while the info is up. It
+            // runs here too: a membership change made on this screen (remove,
+            // make admin) is applied by the owner's sweep only once the poll
+            // has read the proposal back, and without a poll it waited until
+            // the chat was opened again (seen on an iPhone 2026-11-10: "2
+            // membership changes are waiting to apply" on the owner's device).
+            .task {
+                while !Task.isCancelled, viewModel.pollLoopShouldContinue {
+                    await viewModel.pollOnceLongPoll()
+                    await Task.yield()
+                }
+            }
             // UX 9.1 — the dialog over whichever screen of the conversation is
             // up; a cover cannot be presented from a screen under this one.
             .modifier(EndDialogPresenter(viewModel: viewModel, active: viewModel.conversationInfoOpen))

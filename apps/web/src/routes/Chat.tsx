@@ -1499,15 +1499,16 @@ function ChatView(props: {
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
-   *  indicator is live, else the person's "@username" in a 1x1, else the size
-   *  of the group in people. Which of the two follows the conversation kind, so
-   *  a two-person group says "2 people" like the list it is filed under. */
+   *  indicator is live, else the person's "@username" in a 1x1, else "N
+   *  members" (docs/ux/client-redesign.md 5.2, as iOS and Android say it; web
+   *  said "N people" here until 2026-11-10). Which of the two follows the
+   *  conversation kind, so a two-person group says "2 members". */
   const headerSub = (): string => {
     const typing = typingIndicator();
     if (typing !== null && !membershipEnded()) return typing;
     const peer = isGroupChat() ? null : peerKeyB64();
     if (peer !== null) return profiles.resolve(peer).username ?? "";
-    return t("chats.row.people", { count: memberCount() });
+    return t("chat.members.count", { count: memberCount() });
   };
   /**
    * The name at the top opens this conversation's info

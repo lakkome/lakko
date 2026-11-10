@@ -1833,6 +1833,12 @@ public final class ChatViewModel: ObservableObject {
                     _ = try await repository.removeMemberFromGroup(
                         groupIdHex: groupIdHex, leafIndex: leafIndex)
                 }
+                // Applied at once when this device is the committer, as web
+                // does: without it an owner's own removal waited for the next
+                // poll that ran a sweep, which a group info screen left open
+                // did not (seen on an iPhone 2026-11-10: "2 membership changes
+                // are waiting to apply" on the owner's own device).
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onRemoveMember", key: "chat.error.remove_member")
@@ -2177,6 +2183,9 @@ public final class ChatViewModel: ObservableObject {
                         makeAdmin: makeAdmin
                     )
                 }
+                // Applied at once when this device is the committer (as on
+                // web and as ``onRemoveMember(leafIndex:)``).
+                _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onToggleAdmin", key: "chat.error.change_admin")

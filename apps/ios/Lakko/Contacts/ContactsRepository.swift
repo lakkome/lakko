@@ -1478,10 +1478,25 @@ public final class ContactsRepository: ObservableObject {
             // A held link that is not their one-to-one (a group, or a
             // one-to-one with someone else) gives way to this one, which is.
             let held = old.groupIdHex.flatMap { keepsLink($0) ? $0 : nil }
-            guard held == nil || newAlias else { return nil }
+            // A row adopted before the person's profile (or the invite link)
+            // told this device their account id takes it now: without it they
+            // cannot be added to a group (seen on an iPhone 2026-11-10: a
+            // contact added through their link read "Accept this contact
+            // again").
+            let fillsAccountId = old.request.fromAccountId == nil && accountId != nil
+            guard held == nil || newAlias || fillsAccountId else { return nil }
             var rows = accepted
+            let request = fillsAccountId ? IncomingContactRequest(
+                messageId: old.request.messageId,
+                fromPubkey: old.request.fromPubkey,
+                fromAccountId: accountId,
+                fromPseudonym: old.request.fromPseudonym,
+                validAfterMs: old.request.validAfterMs,
+                intro: old.request.intro,
+                profile: old.request.profile,
+                createdAt: old.request.createdAt) : old.request
             rows[idx] = AcceptedContact(
-                request: old.request, groupIdHex: held ?? groupIdHex,
+                request: request, groupIdHex: held ?? groupIdHex,
                 displayName: old.displayName, previousKeysB64: previous.isEmpty ? nil : previous)
             return rows
         }
@@ -2873,6 +2888,16 @@ public final class ContactsRepository: ObservableObject {
             else { continue }
             guard chatRepository.handOverPendingInvitedMessages(
                 queueKey: contact.queueKey, toGroupIdHex: thread.groupIdHex) else { continue }
+            // The account id the link gave is the one fact the contact row
+            // cannot learn from the conversation: kept on the row before the
+            // pending record goes.
+            if let accountId = StateBundle.hexDecode(contact.accountIdHex) {
+                let now = UInt64(Date().timeIntervalSince1970 * 1000)
+                adoptOneToOnePeer(
+                    signatureKey: contact.signaturePubkey, accountId: accountId,
+                    groupIdHex: thread.groupIdHex, nowMs: now,
+                    createdAt: ISO8601DateFormatter().string(from: Date()))
+            }
             remaining.removeAll { $0.accountIdHex == contact.accountIdHex }
             handedOver[contact.accountIdHex] = thread.groupIdHex
         }

@@ -800,7 +800,28 @@ private fun ConversationList(
     invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
     onOpenPendingChat: (String) -> Unit = {},
 ) {
+    // The rows are keyed, so a conversation arriving at the top (a group just
+    // joined, the groups a cold start loads after the rest) is inserted ABOVE
+    // the first visible row and Compose keeps that row where it was: the
+    // newest chats sat above the screen's edge after a launch and looked gone
+    // (seen on a Pixel 2026-11-10). A list the person left at the top stays at
+    // the top; one they scrolled down keeps its place.
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    var leftAtTop by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    androidx.compose.runtime.LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) {
+                leftAtTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+            }
+        }
+    }
+    val firstKey = invited.firstOrNull()?.let { "invited:${it.accountIdHex}" }
+        ?: rows.firstOrNull()?.let { "${it.kind}:${it.id}" }
+    androidx.compose.runtime.LaunchedEffect(firstKey) {
+        if (leftAtTop && firstKey != null) listState.scrollToItem(0)
+    }
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 4.dp),
     ) {

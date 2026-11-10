@@ -2233,6 +2233,11 @@ public class ChatViewModel(
                         me.lakko.app.chat.RetryableRequest.Remove(targetKeyB64),
                     ) { repo.removeMemberFromGroup(groupIdHex, leafIndex) }
                 }
+                // Applied at once when this device is the committer, as web
+                // does: an owner's own removal otherwise waited for the next
+                // poll that ran a sweep (seen on an iPhone 2026-11-10; this
+                // client had the same order).
+                repo.sweepIfCommitter(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onRemoveMember", "chat.error.remove_member")
@@ -2388,6 +2393,8 @@ public class ChatViewModel(
                         makeAdmin = makeAdmin,
                     ),
                 ) { repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin) }
+                // Applied at once when this device is the committer.
+                repo.sweepIfCommitter(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onToggleAdmin", "chat.error.change_admin")
