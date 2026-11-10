@@ -344,8 +344,12 @@ clock.
   it was minimised (no report, a request waiting 177 s) until the window came
   back; with `none` it ran for the seven minutes measured. So the main window
   keeps the policy `none` for the whole run, and the collapsed call window's
-  clock runs in a worker. Windows and Linux are not measured; a call (with the
-  microphone in use) is not measured.
+  clock runs in a worker. A `<video>` fed through a loopback peer connection
+  (VP8, from a canvas redrawn on every worker tick) kept decoding while the
+  window was minimised, as many frames as the source sent (about 7.2 a
+  second), and a canvas drawing it on each tick read a new frame about 6 times
+  a second. Windows and Linux are not measured; a call (with the microphone in
+  use, SFrame on the frames) is not measured.
 - **Call media (section 6):** WKWebView has `RTCRtpScriptTransform`, and one
   attaches to an audio sender; `createEncodedStreams` is absent; an offer
   carries audio and video with Opus and VP8. `getUserMedia` exists but was not
