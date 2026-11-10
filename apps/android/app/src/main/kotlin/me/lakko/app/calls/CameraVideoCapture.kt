@@ -88,12 +88,28 @@ public class CameraVideoCapture private constructor(
     /**
      * The video source the [kind] copy of the camera is sent from: a source of
      * its own, fed the same frames as the main one, so the copy's encoder can
-     * narrow only its own picture ([CapturerFan]). Made on first ask and kept
-     * until [dispose]; `null` when no source can be made.
+     * narrow only its own picture ([CapturerFan]). The source itself scales
+     * the camera's frames down to the copy's size ([cameraCopySize]): the
+     * encoding's `scaleResolutionDownBy` did not reach the frames
+     * ([CAMERA_LIGHT_SCALE_DOWN]). Made on first ask and kept until
+     * [dispose]; `null` when no source can be made or it refuses the size,
+     * so a full-size copy is never sent.
      */
     internal fun copySource(kind: CameraCopyKind): VideoSource? {
         copySources[kind]?.let { return it }
         val made = WebRtcPeerConnection.newVideoSource(context) ?: return null
+        val (width, height) = cameraCopySize(kind, TARGET_WIDTH, TARGET_HEIGHT)
+        try {
+            made.adaptOutputFormat(width, height, TARGET_FPS)
+        } catch (cause: RuntimeException) {
+            android.util.Log.w(
+                "CameraVideoCapture",
+                "camera sender: no ${kind.sender.wireName} copy: its source refused ${width}x$height",
+                cause,
+            )
+            made.dispose()
+            return null
+        }
         copySources[kind] = made
         fan.attach(made.capturerObserver)
         return made

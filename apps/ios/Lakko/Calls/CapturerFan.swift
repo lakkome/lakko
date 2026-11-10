@@ -120,6 +120,13 @@ final class CameraCopySources {
         defer { lock.unlock() }
         if let existing = sources[kind] { return existing }
         guard let made = makeSource() else { return nil }
+        // The source scales the camera's frames down to the copy's size: the
+        // encoding's `scaleResolutionDownBy` did not reach the frames on the
+        // Android twin (``CameraSender/lightScaleDown``).
+        let size = CameraSender.copySourceSize(
+            kind, captureWidth: CameraSender.captureWidth,
+            captureHeight: CameraSender.captureHeight)
+        made.adaptOutputFormat(toWidth: size.width, height: size.height, fps: CameraSender.copyFps)
         sources[kind] = made
         fan.attach(made)
         return made

@@ -28,8 +28,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * The web client sends clones of the camera track, and its tiles looked sharp
  * in the same call. Here each copy gets a `VideoSource` of its own and the capturer's
  * frames are handed to every source in turn, so an encoder narrows only its
- * own source. Each sender still scales its source down by its own
- * `scaleResolutionDownBy`.
+ * own source. Each copy's source scales the frames down to the copy's size
+ * ([cameraCopySize]); an encoding's `scaleResolutionDownBy` did not reach the
+ * frames ([CAMERA_LIGHT_SCALE_DOWN]).
  *
  * ## Threading
  *

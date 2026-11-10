@@ -66,14 +66,14 @@ class CameraSendersTest {
         val light = cameraCopyEncoding(CameraCopyKind.LIGHT)
         assertNull(light.rid)
         assertTrue(light.active)
-        assertEquals(4.0, light.scaleResolutionDownBy!!, 0.0)
+        assertEquals(1.0, light.scaleResolutionDownBy!!, 0.0)
         assertEquals(150_000, light.maxBitrateBps)
         assertNull(light.scalabilityMode)
 
         val middle = cameraCopyEncoding(CameraCopyKind.MIDDLE, active = false)
         assertNull(middle.rid)
         assertFalse(middle.active)
-        assertEquals(2.0, middle.scaleResolutionDownBy!!, 0.0)
+        assertEquals(1.0, middle.scaleResolutionDownBy!!, 0.0)
         assertEquals(500_000, middle.maxBitrateBps)
         assertTrue(cameraCopyEncoding(CameraCopyKind.MIDDLE, active = true).active)
     }
@@ -187,7 +187,7 @@ class CameraSendersTest {
         assertEquals("middle", added.sender)
         assertTrue(added.configured)
         assertFalse(seen.single().active)
-        assertEquals(2.0, seen.single().scaleResolutionDownBy!!, 0.0)
+        assertEquals(1.0, seen.single().scaleResolutionDownBy!!, 0.0)
         assertEquals(500_000, seen.single().maxBitrateBps)
     }
 
@@ -221,7 +221,7 @@ class CameraSendersTest {
     fun `a plainly added copy is given its size and ceiling on the sender`() {
         val encodings = listOf(RtpParameters.Encoding(null, true, null))
         assertTrue(configureCopyEncoding(encodings, CameraCopyKind.MIDDLE, active = false) { true })
-        assertEquals(2.0, encodings.single().scaleResolutionDownBy!!, 0.0)
+        assertEquals(1.0, encodings.single().scaleResolutionDownBy!!, 0.0)
         assertEquals(500_000, encodings.single().maxBitrateBps)
         assertFalse(encodings.single().active)
 
@@ -229,7 +229,21 @@ class CameraSendersTest {
         val light = listOf(RtpParameters.Encoding(null, true, null))
         assertTrue(configureCopyEncoding(light, CameraCopyKind.LIGHT, active = null) { true })
         assertTrue(light.single().active)
-        assertEquals(4.0, light.single().scaleResolutionDownBy!!, 0.0)
+        assertEquals(1.0, light.single().scaleResolutionDownBy!!, 0.0)
+    }
+
+    @Test
+    fun `a copy whose platform encoding carried a scale is reset to 1`() {
+        val encodings = listOf(RtpParameters.Encoding(null, true, 4.0))
+        assertTrue(configureCopyEncoding(encodings, CameraCopyKind.LIGHT, active = null) { true })
+        assertEquals(1.0, encodings.single().scaleResolutionDownBy!!, 0.0)
+    }
+
+    @Test
+    fun `a copy's source is the capture divided by the copy's factor`() {
+        assertEquals(320 to 180, cameraCopySize(CameraCopyKind.LIGHT, 1280, 720))
+        assertEquals(640 to 360, cameraCopySize(CameraCopyKind.MIDDLE, 1280, 720))
+        assertEquals(1 to 1, cameraCopySize(CameraCopyKind.LIGHT, 2, 2))
     }
 
     @Test

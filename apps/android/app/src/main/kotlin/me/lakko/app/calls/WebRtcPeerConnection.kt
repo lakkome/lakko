@@ -916,8 +916,9 @@ public class WebRtcPeerConnection(
      * any of their encoders asks for, so one sender's adaptation held all
      * three down (the Pixel 7a call of 2026-11-07: main 480x270 at 2.5
      * Mbit/s, middle 240x135). [source] is therefore the
-     * copy's own, fed the capturer's frames by [CapturerFan]; the sender
-     * scales it down by its own encoding's `scaleResolutionDownBy`.
+     * copy's own, fed the capturer's frames by [CapturerFan] and scaled down
+     * to the copy's size by the source itself ([cameraCopySize]); the
+     * encoding's `scaleResolutionDownBy` is 1 ([CAMERA_COPY_ENCODING_SCALE]).
      *
      * Never fails the call. `false` when libwebrtc takes no such sender,
      * takes none with the right size, or the encryptor cannot be created:
