@@ -10,8 +10,13 @@ import uniffi.lakko_ffi_uniffi.CallBarPhase
 import uniffi.lakko_ffi_uniffi.CallBarStatus
 
 /**
- * The collapsed call bar — `docs/ux/calls.md` section 4.5 — everything about it
- * that is not Compose.
+ * The collapsed call — `docs/ux/calls.md` section 4.5 — the decisions the
+ * floating call window (`ui/call/CallMiniWindow.kt`) and the system
+ * picture-in-picture window take from the shared `call_bar` rule: whether the
+ * call can be put away, and the one thing the status line says. The window
+ * replaced a bar across the top of the app on 2026-11-09; the rule kept its
+ * name, and so do these functions, because the window replaces the bar's
+ * picture and not its decisions (section 4.5.6).
  *
  * ## What is NOT here
  *
@@ -30,9 +35,8 @@ import uniffi.lakko_ffi_uniffi.CallBarStatus
  * this app already has onto the one the rule speaks ([callBarPhaseOf]), and
  * from the rule's answer onto the words the call screen already uses
  * ([callBarStatusText]). Both are pure, so both are unit-tested on the host
- * JVM — the bar's own drawing is not testable on this client at all (there is
- * no Robolectric and no compose-ui-test here), which is exactly why as much of
- * it as possible is pushed down into functions that are.
+ * JVM; the window's drawing is covered by the Robolectric suite
+ * `CallMiniWindowUiTest`.
  */
 
 /**

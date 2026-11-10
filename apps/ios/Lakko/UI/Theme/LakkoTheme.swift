@@ -221,8 +221,11 @@ struct InitialsAvatar: View {
     /// ADR-0084 — whose profile photo to show, when this device holds it.
     /// `nil` (a group, a channel, someone with no key) draws initials only.
     var photo: AvatarPhoto? = nil
-    /// Play a profile video muted and looped (the large views only, UX spec
-    /// section 7); elsewhere its still is shown.
+    /// Play a profile video muted and looped (UX profile-screen section 7:
+    /// large views and the chat header always, Chats and Contacts list rows
+    /// while a pointer hovers them); otherwise the still is shown. The video
+    /// is downloaded the first time it is asked for; the still stays until it
+    /// is ready.
     var playsVideo: Bool = false
 
     var body: some View {

@@ -81,8 +81,8 @@ Windows computer without a TPM is an open decision of the ADR (section 11).
 
 ### 2.1 A call in the window
 
-A call takes over the main window exactly as on the web, and the call bar of
-[`calls.md`](calls.md) section 4.5 lets the person put it away and keep
+A call takes over the main window exactly as on the web, and the floating call
+window of [`calls.md`](calls.md) section 4.5 lets the person put it away and keep
 chatting. A separate call window is not in this spec (section 12).
 
 ## 3. Closing is not quitting

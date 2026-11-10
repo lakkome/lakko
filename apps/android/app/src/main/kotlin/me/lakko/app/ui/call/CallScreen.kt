@@ -460,8 +460,8 @@ public fun CallScreen(
     // Who is speaking is read only while a screen is showing the tiles
     // (`docs/ux/group-call-grid.md` section 7.3); a group call only.
     DisposableEffect(callState, groupCall) {
-        if (groupCall) callState.setSpeakingWatched(true)
-        onDispose { if (groupCall) callState.setSpeakingWatched(false) }
+        if (groupCall) callState.watchSpeaking(true)
+        onDispose { if (groupCall) callState.watchSpeaking(false) }
     }
 
     // There is no branch on the phase any more. `docs/ux/calls.md` section 3

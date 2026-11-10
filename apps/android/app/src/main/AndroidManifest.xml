@@ -32,6 +32,17 @@
       which is why the step its iOS twin has was missing here.
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      docs/ux/calls.md section 4.5.4: a call keeps running while Lakko is not
+      on the screen, through a foreground service with an ongoing
+      notification (calls/CallForegroundService.kt). Its types are the
+      microphone, and the camera while the camera sends; not phoneCall, which
+      needs a self-managed ConnectionService this client does not have.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <!--
       Phase 1.20d — INTERNET is implicit since API 23 (it's
       auto-granted) but the lint expects it explicit for any
@@ -125,11 +136,19 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true">
 
+        <!--
+          docs/ux/calls.md section 4.5.4: during a call the activity goes into
+          the system's picture-in-picture window when the app leaves the
+          screen. Entering and leaving that window changes the screen size;
+          declaring those changes keeps the activity (and the call screens it
+          hosts) instead of recreating it on every entry and exit.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:configChanges="locale|layoutDirection"
+            android:configChanges="locale|layoutDirection|screenSize|smallestScreenSize|screenLayout|orientation"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -258,6 +277,25 @@
         <receiver
             android:name=".calls.IncomingCallActionReceiver"
             android:exported="false" />
+
+        <!--
+          The microphone action of the call's system picture-in-picture
+          window (docs/ux/calls.md section 4.5.4). Reached only through the
+          app's own PendingIntent.
+        -->
+        <receiver
+            android:name=".calls.CallPictureInPictureActionReceiver"
+            android:exported="false" />
+
+        <!--
+          The call while Lakko is not on the screen (docs/ux/calls.md section
+          4.5.4). Started by the app for a placed or answered call, stopped by
+          itself when the call ends.
+        -->
+        <service
+            android:name=".calls.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
 
         <!--
           Phase 1.20d — FirebaseMessagingService subclass that

@@ -590,7 +590,7 @@ public struct ChatListScreen: View {
                 ForEach(visible) { row in
                     VStack(spacing: 8) {
                         Button { onOpen(row) } label: {
-                            ConversationRowView(row: row, timeLabel: timeLabel(row))
+                            ConversationRowView(row: row, timeLabel: timeLabel(row), playsVideoOnHover: true)
                         }
                         .buttonStyle(.plain)
                         // `docs/ux/calls.md` section 2.1.1 — a muted
@@ -1072,6 +1072,14 @@ struct ConversationRowView: View {
     let row: ConversationListRow
     /// The last activity's time, `nil` when nothing has happened yet.
     let timeLabel: String?
+    /// ADR-0084, UX profile-screen section 7 — the Chats list plays a profile
+    /// (or group) video while a pointer hovers the row; other lists drawing
+    /// this row (Forward to, the folder picker) keep the still.
+    var playsVideoOnHover: Bool = false
+
+    /// A pointer (iPad trackpad or mouse) is over the row. `.onHover` never
+    /// fires for a finger, so on a touch-only screen the still stays.
+    @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -1079,7 +1087,8 @@ struct ConversationRowView: View {
                 // The id is hashed for the tint only, never shown.
                 name: row.title, identity: row.tintIdentity, size: 40,
                 isGroup: row.kind == .group,
-                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group))
+                photo: row.personKey.map(AvatarPhoto.person) ?? row.photoGroupIdHex.map(AvatarPhoto.group),
+                playsVideo: playsVideoOnHover && hovering)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -1109,6 +1118,7 @@ struct ConversationRowView: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .opacity(row.archived ? 0.6 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
@@ -1412,6 +1422,9 @@ public final class ChatListViewModel: ObservableObject {
 /// badge), opening the pending chat.
 struct InvitedChatRow: View {
     let contact: PendingContact
+    /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
+    /// a pointer hovers the row; `.onHover` never fires for a finger.
+    @State private var hovering = false
 
     var body: some View {
         let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
@@ -1419,7 +1432,7 @@ struct InvitedChatRow: View {
             HStack(alignment: .center, spacing: 12) {
                 InitialsAvatar(
                     name: title, identity: contact.accountIdHex, size: 40,
-                    photo: .person(contact.signaturePubkey))
+                    photo: .person(contact.signaturePubkey), playsVideo: hovering)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.body)
@@ -1432,6 +1445,8 @@ struct InvitedChatRow: View {
                 }
             }
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
         }
         .buttonStyle(.plain)
     }

@@ -214,7 +214,9 @@ public fun ChannelConversationScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable(enabled = channel != null, onClick = onOpenInfo),
                     ) {
-                        LakkoAvatar(name = title, seed = channelId, size = 32.dp, group = true, avatar = avatar)
+                        // UX profile-screen section 7: the chat header plays a
+                        // profile video always on a touch device.
+                        LakkoAvatar(name = title, seed = channelId, size = 32.dp, group = true, avatar = avatar, playVideo = true)
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)

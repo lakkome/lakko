@@ -95,13 +95,17 @@ public fun GroupCallOverlay(
     endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
-    // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar.
-    // The same flag is handed to the bar's rule as `callScreenUp`, so the screen
-    // and the bar are never both up. It covers the ended state on purpose: a
+    // `docs/ux/calls.md` section 4.5 — the call has been put away into the
+    // floating window, which is drawn only while this flag is set, so the
+    // screen and the window are never both up. It covers the ended state on purpose: a
     // collapsed call that ends must not throw its screen across whatever the
     // person went off to read.
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
-    if (!visible || collapsed) return
+    // Section 4.5.4 — while the app is in the system's picture-in-picture
+    // window the call's picture is drawn there; this screen comes back as it
+    // was left when the app returns.
+    val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+    if (!visible || collapsed || inPictureInPicture) return
     val slot by host.slot.collectAsStateWithLifecycle()
     // The slot empties when the call ends, and the end screen is still titled
     // by the group: the last name it had stands.
@@ -155,9 +159,9 @@ public fun LinkCallOverlay(
      * Leave the `/c/` landing this call was reached through.
      *
      * Called when the call is put away, and not only when it ends. The landing
-     * is drawn ABOVE the session screens — including the collapsed call bar's
-     * strip at the top of them — so a call put away while its landing was still
-     * up would leave the person looking at neither the call nor the bar.
+     * is drawn ABOVE the session screens, so a call put away while its landing
+     * was still up would leave the person looking at the landing rather than
+     * the app the call was put away to reach.
      * Section 4.5 collapses a call to give the app back, and the landing of a
      * link is not the app.
      */
@@ -171,7 +175,9 @@ public fun LinkCallOverlay(
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
-    if (!visible || collapsed) return
+    /** See [GroupCallOverlay] — section 4.5.4's system window. */
+    val inPictureInPicture by me.lakko.app.calls.CallPictureInPicture.active.collectAsStateWithLifecycle()
+    if (!visible || collapsed || inPictureInPicture) return
     val slot by host.slot.collectAsStateWithLifecycle()
     val invite by host.invite.collectAsStateWithLifecycle()
     val inviteLineShown by host.inviteLineShown.collectAsStateWithLifecycle()
@@ -376,7 +382,7 @@ private fun HostedCallDialog(
     onEndForEveryone: (() -> Unit)?,
     endedForEveryoneLine: String?,
     onExit: () -> Unit,
-    /** `docs/ux/calls.md` section 4.5 — put the call away into the bar. */
+    /** `docs/ux/calls.md` section 4.5 — put the call away into the window. */
     onCollapse: () -> Unit,
     /** `docs/ux/calls.md` section 4.5 — the CALL's connect moment, so the
      *  running time counts from the call and not from this screen's mount. */

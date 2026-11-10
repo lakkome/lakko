@@ -15,6 +15,9 @@
  *   * `voice.m4a` — AAC in MP4, the one format ADR-0047 allows for a voice
  *     message, so the fixture hands the production hub exactly the bytes and
  *     the MIME a real sender would. Needs `ffmpeg`.
+ *   * `avatar.mp4` — one second of H.264 in MP4, no audio, square: the shape
+ *     of an ADR-0084 profile video, for the avatar hover spec. Needs `ffmpeg`;
+ *     without it that spec is skipped by name.
  *   * `mic.wav` — 16-bit PCM, for `--use-file-for-fake-audio-capture`. Written
  *     by hand below: a WAV header is 44 bytes and a dependency is not worth it.
  *     Chromium loops it, and every sample is loud, so any window a recorder
@@ -37,6 +40,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const VOICE_M4A = join(HERE, "voice.m4a");
 export const VOICE_WAV = join(HERE, "voice.wav");
 export const MIC_WAV = join(HERE, "mic.wav");
+export const AVATAR_MP4 = join(HERE, "avatar.mp4");
 
 const SAMPLE_RATE = 48000;
 
@@ -86,6 +90,15 @@ export function makeAssets({ force = false } = {}) {
   if (force || !existsSync(MIC_WAV)) {
     // Ten seconds, so a short take never wraps the loop point mid-window.
     writeFileSync(MIC_WAV, wav(10, 440));
+  }
+
+  if ((force || !existsSync(AVATAR_MP4)) && hasFfmpeg()) {
+    execFileSync(
+      "ffmpeg",
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=96x96:rate=15:duration=1",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", AVATAR_MP4],
+      { stdio: "inherit" },
+    );
   }
 
   if (!force && existsSync(VOICE_M4A)) return { voice: VOICE_M4A, kind: "m4a" };

@@ -84,7 +84,22 @@ public fun PendingChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(name) },
+                title = {
+                    // The header shows the person's avatar beside the name, as
+                    // on iOS and web; UX profile-screen section 7: the chat
+                    // header plays a profile video always on a touch device.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        me.lakko.app.ui.components.LakkoAvatar(
+                            name = name,
+                            seed = accountIdHex,
+                            size = 32.dp,
+                            personKey = me.lakko.app.ui.components.personKeyBytes(contact?.signaturePubkeyB64),
+                            playVideo = true,
+                        )
+                        androidx.compose.foundation.layout.Spacer(Modifier.size(10.dp))
+                        Text(name, maxLines = 1)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))

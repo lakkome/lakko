@@ -3462,3 +3462,12 @@ function endedAtMs(phase: ReturnType<typeof callState.phase>): number {
 }
 
 export default Call;
+
+/**
+ * The pieces the collapsed call's window draws with (`calls/CallWindow.tsx`,
+ * `docs/ux/calls.md` section 4.5.1): it shows a subset of this screen and
+ * draws a person exactly as their tile does, so it uses these rather than a
+ * second copy of each.
+ */
+export { LocalVideo, PhotoOrInitials, RemoteVideo, ScreenShareView, withShareTile, peerIdOfParticipant };
+export type { LayoutTile };

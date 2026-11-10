@@ -6703,107 +6703,234 @@ a.lk-button-link:hover {
 }
 
 /* ---------------------------------------------------------------------------
-   The collapsed call — one bar across the top of the app
-   (docs/ux/calls.md section 4.5)
+   The collapsed call — one small window floating over the app
+   (docs/ux/calls.md section 4.5, calls/CallWindow.tsx)
 
-   It follows the APP theme, not the call screen's dark token block: the bar is
-   part of the screen the person is on, exactly as the incoming-call banner
-   above is, and a strip in the call's palette would read as a piece of the call
-   screen left behind on top of a chat.
+   It carries the call surface, not the app theme: the window is a piece of the
+   call (the picture of the person on it), and section 4.5.2 says its colour
+   does not follow the light theme, as the call screen does not. The dark
+   tokens are the call screen's own block, restated on this root so the
+   person's tile and the mute button inside read the same values.
 --------------------------------------------------------------------------- */
-:root {
-  /* One number, read by the bar and by the room it is given below, so the two
-     cannot disagree by a pixel. */
-  --lk-call-bar-h: 44px;
-}
+.lk-call-window {
+  color-scheme: dark;
+  --surface-bg: #0f1220;
+  --surface-elevated: #171b2e;
+  --surface-sunken: #1f2439;
+  --surface-border: #2a3145;
+  --surface-fg: #e6e9f4;
+  --surface-muted: #9aa3bd;
+  --surface-faint: #6c7590;
+  --accent: #818cf8;
+  --av-1-bg: #26295a; --av-1-fg: #a5b4fc;
+  --av-2-bg: #12313a; --av-2-fg: #6fd0e0;
+  --av-3-bg: #252a3d; --av-3-fg: #aeb6d0;
+  --av-4-bg: #3a2f17; --av-4-fg: #e5b96b;
+  --call-scrim: color-mix(in srgb, var(--surface-bg) 55%, transparent);
+  --call-ctl-on-bg: rgba(255, 255, 255, 0.12);
+  --call-ctl-on-fg: #ffffff;
+  --call-ctl-on-bg-hover: rgba(255, 255, 255, 0.2);
+  --call-ctl-off-bg: #ffffff;
+  --call-ctl-off-fg: #16192b;
+  --call-ctl-off-bg-hover: #e6e9f4;
+  --call-ctl-disabled-opacity: 0.4;
 
-/* Make room rather than cover. `calls/CallBar.tsx` marks the document while the
-   bar is up; `box-sizing: border-box` is global, so padding on `body` shortens
-   its content box and with it `#root` — the rail, the pane, the composer and
-   the mobile tab bar all move down together and nothing is overlapped. */
-html[data-call-bar] body {
-  padding-top: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
-}
-
-.lk-callbar {
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
-  /* The inset is added here and to the room above from the same one number, so
-     a notch cannot leave the bar and the space made for it a few pixels
-     apart. */
-  height: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
-  /* Above every app surface including a modal backdrop (60): a live call's mute
-     must stay reachable. Below the call screen (1000), the incoming call (1050)
-     and the group-call banner (1100) — the bar is never up at the same time as
-     the first, and the other two are calls asking to be answered. */
+  /* Above every app surface including a modal backdrop (60): a live call's
+     mute must stay reachable. Below the call screen (1000), the incoming call
+     (1050) and the group-call banner (1100): the window is never up at the
+     same time as the first, and the other two are calls asking to be
+     answered. */
   z-index: 900;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  background: var(--surface-bg);
+  color: var(--surface-fg);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Snaps to its corner; follows the pointer with no lag while dragged. */
+  transition: transform 180ms ease-out;
+}
+.lk-call-window.dragging {
+  transition: none;
+  cursor: grabbing;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-call-window {
+    transition: none;
+  }
+}
+/* Firefox in-page surfaces: the same identity filter the call screen's
+   pictures carry (calls/video-surface.ts). */
+:root[data-video-surfaces="in-page"] .lk-call-window video {
+  filter: contrast(1.0001);
+}
+
+/* The picture: the stage person's tile, without the tile's frame. */
+.lk-call-window-picture {
+  position: absolute;
+  inset: 0;
+  border: none;
+  border-radius: 0;
+  container-type: size;
+}
+.lk-call-window-share {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+/* Your own camera, while it sends: a small mirrored inset in the bottom
+   corner away from the edge the window rests against. */
+.lk-call-window-inset {
+  position: absolute;
+  bottom: 30px;
+  width: 30%;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-1);
+  z-index: 2;
+  pointer-events: none;
+}
+.lk-call-window[data-shape="landscape"] .lk-call-window-inset {
+  width: 22%;
+  aspect-ratio: 4 / 3;
+}
+.lk-call-window-inset[data-corner="bottom-left"] {
+  left: 8px;
+}
+.lk-call-window-inset[data-corner="bottom-right"] {
+  right: 8px;
+}
+
+/* The state or the running time, top left, and the lock beside it. A scrim
+   behind the text so it reads over any picture. Tabular figures so a ticking
+   time does not shift the line every second. */
+.lk-call-window-top,
+.lk-call-window-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-  /* The shorthand first and the inset after it: the other way round the
-     shorthand resets the top to zero and the bar's contents sit under a
-     notch. */
-  padding: 0 6px 0 4px;
-  padding-top: env(safe-area-inset-top);
-  background: var(--surface-elevated);
-  border-bottom: 1px solid var(--surface-border);
-  box-shadow: var(--shadow-1);
+  padding: 6px 8px;
+  z-index: 2;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  color: #ffffff;
 }
-
-/* Everything except the mute circle: the whole strip is the way back in. */
-.lk-callbar-open {
-  flex: 1;
-  min-width: 0;
-  height: calc(var(--lk-call-bar-h) - 8px);
-  min-height: 0;
-  display: flex;
+.lk-call-window-top {
+  top: 0;
+  /* Room for the mute circle at the top right. */
+  padding-right: 44px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.45), transparent);
+}
+.lk-call-window-bottom {
+  bottom: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.5), transparent);
+}
+.lk-call-window-state {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lk-call-window-mark {
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  padding: 0 10px;
-  border: none;
-  background: transparent;
-  color: var(--surface-fg);
-  border-radius: var(--radius-sm);
-  text-align: left;
 }
-.lk-callbar-open:hover {
-  background: var(--surface-hover);
-}
-
 /* The name gives way first: a long one truncates rather than pushing the
-   running time or the mute button off the strip. */
-.lk-callbar-who {
+   `+N` off the window. */
+.lk-call-window-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 600;
 }
-
-/* The state or the running time — one of them, decided by the shared rule.
-   Tabular figures so a ticking timer does not shift the line every second. */
-.lk-callbar-state {
+.lk-call-window-more {
   flex: 0 0 auto;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--surface-muted);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
-/* The lock and the camera glyph. Marks, not words. */
-.lk-callbar-mark {
-  flex: 0 0 auto;
+/* The whole window is the way back in: a transparent button over it. */
+.lk-call-window-open {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+/* The app's own button hover paints a fill; this one must stay see-through,
+   or hovering the window hides the picture under it. */
+.lk-call-window-open:hover:not(:disabled),
+.lk-call-window-open:active {
+  background: transparent;
+}
+.lk-call-window.dragging .lk-call-window-open {
+  cursor: grabbing;
+}
+.lk-call-window-open:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: -3px;
+}
+
+/* One round mute button, top right, drawn on and off exactly as the call
+   screen draws it (section 4.1.1): ON the quiet translucent circle, OFF the
+   loud solid one with the slashed glyph. */
+.lk-call-window-mute {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
   display: inline-flex;
   align-items: center;
-  color: var(--surface-muted);
+  justify-content: center;
+  background: var(--call-ctl-on-bg);
+  color: var(--call-ctl-on-fg);
+  backdrop-filter: blur(6px);
+}
+.lk-call-window-mute:hover:not(:disabled) {
+  background: var(--call-ctl-on-bg-hover);
+}
+.lk-call-window-mute[data-tone="solid"] {
+  background: var(--call-ctl-off-bg);
+  color: var(--call-ctl-off-fg);
+}
+.lk-call-window-mute[data-tone="solid"]:hover:not(:disabled) {
+  background: var(--call-ctl-off-bg-hover);
+}
+.lk-call-window-mute:disabled {
+  opacity: var(--call-ctl-disabled-opacity);
+  cursor: default;
+}
+.lk-call-window-mute:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
 }
 
-/* One round mute button, drawn on and off as the call screen draws it
+/* The round mute button the call chat panel's header uses
+   (calls/CallChatPanel.tsx), drawn on and off as the call screen draws it
    (section 4.1.1), translated onto the app palette: ON is the quiet state — a
    subtle fill and a plain icon; OFF is the loud one — a solid circle with the
    slashed glyph knocked out of it. */

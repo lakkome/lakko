@@ -273,6 +273,10 @@ targets:
         # `PKPushRegistry` never issues a VoIP token, so `desiredPushTypes` is
         # silently a no-op and a closed phone never rings.
         UIBackgroundModes:
+          # `audio` is the "Audio, AirPlay, and Picture in Picture" mode:
+          # the system picture-in-picture window of a call
+          # (`docs/ux/calls.md` section 4.5.4, `CallPictureInPicture`).
+          - audio
           - fetch
           - voip
         BGTaskSchedulerPermittedIdentifiers:

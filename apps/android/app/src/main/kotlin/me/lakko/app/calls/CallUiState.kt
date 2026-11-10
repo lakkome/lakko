@@ -297,7 +297,23 @@ public class CallUiState(
     public val speakingWatched: StateFlow<Boolean> = _speakingWatched.asStateFlow()
 
     public fun setSpeakingWatched(watched: Boolean) {
+        speakingWatchers = if (watched) 1 else 0
         _speakingWatched.value = watched
+    }
+
+    /** How many surfaces are showing this call's stage right now. */
+    private var speakingWatchers = 0
+
+    /**
+     * A surface that shows who is on the stage begins ([watching] `true`) or
+     * stops showing it. Counted, because two of them can overlap for a frame:
+     * the call screen and the collapsed call window (`docs/ux/calls.md`
+     * section 4.5.1) hand over in one recomposition whose disposal order is
+     * not this class's to rely on. Main thread only.
+     */
+    public fun watchSpeaking(watching: Boolean) {
+        speakingWatchers = (speakingWatchers + if (watching) 1 else -1).coerceAtLeast(0)
+        _speakingWatched.value = speakingWatchers > 0
     }
 
     /**

@@ -408,7 +408,30 @@ final class SfuCallSession {
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
-    private var localCameraCapture: LocalCameraCapture?
+    private var localCameraCapture: LocalCameraCapture? {
+        didSet {
+            guard oldValue !== localCameraCapture else { return }
+            oldValue?.onInterruptionChanged = nil
+            localCameraCapture?.onInterruptionChanged = { [weak self] interrupted in
+                MainActor.assumeIsolated { self?.setCameraInterrupted(interrupted) }
+            }
+            if localCameraCapture == nil { setCameraInterrupted(false) }
+        }
+    }
+
+    /// iOS interrupted the camera (`docs/ux/calls.md` section 4.5.4): the app
+    /// left the screen and may not keep the camera. While it lasts every
+    /// other peer is told the camera is off, so they see the avatar rather
+    /// than a frozen frame; ``localCameraOn``, and so the camera button here,
+    /// is left alone, because the person did not turn the camera off.
+    private var cameraInterrupted = false
+
+    /// The camera was interrupted (`true`) or came back (`false`).
+    func setCameraInterrupted(_ interrupted: Bool) {
+        guard cameraInterrupted != interrupted else { return }
+        cameraInterrupted = interrupted
+        broadcastMediaState()
+    }
     private(set) var state: State = .idle
     /// The session is connecting or connected: not yet started, hung up and
     /// failed are all "no call to capture or publish for".
@@ -493,7 +516,7 @@ final class SfuCallSession {
         // relays ciphertext only. No key yet (a link joiner before its
         // Welcome) means nothing is said.
         guard let sealed = relay.seal(
-            composeMediaState(cameraOn: localCameraOn, microphoneOn: localMicOn))
+            composeMediaState(cameraOn: localCameraOn && !cameraInterrupted, microphoneOn: localMicOn))
         else { return }
         if let seam = mediaStateSendSeam {
             seam(sealed)

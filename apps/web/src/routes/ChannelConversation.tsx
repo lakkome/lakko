@@ -428,7 +428,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             disabled={role() === null}
             onClick={() => setInfoOpen(true)}
           >
-            <Avatar label={facts().name} id={id} size="sm" conversationKey={channelAvatarKey(id)} />
+            <Avatar label={facts().name} id={id} size="sm" conversationKey={channelAvatarKey(id)} playVideo="header" />
             <div class="lk-chat-title-text">
               <h1>{facts().name}</h1>
               <Show when={headerLine().length > 0}>

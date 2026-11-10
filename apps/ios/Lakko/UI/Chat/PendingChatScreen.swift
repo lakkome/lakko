@@ -81,7 +81,10 @@ struct PendingChatScreen: View {
                 HStack(spacing: 8) {
                     InitialsAvatar(
                         name: name, identity: accountIdHex, size: 32,
-                        photo: contact.map { AvatarPhoto.person($0.signaturePubkey) })
+                        photo: contact.map { AvatarPhoto.person($0.signaturePubkey) },
+                        // UX profile-screen section 7: the chat header plays
+                        // the video always on a touch platform.
+                        playsVideo: true)
                     Text(name).font(.headline).lineLimit(1)
                 }
             }

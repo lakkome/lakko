@@ -53,10 +53,11 @@ final class GroupPhotoDirectory: ObservableObject {
     }
 }
 
-/// The photo half of ``InitialsAvatar``: the person's still (or, in a large
-/// view, their video, muted and looped) when this device holds it, else the
-/// initials circle `fallback`. No spinner: the picture replaces the initials
-/// when it arrives (UX spec section 7).
+/// The photo half of ``InitialsAvatar``: the person's still (or, where
+/// `playsVideo` is set, their video, muted and looped) when this device holds
+/// it, else the initials circle `fallback`. No spinner: the picture replaces
+/// the initials when it arrives, and a video the still once the video is on
+/// this device (UX spec section 7).
 struct AvatarPhotoView<Fallback: View>: View {
     let photo: AvatarPhoto
     let size: CGFloat
