@@ -78,6 +78,13 @@ The one added after the SFU aborted on a live call (2026-10-16):
 |---|---|---|---|
 | 16 | `SrtpContext::protect_rtp` under `AES_CM_128_HMAC_SHA1_80` no longer asserts that the RTP body is a multiple of 16 bytes | `rtp/srtp.rs` | Change 14 sends retransmissions unpadded; the leftover upstream assert then fired on the first retransmission to a peer that negotiated AES-CM, and under `panic = "abort"` the whole SFU process died (test.lakko.me, 2026-10-16). Counter mode needs no alignment; the AEAD-GCM profiles never asserted |
 
+The one added after an iOS client on webrtc-sdk 125.6422.07 refused the SFU's
+subscribe offer (2026-11-09):
+
+| # | Change | Files | Why |
+|---|---|---|---|
+| 17 | When str0m picks a payload type itself it uses 96-127, then 35-63, and never 64-95 (upstream tried 80-95 and 77-78 before 35-71) | `format/payload_params.rs` | With rtcp-mux RFC 5761 section 4 rules out 64-95, and libwebrtc refuses a whole remote description that names one: "invalid payload type 80 for codec 'rtx'". The iOS client then received no sound or video in a group call |
+
 ## Why we pin exactly
 
 `Cargo.toml` lists dependencies with **exact** versions

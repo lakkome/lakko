@@ -12,15 +12,13 @@ use super::codec::{Codec, CodecSpec};
 pub(crate) const PREFERED_RANGES: &[RangeInclusive<usize>] = &[
     // Payload identifiers 96–127 are used for payloads defined dynamically during a session.
     96..=127,
-    // "unassigned" ranged. note that RTCP packet type 207 (XR, Extended Reports) would be
-    // indistinguishable from RTP payload types 79 with the marker bit set
-    80..=95,
-    77..=78,
-    // reserved because RTCP packet types 200–204 would otherwise be indistinguishable
-    // from RTP payload types 72–76
-    // 72..77,
-    // lol range.
-    35..=71,
+    // Lakko fork: 64-95 are never allocated. With RTP and RTCP on one port
+    // (rtcp-mux, which every WebRTC session uses) RFC 5761 section 4 rules them
+    // out, since a marker bit turns them into RTCP packet types 192-223, and
+    // libwebrtc refuses a whole remote description that names one ("invalid
+    // payload type 80 for codec 'rtx'", seen on iOS 2026-11-09). Upstream
+    // allocated 80-95 and 77-78 ahead of 35-71.
+    35..=63,
 ];
 
 pub(crate) trait Claimed {
@@ -1293,5 +1291,19 @@ mod test {
                 "Local sprop-max-don-diff should be preserved when remote doesn't specify it"
             );
         }
+    }
+
+    // Lakko fork (seventeenth change): no allocation ever lands in 64-95.
+    #[test]
+    fn allocation_never_uses_the_rtcp_mux_conflict_range() {
+        let mut claimed = [false; 128];
+        let unlocked = HashSet::new();
+        while let Some(pt) = claimed.find_unclaimed(PREFERED_RANGES, &unlocked) {
+            let v = *pt as usize;
+            assert!(!(64..=95).contains(&v), "allocated payload type {v}");
+            claimed.assert_claim_once(pt);
+        }
+        let free: Vec<usize> = (0..128).filter(|i| claimed[*i]).collect();
+        assert_eq!(free.len(), 32 + 29, "96-127 and 35-63 are all handed out");
     }
 }

@@ -435,6 +435,20 @@
 //! The AEAD-GCM profiles never asserted, which is why the fourteenth
 //! change's tests and the synthetic client, both on AEAD-GCM, passed.
 //!
+//! ## The seventeenth change: no payload type in 64-95 (2026-11-09)
+//!
+//! When str0m has to pick a payload type itself (a conflicting RTX type it
+//! remaps, or a local codec the remote did not name), upstream tried 96-127,
+//! then 80-95 and 77-78, then 35-71. With rtcp-mux, which every WebRTC session
+//! uses, RFC 5761 section 4 rules out 64-95, and libwebrtc refuses a whole
+//! remote description that names one. Seen on 2026-11-09: an iOS client on
+//! webrtc-sdk 125.6422.07, which offers more codecs than the build before it,
+//! refused the SFU's subscribe offer with "invalid payload type 80 for codec
+//! 'rtx'", so it received no sound or video from anyone:
+//!
+//! - `src/format/payload_params.rs` - `PREFERED_RANGES` is 96-127 then 35-63;
+//!   one test hands out every free type and finds none in 64-95.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
@@ -531,7 +545,7 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/format/payload_params.rs",
-        "a9833b7a9065a6714c633930090a9f187604d5e95dba4e04abf215dc4cb5b012",
+        "2d89c3050182d0aed79ff839fb883a021c2f5002d9a74303654a255d8ed98549",
     ),
     (
         "src/format/mod.rs",
