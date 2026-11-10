@@ -146,6 +146,7 @@ import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-st
 import { screenAnchor } from "../ui/screen-anchor";
 import { durableSnapshotHook } from "../chat/persist-hooks";
 import { publicOrigin } from "../platform";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** Within this many pixels of the top, new items are shown at once;
  *  further down they wait behind the pill so the list does not move under
@@ -1109,7 +1110,7 @@ export default function Feed(): JSX.Element {
               <Icon name="more" size={20} />
             </button>
             <Show when={feedMenuOpen()}>
-              <div class="lk-menu-backdrop" onClick={() => setFeedMenuOpen(false)} />
+              <MenuBackdrop onClose={() => setFeedMenuOpen(false)} />
               <div class="lk-menu" role="menu" aria-label={t("feed.menu.a11y")}>
                 <button
                   type="button"
@@ -1510,7 +1511,7 @@ export default function Feed(): JSX.Element {
       <Show when={menu()}>
         {(m) => (
           <>
-            <div class="lk-menu-backdrop" onClick={() => setMenu(null)} />
+            <MenuBackdrop onClose={() => setMenu(null)} />
             <div
               class="lk-menu lk-menu-floating"
               role="menu"

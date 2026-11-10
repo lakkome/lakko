@@ -755,6 +755,29 @@ public struct ChatScreen: View {
     }
 
     /// The last row the timeline draws, for the scroll-to-bottom.
+    /// The anchor at the end of the timeline (see the list's last view).
+    private static let timelineBottomId = "timeline-bottom"
+
+    /// Scroll to the end of the timeline, and again once the lazy stack has
+    /// measured the new rows: a photo or a video note is far taller than the
+    /// estimate it is first laid out with, and one scroll stopped short of it
+    /// (seen on an iPhone 2026-11-10: the newest video note half off screen).
+    private func scrollToNewest(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated {
+            withAnimation {
+                proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+        }
+        Task { @MainActor in
+            for delayMs in [0, 150, 600] {
+                try? await Task.sleep(for: .milliseconds(delayMs))
+                proxy.scrollTo(Self.timelineBottomId, anchor: .bottom)
+            }
+        }
+    }
+
     private var lastDrawnMessageId: Int64? {
         viewModel.messages.last(where: {
             !ChatTimeline.isHiddenSystemRow($0, isGroup: viewModel.presentsAsGroup)
@@ -989,6 +1012,13 @@ public struct ChatScreen: View {
                         .padding(.top, 12)
                         .accessibilityElement(children: .combine)
                     }
+                    // The very end of the timeline: what "scroll to the
+                    // newest" scrolls to, so the last row is whole even
+                    // while the lazy stack is still measuring it.
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.timelineBottomId)
+                        .accessibilityHidden(true)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -1010,25 +1040,17 @@ public struct ChatScreen: View {
                 // (`docs/ux/conversation-info.md` section 3).
                 guard !timelineOpenedAtNewest else { return }
                 timelineOpenedAtNewest = true
-                guard let last = lastDrawnMessageId else { return }
-                scrollProxy.scrollTo(last, anchor: .bottom)
-                Task { @MainActor in
-                    scrollProxy.scrollTo(last, anchor: .bottom)
-                }
+                guard lastDrawnMessageId != nil else { return }
+                scrollToNewest(scrollProxy, animated: false)
             }
             .onChange(of: viewModel.messages.count) { _, _ in
                 // Scroll to the latest message whenever the list grows.
-                if let last = lastDrawnMessageId {
-                    withAnimation {
-                        scrollProxy.scrollTo(last, anchor: .bottom)
-                    }
-                }
+                guard lastDrawnMessageId != nil else { return }
+                scrollToNewest(scrollProxy)
             }
             .onChange(of: media.pendingSends.count) { old, new in
-                guard new > old, let last = media.pendingSends.last else { return }
-                withAnimation {
-                    scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
-                }
+                guard new > old else { return }
+                scrollToNewest(scrollProxy)
             }
             .onChange(of: quoteJump) { _, jump in
                 // ADR-0052 / section 3.1 — scroll to the quoted row (the same
@@ -2177,7 +2199,12 @@ struct MessageRow: View {
     private func videoNoteColumn(alignment: HorizontalAlignment) -> some View {
         VStack(alignment: alignment, spacing: 2) {
             bareVideoNote
-            metaRow
+            // No bubble behind it: the bubble's own text colour on an outgoing
+            // note is dark on the dark screen, and the time and ticks of an own
+            // note could not be seen (seen on an iPhone 2026-11-10).
+            metaContent
+                .foregroundStyle(Color.lakkoTextMuted)
+                .padding(.bottom, 1)
         }
     }
 
@@ -2593,7 +2620,13 @@ struct MessageRow: View {
 
     @ViewBuilder
     private var bubbleContent: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        // Beside short content the time sits on the last line; under a GIF,
+        // photo or video it goes below, or the picture squeezed it into two
+        // lines ("22:" / "04", seen on an iPhone 2026-11-10).
+        let layout = hasVisualAttachment
+            ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .bottom, spacing: 8))
+        layout {
             VStack(alignment: .leading, spacing: 6) {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
@@ -2676,6 +2709,16 @@ struct MessageRow: View {
         .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
         .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+    }
+
+    /// The bubble holds a GIF, photo or video drawn inline.
+    private var hasVisualAttachment: Bool {
+        !message.deleted && message.attachments.contains { ref in
+            switch InlineMedia.decision(for: ref).bubble {
+            case .photo, .video, .gif: return true
+            default: return false
+            }
+        }
     }
 
     /// "(edited)", the time, and — on own messages — the delivery glyph.

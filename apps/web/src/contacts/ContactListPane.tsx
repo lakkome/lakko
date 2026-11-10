@@ -34,6 +34,7 @@ import {
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
 import { pendingNameOf, type PendingContact } from "./pending-contacts";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
  *  "Show my QR code" / "Scan QR code" here, and "Add by username" is gone:
@@ -157,7 +158,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             <Icon name="plus" size={18} />
           </button>
           <Show when={menuOpen()}>
-            <div class="lk-menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <MenuBackdrop onClose={() => setMenuOpen(false)} />
             <div class="lk-menu" role="menu">
               <For each={ADD_ITEMS}>
                 {(item) => (

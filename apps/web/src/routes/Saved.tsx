@@ -42,6 +42,7 @@ import { createLongPress } from "../ui/long-press";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
 import { displayLocale } from "../l10n/display-locale";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** The stored message a held row is, or `undefined`. */
 function heldMessage(
@@ -247,7 +248,7 @@ export default function Saved(): JSX.Element {
       <Show when={menu()}>
         {(m) => (
           <>
-            <div class="lk-menu-backdrop" onClick={() => setMenu(null)} />
+            <MenuBackdrop onClose={() => setMenu(null)} />
             <div
               class="lk-menu lk-menu-floating"
               role="menu"

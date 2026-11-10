@@ -100,6 +100,7 @@ import {
 import { displayLocale } from "../l10n/display-locale";
 import { channelsState } from "../state/channels-state";
 import { channelAvatarKey } from "../channels/channel-avatar";
+import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -142,7 +143,7 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
     <>
       {/* Clicking anywhere else closes it, which is what makes the menu
           dismissable without a keyboard. */}
-      <div class="lk-menu-backdrop" onClick={() => props.onClose()} />
+      <MenuBackdrop onClose={() => props.onClose()} />
       <div class="lk-menu" role="menu" aria-label={t("chats.create.menu")}>
         <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
           <Icon name="compose" size={16} />
@@ -971,14 +972,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           };
           return (
             <>
-              <div
-                class="lk-menu-backdrop"
-                onClick={() => setMenu(null)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setMenu(null);
-                }}
-              />
+              <MenuBackdrop onClose={() => setMenu(null)} closeOnContextMenu />
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"
@@ -1045,14 +1039,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           };
           return (
             <>
-              <div
-                class="lk-menu-backdrop"
-                onClick={close}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  close();
-                }}
-              />
+              <MenuBackdrop onClose={close} closeOnContextMenu />
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"

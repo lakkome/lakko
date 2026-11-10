@@ -173,8 +173,12 @@ struct EmojiTab: View {
                         LazyVGrid(columns: columns, spacing: 4, pinnedViews: []) {
                             if !recent.isEmpty {
                                 Section(header: header(Localization.text("chat.emoji.recent")).id("recent")) {
-                                    ForEach(recent, id: \.self) { emoji in
-                                        recentCell(emoji)
+                                    // Ids of their own: the same emoji is also a cell of
+                                    // its group below, and two cells of one grid with one
+                                    // id drew only one of them, leaving a gap in the group
+                                    // (seen on an iPhone 2026-11-10).
+                                    ForEach(recent.map { "recent:" + $0 }, id: \.self) { key in
+                                        recentCell(String(key.dropFirst("recent:".count)))
                                     }
                                 }
                             }

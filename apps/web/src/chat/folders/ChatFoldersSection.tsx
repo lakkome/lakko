@@ -28,6 +28,7 @@ import {
 } from "./folder-actions";
 import { chatCountLabel, MAX_FOLDERS, openSuggestions, type FolderModel } from "./folder-model";
 import { rowsInFolder } from "./folder-view";
+import { MenuBackdrop } from "../../ui/MenuBackdrop";
 
 export function ChatFoldersSection(): JSX.Element {
   const sync = useDeviceGroupSync();
@@ -209,7 +210,7 @@ export function ChatFoldersSection(): JSX.Element {
           };
           return (
             <>
-              <div class="lk-menu-backdrop" onClick={close} />
+              <MenuBackdrop onClose={close} />
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"

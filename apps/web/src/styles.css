@@ -7939,7 +7939,9 @@ html.lk-call-window-doc body {
 .lk-menu-subanchor > button {
   justify-content: flex-start;
 }
-.lk-menu-subanchor > button > svg:last-child {
+/* Only the submenu's chevron: with no folders yet the folder icon is the
+   button's last svg, and pushing it right moved the whole row. */
+.lk-menu-subanchor > button > .lk-menu-sub-chevron {
   margin-left: auto;
 }
 .lk-menu.lk-menu-sub {

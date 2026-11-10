@@ -764,7 +764,9 @@ public fun ChatScreen(
     val headerSubtitle = when {
         typingLine != null && !membershipEnded -> typingLine
         isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (peopleCount ?: (otherMembers.size + 1)).toULong()))
-        peerUsername != null -> "@$peerUsername"
+        // A contact with no display name already reads "@username" as the
+        // title; the line under it would repeat it (seen 2026-11-10).
+        peerUsername != null && "@$peerUsername" != headerTitle -> "@$peerUsername"
         else -> null
     }
     // docs/ux/conversation-info.md section 3 — a group's info is a SCREEN

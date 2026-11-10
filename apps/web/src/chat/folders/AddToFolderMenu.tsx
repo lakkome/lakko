@@ -71,7 +71,7 @@ export function AddToFolderItems(props: {
         <Icon name="folder" size={18} />
         {t("folders.add_to_folder")}
         <Show when={props.folders.length > 0}>
-          <Icon name="chevron" size={14} />
+          <Icon name="chevron" size={14} class="lk-menu-sub-chevron" />
         </Show>
       </button>
       <Show when={open() && props.folders.length > 0}>
