@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// ADR-0079 (reworked 2026-10-17) — the requests of the account mailbox that
 /// answer one of this account's invite links and are NOT DECIDED yet: the
@@ -24,11 +25,24 @@ public final class LinkRequestInbox {
         public let linkId: Data
         /// The link's 12-byte secret, as the requester opened it. SECRET.
         public let linkSecret: Data
+        /// The requester's reply grant, encoded (`encodeReachGrant`): what
+        /// opens their mailbox for the Welcome. Kept in the row, sealed like
+        /// the link secret, because a grant handed to ``ReachCenter`` before
+        /// it is active (a poll at a cold start) is dropped, and every later
+        /// pass then had no mailbox for the requester (seen on a Pixel
+        /// 2026-11-10; this client stored the row the same way).
+        public let replyGrantWire: Data?
 
-        public init(request: IncomingContactRequest, linkId: Data, linkSecret: Data) {
+        public init(request: IncomingContactRequest, linkId: Data, linkSecret: Data, replyGrantWire: Data? = nil) {
             self.request = request
             self.linkId = linkId
             self.linkSecret = linkSecret
+            self.replyGrantWire = replyGrantWire
+        }
+
+        /// The reply grant, or `nil` when none was kept or it does not decode.
+        public var replyGrant: FfiReachGrant? {
+            replyGrantWire.flatMap { try? decodeReachGrant(bytes: $0) }
         }
     }
 

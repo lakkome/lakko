@@ -355,6 +355,31 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertEqual(back.request.createdAt, "2026-10-19T12:00:00Z")
         XCTAssertEqual(back.request.createdAtMs, request.createdAtMs)
     }
+
+    /// The requester's reply grant stays with the undecided row: handed to the
+    /// reach center at a cold start, before it is active, it was dropped, and
+    /// the Welcome then had no mailbox to go to.
+    func testAnUndecidedRequestKeepsItsReplyGrantAcrossARestart() throws {
+        let defaults = suite()
+        let seal: (Data) throws -> Data = { Data($0.reversed()) }
+        let open: (Data) throws -> Data = { Data($0.reversed()) }
+        let request = IncomingContactRequest(
+            messageId: 7, fromPubkey: Data(repeating: 3, count: 32), fromAccountId: nil,
+            fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil, createdAt: "t")
+        let wire = Data((0..<134).map { UInt8($0 % 251) })
+        let inbox = LinkRequestInbox(accountIdB64: "acct", defaults: defaults, seal: seal, open: open)
+        XCTAssertTrue(inbox.add(.init(
+            request: request, linkId: Data(repeating: 1, count: 16), linkSecret: Data(repeating: 2, count: 12),
+            replyGrantWire: wire)))
+        let again = LinkRequestInbox(accountIdB64: "acct", defaults: defaults, seal: seal, open: open)
+        XCTAssertEqual(again.rows().first?.replyGrantWire, wire)
+        // A row written before the field existed reads with none.
+        let old = try JSONDecoder().decode(
+            LinkRequestInbox.Row.self,
+            from: try JSONEncoder().encode(LinkRequestInbox.Row(
+                request: request, linkId: Data(repeating: 1, count: 16), linkSecret: Data(repeating: 2, count: 12))))
+        XCTAssertNil(old.replyGrantWire)
+    }
 }
 
 /// A device for ``LinkClaims/runBuild(_:)``: recorded state, and every step

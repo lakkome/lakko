@@ -712,7 +712,8 @@ public final class ContactsRepository: ObservableObject {
                     // answered, or a card with the dead-link note.
                     if let linkAnswer {
                         LinkRequestInbox(accountIdB64: pollAccountIdB64).add(LinkRequestInbox.Row(
-                            request: req, linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret))
+                            request: req, linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret,
+                            replyGrantWire: replyGrant.flatMap { try? encodeReachGrant(grant: $0) }))
                         undecidedArrived = true
                         continue
                     }
@@ -3123,6 +3124,13 @@ public final class ContactsRepository: ObservableObject {
                 continue
             }
             if step == .build {
+                // The Welcome below is addressed from the requester's reply
+                // grant: filed again here, where the reach center is active.
+                if let grant = row.replyGrant {
+                    ReachCenter.shared.keep(
+                        grant, carrier: .request,
+                        fromAccountKeyB64: base64Encode(req.fromPubkey), scopeHex: nil)
+                }
                 let answer = FfiLinkAnswer(linkId: row.linkId, linkSecret: row.linkSecret)
                 if await acceptThroughLink(req, linkAnswer: answer, key: key, claims: claims), bound.isCurrent {
                     inbox.remove(messageId: req.messageId)

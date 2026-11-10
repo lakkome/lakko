@@ -3069,15 +3069,13 @@ public class ContactsRepository(
                 continue
             }
             // ADR-0060 section 6 - the requester's reply key opens their
-            // mailbox for the winner's Welcome and ack: kept by the reach
-            // manager now, so the stored row carries nothing secret but the
-            // link answer, which is sealed.
-            req.replyGrant?.let { grant ->
-                if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
-                    reach()?.keepHeld(req.fromPubkey, grant, scopeHex = "")
-                }
-            }
-            inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null, replyGrant = null), answer.linkId, answer.linkSecret))
+            // mailbox for the winner's Welcome and ack. It stays in the row
+            // (sealed under the device key, like the link secret) and is
+            // filed with the reach manager when the request is built: filed
+            // only here, a cold start that polled the mailbox before the
+            // reach manager was bound lost it, and every later pass failed
+            // with no mailbox for the requester (seen on a Pixel 2026-11-10).
+            inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null), answer.linkId, answer.linkSecret))
         }
         return out
     }
@@ -3387,9 +3385,10 @@ public class ContactsRepository(
         val fromAccountId = request.fromAccountId ?: return false
         // ADR-0060 §6 — the requester's reply key opens their mailbox for the
         // Welcome and the ack; kept before anything is written there.
+        // Filed and awaited: the Welcome below is addressed from it.
         request.replyGrant?.let { grant ->
             if (grant.`class` == uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) {
-                reach()?.keepHeld(request.fromPubkey, grant, scopeHex = "")
+                reach()?.fileHeld(request.fromPubkey, grant, scopeHex = "")
             }
         }
         val deps = object : LinkClaims.BuildDeps {
@@ -3465,7 +3464,7 @@ public class ContactsRepository(
             LinkClaims.runBuild(deps)
         } catch (e: Throwable) {
             me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass")
+            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass (${e.javaClass.simpleName})")
             false
         }
     }
