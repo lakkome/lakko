@@ -3324,12 +3324,12 @@ struct GroupInfoScreen: View {
     /// that an assumption rather than a fact.
     @State private var deleteConfirmPresented = false
 
-    /// Reactions-and-emoji spec section 9 — the `Reactions` screen.
-    @State private var reactionsOpen = false
-    /// UX 4.1 — the `Group type` screen.
-    @State private var groupTypeOpen = false
-    /// UX section 14.2 — the invite-link screen.
-    @State private var inviteLinksOpen = false
+    /// Push a screen over the info (a route on the tab's path): the
+    /// `Reactions` screen (reactions-and-emoji spec section 9), `Group type`
+    /// (UX 4.1), the invite links (UX section 14.2), the ownership transfer.
+    var onOpenSubscreen: (GroupInfoSubscreen) -> Void = { _ in }
+    /// Close a screen pushed over the info.
+    var onCloseSubscreen: (GroupInfoSubscreen) -> Void = { _ in }
     /// UX section 8 — the `Reject all requests?` confirmation.
     @State private var rejectAllConfirm = false
     /// ADR-0087 section 11 — the `Delete this group?` confirmation.
@@ -3417,14 +3417,14 @@ struct GroupInfoScreen: View {
                 if sections.contains(.groupType), viewModel.groupHandle == nil {
                     Section {
                         Text(l10n.t("group_info.handle.lapsed")).font(.footnote)
-                        Button(l10n.t("group_info.handle.choose")) { groupTypeOpen = true }
+                        Button(l10n.t("group_info.handle.choose")) { onOpenSubscreen(.groupType) }
                             .foregroundStyle(Color.lakkoAccent)
                     }
                 }
                 // Section 4.1 — the owner's `Who can join` row, opening Group type.
                 if sections.contains(.groupType) {
                     Section {
-                        Button { groupTypeOpen = true } label: {
+                        Button { onOpenSubscreen(.groupType) } label: {
                             HStack {
                                 Text(l10n.t("group_type.who_can_join")).foregroundStyle(Color.lakkoText)
                                 Spacer()
@@ -3514,7 +3514,7 @@ struct GroupInfoScreen: View {
                 // with the current value on the right.
                 if sections.contains(.reactions) {
                     Section {
-                        Button { reactionsOpen = true } label: {
+                        Button { onOpenSubscreen(.reactions) } label: {
                             HStack {
                                 Label(l10n.t("group_reactions.title"), systemImage: "face.smiling")
                                     .foregroundStyle(Color.lakkoText)
@@ -3568,7 +3568,7 @@ struct GroupInfoScreen: View {
                 // approved via the pending list.
                 if sections.contains(.inviteLink) {
                     Section {
-                        Button { inviteLinksOpen = true } label: {
+                        Button { onOpenSubscreen(.inviteLinks) } label: {
                             HStack {
                                 Label(l10n.t("chat.invite_link.label"), systemImage: "link")
                                     .foregroundStyle(Color.lakkoText)
@@ -4040,17 +4040,11 @@ struct GroupInfoScreen: View {
             // choice, because splitting it would put the warning and the button
             // on different screens.
             // Reactions-and-emoji spec section 9 / UX 4.1 — pushed screens.
-            .navigationDestination(isPresented: $inviteLinksOpen) {
-                GroupInviteLinksScreen(viewModel: viewModel)
-            }
-            .navigationDestination(isPresented: $reactionsOpen) {
-                AllowedReactionsScreen(viewModel: viewModel) { reactionsOpen = false }
-            }
-            .navigationDestination(isPresented: $groupTypeOpen) {
-                GroupTypeScreen(viewModel: viewModel) { groupTypeOpen = false }
-            }
-            .navigationDestination(isPresented: $viewModel.transferStepOpen) {
-                TransferOwnershipStep(viewModel: viewModel)
+            // The pushed screens are routes on the tab's path
+            // (``GroupInfoSubscreen``). The transfer step is opened and closed
+            // by the view model; the path follows it.
+            .onChange(of: viewModel.transferStepOpen) { _, open in
+                if open { onOpenSubscreen(.transferOwnership) } else { onCloseSubscreen(.transferOwnership) }
             }
             // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
             // published request cannot be withdrawn (there is no wire withdraw,
@@ -4214,7 +4208,7 @@ struct GroupInfoScreen: View {
 /// the safe one and the warning would read as being about the other one. It is
 /// also what puts *"This cannot be undone"* ahead of the control that does it in
 /// VoiceOver's focus order (UX §13).
-private struct TransferOwnershipStep: View {
+struct TransferOwnershipStep: View {
     @ObservedObject var viewModel: ChatViewModel
     @ObservedObject private var l10n = Localization.shared
 

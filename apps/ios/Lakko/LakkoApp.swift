@@ -1182,6 +1182,9 @@ enum TabRoute: Hashable {
     case groupInfo(groupIdHex: String)
     /// The Add members screen, pushed over a group's info (section 2.4).
     case addMembers(groupIdHex: String)
+    /// A screen pushed over a group's info (invite links, reactions, group
+    /// type, ownership transfer); same view model as the info.
+    case groupInfoSubscreen(groupIdHex: String, screen: GroupInfoSubscreen)
     /// The contact picker behind the create menu's New chat.
     case newChat
     /// The create menu's Create group (see ``NewGroupScreen``).
@@ -2229,6 +2232,16 @@ private struct SessionRoot: View, Equatable {
                 // Section 2.2 — a member who is a contact opens their contact
                 // screen, whose back returns here.
                 onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) },
+                onOpenSubscreen: { screen in
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.openSubscreen(
+                        binding.wrappedValue, groupIdHex: groupIdHex, screen)
+                },
+                onCloseSubscreen: { screen in
+                    let binding = path(for: tab)
+                    binding.wrappedValue = GroupInfoNavigation.closeSubscreen(
+                        binding.wrappedValue, groupIdHex: groupIdHex, screen)
+                },
                 // ADR-0045 UX 6.2.4 — the chat is gone: the info and the
                 // conversation under it both go.
                 onDeleted: {
@@ -2237,6 +2250,34 @@ private struct SessionRoot: View, Equatable {
                         binding.wrappedValue, groupIdHex: groupIdHex)
                 }
             )
+            .toolbar(.hidden, for: .tabBar)
+        case .groupInfoSubscreen(let groupIdHex, let screen):
+            let vm = chatViewModel(for: groupIdHex)
+            let close = {
+                let binding = path(for: tab)
+                binding.wrappedValue = GroupInfoNavigation.closeSubscreen(
+                    binding.wrappedValue, groupIdHex: groupIdHex, screen)
+            }
+            Group {
+                switch screen {
+                case .inviteLinks:
+                    GroupInviteLinksScreen(viewModel: vm)
+                case .reactions:
+                    AllowedReactionsScreen(viewModel: vm) { close() }
+                case .groupType:
+                    GroupTypeScreen(viewModel: vm) { close() }
+                case .transferOwnership:
+                    TransferOwnershipStep(viewModel: vm)
+                        // The view model ends the step (a transfer that landed,
+                        // Cancel); the screen it covers is not on screen to see
+                        // that, so the step closes itself.
+                        .onChange(of: vm.transferStepOpen) { _, open in
+                            if !open { close() }
+                        }
+                        // A back from the step ends it as Cancel would.
+                        .onDisappear { vm.transferStepOpen = false }
+                }
+            }
             .toolbar(.hidden, for: .tabBar)
         case .addMembers(let groupIdHex):
             AddMembersScreen(
