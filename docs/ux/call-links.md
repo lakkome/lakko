@@ -58,7 +58,9 @@ one tap.
 
 ## 2. The Calls destination
 
-The history ([`navigation.md`](navigation.md) section 5) and one action.
+The history ([`navigation.md`](navigation.md) section 5) and one action. A
+call started here, or joined from a link, is in that history too, as a row
+with no call button ([`navigation.md`](navigation.md) section 5.1.1).
 
 ```
 Calls                                    [ New call ]

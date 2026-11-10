@@ -227,9 +227,11 @@ import {
   decideLinkCallStart,
   linkCallNotice,
   linkCallOccupiesSlot,
+  linkCallHistoryEntry,
   linkCallOverlayShown,
   reduceLinkCallPhase,
   type LinkCallEvent,
+  type LinkCallJournal,
   type LinkCallPhase,
 } from "./link-call-host";
 import { MultiJoinerCall, type MultiJoinerCallOptions } from "./multi-joiner-call";
@@ -2525,6 +2527,26 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    *  one the user already left — never touches the slot. */
   let linkAttempt: object | null = null;
 
+  /**
+   * The current link-call attempt's record for the Calls list
+   * (`docs/ux/navigation.md` section 5.1.1): a call with no conversation
+   * still leaves one row. Replaced with the attempt; written once, when this
+   * device leaves the call or the call ends for it, whichever comes first.
+   */
+  let linkJournal: { readonly attempt: object; readonly journal: LinkCallJournal } | null = null;
+
+  /** Write the link call's row, if this device was in the call. */
+  function recordLinkCall(attempt: object): void {
+    const j = linkJournal;
+    if (j === null || j.attempt !== attempt) return;
+    const entry = linkCallHistoryEntry(j.journal, {
+      endedAtMs: Date.now(),
+      isGuest: untrack(() => auth.isGuest()),
+    });
+    j.journal.recorded = true;
+    if (entry !== null) callLog.recordStandalone(entry);
+  }
+
   function applyLinkEvent(
     attempt: object,
     event: LinkCallEvent,
@@ -2542,6 +2564,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // way out.
     const over = !linkCallOccupiesSlot(phase);
     const h = over ? linkHandle() : null;
+    const j = linkJournal;
+    if (j !== null && j.attempt === attempt && phase === "live" && j.journal.liveAtMs === null) {
+      j.journal.liveAtMs = Date.now();
+    }
+    if (over) recordLinkCall(attempt);
     try {
       setLinkSlot({
         ...slot,
@@ -2584,6 +2611,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
     const attempt = {};
     linkAttempt = attempt;
+    linkJournal = {
+      attempt,
+      journal: {
+        callIdHex: hex,
+        role: opts.isOwner ? "owner" : "joiner",
+        video: opts.mediaVideo,
+        liveAtMs: null,
+        recorded: false,
+      },
+    };
     setLinkHandle(null);
     setLinkCallId(opts.callId);
     setLinkInvite(INVITE_IDLE);
@@ -2688,7 +2725,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const slot = untrack(linkSlot);
     const h = untrack(linkHandle);
     const held = h !== null || (slot !== null && linkCallOccupiesSlot(slot.phase));
+    // The person left: the call is over for this device. Written before the
+    // session is hung up and the attempt forgotten.
+    if (linkAttempt !== null) recordLinkCall(linkAttempt);
     linkAttempt = null;
+    linkJournal = null;
     // `finally`, as in `releaseGroupSlot`: the writes below take the call
     // screen down, and the session is closed whatever it does on its way out.
     try {

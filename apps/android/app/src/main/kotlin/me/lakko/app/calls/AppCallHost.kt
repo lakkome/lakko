@@ -102,7 +102,35 @@ public object AppCallHost {
             },
             onSlotChanged = { occupied -> instance.setOtherCallActive(LINK_SLOT_KEY, occupied) },
             notifyEndedForEveryone = { name -> endedForEveryone.show(name) },
+            recordHistory = ::recordLinkCallHistory,
         )
+    }
+
+    /** The application context the Calls-list rows are filed with; set by [attach]. */
+    @Volatile
+    private var historyContext: Context? = null
+
+    /**
+     * File a finished `New call` or call-link call in the Calls list
+     * (`docs/ux/navigation.md` section 5.1.1), under the account it was started
+     * with. Never for a guest account. Off the main thread: the store opens an
+     * encrypted preferences file. Never throws.
+     */
+    private fun recordLinkCallHistory(accountId: ByteArray, entry: CallHistoryEntry) {
+        val context = historyContext ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val accountIdB64 = me.lakko.app.auth.base64Encode(accountId)
+                val guest = me.lakko.app.auth.guestAccountState(
+                    me.lakko.app.auth.SharedPrefsMarkerStorage(context, me.lakko.app.auth.GUEST_ACCOUNT_PREFS),
+                    accountIdB64,
+                ) != null
+                if (!linkCallWritesHistory(guestAccount = guest)) return@launch
+                CallHistoryStore.record(context, accountIdB64, entry)
+            } catch (error: Throwable) {
+                android.util.Log.w("AppCallHost", "filing the call history row failed", error)
+            }
+        }
     }
 
     /** The call occupying the slot, as the UI observes it. */
@@ -142,6 +170,7 @@ public object AppCallHost {
         repository: ChatRepository,
         sessionTokenProvider: () -> String?,
     ) {
+        historyContext = applicationContext.applicationContext
         instance.attach(
             ChatRepositoryCallPort(applicationContext, repository, sessionTokenProvider))
         // docs/ux/calls.md section 2.1 — the phone rings for an offer this

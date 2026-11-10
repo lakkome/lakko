@@ -2096,6 +2096,10 @@ private struct SessionRoot: View, Equatable {
         case .chat:
             services.callHost.startOutgoingCall(
                 groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
+        case .noConversation:
+            // Section 5.1.1: such a row has no call-back button; an ended
+            // link call cannot be joined again.
+            break
         }
     }
 

@@ -48,6 +48,12 @@ import kotlinx.coroutines.flow.asStateFlow
  * [encodeCallHistoryEntry] joined by newlines, newest first, capped at
  * [CALL_HISTORY_MAX]. A line this build cannot read is dropped on load rather
  * than failing the read.
+ *
+ * Calls with no conversation (`docs/ux/navigation.md` section 5.1.1: `New
+ * call`, a call joined from a link) are filed in the same value by
+ * [AppCallHost] through [LinkCallHost], one row per call id, so [clear] (run
+ * by `AccountLocalWipe`) takes them with the rest; [deleteConversation] never
+ * touches them.
  */
 /** [entries] without the calls of [conversationIdHex] (ADR-0087 section 9). */
 internal fun callHistoryWithout(entries: List<CallHistoryEntry>, conversationIdHex: String): List<CallHistoryEntry> =

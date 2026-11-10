@@ -94,6 +94,12 @@ final class LinkCallHost: ObservableObject {
                 return false
             }
         }
+        /// File a finished call in the Calls list (`docs/ux/navigation.md`
+        /// section 5.1.1). A no-op by default, so a test that does not ask
+        /// for it never reaches the process-wide index.
+        var recordCall: @MainActor (_ entry: CallHistoryEntry) -> Void = { _ in }
+        /// The wall clock, in milliseconds.
+        var nowMs: @MainActor () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
     }
 
     /// The link call in the slot.
@@ -187,6 +193,9 @@ final class LinkCallHost: ObservableObject {
     /// leaves the socket before the hang-up closes it.
     private var lingering: LinkCallHandle?
     private var lingerTask: Task<Void, Never>?
+    /// The call in the slot as the Calls list will file it. Cleared once it
+    /// is filed, so a call is filed at most once per attempt.
+    private var history: LinkCallHostRules.HistoryTrack?
 
     init(ports: Ports) {
         self.ports = ports
@@ -282,6 +291,7 @@ final class LinkCallHost: ObservableObject {
         self.attempt = attempt
         controls.removeAll()
         handle = nil
+        history = nil
         // The screen of a call that is over (its "Call ended" overlay, not
         // dismissed yet) belongs to that call. Kept, it would be shown with
         // this call's `Invite`, and this call's own screen would never be
@@ -326,6 +336,13 @@ final class LinkCallHost: ObservableObject {
         let cameraAllowed = await ports.cameraGranted(request.mediaVideo)
         guard self.attempt == attempt, occupiesSlot else { return .started }
         let joinWithVideo = request.mediaVideo && cameraAllowed
+        // Before the call starts: the owner reports `onJoined` from inside
+        // `startCall`.
+        history = LinkCallHostRules.HistoryTrack(
+            callIdHex: callIdHex,
+            startedHere: request.isOwner,
+            video: joinWithVideo,
+            isGuest: ports.isGuest())
 
         let callbacks = MultiJoinerCall.Callbacks(
             onJoined: { [weak self] in self?.apply(attempt, .joined) },
@@ -374,12 +391,17 @@ final class LinkCallHost: ObservableObject {
         current.phase = phase
         if phase == .error { current.errorMessage = errorMessage ?? current.errorMessage }
         slot = current
+        if phase == .live, history != nil, history?.joinedAtMs == nil {
+            history?.joinedAtMs = ports.nowMs()
+        }
         if phase == .live, presentation == nil, let ui {
             presentation = ui
             presentationId = current.callIdHex
             presentationSlug = current.slug
         }
         if !LinkCallHostRules.occupiesSlot(phase) {
+            // The call ended for this device: file it before anything else.
+            fileHistory()
             // Over on its own: drop the session and keep the outcome for the
             // user to see.
             controls.removeAll()
@@ -406,6 +428,7 @@ final class LinkCallHost: ObservableObject {
     /// closes the old session first (``start(_:)``).
     func endForEveryone() {
         guard let handle, startedCall else { return }
+        fileHistory()
         handle.endForEveryone()
         // The person has left: the microphone and the camera stop now, not
         // when the session closes.
@@ -467,6 +490,7 @@ final class LinkCallHost: ObservableObject {
 
     /// Leave the link call: no outcome to show, the user chose it.
     func leave() {
+        fileHistory()
         attempt = nil
         controls.removeAll()
         let h = handle
@@ -474,6 +498,20 @@ final class LinkCallHost: ObservableObject {
         slot = nil
         invite = nil
         h?.hangUp()
+    }
+
+    /// File the call in the slot in the Calls list, once
+    /// (`docs/ux/navigation.md` section 5.1.1): when this device leaves it or
+    /// it ends for this device, whichever comes first, and only if this
+    /// device got past the join step. A rejoin of the same call is dropped by
+    /// the index, which keeps the first row.
+    private func fileHistory() {
+        guard let track = history else { return }
+        history = nil
+        guard let entry = LinkCallHostRules.historyEntry(track, leftAtMs: ports.nowMs()) else {
+            return
+        }
+        ports.recordCall(entry)
     }
 
     /// Forget an outcome (ended / dead / error) the user has seen.
@@ -576,6 +614,8 @@ final class LinkCallHost: ObservableObject {
             handle.setCameraEnabled(false)
             return
         }
+        // The Calls list reads this call as a video call.
+        history?.video = true
         Task { @MainActor [weak self] in
             // The in-call control already settled the permission; this is the
             // layered half.
@@ -701,7 +741,8 @@ extension LinkCallHost {
                 return composed.url
             },
             copyToClipboard: { UIPasteboard.general.string = $0 },
-            isGuest: { [weak authRepository] in authRepository?.isGuest ?? false }
+            isGuest: { [weak authRepository] in authRepository?.isGuest ?? false },
+            recordCall: { CallHistoryStore.shared.record($0) }
         ))
     }
 

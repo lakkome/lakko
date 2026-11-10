@@ -271,6 +271,32 @@ A missed or declined row is tinted with the danger token, as
 conversation; tapping the call button calls. Those are two different targets
 and the hit areas must not overlap.
 
+#### 5.1.1 A call with no conversation
+
+Added 2026-11-10 (maintainer's decision). A call started with `New call`, and
+a call this device joined from a call link, belong to no conversation. Each
+still gets ONE row, so the list shows every call the person was in:
+
+- avatar: the group-call glyph (the one the call bar and the call screen use
+  for a group call), never initials;
+- title: `Group call`, the words the call screen already uses (a call has no
+  name of its own: `Your name in this call`, [`calls.md`](calls.md) section
+  4.1, names a person and is forgotten when the call ends);
+- second line: `Outgoing call` when this device started the call with `New
+  call`, `Incoming call` when it joined from a link, then the time; with the
+  duration this device was in the call, as for any other row;
+- a direction glyph as any other row (out, in); never missed or declined,
+  since such a call never rings;
+- **no trailing call button, and the row is not a tap target** (no pressed
+  state, no focus stop for VoiceOver / TalkBack beyond reading it): an ended
+  link call cannot be joined again and there is no conversation to open.
+
+One row per call per device, written when this device leaves the call or the
+call ends for it, whichever comes first, and only if this device was in the
+call (reached the call screen past the join step). If the device joins the
+same call again, the first row stays as it is. A guest account writes none: a
+guest never lands in the app.
+
 ### 5.2 States
 
 - **Default** - the list.
@@ -316,7 +342,9 @@ which is honest; inventing a badge that can never be non-zero is not.
 
 A **flat, cross-conversation, time-ordered** sequence, holding per row:
 conversation id, kind, outcome, whether it was a video call, start time,
-duration.
+duration. A row for a call with no conversation (section 5.1.1) holds no
+conversation id; it holds the call's id instead (so a call is recorded once)
+and outgoing or incoming.
 
 Two requirements follow from the shape rather than from any platform.
 

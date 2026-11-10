@@ -344,3 +344,331 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertEqual(store.entries.first?.id, "\(CallHistory.maxRows + 24)")
     }
 }
+
+// MARK: - A call with no conversation
+
+/// `docs/ux/navigation.md` section 5.1.1 — a call started with `New call` or
+/// joined from a call link belongs to no conversation and still gets one row.
+final class CallHistoryNoConversationTests: XCTestCase {
+
+    private let callIdHex = String(repeating: "ab", count: 16)
+
+    private func track(
+        startedHere: Bool, video: Bool = true, isGuest: Bool = false, joinedAtMs: Int64? = 1_000
+    ) -> LinkCallHostRules.HistoryTrack {
+        LinkCallHostRules.HistoryTrack(
+            callIdHex: callIdHex, startedHere: startedHere, video: video,
+            isGuest: isGuest, joinedAtMs: joinedAtMs)
+    }
+
+    // MARK: The record
+
+    func testANewCallIsFiledOutgoingWithTheTimeInTheCall() throws {
+        let entry = try XCTUnwrap(
+            LinkCallHostRules.historyEntry(track(startedHere: true), leftAtMs: 126_000))
+        XCTAssertEqual(entry.kind, .noConversation)
+        XCTAssertNil(entry.conversationId)
+        XCTAssertEqual(entry.callIdHex, callIdHex)
+        XCTAssertEqual(entry.id, CallHistoryEntry.noConversationId(callIdHex: callIdHex))
+        XCTAssertEqual(entry.direction, .outgoing)
+        XCTAssertEqual(entry.outcome, .answered)
+        XCTAssertTrue(entry.video)
+        XCTAssertEqual(entry.startedAtMs, 1_000)
+        XCTAssertEqual(entry.durationMs, 125_000)
+    }
+
+    func testACallJoinedFromALinkIsFiledIncoming() throws {
+        let entry = try XCTUnwrap(
+            LinkCallHostRules.historyEntry(
+                track(startedHere: false, video: false), leftAtMs: 5_000))
+        XCTAssertEqual(entry.direction, .incoming)
+        XCTAssertFalse(entry.video)
+    }
+
+    /// Only a call this device got into: one still waiting to be admitted,
+    /// refused or timed out leaves no row.
+    func testACallNeverJoinedIsNotFiled() {
+        XCTAssertNil(
+            LinkCallHostRules.historyEntry(
+                track(startedHere: false, joinedAtMs: nil), leftAtMs: 5_000))
+    }
+
+    func testAGuestFilesNothing() {
+        XCTAssertNil(
+            LinkCallHostRules.historyEntry(
+                track(startedHere: false, isGuest: true), leftAtMs: 5_000))
+    }
+
+    func testAClockThatWentBackwardsFilesNoNegativeDuration() throws {
+        let entry = try XCTUnwrap(
+            LinkCallHostRules.historyEntry(track(startedHere: true), leftAtMs: 10))
+        XCTAssertEqual(entry.durationMs, 0)
+    }
+
+    // MARK: Once per call
+
+    @MainActor
+    func testOneCallIsFiledOnceAndTheFirstRowStays() {
+        let store = CallHistoryStore(backing: InMemoryCallHistoryBacking())
+        store.bind(accountIdB64: "acct")
+        store.record(.noConversation(
+            callIdHex: callIdHex, direction: .outgoing, video: true,
+            startedAtMs: 1_000, durationMs: 60_000))
+        store.record(.noConversation(
+            callIdHex: callIdHex, direction: .outgoing, video: true,
+            startedAtMs: 90_000, durationMs: 5_000))
+        XCTAssertEqual(store.entries.count, 1)
+        XCTAssertEqual(store.entries.first?.startedAtMs, 1_000)
+        XCTAssertEqual(store.entries.first?.durationMs, 60_000)
+
+        store.record(.noConversation(
+            callIdHex: String(repeating: "cd", count: 16),
+            direction: .incoming, video: false, startedAtMs: 2_000, durationMs: 1_000))
+        XCTAssertEqual(store.entries.count, 2)
+    }
+
+    @MainActor
+    func testARowWithNoConversationSurvivesARelaunchAndTheWipe() {
+        let backing = InMemoryCallHistoryBacking()
+        let store = CallHistoryStore(backing: backing)
+        store.bind(accountIdB64: "acct")
+        store.record(.noConversation(
+            callIdHex: callIdHex, direction: .incoming, video: false,
+            startedAtMs: 1_000, durationMs: 2_000))
+
+        let reopened = CallHistoryStore(backing: backing)
+        reopened.bind(accountIdB64: "acct")
+        XCTAssertEqual(reopened.entries.first?.kind, .noConversation)
+        XCTAssertEqual(reopened.entries.first?.callIdHex, callIdHex)
+        XCTAssertNil(reopened.entries.first?.conversationId)
+
+        reopened.forget(accountIdB64: "acct")
+        XCTAssertNil(backing.load(accountIdB64: "acct"))
+        let afterWipe = CallHistoryStore(backing: backing)
+        afterWipe.bind(accountIdB64: "acct")
+        XCTAssertTrue(afterWipe.entries.isEmpty)
+    }
+
+    /// Forgetting a conversation leaves the calls that had none.
+    @MainActor
+    func testForgettingAConversationKeepsCallsWithNone() {
+        let store = CallHistoryStore(backing: InMemoryCallHistoryBacking())
+        store.bind(accountIdB64: "acct")
+        store.record(CallHistoryEntry(
+            id: "x", conversationId: "aa", kind: .group, direction: .outgoing,
+            outcome: .answered, video: false, startedAtMs: 1, durationMs: 1))
+        store.record(.noConversation(
+            callIdHex: callIdHex, direction: .outgoing, video: true,
+            startedAtMs: 2, durationMs: 1))
+        store.forget(conversationId: "aa")
+        XCTAssertEqual(store.entries.map(\.kind), [.noConversation])
+    }
+
+    // MARK: The row
+
+    func testTheRowOfACallWithNoConversationOpensNothingAndReadsGroupCall() {
+        let entry = CallHistoryEntry.noConversation(
+            callIdHex: callIdHex, direction: .outgoing, video: true,
+            startedAtMs: 1, durationMs: 1)
+        XCTAssertEqual(
+            CallHistory.rowShape(entry),
+            .noConversation(title: Localization.text("call.label.group")))
+        XCTAssertEqual(CallHistory.directionGlyph(entry), "phone.arrow.up.right")
+    }
+
+    func testAnIncomingRowStillReadsGroupCall() {
+        let entry = CallHistoryEntry.noConversation(
+            callIdHex: callIdHex, direction: .incoming, video: false,
+            startedAtMs: 1, durationMs: 1)
+        XCTAssertEqual(
+            CallHistory.rowShape(entry),
+            .noConversation(title: Localization.text("call.label.group")))
+        XCTAssertEqual(CallHistory.directionGlyph(entry), "phone.arrow.down.left")
+    }
+
+    func testAConversationsCallStillOpensItsConversation() {
+        let entry = CallHistoryEntry(
+            id: "x", conversationId: "aa", kind: .chat, direction: .incoming,
+            outcome: .missed, video: false, startedAtMs: 1, durationMs: 0)
+        XCTAssertEqual(CallHistory.rowShape(entry), .conversation(groupIdHex: "aa", kind: .chat))
+    }
+
+    /// The second line is worded as any other row: the direction with the
+    /// duration, then the time of day.
+    func testTheSecondLineIsWordedAsAnyOtherRow() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        let locale = Locale(identifier: "en_GB")
+        let entry = CallHistoryEntry.noConversation(
+            callIdHex: callIdHex, direction: .outgoing, video: true,
+            startedAtMs: 0, durationMs: 125_000)
+        let expected = Localization.joinList([
+            CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 125_000)).text,
+            CallHistory.timeOfDay(ms: 0, calendar: calendar, locale: locale),
+        ])
+        XCTAssertEqual(
+            CallHistory.rowSubtitle(entry, calendar: calendar, locale: locale), expected)
+    }
+
+    // MARK: The link-slot host files it
+
+    @MainActor
+    private final class Harness {
+        var recorded: [CallHistoryEntry] = []
+        var callbacks: [MultiJoinerCall.Callbacks] = []
+        var handles: [FakeLinkCallHandle] = []
+        var now: Int64 = 1_000
+        var guest = false
+        var joinAtStart = true
+    }
+
+    @MainActor
+    private func makeHost(_ h: Harness) -> LinkCallHost {
+        LinkCallHost(ports: LinkCallHost.Ports(
+            session: { (Data(repeating: 1, count: 64), "token") },
+            sfuBaseUrl: { "wss://sfu.test" },
+            microphoneGranted: { true },
+            cameraGranted: { _ in true },
+            startCall: { request, _, _, _, _, callbacks in
+                h.callbacks.append(callbacks)
+                if request.isOwner || h.joinAtStart { callbacks.onJoined?() }
+                let handle = FakeLinkCallHandle()
+                h.handles.append(handle)
+                return handle
+            },
+            ownIdentity: { (Data(repeating: 2, count: 16), Data(repeating: 3, count: 32)) },
+            isGuest: { h.guest },
+            recordCall: { h.recorded.append($0) },
+            nowMs: { h.now }
+        ))
+    }
+
+    @MainActor
+    private func joinRequest(_ callByte: UInt8) -> LinkCallHost.Request {
+        LinkCallHost.Request(
+            slug: "slug", callId: Data(repeating: callByte, count: 16),
+            ownerAccountId: Data(repeating: 2, count: 16),
+            ownerSignatureKey: Data(repeating: 3, count: 32),
+            mediaVideo: false, isOwner: false)
+    }
+
+    @MainActor
+    func testANewCallLeftByThisDeviceIsFiledOnceAsOutgoing() async {
+        let h = Harness()
+        let host = makeHost(h)
+        let outcome = await host.startNewCall()
+        XCTAssertEqual(outcome, .started)
+        XCTAssertEqual(host.slot?.phase, .live)
+        let callIdHex = host.slot?.callIdHex
+        h.now = 61_000
+        host.leave()
+        host.dismissPresentation()
+        host.reset()
+        XCTAssertEqual(h.recorded.count, 1)
+        XCTAssertEqual(h.recorded.first?.direction, .outgoing)
+        XCTAssertEqual(h.recorded.first?.durationMs, 60_000)
+        XCTAssertEqual(h.recorded.first?.callIdHex, callIdHex)
+        XCTAssertNotNil(callIdHex)
+    }
+
+    @MainActor
+    func testALinkCallThatEndedForThisDeviceIsFiledOnceAsIncoming() async {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(joinRequest(0x0A))
+        XCTAssertEqual(host.slot?.phase, .live)
+        h.now = 4_000
+        h.callbacks.last?.onEnded?()
+        XCTAssertEqual(host.slot?.phase, .ended)
+        // Leaving the outcome screen afterwards files nothing more.
+        host.dismissPresentation()
+        host.leave()
+        XCTAssertEqual(h.recorded.count, 1)
+        XCTAssertEqual(h.recorded.first?.direction, .incoming)
+        XCTAssertEqual(h.recorded.first?.callIdHex, String(repeating: "0a", count: 16))
+        XCTAssertEqual(h.recorded.first?.durationMs, 3_000)
+    }
+
+    @MainActor
+    func testAJoinerThatWasNeverAdmittedFilesNothing() async {
+        let h = Harness()
+        h.joinAtStart = false
+        let host = makeHost(h)
+        _ = await host.start(joinRequest(0x0B))
+        XCTAssertEqual(host.slot?.phase, .waiting)
+        h.callbacks.last?.onEnded?()
+        h.callbacks.last?.onNoCommitter?()
+        XCTAssertEqual(host.slot?.phase, .dead)
+        host.leave()
+        XCTAssertTrue(h.recorded.isEmpty)
+    }
+
+    @MainActor
+    func testAGuestFilesNoCall() async {
+        let h = Harness()
+        h.guest = true
+        let host = makeHost(h)
+        _ = await host.start(joinRequest(0x0C))
+        XCTAssertEqual(host.slot?.phase, .live)
+        host.leave()
+        XCTAssertTrue(h.recorded.isEmpty)
+    }
+
+    @MainActor
+    func testEndingANewCallForEveryoneFilesItOnce() async {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.startNewCall()
+        h.now = 3_000
+        host.endForEveryone()
+        host.reset()
+        XCTAssertEqual(h.recorded.count, 1)
+        XCTAssertEqual(h.recorded.first?.direction, .outgoing)
+    }
+}
+
+extension CallHistoryNoConversationTests {
+    /// Turning the camera on during a call joined without it files a video
+    /// call, as Android does.
+    @MainActor
+    func testTheCameraTurnedOnInTheCallFilesAVideoCall() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(joinRequest(0x0D))
+        XCTAssertEqual(host.slot?.phase, .live)
+        let ui = try XCTUnwrap(host.presentation)
+        // The real call puts the own tile in; the fake start does not.
+        ui.setParticipants([CallUiState.Participant(
+            id: "me", displayName: "Me", isLocal: true, micOn: true, camOn: false,
+            handRaised: false, quality: .good, speaking: false, screenSharing: false)])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        ui.setCamera(true)
+        // The camera sink is delivered on the main queue.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        host.leave()
+        XCTAssertEqual(h.recorded.first?.video, true)
+    }
+}
+
+extension CallHistoryNoConversationTests {
+    /// Joining the same call again files nothing more: the first row stays.
+    @MainActor
+    func testRejoiningTheSameCallKeepsTheFirstRow() async {
+        let h = Harness()
+        let host = makeHost(h)
+        let store = CallHistoryStore(backing: InMemoryCallHistoryBacking())
+        store.bind(accountIdB64: "acct")
+        _ = await host.start(joinRequest(0x0E))
+        h.now = 11_000
+        host.leave()
+        h.now = 20_000
+        _ = await host.start(joinRequest(0x0E))
+        h.now = 50_000
+        host.leave()
+        XCTAssertEqual(h.recorded.count, 2, "the host files each stint")
+        for entry in h.recorded { store.record(entry) }
+        XCTAssertEqual(store.entries.count, 1)
+        XCTAssertEqual(store.entries.first?.startedAtMs, 1_000)
+        XCTAssertEqual(store.entries.first?.durationMs, 10_000)
+    }
+}

@@ -118,44 +118,81 @@ struct CallsScreen: View {
 
     // MARK: - Row
 
-    /// Avatar and title as the conversation list draws them, the outcome and
-    /// the time on the second line, a direction glyph at the leading edge, and
-    /// a call-back button on the trailing edge.
+    /// A conversation's call: avatar and title as the conversation list draws
+    /// them, the outcome and the time on the second line, a direction glyph at
+    /// the leading edge, and a call-back button on the trailing edge. A call
+    /// with no conversation has the first three and neither target.
     ///
     /// The two buttons are siblings rather than one nested in the other:
     /// SwiftUI would let a button inside a button take the whole row's taps,
     /// and the spec is explicit that these are two targets.
+    @ViewBuilder
     private func row(_ entry: CallHistoryEntry) -> some View {
-        let title = conversations.title(groupIdHex: entry.conversationId)
+        switch CallHistory.rowShape(entry) {
+        case .conversation(let groupIdHex, let kind):
+            conversationRow(entry, groupIdHex: groupIdHex, kind: kind)
+        case .noConversation(let title):
+            noConversationRow(entry, title: title)
+        }
+    }
+
+    /// The avatar, the title and the second line, shared by both row kinds.
+    private func rowBody(
+        _ entry: CallHistoryEntry, title: String, avatar: InitialsAvatar
+    ) -> some View {
         let tint = entry.isUnanswered ? Color.lakkoDanger : Color.lakkoTextMuted
         return HStack(spacing: 12) {
-            Button {
-                onOpenConversation(entry.conversationId, entry.kind)
-            } label: {
-                HStack(spacing: 12) {
-                    InitialsAvatar(
-                        name: title, identity: entry.conversationId, size: 40,
-                        isGroup: entry.kind == .group,
-                        photo: conversations.avatarPhoto(
-                            groupIdHex: entry.conversationId, isGroup: entry.kind == .group))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(title)
-                            .font(.body)
-                            .foregroundStyle(Color.lakkoText)
-                            .lineLimit(1)
-                        HStack(spacing: 6) {
-                            Image(systemName: CallHistory.directionGlyph(entry))
-                                .font(.caption2)
-                            Text(
-                                CallHistory.rowSubtitle(
-                                    entry, calendar: calendar, locale: locale))
-                                .font(.subheadline)
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(tint)
-                    }
-                    Spacer(minLength: 8)
+            avatar
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoText)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Image(systemName: CallHistory.directionGlyph(entry))
+                        .font(.caption2)
+                    Text(
+                        CallHistory.rowSubtitle(
+                            entry, calendar: calendar, locale: locale))
+                        .font(.subheadline)
+                        .lineLimit(1)
                 }
+                .foregroundStyle(tint)
+            }
+            Spacer(minLength: 8)
+        }
+    }
+
+    /// A call with no conversation (`docs/ux/navigation.md` section 5.1.1):
+    /// the group-call glyph, never initials; no call-back button; and not a
+    /// tap target. VoiceOver reads it as one element and offers no action.
+    private func noConversationRow(_ entry: CallHistoryEntry, title: String) -> some View {
+        rowBody(
+            entry, title: title,
+            avatar: InitialsAvatar(
+                name: "", identity: entry.callIdHex ?? entry.id, size: 40, isGroup: true))
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                CallHistory.rowAccessibilityLabel(
+                    entry, title: title, calendar: calendar, locale: locale))
+    }
+
+    private func conversationRow(
+        _ entry: CallHistoryEntry, groupIdHex: String, kind: CallHistoryKind
+    ) -> some View {
+        let title = conversations.title(groupIdHex: groupIdHex)
+        return HStack(spacing: 12) {
+            Button {
+                onOpenConversation(groupIdHex, kind)
+            } label: {
+                rowBody(
+                    entry, title: title,
+                    avatar: InitialsAvatar(
+                        name: title, identity: groupIdHex, size: 40,
+                        isGroup: kind == .group,
+                        photo: conversations.avatarPhoto(
+                            groupIdHex: groupIdHex, isGroup: kind == .group)))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -164,7 +201,7 @@ struct CallsScreen: View {
                     entry, title: title, calendar: calendar, locale: locale))
 
             Button {
-                onCallBack(entry.conversationId, entry.kind, entry.video)
+                onCallBack(groupIdHex, kind, entry.video)
             } label: {
                 Image(systemName: entry.video ? "video.fill" : "phone.fill")
                     .font(.body)

@@ -193,9 +193,28 @@ public class LinkCallHost(
      * [LinkCallEvents.onEndedForEveryone].
      */
     private val notifyEndedForEveryone: (starterName: String?) -> Unit = {},
+    /**
+     * File a finished call in the Calls list (`docs/ux/navigation.md` section
+     * 5.1.1): the account the call was started under, and its row. Called at
+     * most once per call, only for a call that went live, on the main thread;
+     * the guest rule and the store write are the caller's. Never throws into
+     * the host: a failure is logged.
+     */
+    private val recordHistory: (accountId: ByteArray, entry: CallHistoryEntry) -> Unit = { _, _ -> },
+    /** The wall clock the history row is stamped with. */
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
     @Volatile
     private var port: LinkCallPort? = null
+
+    /** The Calls-list row of the current start, until it is filed. */
+    private class PendingHistory(
+        val attempt: Any,
+        val accountId: ByteArray,
+        val recorder: LinkCallHistoryRecorder,
+    )
+
+    private var pendingHistory: PendingHistory? = null
 
     public fun attach(port: LinkCallPort) {
         this.port = port
@@ -285,6 +304,7 @@ public class LinkCallHost(
                 .distinctUntilChanged()
                 .collect { camOn ->
                     val h = liveHandle() ?: return@collect
+                    if (camOn) pendingHistory?.recorder?.sawVideo()
                     if (camOn) {
                         try {
                             h.publishVideo()
@@ -427,6 +447,7 @@ public class LinkCallHost(
         // A start still in flight stops here: what it has opened so far is
         // closed by its own cancellation, and it reports nothing.
         startJob?.cancel()
+        fileHistory()
         attempt = null
         val h = handle
         handle = null
@@ -450,6 +471,7 @@ public class LinkCallHost(
         val h = liveHandle() ?: return
         if (!s.owner) return
         h.endForEveryone()
+        fileHistory()
         attempt = null
         handle = null
         liveCallId = null
@@ -617,8 +639,20 @@ public class LinkCallHost(
         // A call ended for everyone a moment ago still closes its session; do
         // it now, before this call takes the UI state that close would write.
         finishFlush()
+        // A row still owed by the previous call is filed before this one
+        // replaces it.
+        fileHistory()
         val thisAttempt = Any()
         attempt = thisAttempt
+        pendingHistory = PendingHistory(
+            attempt = thisAttempt,
+            accountId = request.accountId.copyOf(),
+            recorder = LinkCallHistoryRecorder(
+                callIdHex = callIdHex,
+                outgoing = request.isOwner,
+                video = request.mediaVideo,
+            ),
+        )
         handle = null
         liveCallId = request.callId.copyOf()
         mutableInvite.value = InCallInvite.Idle
@@ -678,16 +712,36 @@ public class LinkCallHost(
         if (next == s.phase && reason == s.error) return
         setSlot(s.copy(phase = next, error = reason))
         if (next == LinkCallPhase.LIVE) {
+            pendingHistory?.takeIf { it.attempt === forAttempt }?.recorder?.live(nowMs())
             mutableOverlay.value = true
             // A call is born expanded — see [collapsed].
             mutableCollapsed.value = false
         }
         if (!linkCallOccupiesSlot(next)) {
+            fileHistory(forAttempt)
             // The orchestrator already closed its session; free what the call
             // still holds (its identity), outside the callback that reported it.
             val h = handle
             handle = null
             if (h != null) scope.launch { h.hangUp() }
+        }
+    }
+
+    /**
+     * File the current call's Calls-list row, once: when this device leaves the
+     * call or the call ends for it, whichever comes first. With [onlyAttempt],
+     * only when that start is still the current one. Nothing for a call that
+     * never went live.
+     */
+    private fun fileHistory(onlyAttempt: Any? = null) {
+        val pending = pendingHistory ?: return
+        if (onlyAttempt != null && pending.attempt !== onlyAttempt) return
+        pendingHistory = null
+        val entry = pending.recorder.finish(nowMs()) ?: return
+        try {
+            recordHistory(pending.accountId, entry)
+        } catch (error: Throwable) {
+            warn("link call: filing the call history row failed", error)
         }
     }
 

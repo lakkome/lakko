@@ -37,15 +37,30 @@
  * backend is `call-log-idb.ts`; the session runtime is `CallLogContext.tsx`.
  */
 
-import type { CallLogEntry, CallOutcome } from "./call-log";
+import type { CallLogEntry, CallOutcome, StandaloneCallEntry } from "./call-log";
 
 /** How many rows are kept per conversation, newest first. */
 export const CALL_LOG_MAX_PER_GROUP = 200;
 
+/** How many rows of calls with no conversation (`docs/ux/navigation.md`
+ *  section 5.1.1) are kept, newest first. */
+export const CALL_LOG_MAX_STANDALONE = 200;
+
 /** All groups' call rows for one account, each list oldest-first. */
 export type CallLogRows = ReadonlyMap<string, readonly CallLogEntry[]>;
 
+/**
+ * Everything one account's row holds: the per-conversation rows, and the
+ * calls that belong to no conversation (a `New call`, a call joined from a
+ * link), oldest first, one per call id.
+ */
+export interface CallLogData {
+  readonly groups: CallLogRows;
+  readonly standalone: readonly StandaloneCallEntry[];
+}
+
 const EMPTY: readonly CallLogEntry[] = [];
+const EMPTY_STANDALONE: readonly StandaloneCallEntry[] = [];
 
 const OUTCOMES: readonly CallOutcome[] = ["outgoing", "incoming", "missed", "declined", "failed"];
 
@@ -53,23 +68,26 @@ const OUTCOMES: readonly CallOutcome[] = ["outgoing", "incoming", "missed", "dec
 // Row codec
 // ---------------------------------------------------------------------------
 
-/** Schema version of the JSON payload inside the encrypted row. */
-export const CALL_LOG_ROW_VERSION = 1;
+/** Schema version of the JSON payload inside the encrypted row. Version 2
+ *  added `n`; a version 1 row is not read (no data to carry over). */
+export const CALL_LOG_ROW_VERSION = 2;
 
 /** The JSON shape inside the ciphertext. */
 export interface CallLogRowPayload {
-  readonly v: 1;
+  readonly v: 2;
   /** base64 group id -> the group's rows, oldest first. */
   readonly g: Record<string, readonly CallLogEntry[]>;
+  /** Calls with no conversation, oldest first. */
+  readonly n: readonly StandaloneCallEntry[];
 }
 
 /** Encode the rows to the payload JSON. */
-export function encodeCallLogRow(rows: CallLogRows): string {
+export function encodeCallLogRow(data: CallLogData): string {
   const g: Record<string, readonly CallLogEntry[]> = {};
-  for (const [groupIdB64, list] of rows) {
+  for (const [groupIdB64, list] of data.groups) {
     if (list.length > 0) g[groupIdB64] = list;
   }
-  const payload: CallLogRowPayload = { v: CALL_LOG_ROW_VERSION, g };
+  const payload: CallLogRowPayload = { v: CALL_LOG_ROW_VERSION, g, n: data.standalone };
   return JSON.stringify(payload);
 }
 
@@ -102,9 +120,18 @@ function decodeEntry(raw: unknown): CallLogEntry | null {
   };
 }
 
+/** One call with no conversation from untrusted JSON, or `null`. Only the two
+ *  outcomes such a call can have. */
+function decodeStandaloneEntry(raw: unknown): StandaloneCallEntry | null {
+  const base = decodeEntry(raw);
+  if (base === null) return null;
+  if (base.outcome !== "outgoing" && base.outcome !== "incoming") return null;
+  return { ...base, outcome: base.outcome };
+}
+
 /** Decode payload JSON, dropping any malformed entry rather than trusting it.
  *  `null` for a payload that is not this schema at all. */
-export function decodeCallLogRow(json: string): Map<string, readonly CallLogEntry[]> | null {
+export function decodeCallLogRow(json: string): CallLogData | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -114,18 +141,26 @@ export function decodeCallLogRow(json: string): Map<string, readonly CallLogEntr
   if (typeof parsed !== "object" || parsed === null) return null;
   const obj = parsed as Partial<CallLogRowPayload>;
   if (obj.v !== CALL_LOG_ROW_VERSION) return null;
-  const rows = new Map<string, readonly CallLogEntry[]>();
-  if (typeof obj.g !== "object" || obj.g === null) return rows;
-  for (const [groupIdB64, raw] of Object.entries(obj.g)) {
-    if (groupIdB64.length === 0 || !Array.isArray(raw)) continue;
-    const list: CallLogEntry[] = [];
-    for (const item of raw) {
-      const entry = decodeEntry(item);
-      if (entry !== null) list.push(entry);
+  const groups = new Map<string, readonly CallLogEntry[]>();
+  if (typeof obj.g === "object" && obj.g !== null) {
+    for (const [groupIdB64, raw] of Object.entries(obj.g)) {
+      if (groupIdB64.length === 0 || !Array.isArray(raw)) continue;
+      const list: CallLogEntry[] = [];
+      for (const item of raw) {
+        const entry = decodeEntry(item);
+        if (entry !== null) list.push(entry);
+      }
+      if (list.length > 0) groups.set(groupIdB64, sortAndCap(list, CALL_LOG_MAX_PER_GROUP));
     }
-    if (list.length > 0) rows.set(groupIdB64, sortAndCap(list));
   }
-  return rows;
+  const standalone: StandaloneCallEntry[] = [];
+  if (Array.isArray(obj.n)) {
+    for (const item of obj.n as readonly unknown[]) {
+      const entry = decodeStandaloneEntry(item);
+      if (entry !== null) standalone.push(entry);
+    }
+  }
+  return { groups, standalone: sortAndCap(standalone, CALL_LOG_MAX_STANDALONE) };
 }
 
 // ---------------------------------------------------------------------------
@@ -133,13 +168,20 @@ export function decodeCallLogRow(json: string): Map<string, readonly CallLogEntr
 // ---------------------------------------------------------------------------
 
 /** Oldest first, newest kept when the cap bites, and one row per call id. */
-function sortAndCap(list: readonly CallLogEntry[]): readonly CallLogEntry[] {
-  const byId = new Map<string, CallLogEntry>();
+function sortAndCap<T extends CallLogEntry>(list: readonly T[], cap: number): readonly T[] {
+  const byId = new Map<string, T>();
   for (const entry of list) byId.set(entry.id, entry);
   const sorted = [...byId.values()].sort((a, b) => a.startedAtMs - b.startedAtMs);
-  return sorted.length <= CALL_LOG_MAX_PER_GROUP
-    ? sorted
-    : sorted.slice(sorted.length - CALL_LOG_MAX_PER_GROUP);
+  return sorted.length <= cap ? sorted : sorted.slice(sorted.length - cap);
+}
+
+function sameEntry(a: CallLogEntry, b: CallLogEntry): boolean {
+  return (
+    a.outcome === b.outcome &&
+    a.video === b.video &&
+    a.startedAtMs === b.startedAtMs &&
+    a.durationMs === b.durationMs
+  );
 }
 
 /**
@@ -158,16 +200,8 @@ export function foldCallLogEntry(
   entry: CallLogEntry,
 ): readonly CallLogEntry[] {
   const existing = list.find((e) => e.id === entry.id);
-  if (
-    existing !== undefined &&
-    existing.outcome === entry.outcome &&
-    existing.video === entry.video &&
-    existing.startedAtMs === entry.startedAtMs &&
-    existing.durationMs === entry.durationMs
-  ) {
-    return list;
-  }
-  return sortAndCap([...list.filter((e) => e.id !== entry.id), entry]);
+  if (existing !== undefined && sameEntry(existing, entry)) return list;
+  return sortAndCap([...list.filter((e) => e.id !== entry.id), entry], CALL_LOG_MAX_PER_GROUP);
 }
 
 /** Fold every entry of `from` into `into`. */
@@ -180,14 +214,29 @@ export function mergeCallLogEntries(
   return out;
 }
 
+/**
+ * Fold one call with no conversation into that list: one row per call id
+ * (`docs/ux/navigation.md` section 6.2). The FIRST row for a call stays as it
+ * is: a later record for a call id already held — this device joining the
+ * same call again — is dropped, and the list comes back unchanged (as on
+ * Android).
+ */
+export function foldStandaloneCallEntry(
+  list: readonly StandaloneCallEntry[],
+  entry: StandaloneCallEntry,
+): readonly StandaloneCallEntry[] {
+  if (list.some((e) => e.id === entry.id)) return list;
+  return sortAndCap([...list, entry], CALL_LOG_MAX_STANDALONE);
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
 /** Where the rows live between sessions. One row per account. */
 export interface CallLogBackend {
-  load(accountId: string): Promise<CallLogRows | null>;
-  save(accountId: string, rows: CallLogRows): Promise<void>;
+  load(accountId: string): Promise<CallLogData | null>;
+  save(accountId: string, data: CallLogData): Promise<void>;
 }
 
 /** A backend that keeps nothing (tests, a device with no key). */
@@ -202,6 +251,8 @@ export const MEMORY_CALL_LOG_BACKEND: CallLogBackend = {
  */
 export class CallLogStore {
   private rows = new Map<string, readonly CallLogEntry[]>();
+  /** Calls with no conversation, oldest first. */
+  private standaloneRows: readonly StandaloneCallEntry[] = EMPTY_STANDALONE;
   private account: string | null = null;
   private readonly listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
@@ -222,6 +273,7 @@ export class CallLogStore {
     if (this.account !== accountId) {
       this.account = accountId;
       this.rows = new Map();
+      this.standaloneRows = EMPTY_STANDALONE;
       this.notify();
     }
     const attempt = this.load(accountId);
@@ -230,7 +282,7 @@ export class CallLogStore {
   }
 
   private async load(accountId: string): Promise<void> {
-    let loaded: CallLogRows | null = null;
+    let loaded: CallLogData | null = null;
     try {
       loaded = await this.backend.load(accountId);
     } catch (err) {
@@ -238,11 +290,16 @@ export class CallLogStore {
     }
     // The session may have moved on while the load was in flight.
     if (this.account !== accountId || loaded === null) return;
-    const next = new Map<string, readonly CallLogEntry[]>(loaded);
+    const next = new Map<string, readonly CallLogEntry[]>(loaded.groups);
     for (const [groupIdB64, list] of this.rows) {
       next.set(groupIdB64, mergeCallLogEntries(next.get(groupIdB64) ?? EMPTY, list));
     }
     this.rows = next;
+    // The stored row was written first, so for a call id held on both sides
+    // the stored one stays.
+    let standalone = loaded.standalone;
+    for (const entry of this.standaloneRows) standalone = foldStandaloneCallEntry(standalone, entry);
+    this.standaloneRows = standalone;
     this.notify();
   }
 
@@ -250,6 +307,7 @@ export class CallLogStore {
   close(): void {
     this.account = null;
     this.rows = new Map();
+    this.standaloneRows = EMPTY_STANDALONE;
     this.notify();
   }
 
@@ -273,6 +331,12 @@ export class CallLogStore {
     return this.rows;
   }
 
+  /** The calls with no conversation, oldest first, for the Calls screen
+   *  (`docs/ux/navigation.md` section 5.1.1). Never mutate them. */
+  standalone(): readonly StandaloneCallEntry[] {
+    return this.standaloneRows;
+  }
+
   /**
    * Record one finished call. Returns `true` when something changed (and a
    * save was scheduled). A call for an account the store is not bound to is
@@ -285,6 +349,24 @@ export class CallLogStore {
     const next = foldCallLogEntry(prev, entry);
     if (next === prev) return false;
     this.rows = new Map(this.rows).set(groupIdB64, next);
+    this.notify();
+    this.scheduleSave(accountId);
+    return true;
+  }
+
+  /**
+   * Record one finished call that belongs to no conversation. One row per
+   * call id, the first one kept: a record for a call id already held is
+   * dropped. Returns `true` when something changed. Dropped for an account
+   * the store is not bound to, like {@link record}.
+   */
+  recordStandalone(accountId: string, entry: StandaloneCallEntry): boolean {
+    if (this.account !== accountId) return false;
+    if (entry.id.length === 0) return false;
+    const prev = this.standaloneRows;
+    const next = foldStandaloneCallEntry(prev, entry);
+    if (next === prev) return false;
+    this.standaloneRows = next;
     this.notify();
     this.scheduleSave(accountId);
     return true;
@@ -322,7 +404,7 @@ export class CallLogStore {
         this.saveQueued = false;
         // Snapshot at run time so a burst of records costs one write.
         if (this.account !== accountId) return;
-        await this.backend.save(accountId, this.rows);
+        await this.backend.save(accountId, { groups: this.rows, standalone: this.standaloneRows });
       })
       .catch((err: unknown) => {
         this.saveQueued = false;

@@ -70,6 +70,10 @@ public fun LakkoAvatar(
     /** ADR-0087 4.5.4 — for a group, its id (hex): the circle shows the
      *  group's photo when this device holds it. */
     groupIdHex: String? = null,
+    /** Draw the group glyph whatever [name] is: a call with no conversation
+     *  in the Calls list (`docs/ux/navigation.md` section 5.1.1), never
+     *  initials. */
+    groupGlyph: Boolean = false,
 ) {
     // One person, one colour on every screen: a person's circle is tinted by
     // their key whenever the caller passes it, not by whatever id the screen
@@ -92,7 +96,7 @@ public fun LakkoAvatar(
         // The unnamed-group stand-in is rendered in the interface language
         // (`chat.group.fallback_name`), so the glyph keys on that, not on
         // the English word.
-        if (group && name == LocalStrings.current["chat.group.fallback_name"]) {
+        if (groupGlyph || (group && name == LocalStrings.current["chat.group.fallback_name"])) {
             Icon(
                 Icons.Filled.Groups,
                 contentDescription = null,

@@ -80,8 +80,16 @@ public final class CallHistoryStore: ObservableObject {
     /// Ignored while nothing is bound: a call cannot finish before a session
     /// exists, so a write with no account is a bug rather than a case to
     /// guess at, and guessing would file the row under the wrong person.
+    ///
+    /// A call with no conversation (`docs/ux/navigation.md` section 5.1.1) is
+    /// filed once per call on this device: its id is the call id, and a second
+    /// write for a call already filed (a rejoin of the same link call) leaves
+    /// the first row as it is.
     public func record(_ entry: CallHistoryEntry) {
         guard let accountIdB64 = boundAccountIdB64 else { return }
+        if entry.kind == .noConversation, entries.contains(where: { $0.id == entry.id }) {
+            return
+        }
         var next = entries.filter { $0.id != entry.id }
         next.append(entry)
         entries = CallHistory.ordered(next)
