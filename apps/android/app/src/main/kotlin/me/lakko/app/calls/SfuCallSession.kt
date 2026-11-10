@@ -1941,7 +1941,7 @@ class SfuCallSession(
     private companion object {
         /** SFrame overlap window in ms — mirrors the web `SFRAME_OVERLAP_MS`
          *  and the Rust core `OVERLAP_DEFAULT_MS` (ADR-0008 / ADR-0029). */
-        const val OVERLAP_MS = 1000L
+        const val OVERLAP_MS = SFRAME_REKEY_OVERLAP_MS
 
         /** Extra margin before pruning so the window fully elapses on the
          *  media threads (mirrors the web worker's `overlapMs + 200`). */

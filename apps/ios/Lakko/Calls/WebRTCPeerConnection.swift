@@ -336,8 +336,9 @@ public final class WebRTCPeerConnection: NSObject {
         if localVideoTrack != nil { CameraBackgroundStage.shared?.setCameraSending(false) }
         localVideoTrack = nil
         cameraCopies = [:]
-        sframeSenders = []
-        sframeReceivers = []
+        // The transforms hold their own references on the keys.
+        callKeys = nil
+        callKeysSeeds.clear()
     }
 
     // MARK: - Local tracks
@@ -694,20 +695,34 @@ public final class WebRTCPeerConnection: NSObject {
     /// kind; empty on the one-to-one path.
     private var cameraCopies: [CameraCopyKind: CameraCopy] = [:]
 
-    /// The exact sender and receiver objects an SFrame transform was attached
-    /// to (the bridge keeps it as an associated object on that object). A
-    /// rekey and a prune walk these, never `peer.senders` / `peer.receivers`:
-    /// those build new wrapper objects on every read, which carry no
-    /// association, so a rekey over them was a silent no-op. Found on an
-    /// iPhone on 2026-11-10: in a call link the owner's senders kept sealing
-    /// under the seed of before the web joiner's admission and the web opened
-    /// none of its frames, while the owner, whose decryptor for the joiner was
-    /// armed after the rekey, opened the joiner's.
-    private var sframeSenders: [RTCRtpSender] = []
-    private var sframeReceivers: [RTCRtpReceiver] = []
+    /// The call's SFrame keys, shared by every encryptor and decryptor this
+    /// connection attaches (`apps/shared/sframe-bridge`, `LakkoCallKeys`), and
+    /// the seed they are at. A rekey is one call on them. Before they were
+    /// shared, the rekey walked `peer.senders` / `peer.receivers`, which build
+    /// new wrapper objects on every read and carry none of the transforms, so
+    /// it reached none: in a call link the owner's senders kept sealing under
+    /// the seed of before a web joiner's admission and the web opened none of
+    /// its frames (seen on an iPhone, 2026-11-10).
+    private var callKeys: SFrameCallKeys?
+    private var callKeysSeeds = CallKeysSeeds()
 
-    private func rememberSFrame(sender: RTCRtpSender) {
-        if !sframeSenders.contains(where: { $0 === sender }) { sframeSenders.append(sender) }
+    /// The call keys an arm at `seed` builds on (``CallKeysSeeds``): made at
+    /// the first arm, rekeyed first when an arm names a new seed, the current
+    /// ones for a seed they have left behind. `nil` when the seed is refused
+    /// (the caller fails closed, invariant #4).
+    private func sframeKeys(at seed: Data) -> SFrameCallKeys? {
+        switch callKeysSeeds.decide(armAt: seed) {
+        case .use:
+            return callKeys
+        case .rekey:
+            guard rekeySFrame(seed: seed) else { return nil }
+            return callKeys
+        case .create:
+            guard let keys = SFrameCallKeys.make(seed: seed) else { return nil }
+            callKeys = keys
+            callKeysSeeds.moved(to: seed)
+            return keys
+        }
     }
 
     /// Add the camera of an SFU call (group and link calls) as its main
@@ -867,7 +882,6 @@ public final class WebRTCPeerConnection: NSObject {
             kind.rawValue, reason)
         copy.track.isEnabled = false
         LakkoSFrameAttach.detach(fromSender: copy.sender)
-        sframeSenders.removeAll { $0 === copy.sender }
         if let peer = peer {
             _ = peer.removeTrack(copy.sender)
         }
@@ -1105,6 +1119,7 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
+        guard let keys = sframeKeys(at: seed) else { return false }
         var allOk = true
         // Each sender is bound to its own per-sender stream ordinal
         // (ADR-0035): the audio sender seals under stream 0, the video
@@ -1120,17 +1135,15 @@ public final class WebRTCPeerConnection: NSObject {
             guard let sender = maybeSender else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: sender,
-                seed: seed,
+                keys: keys,
                 localLeaf: localLeaf,
                 streamIndex: streamIndex
             )
             if status != .OK {
                 allOk = false
-            } else {
-                rememberSFrame(sender: sender)
             }
         }
-        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        armCameraCopyEncryptors(keys: keys, localLeaf: localLeaf)
         return allOk
     }
 
@@ -1139,19 +1152,17 @@ public final class WebRTCPeerConnection: NSObject {
     /// this leaf share a key. A copy that cannot be sealed is REMOVED rather
     /// than left unsealed (invariant #4) and the call goes on without it: a
     /// copy is a second picture, never the only one.
-    private func armCameraCopyEncryptors(seed: Data, localLeaf: UInt32) {
+    private func armCameraCopyEncryptors(keys: SFrameCallKeys, localLeaf: UInt32) {
         for kind in CameraCopyKind.addOrder {
             guard let copy = cameraCopies[kind] else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: copy.sender,
-                seed: seed,
+                keys: keys,
                 localLeaf: localLeaf,
                 streamIndex: CameraSender.streamIndex(of: kind.senderKind)
             )
             if status != .OK {
                 removeCameraCopy(kind, reason: "its SFrame encryptor could not be attached")
-            } else {
-                rememberSFrame(sender: copy.sender)
             }
         }
     }
@@ -1175,18 +1186,19 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        guard let sender = localVideoSender else { return false }
+        guard let sender = localVideoSender, let keys = sframeKeys(at: seed) else {
+            return false
+        }
         // Stream 1 (ADR-0035) for the camera's main sender; the copies of an
         // SFU call's camera are sealed under 3 and 4 below, and a shared
         // screen would use 2.
         guard LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
-            seed: seed,
+            keys: keys,
             localLeaf: localLeaf,
             streamIndex: CameraSender.streamIndexCamera
         ) == .OK else { return false }
-        rememberSFrame(sender: sender)
-        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        armCameraCopyEncryptors(keys: keys, localLeaf: localLeaf)
         return true
     }
 
@@ -1206,13 +1218,11 @@ public final class WebRTCPeerConnection: NSObject {
         // reading the composite KID (`(senderLeaf << 8) | streamIndex`)
         // from each frame's own SFrame header, so audio and either video
         // stream are each keyed correctly with no local track-kind signal.
+        guard let keys = sframeKeys(at: seed) else { return false }
         let status = LakkoSFrameAttach.attachDecryptor(
             toReceiver: receiver,
-            seed: seed
+            keys: keys
         )
-        if status == .OK, !sframeReceivers.contains(where: { $0 === receiver }) {
-            sframeReceivers.append(receiver)
-        }
         return status == .OK
     }
 
@@ -1228,40 +1238,26 @@ public final class WebRTCPeerConnection: NSObject {
     /// the decryptors' retained previous key.
     ///
     /// Called by `SfuCallSession.rekey(newSeed:)` when a commit advances
-    /// the group's epoch during a live call. Walks the senders and
-    /// receivers this connection attached a transform to
-    /// (``sframeSenders`` / ``sframeReceivers``); a receiver added by a
-    /// later renegotiation joins them when it is armed.
+    /// the group's epoch during a live call. One rekey of the shared call
+    /// keys (``callKeys``) reaches every encryptor and decryptor attached
+    /// on them, including those of a later renegotiation.
     ///
     /// A rekey never downgrades to plaintext: if the rotation itself
     /// fails (bad seed), the bridge retains the current key (still
     /// E2EE, invariant #4). The `Bool` return is for observability only
-    /// — `false` means at least one present transform's rotation failed;
-    /// the caller keeps the call up.
+    /// — `false` means the call keys refused the seed (or there are none
+    /// yet); the caller keeps the call up.
     @discardableResult
     public func rekeySFrame(seed: Data) -> Bool {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        guard peer != nil else { return false }
+        guard peer != nil, let keys = callKeys else { return false }
+        if callKeysSeeds.current == seed { return true }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let overlapMs = Self.sframeOverlapMs
-        var allOk = true
-        for sender in sframeSenders {
-            if !LakkoSFrameAttach.rekeyEncryptor(onSender: sender, seed: seed) {
-                allOk = false
-            }
-        }
-        for receiver in sframeReceivers {
-            if !LakkoSFrameAttach.rekeyDecryptor(
-                onReceiver: receiver,
-                seed: seed,
-                nowMs: now,
-                overlapMs: overlapMs
-            ) {
-                allOk = false
-            }
-        }
+        guard keys.rekey(seed: seed, nowMs: now, overlapMs: overlapMs) else { return false }
+        callKeysSeeds.moved(to: seed)
         // Close the overlap window: after `overlapMs`, drop the retained
         // previous key so seed-boundary forward secrecy takes full effect.
         // `Task {}` (not detached) inherits this @MainActor isolation, so
@@ -1271,17 +1267,14 @@ public final class WebRTCPeerConnection: NSObject {
             try? await Task.sleep(nanoseconds: overlapNs)
             self?.pruneSFrameDecryptors()
         }
-        return allOk
+        return true
     }
 
-    /// Drop each decryptor's retained previous key once the overlap
-    /// window has elapsed (G-18, ADR-0029), on every receiver armed so far.
+    /// Drop the call keys' retained previous key once the overlap window has
+    /// elapsed (G-18, ADR-0029).
     private func pruneSFrameDecryptors() {
         guard peer != nil else { return }
-        let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        for receiver in sframeReceivers {
-            LakkoSFrameAttach.pruneDecryptor(onReceiver: receiver, nowMs: now)
-        }
+        callKeys?.prune(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
     }
 
     // MARK: - SDP exchange

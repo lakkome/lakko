@@ -49,48 +49,112 @@ bool EqualsIgnoreAsciiCase(const char* a, const char* b) {
 // LakkoFrameEncryptor
 // ---------------------------------------------------------------
 
+// ---------------------------------------------------------------
+// LakkoCallKeys
+// ---------------------------------------------------------------
+
 // static
-LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
-                                                 std::size_t seed_len,
-                                                 uint32_t local_leaf,
-                                                 uint8_t stream_index) {
-  lakko_sframe_call_key_t* call_key = nullptr;
-  lakko_sframe_status_t status =
-      lakko_sframe_call_key_new(seed, seed_len, &call_key);
-  if (status != LAKKO_SFRAME_STATUS_T_OK || call_key == nullptr) {
+LakkoCallKeys* LakkoCallKeys::Create(const uint8_t* seed,
+                                     std::size_t seed_len) {
+  lakko_sframe_call_key_ring_t* ring = nullptr;
+  if (lakko_sframe_call_key_ring_new(seed, seed_len, &ring) !=
+          LAKKO_SFRAME_STATUS_T_OK ||
+      ring == nullptr) {
     return nullptr;
   }
+  return new LakkoCallKeys(ring);
+}
 
+LakkoCallKeys::LakkoCallKeys(lakko_sframe_call_key_ring_t* ring)
+    : ring_(ring) {}
+
+LakkoCallKeys::~LakkoCallKeys() {
+  // Every encryptor and decryptor holds a reference, so none is using the
+  // ring when the last one goes.
+  lakko_sframe_call_key_ring_free(ring_);
+}
+
+bool LakkoCallKeys::Rekey(const uint8_t* seed, std::size_t seed_len,
+                          uint64_t now_ms, uint64_t overlap_ms) {
+  // The ring is Mutex-guarded internally, so this is safe against a
+  // concurrent open or seal-key derivation.
+  if (lakko_sframe_call_key_ring_rekey(ring_, seed, seed_len, now_ms,
+                                       overlap_ms) !=
+      LAKKO_SFRAME_STATUS_T_OK) {
+    return false;
+  }
+  // After the ring holds the new key, so an encryptor that sees the new
+  // generation derives from the new key.
+  generation_.fetch_add(1, std::memory_order_acq_rel);
+  return true;
+}
+
+void LakkoCallKeys::Prune(uint64_t now_ms) {
+  lakko_sframe_call_key_ring_prune(ring_, now_ms);
+}
+
+uint64_t LakkoCallKeys::Generation() const {
+  return generation_.load(std::memory_order_acquire);
+}
+
+void LakkoCallKeys::AddRef() const {
+  refcount_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void LakkoCallKeys::Release() const {
+  if (refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    delete this;
+  }
+}
+
+// ---------------------------------------------------------------
+// LakkoFrameEncryptor
+// ---------------------------------------------------------------
+
+// static
+LakkoFrameEncryptor* LakkoFrameEncryptor::Create(LakkoCallKeys* keys,
+                                                 uint32_t local_leaf,
+                                                 uint8_t stream_index) {
+  if (keys == nullptr) {
+    return nullptr;
+  }
+  // The generation is read before the key is derived: if a rekey lands in
+  // between, the key is already the new one and the first frame derives
+  // it again, which only costs a fresh counter start.
+  const uint64_t generation = keys->Generation();
   // Derive the seal key on this encryptor's fixed stream (ADR-0035):
   // KID = (local_leaf << 8) | stream_index. Every uint8_t stream_index
-  // is valid, so this only fails on an (unreachable) HKDF error →
+  // is valid, so this only fails on an (unreachable) HKDF error ->
   // nullptr, which the boot probe treats like any other Create failure
   // (invariant #4: no non-E2EE fallback).
   lakko_sframe_participant_key_t* participant_key = nullptr;
-  status = lakko_sframe_participant_key_new(call_key, local_leaf, stream_index,
-                                            &participant_key);
-  // The call key is only needed to derive the seal key; drop it either way.
-  lakko_sframe_call_key_free(call_key);
-  if (status != LAKKO_SFRAME_STATUS_T_OK || participant_key == nullptr) {
+  if (lakko_sframe_call_key_ring_participant_key(
+          keys->Ring(), local_leaf, stream_index, &participant_key) !=
+          LAKKO_SFRAME_STATUS_T_OK ||
+      participant_key == nullptr) {
     return nullptr;
   }
-
-  return new LakkoFrameEncryptor(participant_key, local_leaf, stream_index);
+  return new LakkoFrameEncryptor(keys, participant_key, generation, local_leaf,
+                                 stream_index);
 }
 
 LakkoFrameEncryptor::LakkoFrameEncryptor(
+    LakkoCallKeys* keys,
     lakko_sframe_participant_key_t* participant_key,
+    uint64_t generation,
     uint32_t local_leaf,
     uint8_t stream_index)
-    : participant_key_(participant_key),
+    : keys_(keys),
+      participant_key_(participant_key),
+      generation_(generation),
       local_leaf_(local_leaf),
-      stream_index_(stream_index) {}
+      stream_index_(stream_index) {
+  keys_->AddRef();
+}
 
 LakkoFrameEncryptor::~LakkoFrameEncryptor() {
-  // The free routine tolerates null pointers (per the C ABI contract
-  // documented in lakko_sframe_native.h) but we paired construction +
-  // ownership so this is always live here.
   lakko_sframe_participant_key_free(participant_key_);
+  keys_->Release();
 }
 
 int LakkoFrameEncryptor::Encrypt(cricket::MediaType media_type,
@@ -136,13 +200,27 @@ int LakkoFrameEncryptor::Encrypt(cricket::MediaType media_type,
   // `RTCRtpScriptTransform` side, so binding it would break
   // web <-> native interop.
   //
-  // `participant_key_` is read under `seal_mutex_` because a mid-call
-  // Rekey (signaling thread) may swap it concurrently (ADR-0029).
+  // A rekey of the call (ADR-0029) moved the generation: derive the new
+  // epoch's seal key on the same stream before sealing. A derivation that
+  // fails keeps the current key (still E2EE, invariant #4) and is tried
+  // again on the next frame.
   uint8_t* wire_ptr = nullptr;
   std::size_t wire_len = 0;
   lakko_sframe_status_t status;
   {
     std::lock_guard<std::mutex> guard(seal_mutex_);
+    const uint64_t generation = keys_->Generation();
+    if (generation != generation_) {
+      lakko_sframe_participant_key_t* fresh = nullptr;
+      if (lakko_sframe_call_key_ring_participant_key(
+              keys_->Ring(), local_leaf_, stream_index_, &fresh) ==
+              LAKKO_SFRAME_STATUS_T_OK &&
+          fresh != nullptr) {
+        lakko_sframe_participant_key_free(participant_key_);
+        participant_key_ = fresh;
+        generation_ = generation;
+      }
+    }
     status = lakko_sframe_seal_media_frame_for_codec(
         participant_key_, frame.data(), frame.size(), codec, &wire_ptr,
         &wire_len);
@@ -190,36 +268,6 @@ uint8_t LakkoFrameEncryptor::CodecFromName(const char* name) {
     return LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS;
   }
   return LAKKO_SFRAME_MEDIA_CODEC_OTHER;
-}
-
-bool LakkoFrameEncryptor::Rekey(const uint8_t* seed, std::size_t seed_len) {
-  // Derive the new epoch's seal key BEFORE taking the lock, so the codec
-  // thread is never blocked on HKDF; only the pointer swap is under the lock.
-  lakko_sframe_call_key_t* call_key = nullptr;
-  if (lakko_sframe_call_key_new(seed, seed_len, &call_key) !=
-          LAKKO_SFRAME_STATUS_T_OK ||
-      call_key == nullptr) {
-    return false;
-  }
-  // Re-derive on the SAME stream this encryptor was created with
-  // (ADR-0035) — a rekey changes only the epoch, never the stream.
-  lakko_sframe_participant_key_t* fresh = nullptr;
-  lakko_sframe_status_t status = lakko_sframe_participant_key_new(
-      call_key, local_leaf_, stream_index_, &fresh);
-  lakko_sframe_call_key_free(call_key);
-  if (status != LAKKO_SFRAME_STATUS_T_OK || fresh == nullptr) {
-    // Keep sealing under the current key — never emit plaintext (invariant #4).
-    return false;
-  }
-
-  lakko_sframe_participant_key_t* stale = nullptr;
-  {
-    std::lock_guard<std::mutex> guard(seal_mutex_);
-    stale = participant_key_;
-    participant_key_ = fresh;
-  }
-  lakko_sframe_participant_key_free(stale);
-  return true;
 }
 
 std::size_t LakkoFrameEncryptor::GetMaxCiphertextByteSize(
@@ -321,25 +369,22 @@ bool LakkoFrameDecryptor::IsLive(const void* candidate) {
   return false;
 }
 
-LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
-                                                 std::size_t seed_len,
+LakkoFrameDecryptor* LakkoFrameDecryptor::Create(LakkoCallKeys* keys,
                                                  const char* label) {
   // The decryptor reads the composite KID from each frame's header
-  // (ADR-0035), so it carries no per-stream state — a bad seed length
-  // is the only Create-time failure, surfaced as nullptr (invariant
-  // #4: the boot probe refuses to install a decryptor that cannot key).
-  lakko_sframe_call_key_ring_t* ring = nullptr;
-  lakko_sframe_status_t status =
-      lakko_sframe_call_key_ring_new(seed, seed_len, &ring);
-  if (status != LAKKO_SFRAME_STATUS_T_OK || ring == nullptr) {
+  // (ADR-0035), so it carries no per-stream state; null keys are the only
+  // Create-time failure, surfaced as nullptr (invariant #4: the boot probe
+  // refuses to install a decryptor that cannot key).
+  if (keys == nullptr) {
     return nullptr;
   }
-  return new LakkoFrameDecryptor(ring, label);
+  return new LakkoFrameDecryptor(keys, label);
 }
 
-LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring,
+LakkoFrameDecryptor::LakkoFrameDecryptor(LakkoCallKeys* keys,
                                          const char* label)
-    : ring_(ring) {
+    : keys_(keys) {
+  keys_->AddRef();
   // Bounded copy: the caller's string is not owned and this object outlives
   // the attach call that supplied it.
   const char* source = (label != nullptr && label[0] != '\0') ? label : "unknown";
@@ -364,8 +409,8 @@ LakkoFrameDecryptor::~LakkoFrameDecryptor() {
     }
   }
   // Callers must have released their refcount before letting us
-  // destruct, so no Decrypt / Rekey is in flight against `ring_`.
-  lakko_sframe_call_key_ring_free(ring_);
+  // destruct, so no Decrypt is in flight.
+  keys_->Release();
 }
 
 webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
@@ -413,7 +458,7 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
   std::size_t pt_len = 0;
   lakko_sframe_status_t open_status =
       lakko_sframe_call_key_ring_open_media_frame_with_overlap(
-          ring_, encrypted_frame.data(), encrypted_frame.size(), &pt_ptr,
+          keys_->Ring(), encrypted_frame.data(), encrypted_frame.size(), &pt_ptr,
           &pt_len);
   if (open_status != LAKKO_SFRAME_STATUS_T_OK) {
     ReportFirstFailure(open_status, encrypted_frame.data(), encrypted_frame.size());
@@ -525,19 +570,6 @@ void LakkoFrameDecryptor::ReportFirstFailure(
         label_, StatusName(status), static_cast<int>(status), frame_size);
   }
   EmitLog(line);
-}
-
-bool LakkoFrameDecryptor::Rekey(const uint8_t* seed, std::size_t seed_len,
-                                uint64_t now_ms, uint64_t overlap_ms) {
-  // The ring is Mutex-guarded internally, so this is safe against a
-  // concurrent Decrypt on the network thread.
-  return lakko_sframe_call_key_ring_rekey(ring_, seed, seed_len, now_ms,
-                                          overlap_ms) ==
-         LAKKO_SFRAME_STATUS_T_OK;
-}
-
-void LakkoFrameDecryptor::Prune(uint64_t now_ms) {
-  lakko_sframe_call_key_ring_prune(ring_, now_ms);
 }
 
 std::size_t LakkoFrameDecryptor::GetMaxPlaintextByteSize(

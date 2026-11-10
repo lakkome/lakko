@@ -8,7 +8,10 @@
 //
 // What this file does:
 //
-//   1. Take the (seed, leaf) tuple from Kotlin via JNI, call
+//   1. Build one `lakko::sframe::LakkoCallKeys` per call from the
+//      per-call seed (the Kotlin `LakkoCallKeys` holds one refcount),
+//      then, for each sender, take (call keys, leaf, stream) from
+//      Kotlin and call
 //      `lakko::sframe::LakkoFrameEncryptor::Create(...)` which
 //      builds the C++ subclass of `webrtc::FrameEncryptor
 //      Interface` and trampolines through the
@@ -21,6 +24,10 @@
 //      balanced by libwebrtc's own Release on detach.
 //   3. Release() on the Kotlin side's `nativeRelease(ptr)` so
 //      our refcount drops to 0 and `delete this` runs.
+//
+// A mid-call rekey (G-18, ADR-0029) is one `LakkoCallKeys::Rekey`
+// on the call's shared keys; every encryptor and decryptor built on
+// them follows. No transform has a rekey of its own.
 //
 // Threading: libwebrtc calls
 // FrameEncryptorInterface::Encrypt on the codec thread, and
@@ -53,16 +60,20 @@
 extern "C" {
 
 // ---------------------------------------------------------------
-// LakkoFrameEncryptor
+// LakkoCallKeys
 // ---------------------------------------------------------------
 
+// Build the call's shared keys from the 32-byte per-call seed
+// (`Group::export_secret("lakko/call/v1", call_id, 32)`). Returns 0 on a
+// null or empty array or a refused seed (the bridge refuses any length
+// but 32): nothing that cannot key is installed (security invariant #4).
+// The returned pointer carries one refcount, owned by the Kotlin
+// `LakkoCallKeys`; every transform built on it takes its own.
 JNIEXPORT jlong JNICALL
-Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate(
+Java_me_lakko_sframe_LakkoCallKeys_nativeCreate(
     JNIEnv* env,
     jobject /*thiz*/,
-    jbyteArray seed,
-    jint local_leaf,
-    jint stream_index) {
+    jbyteArray seed) {
     if (seed == nullptr) {
         return 0;
     }
@@ -70,16 +81,110 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate(
     if (seed_len <= 0) {
         return 0;
     }
-
-    // GetByteArrayElements returns a pointer the JVM may have
-    // pinned in place or copied. Either way we only hold it for
-    // the duration of Create — N-3's `Create` copies the seed
-    // bytes into the per-call state, so no reference outlives
-    // this stack frame.
+    // Held only for the duration of Create, which copies what it needs.
     jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
     if (seed_bytes == nullptr) {
         return 0;
     }
+    lakko::sframe::LakkoCallKeys* keys = lakko::sframe::LakkoCallKeys::Create(
+        reinterpret_cast<const uint8_t*>(seed_bytes),
+        static_cast<std::size_t>(seed_len));
+    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
+    if (keys == nullptr) {
+        return 0;
+    }
+    // Refcount: 0 -> 1 (the Kotlin side owns this retain).
+    keys->AddRef();
+    return reinterpret_cast<jlong>(keys);
+}
+
+// Mid-call rekey (G-18, ADR-0029): rotate the whole call to the new MLS
+// epoch's `seed`, retaining the previous key until `now_ms +
+// clamp(overlap_ms)`. Every encryptor of the call seals under the new key
+// from its next frame; every decryptor tries the current key, then the
+// previous one. Returns JNI_FALSE on a null pointer, a bad seed or a
+// negative time, in which case nothing changes (the call keeps sealing
+// under the current key, never plaintext, invariant #4). Callable from
+// any thread.
+JNIEXPORT jboolean JNICALL
+Java_me_lakko_sframe_LakkoCallKeys_nativeRekey(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jbyteArray seed,
+    jlong now_ms,
+    jlong overlap_ms) {
+    if (native_ptr == 0 || seed == nullptr || now_ms < 0 || overlap_ms < 0) {
+        return JNI_FALSE;
+    }
+    const jsize seed_len = env->GetArrayLength(seed);
+    if (seed_len <= 0) {
+        return JNI_FALSE;
+    }
+    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
+    if (seed_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    auto* keys = reinterpret_cast<lakko::sframe::LakkoCallKeys*>(native_ptr);
+    const bool ok = keys->Rekey(
+        reinterpret_cast<const uint8_t*>(seed_bytes),
+        static_cast<std::size_t>(seed_len),
+        static_cast<uint64_t>(now_ms),
+        static_cast<uint64_t>(overlap_ms));
+    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Close the overlap window (G-18, ADR-0029): drop the retained previous
+// key once it has expired at `now_ms`, restoring seed-boundary forward
+// secrecy. A null pointer or a negative time is a no-op.
+JNIEXPORT void JNICALL
+Java_me_lakko_sframe_LakkoCallKeys_nativePrune(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jlong now_ms) {
+    if (native_ptr == 0 || now_ms < 0) {
+        return;
+    }
+    auto* keys = reinterpret_cast<lakko::sframe::LakkoCallKeys*>(native_ptr);
+    keys->Prune(static_cast<uint64_t>(now_ms));
+}
+
+// Drop the Kotlin side's refcount. The keys live on while any transform
+// built on them is alive (each holds its own reference). A null pointer
+// is a no-op.
+JNIEXPORT void JNICALL
+Java_me_lakko_sframe_LakkoCallKeys_nativeRelease(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong native_ptr) {
+    if (native_ptr == 0) {
+        return;
+    }
+    auto* keys = reinterpret_cast<lakko::sframe::LakkoCallKeys*>(native_ptr);
+    keys->Release();
+}
+
+// ---------------------------------------------------------------
+// LakkoFrameEncryptor
+// ---------------------------------------------------------------
+
+// Build an encryptor on the call's shared keys at `keys_ptr` (a pointer
+// from `LakkoCallKeys.nativeCreate`, which the encryptor AddRefs itself)
+// for this device's leaf and the send track's stream ordinal. Returns 0
+// on a null keys pointer or a seal key that cannot be derived.
+JNIEXPORT jlong JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong keys_ptr,
+    jint local_leaf,
+    jint stream_index) {
+    if (keys_ptr == 0) {
+        return 0;
+    }
+    auto* keys = reinterpret_cast<lakko::sframe::LakkoCallKeys*>(keys_ptr);
 
     // `stream_index` (ADR-0035) is the local send track's per-sender
     // stream ordinal (0 = audio, 1 = first video, 2 = screen-share …).
@@ -89,14 +194,9 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate(
     // stream index — the C++ Create never rejects on this argument.
     lakko::sframe::LakkoFrameEncryptor* enc =
         lakko::sframe::LakkoFrameEncryptor::Create(
-            reinterpret_cast<const uint8_t*>(seed_bytes),
-            static_cast<std::size_t>(seed_len),
+            keys,
             static_cast<uint32_t>(local_leaf),
             static_cast<uint8_t>(stream_index));
-
-    // JNI_ABORT skips copying back; we never modified the
-    // bytes so the abort path is the right choice.
-    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
 
     if (enc == nullptr) {
         return 0;
@@ -116,37 +216,6 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRelease(
     }
     auto* enc = reinterpret_cast<lakko::sframe::LakkoFrameEncryptor*>(native_ptr);
     enc->Release();
-}
-
-// Mid-call rekey (G-18, ADR-0029). Swap the encryptor's seal key to the
-// new MLS epoch's `seed`, keeping the same local leaf. Returns JNI_FALSE
-// on a bad seed length / HKDF failure or a null pointer — the C++ side
-// then retains the current key (the caller keeps sealing under it, never
-// plaintext, invariant #4). Thread-safe against a concurrent Encrypt on
-// the codec thread (the bridge guards the seal key with a mutex).
-JNIEXPORT jboolean JNICALL
-Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRekey(
-    JNIEnv* env,
-    jobject /*thiz*/,
-    jlong native_ptr,
-    jbyteArray seed) {
-    if (native_ptr == 0 || seed == nullptr) {
-        return JNI_FALSE;
-    }
-    const jsize seed_len = env->GetArrayLength(seed);
-    if (seed_len <= 0) {
-        return JNI_FALSE;
-    }
-    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
-    if (seed_bytes == nullptr) {
-        return JNI_FALSE;
-    }
-    auto* enc = reinterpret_cast<lakko::sframe::LakkoFrameEncryptor*>(native_ptr);
-    const bool ok = enc->Rekey(
-        reinterpret_cast<const uint8_t*>(seed_bytes),
-        static_cast<std::size_t>(seed_len));
-    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
-    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 // Negotiated codec (ADR-0071). Tell the encryptor which codec its sender
@@ -194,35 +263,26 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCodecFromName(
 // LakkoFrameDecryptor
 // ---------------------------------------------------------------
 
+// Build a decryptor on the call's shared keys at `keys_ptr` (which the
+// decryptor AddRefs itself). Returns 0 on a null keys pointer.
 JNIEXPORT jlong JNICALL
 Java_me_lakko_sframe_LakkoFrameDecryptor_nativeCreate(
-    JNIEnv* env,
+    JNIEnv* /*env*/,
     jobject /*thiz*/,
-    jbyteArray seed) {
-    if (seed == nullptr) {
+    jlong keys_ptr) {
+    if (keys_ptr == 0) {
         return 0;
     }
-    const jsize seed_len = env->GetArrayLength(seed);
-    if (seed_len <= 0) {
-        return 0;
-    }
-    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
-    if (seed_bytes == nullptr) {
-        return 0;
-    }
+    auto* keys = reinterpret_cast<lakko::sframe::LakkoCallKeys*>(keys_ptr);
 
     // The decryptor takes NO stream argument (ADR-0035): it opens each
-    // frame through the call-key ring, which reads the composite KID
-    // `(sender_leaf << 8) | stream_index` from the frame's own SFrame
+    // frame through the call keys' shared ring, which reads the composite
+    // KID `(sender_leaf << 8) | stream_index` from the frame's own SFrame
     // header and derives that sender+stream's key internally. One
     // decryptor bound to a remote receive track opens audio and every
     // video stream on it with no local media-type or MID signal.
     lakko::sframe::LakkoFrameDecryptor* dec =
-        lakko::sframe::LakkoFrameDecryptor::Create(
-            reinterpret_cast<const uint8_t*>(seed_bytes),
-            static_cast<std::size_t>(seed_len));
-
-    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
+        lakko::sframe::LakkoFrameDecryptor::Create(keys);
 
     if (dec == nullptr) {
         return 0;
@@ -241,57 +301,6 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_nativeRelease(
     }
     auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
     dec->Release();
-}
-
-// Mid-call rekey (G-18, ADR-0029). Rotate the decryptor's call-key ring
-// to the new MLS epoch's `seed`, retaining the previous epoch's key until
-// `now_ms + clamp(overlap_ms)` so in-flight frames sealed under the old
-// epoch still open. Returns JNI_FALSE on a bad seed length / null pointer
-// (the ring keeps its current + previous keys). Thread-safe (the Rust
-// ring is Mutex-guarded internally).
-JNIEXPORT jboolean JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_nativeRekey(
-    JNIEnv* env,
-    jobject /*thiz*/,
-    jlong native_ptr,
-    jbyteArray seed,
-    jlong now_ms,
-    jlong overlap_ms) {
-    if (native_ptr == 0 || seed == nullptr) {
-        return JNI_FALSE;
-    }
-    const jsize seed_len = env->GetArrayLength(seed);
-    if (seed_len <= 0) {
-        return JNI_FALSE;
-    }
-    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
-    if (seed_bytes == nullptr) {
-        return JNI_FALSE;
-    }
-    auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
-    const bool ok = dec->Rekey(
-        reinterpret_cast<const uint8_t*>(seed_bytes),
-        static_cast<std::size_t>(seed_len),
-        static_cast<uint64_t>(now_ms),
-        static_cast<uint64_t>(overlap_ms));
-    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
-    return ok ? JNI_TRUE : JNI_FALSE;
-}
-
-// Close the overlap window (G-18, ADR-0029): drop the retained previous
-// key once it has expired at `now_ms`, restoring seed-boundary forward
-// secrecy. A null pointer is a no-op.
-JNIEXPORT void JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_nativePrune(
-    JNIEnv* /*env*/,
-    jobject /*thiz*/,
-    jlong native_ptr,
-    jlong now_ms) {
-    if (native_ptr == 0) {
-        return;
-    }
-    auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
-    dec->Prune(static_cast<uint64_t>(now_ms));
 }
 
 }  // extern "C"

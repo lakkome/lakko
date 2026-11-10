@@ -329,6 +329,24 @@ public class WebRtcPeerConnection(
         MutableList<me.lakko.sframe.LakkoFrameDecryptor> = mutableListOf()
 
     /**
+     * The call's one set of SFrame keys (G-18, ADR-0029), shared by every
+     * encryptor and decryptor this connection arms, and the seed they are
+     * at. Created by the first arm; a later arm at a new seed rekeys them
+     * first, so no transform is built on keys at another seed
+     * ([CallKeysSlot]). A mid-call rekey is one rekey of these keys
+     * ([rekeySFrame]); [attachedEncryptors] / [attachedDecryptors] only
+     * keep the transforms alive. Released in [close], after the transforms.
+     */
+    private val callKeys = CallKeysSlot<me.lakko.sframe.LakkoCallKeys>(
+        create = { seed -> me.lakko.sframe.LakkoCallKeys.create(seed) },
+        rekeyKeys = { keys, seed, nowMs, overlapMs -> keys.rekey(seed, nowMs, overlapMs) },
+        pruneKeys = { keys, nowMs -> keys.prune(nowMs) },
+        releaseKeys = { keys -> keys.release() },
+        nowMs = System::currentTimeMillis,
+        defaultOverlapMs = SFRAME_REKEY_OVERLAP_MS,
+    )
+
+    /**
      * Bridge libwebrtc's `PeerConnection.Observer` into the
      * typed [Delegate] surface. Declared before `init` so
      * the `createPeerConnection(config, observer)` call in
@@ -542,6 +560,8 @@ public class WebRtcPeerConnection(
             }
             attachedDecryptors.forEach { it.release() }
             attachedDecryptors.clear()
+            // The call keys go after every transform built on them.
+            callKeys.clear()
 
             localAudioTrack?.dispose()
             localAudioSource?.dispose()
@@ -974,8 +994,9 @@ public class WebRtcPeerConnection(
             return false
         }
         // Sealed first: an unsealed sender is never left in place.
-        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, kind.sender.streamIndex)
-            ?: return dropAgain("its SFrame encryptor could not be created")
+        val enc = callKeys.build(seed) { keys ->
+            me.lakko.sframe.LakkoFrameEncryptor.create(keys, localLeaf, kind.sender.streamIndex)
+        } ?: return dropAgain("its SFrame encryptor could not be created")
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
         if (!added.configured) {
@@ -1382,7 +1403,9 @@ public class WebRtcPeerConnection(
             localVideoSender to SFRAME_STREAM_CAMERA,
         )) {
             sender ?: continue
-            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, streamIndex)
+            val enc = callKeys.build(seed) { keys ->
+                me.lakko.sframe.LakkoFrameEncryptor.create(keys, localLeaf, streamIndex)
+            }
             if (enc == null) {
                 allOk = false
                 continue
@@ -1413,9 +1436,9 @@ public class WebRtcPeerConnection(
      * every sender's encryptor, and is the connect-time / rekey
      * path), this targets the new video sender only — so the
      * audio encryptor is neither released-without-detach nor
-     * needlessly re-derived. The new encryptor is appended to
-     * [attachedEncryptors] so the mid-call rekey
-     * ([rekeySFrame]) and teardown ([close]) cover it too.
+     * needlessly re-derived. The new encryptor is built on the call's
+     * shared keys, so the mid-call rekey ([rekeySFrame]) reaches it, and is
+     * appended to [attachedEncryptors] so teardown ([close]) releases it.
      *
      * Returns `false` on a missing video sender, HKDF failure,
      * or if the SFrame shim is unavailable. A `false` return is
@@ -1433,11 +1456,9 @@ public class WebRtcPeerConnection(
         // The SAME stream index the connect-time path seals the video sender
         // with. Two literals for one number is how a mid-call sender ends up
         // sealed into a key space the peer is not reading.
-        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(
-            seed,
-            localLeaf,
-            SFRAME_STREAM_CAMERA,
-        ) ?: return false
+        val enc = callKeys.build(seed) { keys ->
+            me.lakko.sframe.LakkoFrameEncryptor.create(keys, localLeaf, SFRAME_STREAM_CAMERA)
+        } ?: return false
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
         videoSenderSealed = true
@@ -1618,7 +1639,9 @@ public class WebRtcPeerConnection(
         if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
             return false
         }
-        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed) ?: return false
+        val dec = callKeys.build(seed) { keys ->
+            me.lakko.sframe.LakkoFrameDecryptor.create(keys)
+        } ?: return false
         receiver.setFrameDecryptor(dec)
         attachedDecryptors += dec
         synchronized(decryptorByReceiver) { decryptorByReceiver[receiver] = dec }
@@ -1653,43 +1676,36 @@ public class WebRtcPeerConnection(
         }
 
     /**
-     * Mid-call SFrame rekey (G-18, ADR-0029). Rotate every installed
-     * encryptor + decryptor to the new MLS epoch's [seed]. Each encryptor
-     * swaps its seal key (it seals only under the current epoch); each
-     * decryptor rotates its call-key ring, retaining the previous epoch's
-     * key until `nowMs + overlapMs` so in-flight frames sealed under the
-     * old epoch still open. Call [pruneSFrameDecryptors] after the window
-     * to close it.
+     * Mid-call SFrame rekey (G-18, ADR-0029). Rotate the call's shared keys
+     * ([callKeys]) to the new MLS epoch's [seed], once: every encryptor built
+     * on them derives a fresh seal key on its next frame, every decryptor
+     * opens through their ring, which retains the previous epoch's key until
+     * `nowMs + overlapMs` so in-flight frames sealed under the old epoch
+     * still open. Call [pruneSFrameDecryptors] after the window to close it.
      *
-     * Returns `true` only when every installed encryptor + decryptor
-     * adopted the new key. A `false` return means at least one seal / open
-     * path could not — the caller keeps the current seed (never plaintext,
-     * security invariant #4). Iterates snapshots so a concurrent
-     * [armSFrameDecryptor] on a libwebrtc thread cannot fault the walk.
+     * Nothing walks the transforms: the iOS shim did, over wrapper objects
+     * that were new on every read, and its rekey reached none of them.
+     *
+     * Returns `true` when the keys are at [seed] afterwards (or no keys exist
+     * yet: the first arm creates them at the seed it is given). A `false`
+     * return means the rekey was refused; the keys stay at their current
+     * seed (never plaintext, security invariant #4), and a later arm at
+     * [seed] tries the rekey again and arms nothing if it fails.
      */
     public fun rekeySFrame(seed: ByteArray, nowMs: Long, overlapMs: Long): Boolean {
         if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
             return false
         }
-        var allOk = true
-        for (enc in attachedEncryptors.toList()) {
-            if (!enc.rekey(seed)) allOk = false
-        }
-        for (dec in attachedDecryptors.toList()) {
-            if (!dec.rekey(seed, nowMs, overlapMs)) allOk = false
-        }
-        return allOk
+        return callKeys.rekey(seed, nowMs, overlapMs)
     }
 
     /**
-     * Drop each decryptor's retained previous key once the overlap window
-     * has elapsed at [nowMs] (G-18, ADR-0029) — closes the window for
+     * Drop the call keys' retained previous key once the overlap window has
+     * elapsed at [nowMs] (G-18, ADR-0029) — closes the window for
      * seed-boundary forward secrecy (C-9 / C-10). Idempotent.
      */
     public fun pruneSFrameDecryptors(nowMs: Long) {
-        for (dec in attachedDecryptors.toList()) {
-            dec.prune(nowMs)
-        }
+        callKeys.prune(nowMs)
     }
 
     // ----------------------------------------------------------------
