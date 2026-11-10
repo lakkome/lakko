@@ -1742,6 +1742,16 @@ final class SfuCallSession {
                 guard let self = self, let seed = self.activeSeed, let pc = self.pc else {
                     return
                 }
+                // The receiving half of this device's own media lines carries
+                // nothing (the SFU echoes this device's stream id there). Its
+                // decryptor is armed like any receiver's, but it is no person:
+                // left out of the sound-to-tile map and the sound-and-picture
+                // rule, where it showed as an extra peer that never flowed
+                // (`sync peer=lakko-local-stream`, seen 2026-11-10).
+                if pc.receiverIsOnOwnSender(receiver) {
+                    _ = pc.armSFrameDecryptor(for: receiver, seed: seed)
+                    return
+                }
                 let kind = receiver.track?.kind ?? "unknown"
                 // Remember whose voice this track is, so a sound level read
                 // from the statistics can be put on the right tile.

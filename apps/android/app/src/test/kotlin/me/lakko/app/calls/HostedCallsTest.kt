@@ -685,6 +685,41 @@ class HostedCallsTest {
     }
 
     @Test
+    fun `the copied line is held by the call, so it does not come back on its own`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
+
+        advanceTimeBy(INVITE_STATUS_HOLD_MS - 1)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(h.host.inviteLineShown.value)
+
+        // The link is still the call's (a second copy re-offers it), but the
+        // line about the first copy stays down however long the call runs:
+        // a call screen opened again reads this flag, not a timer of its own.
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertFalse(h.host.inviteLineShown.value)
+        assertEquals(InCallInvite.Ready(h.link()!!, LinkDelivery.Copied), h.host.invite.value)
+    }
+
+    @Test
+    fun `a link shown to be copied by hand stays up`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.copyInviteLink(inviteIdentity(), copy = null)
+        runCurrent()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertTrue(h.host.inviteLineShown.value)
+    }
+
+    @Test
     fun `a second use re-offers the link instead of minting another`() = runTest {
         val h = linkHarness()
         h.host.start(request(owner = true))

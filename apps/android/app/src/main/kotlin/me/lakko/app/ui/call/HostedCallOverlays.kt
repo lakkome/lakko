@@ -174,6 +174,7 @@ public fun LinkCallOverlay(
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
     val invite by host.invite.collectAsStateWithLifecycle()
+    val inviteLineShown by host.inviteLineShown.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Only the host of a live call has a link to offer; everyone else gets the
@@ -198,6 +199,7 @@ public fun LinkCallOverlay(
         // See [GroupCallOverlay] — section 4.5's running time.
         connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
         invite = invite.takeIf { canInvite },
+        inviteLineShown = inviteLineShown,
         onCopyInviteLink = {
             scope.launch {
                 // The mint and the copy run on the host's scope, so they
@@ -383,6 +385,8 @@ private fun HostedCallDialog(
     /** `docs/ux/call-links.md` section 3; `null` for a call with no link to
      *  offer. */
     invite: InCallInvite? = null,
+    /** See [CallScreen]'s parameter of the same name. */
+    inviteLineShown: Boolean? = null,
     onCopyInviteLink: () -> Unit = {},
     onInviteContact: (() -> Unit)? = null,
 ) {
@@ -419,6 +423,7 @@ private fun HostedCallDialog(
                 groupCall = true,
                 groupName = groupName,
                 invite = invite,
+                inviteLineShown = inviteLineShown,
                 onCopyInviteLink = onCopyInviteLink,
                 onInviteContact = onInviteContact,
                 // Section 4.5 — the chevron, beside the system back.

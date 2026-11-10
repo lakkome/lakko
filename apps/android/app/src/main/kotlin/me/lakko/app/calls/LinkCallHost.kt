@@ -287,6 +287,22 @@ public class LinkCallHost(
      */
     public val invite: StateFlow<InCallInvite> = mutableInvite.asStateFlow()
 
+    private val mutableInviteLineShown = MutableStateFlow(false)
+
+    /**
+     * Whether the line under the status row that says where the link went is
+     * on screen ([inviteStatusHoldMs]). Held here, with the call, and not in
+     * the call screen: a screen that is collapsed into the bar and opened
+     * again is a new composition, and a timer of its own showed an old
+     * "Link copied" for another few seconds on every return (seen on the
+     * Pixel 7a, 2026-11-10). iOS (`CallInviteOffer.lineShown`) and web
+     * (`CallHostContext`) hold it with the call too.
+     */
+    public val inviteLineShown: StateFlow<Boolean> = mutableInviteLineShown.asStateFlow()
+
+    /** Takes the line down once its hold has passed. */
+    private var inviteHoldJob: Job? = null
+
     /** The live call's raw `call_id`, which the link has to carry to lead here. */
     private var liveCallId: ByteArray? = null
 
@@ -295,6 +311,18 @@ public class LinkCallHost(
         get() = mutableSlot.value?.let { linkCallOccupiesSlot(it.phase) } == true
 
     init {
+        scope.launch {
+            mutableInvite.collect { next ->
+                inviteHoldJob?.cancel()
+                inviteHoldJob = null
+                mutableInviteLineShown.value = next !is InCallInvite.Idle
+                val hold = inviteStatusHoldMs(next) ?: return@collect
+                inviteHoldJob = scope.launch {
+                    delay(hold)
+                    mutableInviteLineShown.value = false
+                }
+            }
+        }
         // Controls, only once the call is live: a joiner still waiting for its
         // Welcome has published nothing (invariant #4) and must not start
         // announcing camera state to a room it has not been admitted to.

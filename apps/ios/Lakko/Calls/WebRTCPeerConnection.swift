@@ -1038,6 +1038,18 @@ public final class WebRTCPeerConnection: NSObject {
     ///   knows a renegotiation is owed. `false` (no video sender, no matching
     ///   transceiver, already in that direction, or the platform refused) leaves
     ///   the connection exactly as it was.
+    /// Whether `receiver` is the receiving half of a transceiver this device
+    /// sends on (a sender with a track of its own). In an SFU call such a
+    /// receiver carries nothing: the SFU forwards every other person on media
+    /// lines it opens itself, and only echoes this device's own stream id on
+    /// the receiving half of the lines this device offered.
+    public func receiverIsOnOwnSender(_ receiver: RTCRtpReceiver) -> Bool {
+        guard let peer = peer else { return false }
+        return peer.transceivers.contains { transceiver in
+            transceiver.receiver == receiver && transceiver.sender.track != nil
+        }
+    }
+
     public func setVideoSendingEnabled(_ sending: Bool) -> Bool {
         guard let peer = peer, let sender = localVideoSender else { return false }
         guard let transceiver = peer.transceivers.first(where: { $0.sender == sender })

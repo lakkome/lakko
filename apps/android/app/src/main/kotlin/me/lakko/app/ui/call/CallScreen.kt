@@ -310,6 +310,12 @@ public fun CallScreen(
      * that hosts it, has a link that leads back to the call on screen.
      */
     invite: InCallInvite? = null,
+    /**
+     * Whether the line saying where the link went is on screen, held by the
+     * call's host (`LinkCallHost.inviteLineShown`). `null` leaves it to this
+     * screen's own timer, for a caller with no host to hold it.
+     */
+    inviteLineShown: Boolean? = null,
     /** `Copy link`: the link goes to the clipboard, minted on first use. */
     onCopyInviteLink: () -> Unit = {},
     /** `Invite contacts`: open the list of conversations to send the
@@ -474,6 +480,7 @@ public fun CallScreen(
             groupCall = groupCall,
             groupName = groupName,
             invite = invite,
+            inviteLineShownByHost = inviteLineShown,
             onCopyInviteLink = onCopyInviteLink,
             onInviteContact = onInviteContact,
             onEndForEveryone = onEndForEveryone,
@@ -560,6 +567,7 @@ private fun InCallView(
     groupName: String? = null,
     /** See [CallScreen]'s parameters of the same names. */
     invite: InCallInvite? = null,
+    inviteLineShownByHost: Boolean? = null,
     onCopyInviteLink: () -> Unit = {},
     onInviteContact: (() -> Unit)? = null,
     onEndForEveryone: (() -> Unit)? = null,
@@ -623,7 +631,8 @@ private fun InCallView(
         delay(hold)
         inviteLineShown = false
     }
-    val inviteStatus = invite?.takeIf { inviteLineShown }?.let { inviteStatusLine(it) }?.text()
+    val lineShown = inviteLineShownByHost ?: inviteLineShown
+    val inviteStatus = invite?.takeIf { lineShown }?.let { inviteStatusLine(it) }?.text()
 
     val local = participants.firstOrNull { it.isLocal }
     val remotes = remember(participants) { participants.filter { !it.isLocal } }
