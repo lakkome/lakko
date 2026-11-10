@@ -24,9 +24,13 @@
 //
 // ## Sample rate
 //
-// The model runs at 48 kHz mono only. A capture stage at any other rate or
-// channel count is passed through untouched, not resampled, and the format
-// line says so.
+// The model runs at 48 kHz mono. The native side also takes a mono stream
+// at 24, 16, 12 or 8 kHz (`lakko_noise_supports_rate`): it raises each
+// 10 ms buffer to 48 kHz, cleans it and brings it back down
+// (`lakko_noise_process_s16_in_place_at_rate`), so a capture stage at one of
+// those rates is cleaned too (the iOS Simulator captures at 16 kHz). A stage
+// at any other rate, or with more than one channel, is passed through
+// untouched, and the format line says so.
 //
 // ## Threads
 //
@@ -73,10 +77,21 @@ FOUNDATION_EXPORT const int32_t LakkoNoiseEngineStatusOK;
 /// Frees `handle`; NULL is a no-op. Control thread.
 - (void)destroySuppressor:(nullable void *)handle;
 
-/// Cleans `frames` floats at `samples` in place. Returns
-/// `LakkoNoiseEngineStatusOK` on success; nothing is touched otherwise.
-/// Audio thread; must not allocate.
+/// Cleans `frames` floats at `samples` in place, a 48 kHz mono stream.
+/// Returns `LakkoNoiseEngineStatusOK` on success; nothing is touched
+/// otherwise. Audio thread; must not allocate.
 - (int32_t)processSuppressor:(void *)handle
+                     samples:(float *)samples
+                      frames:(size_t)frames;
+
+/// Whether `processSuppressor:rate:samples:frames:` takes a mono stream at
+/// `rateHz`. Never YES when there is no native suppressor.
+- (BOOL)supportsRate:(NSInteger)rateHz;
+
+/// As `processSuppressor:samples:frames:` for a mono stream at `rateHz`;
+/// the rate may change between calls. Audio thread; must not allocate.
+- (int32_t)processSuppressor:(void *)handle
+                        rate:(NSInteger)rateHz
                      samples:(float *)samples
                       frames:(size_t)frames;
 
@@ -87,7 +102,8 @@ FOUNDATION_EXPORT const int32_t LakkoNoiseEngineStatusOK;
 @end
 
 /// The capture post-processing stage: cleans the microphone when the switch
-/// is on and the stage runs at 48 kHz mono, else leaves the buffer as it is.
+/// is on and the stage runs mono at a rate the engine supports, else leaves
+/// the buffer as it is.
 @interface LakkoCaptureNoiseProcessor : NSObject <RTCAudioCustomProcessingDelegate>
 
 /// `log` receives one plain-ASCII line at a time, with no identifier.

@@ -33,6 +33,10 @@ public object NativeNoiseSuppressor {
      *  nothing was touched. */
     public const val STATUS_BAD_BUFFER: Int = 3
 
+    /** [processAtRate] got a rate [supportsRate] refuses; nothing was
+     *  touched. */
+    public const val STATUS_UNSUPPORTED_RATE: Int = 4
+
     private val loaded: Boolean by lazy {
         try {
             System.loadLibrary("sframe_jni")
@@ -88,6 +92,29 @@ public object NativeNoiseSuppressor {
     public fun process(handle: Long, buffer: ByteBuffer, frames: Int): Int =
         nativeProcess(handle, buffer, frames)
 
+    /**
+     * Whether [processAtRate] takes [rateHz]: 48 000, or a rate 48 000 is a
+     * whole multiple of (24 000, 16 000, 12 000, 8 000). `false` when the
+     * native library or the function is missing (a stale
+     * `libsframe_jni.so`). Allocates nothing after the first call.
+     */
+    public fun supportsRate(rateHz: Int): Boolean = try {
+        sampleRate != 0 && nativeSupportsRate(rateHz)
+    } catch (cause: UnsatisfiedLinkError) {
+        false
+    }
+
+    /**
+     * [process] for a mono stream at [rateHz] (ADR-0088 amendment of
+     * 2026-11-10): a rate below 48 kHz is raised to 48 kHz, cleaned and
+     * lowered back in place. The rate may change between calls. Returns a
+     * `STATUS_*` value ([STATUS_UNSUPPORTED_RATE] for a rate
+     * [supportsRate] refuses); nothing is touched unless it is
+     * [STATUS_OK]. Allocates nothing; audio thread.
+     */
+    public fun processAtRate(handle: Long, rateHz: Int, buffer: ByteBuffer, frames: Int): Int =
+        nativeProcessAtRate(handle, rateHz, buffer, frames)
+
     private external fun nativeCreate(): Long
 
     private external fun nativeFree(handle: Long)
@@ -95,4 +122,8 @@ public object NativeNoiseSuppressor {
     private external fun nativeProcess(handle: Long, buffer: ByteBuffer, frames: Int): Int
 
     private external fun nativeSampleRate(): Int
+
+    private external fun nativeSupportsRate(rateHz: Int): Boolean
+
+    private external fun nativeProcessAtRate(handle: Long, rateHz: Int, buffer: ByteBuffer, frames: Int): Int
 }

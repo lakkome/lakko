@@ -20,6 +20,10 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         private var _created: [Int] = []
         private var _freed: [Int] = []
         private var _processed: [Int] = []
+        private var _rates: [Int] = []
+        private var _frames: [Int] = []
+        /// The rates the native side takes (`lakko_noise_supports_rate`).
+        var supported: Set<Int> = [48_000, 24_000, 16_000, 12_000, 8000]
         var status: Int32 = 0
         var createFails = false
         var gate: DispatchSemaphore?
@@ -32,6 +36,8 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         var created: [Int] { lock.withLock { _created } }
         var freed: [Int] { lock.withLock { _freed } }
         var processed: [Int] { lock.withLock { _processed } }
+        var rates: [Int] { lock.withLock { _rates } }
+        var frameCounts: [Int] { lock.withLock { _frames } }
 
         func createSuppressor() -> UnsafeMutableRawPointer? {
             if createFails { return nil }
@@ -48,14 +54,33 @@ final class CaptureNoiseProcessorTests: XCTestCase {
             lock.withLock { _freed.append(Int(bitPattern: handle)) }
         }
 
+        func supportsRate(_ rateHz: Int) -> Bool {
+            sampleRate != 0 && supported.contains(rateHz)
+        }
+
+        /// Only the rate call cleans: the processor must never reach the
+        /// 48 kHz-only call, which records nothing and fails.
         func processSuppressor(
             _ handle: UnsafeMutableRawPointer,
             samples: UnsafeMutablePointer<Float>,
             frames: Int
         ) -> Int32 {
+            9
+        }
+
+        func processSuppressor(
+            _ handle: UnsafeMutableRawPointer,
+            rate rateHz: Int,
+            samples: UnsafeMutablePointer<Float>,
+            frames: Int
+        ) -> Int32 {
             entered?.signal()
             _ = gate?.wait(timeout: .now() + 5)
-            lock.withLock { _processed.append(Int(bitPattern: handle)) }
+            lock.withLock {
+                _processed.append(Int(bitPattern: handle))
+                _rates.append(rateHz)
+                _frames.append(frames)
+            }
             if status == 0 { samples[0] = 0 }
             return status
         }
@@ -98,8 +123,13 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         XCTAssertTrue(p.running)
         XCTAssertEqual(run(p), 0)
         XCTAssertEqual(engine.processed, [1])
+        XCTAssertEqual(engine.rates, [48_000])
         XCTAssertEqual(p.cleanedCount, 1)
-        XCTAssertTrue(logged.contains { $0.contains("RNNoise noise suppression on") })
+        XCTAssertTrue(logged.contains {
+            $0.contains("RNNoise noise suppression on after platform processing (capture 48000 Hz mono)")
+        })
+        XCTAssertTrue(logged.contains(
+            "capture post-processing format 48000 Hz, 1 ch: RNNoise applies when the switch is on"))
     }
 
     func testOffLeavesTheBufferAlone() {
@@ -114,15 +144,51 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         XCTAssertTrue(logged.contains { $0.contains("noise suppression off, platform processing only") })
     }
 
-    func testAnotherRateIsPassedThroughNotResampled() {
+    /// The iOS Simulator's capture rate: cleaned through the rate call,
+    /// which raises it to 48 kHz on the native side.
+    func testCleansAt16kMonoThroughTheRateCall() {
         let engine = FakeEngine()
         let p = processor(engine)
         p.audioProcessingInitialize(sampleRate: 16_000, channels: 1)
         p.arm(forOwner: self, on: true, platform: "x")
-        XCTAssertEqual(run(p, frames: 160), 1000)
+        XCTAssertTrue(p.running)
+        XCTAssertEqual(run(p, frames: 160), 0)
+        XCTAssertEqual(engine.processed, [1])
+        XCTAssertEqual(engine.rates, [16_000])
+        XCTAssertEqual(engine.frameCounts, [160])
+        XCTAssertEqual(p.cleanedCount, 1)
+        XCTAssertTrue(logged.contains {
+            $0.contains("(capture 16000 Hz mono, raised to 48000 Hz for RNNoise)")
+        })
+        XCTAssertTrue(logged.contains(
+            "capture post-processing format 16000 Hz, 1 ch: RNNoise applies when the switch is "
+                + "on, raised to 48000 Hz"))
+        XCTAssertFalse(logged.contains { $0.contains("bypassed") })
+    }
+
+    /// A buffer that is not 10 ms at the reported rate is passed through.
+    func testAWrongSizedBufferAt16kIsPassedThrough() {
+        let engine = FakeEngine()
+        let p = processor(engine)
+        p.audioProcessingInitialize(sampleRate: 16_000, channels: 1)
+        p.arm(forOwner: self, on: true, platform: "x")
+        XCTAssertEqual(run(p, frames: 480), 1000)
         XCTAssertTrue(engine.processed.isEmpty)
-        XCTAssertTrue(logged.contains { $0.contains("RNNoise bypassed (needs 48000 Hz mono") })
-        XCTAssertTrue(logged.contains { $0.contains("but bypassed: capture runs at 16000 Hz") })
+        XCTAssertEqual(p.passedCount, 1)
+    }
+
+    func testA44kRateIsPassedThrough() {
+        let engine = FakeEngine()
+        let p = processor(engine)
+        p.audioProcessingInitialize(sampleRate: 44_100, channels: 1)
+        p.arm(forOwner: self, on: true, platform: "x")
+        XCTAssertEqual(run(p, frames: 441), 1000)
+        XCTAssertTrue(engine.processed.isEmpty)
+        XCTAssertEqual(p.passedCount, 1)
+        XCTAssertTrue(logged.contains(
+            "capture post-processing format 44100 Hz, 1 ch: RNNoise bypassed (RNNoise runs at "
+                + "48000 Hz and cannot be raised to it from this rate)"))
+        XCTAssertTrue(logged.contains { $0.contains("but bypassed: capture runs at 44100 Hz, 1 ch") })
     }
 
     func testStereoIsPassedThrough() {
@@ -132,6 +198,61 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         p.arm(forOwner: self, on: true, platform: "x")
         XCTAssertEqual(run(p, channels: 2), 1000)
         XCTAssertTrue(engine.processed.isEmpty)
+        XCTAssertTrue(logged.contains(
+            "capture post-processing format 48000 Hz, 2 ch: RNNoise bypassed (RNNoise takes one "
+                + "channel only)"))
+        XCTAssertTrue(logged.contains { $0.contains("but bypassed: capture runs at 48000 Hz, 2 ch") })
+    }
+
+    func testStereoAt16kIsPassedThrough() {
+        let engine = FakeEngine()
+        let p = processor(engine)
+        p.audioProcessingInitialize(sampleRate: 16_000, channels: 2)
+        p.arm(forOwner: self, on: true, platform: "x")
+        XCTAssertEqual(run(p, frames: 160, channels: 2), 1000)
+        XCTAssertTrue(engine.processed.isEmpty)
+        XCTAssertTrue(logged.contains { $0.contains("16000 Hz, 2 ch: RNNoise bypassed") })
+    }
+
+    /// The stage opens at one rate and settles at another during a call
+    /// (seen on Android at 16 then 48 kHz): each buffer goes through at its
+    /// own rate, the same suppressor carrying on, and the format line is
+    /// logged once per format.
+    func testAFormatChangeFrom16kTo48kKeepsCleaning() {
+        let engine = FakeEngine()
+        let p = processor(engine)
+        p.audioProcessingInitialize(sampleRate: 16_000, channels: 1)
+        p.arm(forOwner: self, on: true, platform: "x")
+        XCTAssertEqual(run(p, frames: 160), 0)
+        p.audioProcessingInitialize(sampleRate: 48_000, channels: 1)
+        p.audioProcessingInitialize(sampleRate: 48_000, channels: 1)
+        XCTAssertEqual(run(p, frames: 160), 1000, "a 16 kHz-sized buffer at 48 kHz")
+        XCTAssertEqual(run(p, frames: 480), 0)
+        XCTAssertEqual(engine.processed, [1, 1])
+        XCTAssertEqual(engine.rates, [16_000, 48_000])
+        XCTAssertEqual(engine.frameCounts, [160, 480])
+        XCTAssertEqual(engine.created, [1])
+        XCTAssertEqual(p.cleanedCount, 2)
+        XCTAssertEqual(p.passedCount, 1)
+        XCTAssertTrue(p.running)
+        XCTAssertEqual(logged.filter { $0.hasPrefix("capture post-processing format") }, [
+            "capture post-processing format 16000 Hz, 1 ch: RNNoise applies when the switch is "
+                + "on, raised to 48000 Hz",
+            "capture post-processing format 48000 Hz, 1 ch: RNNoise applies when the switch is on",
+        ])
+    }
+
+    /// A stage at an unsupported rate, then a supported one: buffers pass
+    /// through until the format is one RNNoise takes.
+    func testAFormatChangeFrom44kTo16kStartsCleaning() {
+        let engine = FakeEngine()
+        let p = processor(engine)
+        p.audioProcessingInitialize(sampleRate: 44_100, channels: 1)
+        p.arm(forOwner: self, on: true, platform: "x")
+        XCTAssertEqual(run(p, frames: 441), 1000)
+        p.audioProcessingInitialize(sampleRate: 16_000, channels: 1)
+        XCTAssertEqual(run(p, frames: 160), 0)
+        XCTAssertEqual(engine.rates, [16_000])
     }
 
     func testSwitchAppliesAtOnceWithAFreshSuppressor() {
@@ -242,6 +363,38 @@ final class CaptureNoiseProcessorTests: XCTestCase {
         }
         XCTAssertEqual(status, LakkoNoiseEngineStatusOK)
         XCTAssertTrue(samples.allSatisfy { $0.isFinite })
+    }
+
+    /// The rate call through the C ABI the app links: 16 kHz and 48 kHz
+    /// buffers are accepted on one suppressor and stay finite; 44.1 kHz is
+    /// refused and the buffer untouched.
+    func testTheNativeEngineCleansAtTheRatesItSupports() {
+        let engine = LakkoNativeNoiseEngine()
+        XCTAssertTrue(engine.supportsRate(48_000))
+        XCTAssertTrue(engine.supportsRate(16_000))
+        XCTAssertTrue(engine.supportsRate(8000))
+        XCTAssertFalse(engine.supportsRate(44_100))
+        XCTAssertFalse(engine.supportsRate(32_000))
+        XCTAssertFalse(engine.supportsRate(0))
+        XCTAssertFalse(engine.supportsRate(-16_000))
+        guard let handle = engine.createSuppressor() else {
+            return XCTFail("no native suppressor")
+        }
+        defer { engine.destroySuppressor(handle) }
+        for (rate, frames) in [(16_000, 160), (48_000, 480), (16_000, 160)] {
+            var samples = (0..<frames).map { Float(sin(Double($0) * 0.3) * 8000) }
+            let status = samples.withUnsafeMutableBufferPointer {
+                engine.processSuppressor(handle, rate: rate, samples: $0.baseAddress!, frames: frames)
+            }
+            XCTAssertEqual(status, LakkoNoiseEngineStatusOK, "\(rate) Hz")
+            XCTAssertTrue(samples.allSatisfy { $0.isFinite }, "\(rate) Hz")
+        }
+        var odd = [Float](repeating: 1000, count: 441)
+        let refused = odd.withUnsafeMutableBufferPointer {
+            engine.processSuppressor(handle, rate: 44_100, samples: $0.baseAddress!, frames: 441)
+        }
+        XCTAssertNotEqual(refused, LakkoNoiseEngineStatusOK)
+        XCTAssertTrue(odd.allSatisfy { $0 == 1000 })
     }
 
     func testTheSwitchIsOnByDefaultStoredAndApplied() throws {

@@ -81,9 +81,11 @@ Windows computer without a TPM is an open decision of the ADR (section 11).
 
 ### 2.1 A call in the window
 
-A call takes over the main window exactly as on the web, and the floating call
-window of [`calls.md`](calls.md) section 4.5 lets the person put it away and keep
-chatting. A separate call window is not in this spec (section 12).
+A call takes over the main window exactly as on the web. Putting it away
+(the chevron, `Esc`) moves it into a separate small window of its own that stays
+above every other program's windows ([`calls.md`](calls.md) section 4.5.4a,
+added 2026-11-10); the web's in-app floating window is not drawn in the desktop
+app.
 
 ## 3. Closing is not quitting
 
@@ -323,7 +325,6 @@ only when there is no store at all); links use `lakko://`
 
 ## 12. Not in this spec
 
-- A separate call window, picture-in-picture over other apps.
 - Several accounts in one app; several main windows.
 - Screen sharing (not built on any client).
 - An app lock (password or system authentication to open the window).

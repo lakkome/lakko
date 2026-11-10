@@ -26,6 +26,8 @@ class CaptureNoiseProcessorTest {
         val created = mutableListOf<Long>()
         val freed = mutableListOf<Long>()
         val processed = mutableListOf<Long>()
+        val rates = mutableListOf<Int>()
+        val supported = setOf(48_000, 24_000, 16_000, 12_000, 8_000)
         var status = 0
         var throwOnProcess = false
         var createFails = false
@@ -43,11 +45,16 @@ class CaptureNoiseProcessorTest {
             synchronized(this) { freed += handle }
         }
 
-        override fun process(handle: Long, buffer: ByteBuffer, frames: Int): Int {
+        override fun supportsRate(rateHz: Int): Boolean = rateHz in supported
+
+        override fun processAtRate(handle: Long, rateHz: Int, buffer: ByteBuffer, frames: Int): Int {
             entered?.countDown()
             gate?.await(5, TimeUnit.SECONDS)
             if (throwOnProcess) throw IllegalStateException("boom")
-            synchronized(this) { processed += handle }
+            synchronized(this) {
+                processed += handle
+                rates += rateHz
+            }
             if (status == 0) buffer.putFloat(0, 0f)
             return status
         }
@@ -92,32 +99,78 @@ class CaptureNoiseProcessorTest {
     }
 
     @Test
-    fun anotherRateIsPassedThroughNotResampled() {
+    fun sixteenKiloHertzMonoIsCleanedThroughTheRateCall() {
+        val engine = FakeEngine()
+        val lines = mutableListOf<String>()
+        val p = processor(engine, lines)
+        p.initialize(16_000, 1)
+        p.arm(owner = this, on = true, platform = "x")
+        val buf = buffer(160)
+        p.process(1, 160, buf)
+        assertEquals(listOf(1L), engine.processed)
+        assertEquals(listOf(16_000), engine.rates)
+        assertEquals(0f, buf.getFloat(0))
+        assertTrue(lines.any { it.contains("capture 16000 Hz mono, raised to 48000 Hz for RNNoise") })
+        assertTrue(lines.none { it.contains("bypassed") })
+    }
+
+    @Test
+    fun fortyFourPointOneKiloHertzIsPassedThrough() {
+        val engine = FakeEngine()
+        val lines = mutableListOf<String>()
+        val p = processor(engine, lines)
+        p.initialize(44_100, 1)
+        p.arm(owner = this, on = true, platform = "x")
+        val buf = buffer(441)
+        p.process(1, 441, buf)
+        assertTrue(engine.processed.isEmpty())
+        assertEquals(1000f, buf.getFloat(0))
+        assertTrue(lines.any { it.contains("44100 Hz") && it.contains("bypassed") })
+    }
+
+    @Test
+    fun aBlockThatIsNotTenMillisecondsIsPassedThrough() {
+        val engine = FakeEngine()
+        val p = processor(engine, mutableListOf())
+        p.initialize(16_000, 1)
+        p.arm(owner = this, on = true, platform = "x")
+        p.process(1, 480, buffer())
+        assertTrue(engine.processed.isEmpty())
+    }
+
+    @Test
+    fun aFormatChangeFromSixteenToFortyEightMidCallKeepsCleaning() {
         val engine = FakeEngine()
         val lines = mutableListOf<String>()
         val p = processor(engine, lines)
         p.initialize(16_000, 1)
         p.arm(owner = this, on = true, platform = "x")
         p.process(1, 160, buffer(160))
-        p.reset(32_000)
-        p.process(2, 320, buffer(320))
-        assertTrue(engine.processed.isEmpty())
-        assertTrue(lines.any { it.contains("16000 Hz") && it.contains("bypassed") })
-        assertTrue(lines.any { it.contains("32000 Hz") && it.contains("bypassed") })
-        // A stage that comes back to 48 kHz cleans again.
         p.reset(48_000)
         p.process(3, 480, buffer())
-        assertEquals(1, engine.processed.size)
+        // One suppressor for the whole call; the rate goes with each block.
+        assertEquals(listOf(1L, 1L), engine.processed)
+        assertEquals(listOf(16_000, 48_000), engine.rates)
+        assertTrue(engine.freed.isEmpty())
+        assertTrue(lines.any { it.contains("format 16000 Hz, 1 ch") && it.contains("raised to 48000 Hz") })
+        assertTrue(lines.any { it.contains("format 48000 Hz, 1 ch") && it.contains("RNNoise applies") })
+        // A stage that then leaves for an unsupported rate passes through.
+        p.reset(32_000)
+        p.process(2, 320, buffer(320))
+        assertEquals(2, engine.processed.size)
+        assertTrue(lines.any { it.contains("32000 Hz") && it.contains("bypassed") })
     }
 
     @Test
     fun stereoIsPassedThrough() {
         val engine = FakeEngine()
-        val p = processor(engine, mutableListOf())
+        val lines = mutableListOf<String>()
+        val p = processor(engine, lines)
         p.initialize(48_000, 2)
         p.arm(owner = this, on = true, platform = "x")
         p.process(3, 480, buffer())
         assertTrue(engine.processed.isEmpty())
+        assertTrue(lines.any { it.contains("2 ch") && it.contains("bypassed") && it.contains("mono") })
     }
 
     @Test

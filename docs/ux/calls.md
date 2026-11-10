@@ -921,6 +921,37 @@ an avatar view in its call window; it has not been tried on a device, and if it 
 draw, a voice call on iOS has no system window and goes on with sound and the call
 indicator only.
 
+#### 4.5.4a The desktop app: the window is a window of its own
+
+Added 2026-11-10 (maintainer's decision). In the desktop app the collapsed call is not
+drawn inside the app's window: it is **a separate small window of the operating system**,
+without a frame or title bar, that stays above every other program's windows. So the call
+keeps its picture while the person works in another program or minimises Lakko, which is
+what a desktop user collapses a call for.
+
+- It shows exactly what 4.5.1 shows (the stage person, your own inset while your camera
+  sends, the name and `+N`, the state or running time with the lock, the mute button) at
+  the size of 4.5.2 for a desktop (16:9, 320 points wide), with the same corners and
+  shadow.
+- It opens in the top right corner of the screen the app's window is on, 16 points in
+  from the edges of that screen's work area (never under the menu bar or the taskbar).
+  It can be dragged anywhere on any screen and stays where it is dropped (no snapping to
+  a corner: other programs' windows are under it, not the app's own layout). Where it was
+  left is kept while the app runs and is where the next collapsed call opens.
+- **Clicking it anywhere but the mute button** brings the app's window to the front (out
+  of the Dock or taskbar if it was minimised) and returns the call to full screen, as
+  clicking the in-app window does. The mute button mutes and does nothing else.
+- It is never shown at the same time as the call screen, and the in-app floating window
+  of 4.5.1 is never drawn in the desktop app: one state, one place. It does not appear in
+  the taskbar or the window list of its own, and it has no close button (no End, 4.5.1);
+  quitting the app ends the call as it does today.
+- When the call ends, the window goes away and the app's window is not brought forward;
+  the conversation gets its usual row (4.5.3).
+- The picture in it is the same picture the app receives, handed to the window inside
+  the app; nothing new leaves the device.
+
+Web in a browser keeps the in-app floating window of 4.5.1 to 4.5.3.
+
 #### 4.5.5 The recorder stays blocked
 
 A live call holds the microphone, so the composer records neither a voice message nor a

@@ -243,7 +243,10 @@ pinned AAR is built from (`sdk/android/src/jni/pc/external_audio_processor.cc`,
   48 kHz (`SuitableProcessRate`, maximum 48 kHz unless the pipeline caps it
   at 32 kHz, which the voice engine does not). A phone recording at 48 kHz
   therefore gets 48 kHz. **At any other rate, or with more than one channel,
-  the buffer is passed through untouched; there is no resampling.** The
+  the buffer is passed through untouched; there is no resampling.**
+  (Amended 2026-11-10, see the amendment below: a mono stage at 24, 16, 12
+  or 8 kHz is now resampled; other rates and more than one channel still
+  pass through.) The
   format line in the log says which (`capture post-processing format ... Hz,
   ... ch: RNNoise applies when the switch is on` or `... bypassed`).
 
@@ -393,6 +396,36 @@ suppressor heard.
   no suppression, silently.
 - **Neutral:** RNNoise may also attenuate some wanted sounds (music held up
   to the microphone); the switch exists for that.
+
+## Amendment 2026-11-10: a capture stage below 48 kHz is resampled
+
+Seen on devices: the Pixel 7a's capture post-processing stage opened at
+16 kHz mono before its microphone settled at 48 kHz, and the iOS Simulator
+captures at 16 kHz for the whole call. Both were passed through untouched,
+so on such a stream RNNoise never ran. What a real iPhone's voice-processing
+I/O runs at is not measured.
+
+Decision (the maintainer's, 2026-11-10): the suppressor takes a mono stream
+at 48 kHz or at a rate 48 kHz divides by a whole factor (24, 16, 12, 8 kHz).
+A lower rate is raised to 48 kHz (zeros between samples, then a low-pass
+filter), cleaned by RNNoise, filtered again and lowered back by keeping one
+sample in each factor; `lakko_noise::NoiseSuppressor::process_s16_in_place_at`
+and the C ABI's `lakko_noise_process_s16_in_place_at_rate` /
+`lakko_noise_supports_rate` (status `UNSUPPORTED_RATE = 4`). The rate is
+passed with every block, so a stage that re-opens at another rate mid-call
+keeps working; the filters then start from silence. The filter is a
+windowed-sinc low-pass (Blackman window), 16 taps per unit of the factor
+plus one, corner at 0.45 of the lower rate: chosen, not measured. It adds its
+group delay to RNNoise's 10 ms (two filters of `16 * factor / 2` samples at
+48 kHz each, for example 1 ms at 16 kHz). Allocation-free on the audio
+thread: the filters for every factor are made when the suppressor is.
+
+Every other rate (44.1 or 32 kHz, for example) and more than one channel is
+still passed through, and the log line says so. Host tests: a tone inside
+the band survives a raise and a lower at its level within 3 percent, a tone
+above the band is stopped, low-passed noise is attenuated at each lower rate,
+and a 16 to 48 kHz change mid-stream keeps working. How RNNoise treats a
+voice that reaches it band-limited by a 16 or 8 kHz capture is not measured.
 
 ## Open questions (to be measured, not claimed)
 
