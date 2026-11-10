@@ -7,7 +7,14 @@ const platform = { desktop: true };
 vi.mock("./index", () => ({ isDesktop: (): boolean => platform.desktop }));
 
 import {
+  callWindowFrameUrl,
+  fetchCallWindowState,
   getHostSettings,
+  onHostCallWindowAction,
+  postCallWindowAction,
+  postCallWindowFrame,
+  postCallWindowView,
+  startCallWindowDrag,
   HOST_EVENT,
   HostRequestError,
   onHostEvent,
@@ -126,6 +133,70 @@ describe("in the browser build", () => {
     const seen: string[] = [];
     onHostEvent("quit-requested", () => seen.push("quit"));
     window.dispatchEvent(new CustomEvent(HOST_EVENT, { detail: { kind: "quit-requested" } }));
+    expect(seen).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("the collapsed call's own window (calls.md 4.5.4a)", () => {
+  it("shows the window with a view, and hides it with none", async () => {
+    await postCallWindowView({ name: "Dana" });
+    await postCallWindowView(null);
+    expect(calls).toEqual([
+      { url: "/__host/call-window/view", method: "POST", body: { visible: true, view: { name: "Dana" } } },
+      { url: "/__host/call-window/view", method: "POST", body: { visible: false } },
+    ]);
+  });
+
+  it("puts a frame as bytes into its slot, and reports whether the host took it", async () => {
+    let seenBody: unknown;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET", body: undefined });
+      seenBody = init?.body;
+      return Promise.resolve(new Response(null, { status: 409 }));
+    });
+    await expect(postCallWindowFrame("inset", new Uint8Array([0xff, 0xd8, 0xff]))).resolves.toBe(false);
+    expect(calls[0]).toMatchObject({ url: "/__host/call-window/frame/inset", method: "PUT" });
+    expect(seenBody).toBeInstanceOf(Uint8Array);
+  });
+
+  it("delivers only the two clicks the window can send", () => {
+    const seen: string[] = [];
+    const off = onHostCallWindowAction((a) => seen.push(a));
+    const send = (detail: unknown): void => {
+      window.dispatchEvent(new CustomEvent(HOST_EVENT, { detail }));
+    };
+    send({ kind: "call-window", action: "toggle-mute" });
+    send({ kind: "call-window", action: "expand" });
+    send({ kind: "call-window", action: "end" });
+    send({ kind: "open-settings", action: "expand" });
+    off();
+    send({ kind: "call-window", action: "expand" });
+    expect(seen).toEqual(["toggle-mute", "expand"]);
+  });
+
+  it("reads the window's state on load, and the frame url names the slot and number", async () => {
+    reply = () => json({ visible: true, view: { name: "Dana" }, picture: 7, inset: null });
+    await expect(fetchCallWindowState()).resolves.toEqual({ view: { name: "Dana" }, picture: 7, inset: null });
+    expect(callWindowFrameUrl("picture", 7)).toBe("/__host/call-window/frame/picture?n=7");
+  });
+
+  it("sends a click and a drag from the window", async () => {
+    await postCallWindowAction("mute");
+    await startCallWindowDrag();
+    expect(calls).toEqual([
+      { url: "/__host/call-window/action", method: "POST", body: { action: "mute" } },
+      { url: "/__host/call-window/drag", method: "POST", body: undefined },
+    ]);
+  });
+
+  it("does nothing from the main page of a browser build", async () => {
+    platform.desktop = false;
+    await postCallWindowView({ name: "Dana" });
+    await expect(postCallWindowFrame("picture", new Uint8Array([1]))).resolves.toBe(false);
+    const seen: string[] = [];
+    onHostCallWindowAction((a) => seen.push(a));
+    window.dispatchEvent(new CustomEvent(HOST_EVENT, { detail: { kind: "call-window", action: "expand" } }));
     expect(seen).toEqual([]);
     expect(calls).toEqual([]);
   });

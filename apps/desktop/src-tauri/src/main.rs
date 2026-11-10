@@ -16,6 +16,7 @@
 #![windows_subsystem = "windows"]
 
 mod app_shell;
+mod call_window;
 mod device_key;
 mod key_store;
 mod link;
@@ -38,7 +39,7 @@ use app_shell::{CloseAction, Shell, MAIN};
 pub const APP_SCHEME: &str = "lakkoapp";
 
 /// Where the page lives, as each OS's webview spells a custom scheme.
-fn app_url(path: &str) -> String {
+pub fn app_url(path: &str) -> String {
     if cfg!(windows) {
         format!("http://{APP_SCHEME}.localhost{path}")
     } else {
@@ -92,14 +93,23 @@ fn main() {
         .enable_macos_default_menu(false)
         .register_asynchronous_uri_scheme_protocol(APP_SCHEME, move |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            let label = ctx.webview_label().to_owned();
             let config = Arc::clone(&handler_config);
             tauri::async_runtime::spawn(async move {
-                let response = proxy::handle(&app, &config, request).await;
+                let response = proxy::handle(&app, &config, &label, request).await;
                 responder.respond(response);
             });
         })
         .on_menu_event(|app, event| app_shell::on_menu(app, event.id().as_ref()))
         .on_window_event(|window, event| {
+            if window.label() == call_window::LABEL {
+                if let WindowEvent::Moved(at) = event {
+                    if let Some(state) = window.app_handle().try_state::<call_window::CallWindow>() {
+                        state.remember_position(*at);
+                    }
+                }
+                return;
+            }
             if window.label() != MAIN {
                 return;
             }
@@ -130,6 +140,7 @@ fn main() {
             setup_config.tunnel.start(dir.clone());
             let notifier = notify::Notifier::new(&app.config().identifier);
             app.manage(Shell::load(dir, notifier));
+            app.manage(call_window::CallWindow::default());
             if let Some(menu) = app_shell::menu(app.handle())? {
                 app.set_menu(menu)?;
             }
@@ -149,7 +160,14 @@ fn main() {
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::CustomProtocol(url))
                 .initialization_script(format!(
                     "Object.defineProperty(globalThis, '__LAKKO_PUBLIC_ORIGIN__', {{ value: {public_origin}, writable: false, configurable: false }});"
-                ));
+                ))
+                // A new page has no collapsed call: whatever the old one
+                // relayed to the call window goes with it.
+                .on_page_load(|w, payload| {
+                    if payload.event() == tauri::webview::PageLoadEvent::Started {
+                        call_window::reset(w.app_handle());
+                    }
+                });
             if cfg!(debug_assertions) {
                 // Debug builds only: page errors and console errors reach the
                 // host log, since the window has no devtools.
@@ -159,6 +177,16 @@ fn main() {
             // screen-sharing pickers read it (`desktop.md` section 2).
             let window = builder
                 .title("Lakko")
+                // The collapsed call's own window draws frames this page
+                // sends (`call_window.rs`), so the page must keep running at
+                // its rate while this window is minimised, hidden or behind
+                // other windows. On macOS 14 and later this sets WebKit's
+                // inactive scheduling policy to none: no timer throttling and
+                // no suspension of a hidden view, for the whole page and at
+                // all times, so a Lakko in the background spends more battery
+                // than a throttled one. Older macOS, Windows and Linux ignore
+                // it (wry applies it on WKWebView only).
+                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
                 // The page's own drop targets take a dragged file; the host's
                 // handler would swallow the event before them.
                 .disable_drag_drop_handler()

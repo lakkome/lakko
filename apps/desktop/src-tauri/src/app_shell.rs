@@ -27,8 +27,9 @@
 //! The host talks to the page with a DOM event, `lakko:host`, whose `detail`
 //! is `{kind: "quit-requested"}`, `{kind: "open-settings"}`,
 //! `{kind: "open-target", target}` (a notification was clicked),
-//! `{kind: "call-action", action, callId, video}` (Accept or Decline on one)
-//! or `{kind: "still-running"}` (the window was hidden for the first time, on
+//! `{kind: "call-action", action, callId, video}` (Accept or Decline on one),
+//! `{kind: "call-window", action}` (a click on the collapsed call's window,
+//! `call_window.rs`) or `{kind: "still-running"}` (the window was hidden for the first time, on
 //! the OSes that say so, `desktop.md` section 3).
 
 use std::path::PathBuf;
@@ -285,7 +286,7 @@ pub fn notify_page<R: Runtime>(app: &AppHandle<R>, kind: &str) {
 
 /// Send `detail` to the page as a `lakko:host` DOM event. `detail` is JSON
 /// built here, so it is a valid script expression.
-fn send_page_event<R: Runtime>(app: &AppHandle<R>, detail: &Value) {
+pub fn send_page_event<R: Runtime>(app: &AppHandle<R>, detail: &Value) {
     let kind = detail.get("kind").and_then(Value::as_str).unwrap_or("");
     if let Some(w) = app.get_webview_window(MAIN) {
         let detail = detail.to_string();

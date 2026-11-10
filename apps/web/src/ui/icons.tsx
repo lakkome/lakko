@@ -109,6 +109,11 @@ const PATHS = {
 /** Every icon name the set knows. */
 export type IconName = keyof typeof PATHS;
 
+/** Whether `name` is one of the set's icons (a name that arrived as text). */
+export function isIconName(name: string): name is IconName {
+  return Object.prototype.hasOwnProperty.call(PATHS, name);
+}
+
 /** One inline SVG icon; `size` in px (default 20), colour from `currentColor`. */
 export function Icon(props: {
   name: IconName;

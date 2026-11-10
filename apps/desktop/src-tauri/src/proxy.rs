@@ -10,6 +10,9 @@
 //! - anything else: the bundled web build, with `index.html` for a path that
 //!   names no file (the web client's routes).
 //!
+//! The collapsed call's own window (`call_window.rs`) gets less: its routes
+//! and the static files of its page, and nothing else.
+//!
 //! Nothing else is reachable: the handler never forwards to a host the page
 //! names, so it is not an open relay.
 
@@ -24,7 +27,7 @@ use tauri::Manager;
 
 use crate::save_file;
 use crate::tunnel::{self, Route, Tunnel};
-use crate::{app_shell, device_key, probe};
+use crate::{app_shell, call_window, device_key, probe};
 
 /// The services the web client addresses as `/api/<service>/` (the dev
 /// proxy list in `apps/web/vite.config.ts`).
@@ -109,9 +112,24 @@ impl ProxyConfig {
 pub async fn handle<R: Runtime>(
     app: &AppHandle<R>,
     config: &ProxyConfig,
+    label: &str,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
     let path = request.uri().path().to_owned();
+    if path.starts_with(call_window::PATH) {
+        return match app.try_state::<call_window::CallWindow>() {
+            Some(state) => call_window::handle(app, &state, label, &request),
+            None => plain(StatusCode::SERVICE_UNAVAILABLE, "starting"),
+        };
+    }
+    if label == call_window::LABEL {
+        // The call window holds no keys and talks to no server: only its own
+        // page, never a request the main page may make.
+        if !call_window::page_may_load(&path) {
+            return plain(StatusCode::FORBIDDEN, "not for this window");
+        }
+        return asset(app, &path);
+    }
     if let Some(service) = api_service(&path) {
         debug!(service, method = %request.method(), "forward");
         return forward(config, request).await;

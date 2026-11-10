@@ -6929,6 +6929,55 @@ a.lk-button-link:hover {
   outline-offset: 2px;
 }
 
+/* The desktop app (section 4.5.4a): the collapsed call is a window of the
+   operating system, and the page only feeds it. The picture is still built in
+   the page so its videos play, under every app surface where nothing sees it
+   and nothing can click it (calls/desktop-call-window-relay.ts). */
+.lk-call-window.lk-call-window-relay {
+  z-index: -1;
+  pointer-events: none;
+  box-shadow: none;
+  transition: none;
+}
+
+/* The OS window's own page (call-window.html, DesktopCallWindowPage.tsx): the
+   window fills it. The OS window is transparent, so the page draws the
+   window's rounded corners (section 4.5.2) and leaves the corners clear; the
+   shadow is the OS's own (apps/desktop/src-tauri/src/call_window.rs), since a
+   CSS shadow would need room outside the window. */
+html.lk-call-window-doc,
+html.lk-call-window-doc body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+.lk-call-window.lk-call-window-os {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  transition: none;
+}
+.lk-call-window-os .lk-call-window-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.lk-call-window-os .lk-call-window-press {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  cursor: pointer;
+}
+
 /* The round mute button the call chat panel's header uses
    (calls/CallChatPanel.tsx), drawn on and off as the call screen draws it
    (section 4.1.1), translated onto the app palette: ON is the quiet state — a

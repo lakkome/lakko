@@ -38,6 +38,16 @@
  *
  * Section 4.5.2: web has no tuck (a pointer does not throw), and section
  * 4.5.4's system window is iOS and Android only. The window lives in the page.
+ *
+ * ## The desktop app: a window of its own
+ *
+ * Section 4.5.4a: in the desktop app the collapsed call is a separate window
+ * of the operating system, and the in-app window is never drawn. The picture
+ * is still built here, by the same code, but out of sight: its videos play
+ * the call's streams with the layer choice this file makes, and
+ * `desktop-call-window-relay.ts` draws the shown one into images and posts
+ * them, with the window's view, to the host, which hands them to the second
+ * window (`DesktopCallWindowPage.tsx`). Clicks there come back as host events.
  */
 
 import {
@@ -52,7 +62,10 @@ import {
 } from "solid-js";
 
 import { Icon } from "../ui/icons";
-import { toneOf } from "../ui/Avatar";
+import { initialsOf, toneOf } from "../ui/Avatar";
+import { isDesktop } from "../platform";
+import { onHostCallWindowAction } from "../platform/host";
+import { avatarMediaFor } from "../profile/avatar-runtime";
 import { joinList, t } from "../l10n";
 import { callActions, callState, type Participant } from "../state/call-state";
 import { uiRules } from "../chat/ui-rules";
@@ -102,6 +115,13 @@ import {
   type CallWindowPoint,
   type CallWindowViewport,
 } from "./call-window-model";
+import {
+  OS_CALL_WINDOW_HEIGHT,
+  OS_CALL_WINDOW_WIDTH,
+  type CallWindowPicture,
+  type CallWindowView,
+} from "./desktop-call-window-model";
+import { startCallWindowRelay } from "./desktop-call-window-relay";
 
 /** Where the window reads the call's pictures from: the same functions the
  *  host hands the call screen, for whichever call is live. */
@@ -141,6 +161,12 @@ export interface CallWindowProps {
   readonly onExpand: () => void;
   /** The live call's pictures. */
   readonly sources: CallWindowSources;
+  /**
+   * Where the collapsed call is drawn: in the page, or (the desktop app,
+   * section 4.5.4a) in a window of the operating system the page feeds.
+   * Defaults to the build: the desktop app is `os-window`.
+   */
+  readonly presentation?: "in-app" | "os-window";
 }
 
 /** Who the window shows. */
@@ -170,9 +196,11 @@ export function CallWindow(props: CallWindowProps): JSX.Element {
     return r.callBarVisible(p, props.callScreenUp);
   });
 
+  const osWindow = (): boolean => (props.presentation ?? (isDesktop() ? "os-window" : "in-app")) === "os-window";
+
   return (
     <Show when={shown()}>
-      <CallWindowBody {...props} rules={rules} phase={phase} />
+      <CallWindowBody {...props} rules={rules} phase={phase} osWindow={osWindow()} />
     </Show>
   );
 }
@@ -183,9 +211,13 @@ function CallWindowBody(
   props: CallWindowProps & {
     readonly rules: () => CallBarRules | null;
     readonly phase: () => ReturnType<typeof callBarPhase> | null;
+    /** Drawn in a window of the operating system (section 4.5.4a). */
+    readonly osWindow: boolean;
   },
 ): JSX.Element {
   const now = tickingClock();
+  /** Fixed for the life of the window: the build decides it. */
+  const osWindow = untrack(() => props.osWindow);
 
   const local = (): Participant | null =>
     callState.participants().find((participant) => participant.isLocal) ?? null;
@@ -324,7 +356,11 @@ function CallWindowBody(
     viewport();
     return readSafeInsets();
   });
-  const size = createMemo(() => callWindowSize(viewport(), showingScreen(), insets()));
+  const size = createMemo(() =>
+    osWindow
+      ? { width: OS_CALL_WINDOW_WIDTH, height: OS_CALL_WINDOW_HEIGHT }
+      : callWindowSize(viewport(), showingScreen(), insets()),
+  );
   const [corner, setCorner] = createSignal<CallWindowCorner>(rememberedCorner());
   /** While a drag is under way: where the window is. `null` at rest. */
   const [dragAt, setDragAt] = createSignal<CallWindowPoint | null>(null);
@@ -378,6 +414,8 @@ function CallWindowBody(
     setDragAt(null);
   };
   const onPointerDown = (event: PointerEvent): void => {
+    // The OS window is dragged and clicked in its own page.
+    if (osWindow) return;
     if (event.button !== 0) return;
     // A click swallowed after a drag that ended off the window never came.
     swallowClick = false;
@@ -507,19 +545,92 @@ function CallWindowBody(
     return joinList(parts.filter((part) => part.length > 0));
   });
 
+  // ----- the desktop app: feeding the window of its own (§4.5.4a) ---------
+
+  /** What the OS window draws for the picture, by the same reading
+   *  `PersonPicture` makes. */
+  const pictureView = (): CallWindowPicture => {
+    const s = subject();
+    if (s === null) return { kind: "blank" };
+    if (s.kind === "screen") return { kind: "frame" };
+    const p = s.person;
+    if (p.camOn) {
+      const stream = p.isLocal ? props.sources.localStream() : props.sources.remoteStreamFor(p.id);
+      return stream !== undefined ? { kind: "frame" } : { kind: "blank" };
+    }
+    if (avatarMediaFor(p.personKeyB64, false)?.stillUrl !== undefined) return { kind: "frame" };
+    return { kind: "initials", text: initialsOf(shownName()), tone: toneOf(toneId()) };
+  };
+
+  if (osWindow) {
+    const osView = createMemo((): CallWindowView => {
+      const spec = mute();
+      const root = globalThis.document?.documentElement;
+      return {
+        status: status().text,
+        encrypted: encrypted(),
+        name: shownName(),
+        others: others(),
+        mute:
+          spec === null
+            ? null
+            : {
+                icon: spec.icon,
+                tone: spec.tone,
+                pressed: spec.pressed,
+                label: spec.accessibleName,
+                disabled: spec.disabled,
+              },
+        picture: pictureView(),
+        inset: insetShown(ownCameraSending(), shownIsYou()),
+        spoken: spokenName(),
+        announced: announced(),
+        region: t("call.bar.region_a11y"),
+        lang: root?.lang ?? "en",
+        dir: root?.dir === "rtl" ? "rtl" : "ltr",
+      };
+    });
+
+    onMount(() => {
+      const root = windowEl;
+      if (root === undefined) return;
+      const stop = startCallWindowRelay({
+        root,
+        view: osView,
+        pictureIsScreen: showingScreen,
+        pictureMirrored: shownIsYou,
+      });
+      onCleanup(stop);
+    });
+    const unsubscribe = onHostCallWindowAction((action) => {
+      if (action === "expand") {
+        props.onExpand();
+        return;
+      }
+      const spec = untrack(mute);
+      if (spec === null || spec.disabled) return;
+      callActions.setMic(untrack(local)?.micOn !== true);
+    });
+    onCleanup(unsubscribe);
+  }
+
   return (
     <div
       class="lk-call-window"
       ref={windowEl}
-      role="region"
-      aria-label={t("call.bar.region_a11y")}
+      role={osWindow ? undefined : "region"}
+      aria-label={osWindow ? undefined : t("call.bar.region_a11y")}
+      aria-hidden={osWindow ? "true" : undefined}
+      inert={osWindow ? true : undefined}
       data-corner={corner()}
-      data-shape={showingScreen() || !isUpright(size()) ? "landscape" : "portrait"}
-      classList={{ dragging: dragAt() !== null }}
+      data-shape={osWindow || showingScreen() || !isUpright(size()) ? "landscape" : "portrait"}
+      classList={{ dragging: dragAt() !== null, "lk-call-window-relay": osWindow }}
       style={{
         width: `${size().width}px`,
         height: `${size().height}px`,
-        transform: `translate(${Math.round(position().x)}px, ${Math.round(position().y)}px)`,
+        transform: osWindow
+          ? undefined
+          : `translate(${Math.round(position().x)}px, ${Math.round(position().y)}px)`,
       }}
       onPointerDown={onPointerDown}
     >
@@ -591,15 +702,17 @@ function CallWindowBody(
 
       {/* The whole window is the way back in: a real button over it, so
           `Enter` and `Space` work and the mute button is a sibling rather
-          than nested inside another control. */}
-      <button
-        type="button"
-        class="lk-call-window-open"
-        aria-label={spokenName()}
-        onClick={(): void => props.onExpand()}
-      />
+          than nested inside another control. The OS window has its own. */}
+      <Show when={!osWindow}>
+        <button
+          type="button"
+          class="lk-call-window-open"
+          aria-label={spokenName()}
+          onClick={(): void => props.onExpand()}
+        />
+      </Show>
 
-      <Show when={mute()}>
+      <Show when={osWindow ? null : mute()}>
         {(spec) => (
           <button
             type="button"
@@ -620,9 +733,11 @@ function CallWindowBody(
         )}
       </Show>
 
-      <span class="lk-visually-hidden" role="status" aria-live="polite">
-        {announced()}
-      </span>
+      <Show when={!osWindow}>
+        <span class="lk-visually-hidden" role="status" aria-live="polite">
+          {announced()}
+        </span>
+      </Show>
     </div>
   );
 }

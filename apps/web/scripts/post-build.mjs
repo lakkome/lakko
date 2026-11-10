@@ -40,6 +40,10 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
 const HTML = join(DIST, "index.html");
+/** The desktop build's second page: the collapsed call's own window
+ *  (`docs/ux/calls.md` section 4.5.4a). Absent from a browser build; given
+ *  the same SRI and CSP when present. */
+const CALL_WINDOW_HTML = join(DIST, "call-window.html");
 
 /**
  * Production CSP. Kept in lock-step with `nginx.conf.example`
@@ -243,6 +247,12 @@ function injectCsp(html, csp) {
 }
 
 function main() {
+  processPage(HTML);
+  if (existsSync(CALL_WINDOW_HTML)) processPage(CALL_WINDOW_HTML);
+  warnOnHeaderDrift();
+}
+
+function processPage(HTML) {
   let html;
   try {
     html = readFileSync(HTML, "utf8");
@@ -301,8 +311,8 @@ function main() {
   } else {
     console.log(`post-build: SRI + CSP injected (${injectedCount} new SRI tag(s))`);
   }
+  console.log(`  page: ${HTML}`);
   console.log(`  csp:  ${CSP}`);
-  warnOnHeaderDrift();
   for (const [ref, integrity] of integrities) {
     console.log(`  sri:  ${ref}  ${integrity.slice(0, 24)}…`);
   }
