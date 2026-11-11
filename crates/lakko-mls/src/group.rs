@@ -1268,6 +1268,7 @@ impl Group {
             self.inner
                 .merge_pending_commit(&identity.provider)
                 .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+            self.reap_joined_external_joins_after_merge(identity)?;
         }
         Ok(())
     }
@@ -2083,6 +2084,25 @@ impl Group {
                 .iter()
                 .any(|m| m.signature_public_key == p.joiner_signature_key)
         });
+    }
+
+    /// [`Self::reap_joined_external_joins`] at the moment a commit merges, and
+    /// the row written when it dropped anything.
+    ///
+    /// The reap used to run only when the next external-join proposal or join
+    /// request arrived, and [`Self::pending_external_joins`] hid a joiner only
+    /// while they WERE a member. So a request approved by one admin stayed in
+    /// another admin's retained queue, and once the joiner had left the group
+    /// it was listed again, with Approve and Reject, as a request (seen on a
+    /// Pixel 2026-11-10). Reaped when the commit that admitted the joiner
+    /// merges, it is gone before they can leave.
+    fn reap_joined_external_joins_after_merge(&mut self, identity: &Identity) -> Result<()> {
+        let before = self.pending_external_joins.len();
+        self.reap_joined_external_joins();
+        if self.pending_external_joins.len() == before {
+            return Ok(());
+        }
+        self.persist_pending_external_joins(identity)
     }
 
     /// The signature key of every external-join proposal currently awaiting a
@@ -3646,6 +3666,7 @@ impl Group {
         self.inner
             .merge_pending_commit(&identity.provider)
             .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.reap_joined_external_joins_after_merge(identity)?;
         Ok(true)
     }
 
@@ -3800,6 +3821,7 @@ impl Group {
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
                     .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
+                self.reap_joined_external_joins_after_merge(identity)?;
                 Ok(Incoming::Commit)
             },
             ProcessedMessageContent::ProposalMessage(qp) => {
