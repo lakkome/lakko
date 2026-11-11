@@ -102,6 +102,12 @@ export class OwnerClaimMemo {
 
   /** Claim `groupId` once per session when this account owns it. Never
    *  throws. Concurrent calls for one group share one request. */
+  /** Forget what this session settled for `groupId` (its chain was
+   *  replaced): the next open claims it again. */
+  forget(groupId: Uint8Array): void {
+    this.entries.delete(journalHex(groupId));
+  }
+
   run(groupId: Uint8Array, ports: OwnerClaimPorts): Promise<OwnerClaimOutcome> {
     const hex = journalHex(groupId);
     let entry = this.entries.get(hex);

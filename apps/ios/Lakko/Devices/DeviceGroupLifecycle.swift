@@ -225,6 +225,17 @@ public enum DeviceGroupLifecycle {
         return Ensured(identity: identity, group: group, bootstrapped: true, generation: written)
     }
 
+    /// A DeviceGroup this device JOINED from a Welcome is another device's
+    /// chain: a founding mark left from an earlier founding here (whose claim
+    /// never landed) must not make claim-on-open reset it
+    /// (``DeviceGroupDsAccess/claim(group:identity:accountIdB64:ds:marks:)``).
+    public static func clearFoundingMark(
+        joined group: DeviceGroup, marks: JournalFoundingMarks = .shared
+    ) {
+        guard let groupId = try? group.groupId() else { return }
+        marks.clear(journalIdHex: DsClient.pseudonymHex(groupId))
+    }
+
     /// Persist the MLS provider snapshot of `identity` and THROW when it did
     /// not land (ADR-0081 decision 3: every DeviceGroup snapshot write fails
     /// closed): a disk or Keychain failure, the account's session ended

@@ -492,6 +492,27 @@ final class DeviceGroupRejoinTests: XCTestCase {
         s.deleteSnapshot(accountIdB64: account)
     }
 
+    func testJoiningFromAWelcomeClearsALeftoverFoundingMark() throws {
+        // A founding mark left on this journal would make claim-on-open reset
+        // the chain this device just joined.
+        let suite = "lakko-marks-test-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let marks = JournalFoundingMarks(defaults: defaults)
+        let s = store()
+        let account = "acct-\(UUID().uuidString)"
+        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+            accountIdBytes: Data(repeating: 7, count: 16), accountIdB64: account,
+            deviceIdentitySeed: deviceSeed, accountSeed: accountSeed, found: true, snapshotStore: s)
+        let hex = DsClient.pseudonymHex(try ensured.group.groupId())
+        marks.mark(journalIdHex: hex)
+        marks.mark(journalIdHex: "other")
+        DeviceGroupLifecycle.clearFoundingMark(joined: ensured.group, marks: marks)
+        XCTAssertFalse(marks.isMarked(journalIdHex: hex))
+        XCTAssertTrue(marks.isMarked(journalIdHex: "other"))
+        s.deleteSnapshot(accountIdB64: account)
+    }
+
     func testAStaleHandlesPersistIsRefused() throws {
         let s = store()
         let account = "acct-\(UUID().uuidString)"

@@ -237,7 +237,16 @@ public class DsSignerRegistry {
         } catch (_: Throwable) {
             null
         } ?: return
-        if (cached != null && cached.epoch == fresh.epoch) return
+        if (cached != null && cached.epoch == fresh.epoch) {
+            if (cached.verifyingKey.contentEquals(fresh.verifyingKey)) return
+            // The same epoch number under another key: the journal's chain is
+            // not the one the cached signer belongs to (a DeviceGroup founded
+            // again and joined anew, ADR-0081 third amendment). Nothing cached
+            // belongs to the new chain.
+            entry.previous = null
+            entry.current = fresh
+            return
+        }
         if (cached != null) {
             if (fresh.epoch > cached.epoch) {
                 entry.previous = cached

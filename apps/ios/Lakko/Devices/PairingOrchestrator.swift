@@ -260,6 +260,7 @@ public enum PairingOrchestrator {
                 identity: identity,
                 accountId: accountIdBytes
             )
+            DeviceGroupLifecycle.clearFoundingMark(joined: joined)
             // ADR-0081 decision 3 — fail-closed: a joined DeviceGroup that is
             // not on disk is not reported as joined.
             try DeviceGroupLifecycle.persistSnapshotOrThrow(
@@ -735,6 +736,7 @@ public enum PairingOrchestrator {
             identity: identity, accountId: accountIdBytes, groupId: groupId) else {
             throw JoinByNameError.wrongAccount
         }
+        DeviceGroupLifecycle.clearFoundingMark(joined: group)
         return group
     }
 

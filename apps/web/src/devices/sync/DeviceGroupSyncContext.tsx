@@ -108,6 +108,8 @@ import {
   type RejoinPorts,
 } from "../device-group-rejoin";
 import { openRejoinWatch } from "../rejoin-watch";
+import { runKnockListener } from "../knock-listener";
+import { createReplacementQueue } from "./handle-replacements";
 import { isRecoveryPayloadRow } from "../recovery-payload";
 import { isStateRow } from "../state-bundle";
 import {
@@ -949,8 +951,12 @@ export function DeviceGroupSyncProvider(props: {
     // ADR-0081 third amendment: the knocks are long-polled beside the journal
     // from the start. A device that answers before its journal is read to the
     // head can only build a commit the DS refuses (409), never a wrong one.
-    const journal = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+    const journal = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup poll loop stopped on an error", rejoinFailureCode(err));
+    });
     const knocks = runKnockLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+    // Never rejects: a reload awaits it before it replaces the handle.
     pollDone = Promise.all([journal, knocks]).then(() => undefined);
   }
 
@@ -987,7 +993,15 @@ export function DeviceGroupSyncProvider(props: {
    * another handle on this device (the pairing flow) committed: the one held
    * here is an epoch behind and anything it sent or persisted would be wrong.
    */
-  async function reloadHandle(): Promise<void> {
+  /** Handle replacements (reload, rejoin) run one at a time
+   *  (`handle-replacements.ts`). */
+  const serialiseHandleReplacement = createReplacementQueue();
+
+  function reloadHandle(): Promise<void> {
+    return serialiseHandleReplacement(reloadHandleNow);
+  }
+
+  async function reloadHandleNow(): Promise<void> {
     const account = activeAccountIdB64;
     const accountBytes = accountIdBytesActive;
     if (account === null || accountBytes === null || group === null) return;
@@ -2389,7 +2403,7 @@ export function DeviceGroupSyncProvider(props: {
    * as it is posted. A hidden page does not answer (it counts as offline).
    * Ends with the poll loop's signal.
    */
-  async function runKnockLoop(
+  function runKnockLoop(
     g: WasmDeviceGroup,
     id: WasmIdentity,
     accountIdB64: string,
@@ -2398,45 +2412,32 @@ export function DeviceGroupSyncProvider(props: {
   ): Promise<void> {
     const ds = new DsClient();
     const groupId = g.groupId();
-    /** When this listening run started; restarted on every return to the
-     *  foreground, so knocks left from a long background stay unanswered. */
-    let listeningSinceMs = Date.now();
-    while (!signal.aborted) {
-      if (!pageVisible()) {
-        await untilVisible(signal);
-        listeningSinceMs = Date.now();
-        continue;
-      }
-      let page;
-      try {
-        page = await ds.fetchKnocks(groupId, { after: knockCursor, waitSecs: 25, signal });
-      } catch (err) {
-        if (signal.aborted) return;
-        if (err instanceof DsHttpError && err.status === 404) {
-          await sleepCancellable(1000, signal);
-        } else if (err instanceof DsNetworkError) {
-          await sleepCancellable(2000, signal);
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn("DeviceGroup knock read failed", rejoinFailureCode(err));
-          await sleepCancellable(5000, signal);
-        }
-        continue;
-      }
-      if (signal.aborted) return;
-      // Read while the page went to the background: answered when it is back.
-      if (page.messages.length === 0 || !pageVisible()) continue;
-      let committed = false;
-      try {
-        committed = await handleKnocks(g, id, accountIdB64, deviceKey, page.messages, listeningSinceMs, signal);
-      } catch (err) {
+    return runKnockListener(
+      {
+        visible: pageVisible,
+        untilVisible,
+        async read(s) {
+          const page = await ds.fetchKnocks(groupId, { after: knockCursor, waitSecs: 25, signal: s });
+          return page.messages;
+        },
+        classify: (err) =>
+          err instanceof DsHttpError && err.status === 404
+            ? "empty"
+            : err instanceof DsNetworkError
+              ? "network"
+              : "other",
+        async answer(rows, listeningSinceMs, s) {
+          // An admission reloads the long-lived handle; this loop keeps
+          // listening on the old one until that reload aborts it.
+          await handleKnocks(g, id, accountIdB64, deviceKey, rows, listeningSinceMs, s);
+        },
+        sleep: sleepCancellable,
+        now: () => Date.now(),
         // eslint-disable-next-line no-console
-        console.warn("DeviceGroup knock check failed", rejoinFailureCode(err));
-        await sleepCancellable(2000, signal);
-      }
-      // A commit reloads the long-lived handle, which restarts this loop.
-      if (committed) return;
-    }
+        log: (line) => console.info(line),
+      },
+      signal,
+    );
   }
 
   /** DS id of the last knock row read this session. */
@@ -2711,7 +2712,11 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   /** Stop following the DeviceGroup, drop its local state, and rejoin. */
-  async function enterRejoin(account: string): Promise<void> {
+  function enterRejoin(account: string): Promise<void> {
+    return serialiseHandleReplacement(() => enterRejoinNow(account));
+  }
+
+  async function enterRejoinNow(account: string): Promise<void> {
     const accountBytes = accountIdBytesActive;
     if (activeAccountIdB64 !== account || accountBytes === null || group === null) return;
     if (deviceRemoved()) return;
@@ -2770,6 +2775,13 @@ export function DeviceGroupSyncProvider(props: {
           if (outcome === "joined" || outcome === "founded") {
             // eslint-disable-next-line no-console
             console.info(`DeviceGroup rejoin: ${outcome}`);
+            // The journal id is the same, its epoch chain may be new (another
+            // device founded again, or this one did): no signer of the old
+            // chain is kept for it.
+            const journalId =
+              ownDeviceGroupId ??
+              (await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed).catch(() => null));
+            if (journalId !== null) dsAccess.forgetGroup(journalId);
             break;
           }
         } catch (err) {

@@ -1856,8 +1856,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 let joiner = try Identity.fromSeed(seed: seed)
                 DeviceGroupLifecycle.noteHandle(joiner, accountIdB64: accountIdB64)
                 try joiner.restoreStorage(snapshot: joinerSnapshot)
-                _ = try DeviceGroup.joinFromWelcome(
+                let joined = try DeviceGroup.joinFromWelcome(
                     welcome: welcome, identity: joiner, accountId: accountIdBytes)
+                DeviceGroupLifecycle.clearFoundingMark(joined: joined)
                 try DeviceGroupLifecycle.persistSnapshotOrThrow(identity: joiner, accountIdB64: accountIdB64)
                 // A fresh observer of the journal.
                 try store.putPending(

@@ -169,7 +169,15 @@ public final class DsSignerMemory {
     @discardableResult
     public func observe(journal: String, signer: DsRequestSigner) -> DsRequestSigner? {
         if let held = current[journal] {
-            if held.epoch() < signer.epoch() {
+            if held.epoch() == signer.epoch(),
+               let heldKey = (held as? DsGroupSigner)?.verifyingKey(),
+               let newKey = (signer as? DsGroupSigner)?.verifyingKey(),
+               heldKey != newKey {
+                // The same epoch number under another key: another chain (a
+                // journal founded afresh restarts its epochs). Nothing held
+                // for the old chain proves anything on the new one.
+                previous[journal] = nil
+            } else if held.epoch() < signer.epoch() {
                 previous[journal] = held
             } else if held.epoch() > signer.epoch() {
                 // The group went back (a reset to the durable snapshot, an

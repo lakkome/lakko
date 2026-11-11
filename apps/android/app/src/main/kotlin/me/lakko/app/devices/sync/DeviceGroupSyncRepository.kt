@@ -2593,7 +2593,16 @@ public class DeviceGroupSyncRepository(
         if (!bound.isCurrent || activeAccountIdB64.get() != accountIdB64) return
         rejoinJob = null
         Log.i(LOG_TAG, "rejoined the account's DeviceGroup")
+        forgetCachedJournalSigners(accountIdB64)
         openAndPoll(accountIdBytes, accountIdB64, seedState = seedState, accountIdentitySeed = accountIdentitySeed)
+    }
+
+    /** A rejoined or newly founded DeviceGroup is a new epoch chain under the
+     *  same journal id: drop the signers cached for the old one, so no read
+     *  is signed with a key of a chain the DS no longer holds. */
+    private fun forgetCachedJournalSigners(accountIdB64: String) {
+        val groupId = DeviceGroupLifecycle.groupId(applicationContext, accountIdB64) ?: return
+        DsSignerRegistry.shared.remove(dsGroupKey(groupId))
     }
 
     /** Found the DeviceGroup on this device after a knock nobody answered,
@@ -2630,6 +2639,7 @@ public class DeviceGroupSyncRepository(
         }
         Log.i(LOG_TAG, "no device answered the knock; DeviceGroup founded")
         rejoinJob = null
+        forgetCachedJournalSigners(accountIdB64)
         adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
         return true
     }
@@ -2801,6 +2811,10 @@ public class DeviceGroupSyncRepository(
                 }
                 DeviceGroup.joinFromWelcome(welcome, joiner, accountIdBytes).close()
                 DeviceGroupLifecycle.persistSnapshotOrThrow(applicationContext, joiner, accountIdB64)
+                // Joined, not founded: a founding mark left from an earlier
+                // founding on this device must not turn the next claim-on-open
+                // into a root reset of the chain this device just joined.
+                DeviceGroupJournalAccess.clearFoundingUnconfirmed(applicationContext, accountIdB64)
                 // A fresh observer of the journal.
                 DeviceGroupSnapshotStore.putPending(
                     applicationContext, accountIdB64, DeviceGroupSnapshotStore.PendingKind.ADMISSIONS,
