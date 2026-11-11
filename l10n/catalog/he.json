@@ -7765,10 +7765,6 @@
       "text": "מכשיר אחר",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "מחבר אתכם. מחזיר גם את הצ׳אטים אם הפעלתם זאת עבור מפתח הגישה הזה.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "מפתח גישה",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "אין לי אף אחד מאלה",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "אם הפעלתם שחזור מפתחות החשבון עבור מפתח גישה.",
       "status": "machine"
     },
     "restore_identity.not_you": {

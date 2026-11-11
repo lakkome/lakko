@@ -7765,10 +7765,6 @@
       "text": "Інший пристрій",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Дає змогу увійти. Повертає й чати, якщо ви ввімкнули це для цього ключа доступу.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Ключ доступу",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "У мене нічого з цього немає",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Якщо ви ввімкнули відновлення ключів облікового запису для ключа доступу.",
       "status": "machine"
     },
     "restore_identity.not_you": {

@@ -28,7 +28,10 @@
  *
  * ADR-0081 decision 4: re-founding is reserved for an account with no other
  * device. Before it, a device with no usable snapshot founded a new
- * DeviceGroup and reset the journal, cutting off every live sibling.
+ * DeviceGroup and reset the journal, cutting off every live sibling. Since
+ * the third amendment (2026-11-11) the rejoin itself founds (this function,
+ * `mayFound` answering yes) when no listed device answers its knock in time:
+ * a listed device may be gone for good.
  *
  * `lineage` is the account identity the DeviceGroup id is derived from
  * (ADR-0078 section 6, [`deviceGroupLineageSeed`]): the id is a function of

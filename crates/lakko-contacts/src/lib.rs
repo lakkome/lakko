@@ -157,6 +157,7 @@ pub mod push_routing;
 pub mod push_wake;
 pub mod reach;
 pub mod registrar_seed;
+pub mod rejoin_present;
 pub mod request;
 pub mod safety;
 pub mod shared_channels;

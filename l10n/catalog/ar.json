@@ -7765,10 +7765,6 @@
       "text": "جهاز آخر",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "يسجّل دخولك. ويعيد دردشاتك أيضًا إذا فعّلت ذلك لمفتاح المرور هذا.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "مفتاح مرور",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "ليس لديّ أيٌّ من هذه",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "إذا فعّلت استعادة مفاتيح الحساب لأحد مفاتيح المرور.",
       "status": "machine"
     },
     "restore_identity.not_you": {

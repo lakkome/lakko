@@ -34,30 +34,37 @@ import Foundation
 ///    sure its own directory KeyPackage is published (ADR-0050; it carries
 ///    the signed device binding, published under the device-bound session).
 /// 2. Build a DeviceGroup KeyPackage from the same device identity (same leaf
-///    key) and post it to the DeviceGroup's knock (ADR-0053, one `ds-knock`
-///    token) as the ADR-0056 pairing payload: login handle, KeyPackage and a
+///    key) as the ADR-0056 pairing payload: login handle, KeyPackage and a
 ///    fresh rendezvous id. The joiner's provider and the rendezvous are kept
 ///    (``DeviceGroupSnapshotStore/PendingKind/rejoin``) so a restart keeps
 ///    waiting for the same Welcome.
-/// 3. Poll the rendezvous for the Welcome; join from it. Knock again with a
-///    fresh KeyPackage after ``reknockAfterMs`` without one.
+/// 3. (Third amendment, 2026-11-11.) Open the long poll on the rendezvous,
+///    then post the knock (one `ds-knock` token) and measure that request's
+///    round trip `rtt`. Wait for a presence note or a Welcome for
+///    ``answerWindowMs(rttMs:)``. A presence note means a device of the
+///    account is running: wait for the Welcome with no deadline, knocking
+///    again with a fresh KeyPackage after ``reknockAfterMs``. Nothing in the
+///    window means every listed device is offline: FOUND the DeviceGroup
+///    (``PassOutcome/found``); the caller founds and starts at once.
 ///
 /// ## A sibling's side
 ///
-/// A device holding the DeviceGroup reads the knocks once its journal is read
-/// to the head and admits a knock only when ``admissionVerdict(_:)`` says so:
-/// the payload names this account's login handle; the KeyPackage's leaf key
-/// is listed in the account's directory with a device binding that verifies
-/// under the account key (a deleted device is tombstoned there, ADR-0074, and
-/// not listed); the knock is newer than every addition of that key this
-/// device has seen and newer than when it started watching; this device is
-/// the designated admitter (the lowest leaf other than the knocking key) or
-/// the knock has waited ``fallbackAdmitAfterMs``. To admit it replaces the
-/// key's previous leaf, if still in the roster, by the KeyPackage in ONE
-/// commit (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf
-/// is there — one ordinary DeviceGroup commit through the outbox
-/// (``DeviceGroupCommits``), so the DS arbitrates two siblings acting at once
-/// — and the Welcome goes to the knock's rendezvous.
+/// A device holding the DeviceGroup keeps a long poll on its knocks while it
+/// is in the foreground. On a knock naming this account's login handle it
+/// first posts a presence note to the knock's rendezvous
+/// (``shouldAnswer(knockAtMs:watchingSinceMs:listeningSinceMs:handled:knockId:isOwnKey:nowMs:)``),
+/// before any directory lookup, then admits it when ``admissionVerdict(_:)``
+/// says so: the KeyPackage's leaf key is listed in the account's directory
+/// with a device binding that verifies under the account key (a deleted
+/// device is tombstoned there, ADR-0074, and not listed); the knock is newer
+/// than every addition of that key this device has seen and newer than when
+/// it started watching. Every running device that passes the checks admits at
+/// once (no designated admitter): it replaces the key's previous leaf, if
+/// still in the roster, by the KeyPackage in ONE commit (`replaceDeviceAt`),
+/// or adds the KeyPackage when no previous leaf is there — one ordinary
+/// DeviceGroup commit through the outbox (``DeviceGroupCommits``), so the DS
+/// lets exactly one commit take the epoch and the others drop theirs on
+/// `409` — and the Welcome goes to the knock's rendezvous.
 ///
 /// Under the ADR-0015 policy a removal needs a passkey attestation OR
 /// (ADR-0081 amendment) the device's own self-removal proof: the rejoining
@@ -74,13 +81,55 @@ public enum DeviceGroupRejoin {
     /// with a fresh KeyPackage. Chosen, not measured.
     public static let reknockAfterMs: Int64 = 30 * 60_000
 
-    /// How long a knock waits for the designated admitter before any sibling
-    /// admits it. Chosen, not measured.
-    public static let fallbackAdmitAfterMs: Int64 = 10 * 60_000
+    /// The server-side wait of one long poll on the knocks (the DS wakes it
+    /// when a knock is posted). Chosen, not measured.
+    public static let knockLongPollSecs = 25
 
-    /// How often a sibling reads the knocks while its journal is at the head.
-    /// Chosen, not measured.
-    public static let knockCheckIntervalMs: Int64 = 30_000
+    /// The shortest answer window (third amendment). Chosen, not measured.
+    public static let minAnswerWindowMs: Int64 = 1_000
+
+    /// How long a rejoining device waits for a presence note or a Welcome
+    /// after its knock: `max(4 x rtt, 1 s)`, `rtt` the knock request's own
+    /// round trip. The answer is a DS wake, one read and one write on a
+    /// sibling, and this device's read.
+    public static func answerWindowMs(rttMs: Int64) -> Int64 {
+        let rtt = max(0, rttMs)
+        let scaled = rtt > Int64.max / 4 ? Int64.max : rtt * 4
+        return max(scaled, minAnswerWindowMs)
+    }
+
+    /// How old a knock already waiting when this device starts listening may
+    /// be and still be answered: older, its knocker has either founded on
+    /// silence or will knock again. Keeps a device that comes back to the
+    /// foreground from answering a week of old knocks. Chosen, not measured.
+    public static let waitingKnockMaxAgeMs: Int64 = 30_000
+
+    /// Whether a sibling answers a knock naming this account (a presence note
+    /// before any directory lookup, then the admission checks): not its own
+    /// key, not handled, not from before it started watching (it would not
+    /// admit those), not waiting for more than ``waitingKnockMaxAgeMs`` when
+    /// this listen began, and not so old that the knocker has knocked again.
+    public static func shouldAnswer(
+        knockAtMs: Int64, watchingSinceMs: Int64, listeningSinceMs: Int64, handled: Set<Int64>,
+        knockId: Int64, isOwnKey: Bool, nowMs: Int64
+    ) -> Bool {
+        if isOwnKey || handled.contains(knockId) { return false }
+        if knockAtMs < watchingSinceMs { return false }
+        if knockAtMs < listeningSinceMs - waitingKnockMaxAgeMs { return false }
+        return nowMs - knockAtMs < reknockAfterMs
+    }
+
+    /// What a row on the rejoin rendezvous is: a presence note, or a Welcome
+    /// (anything else; a malformed one fails the join and the device knocks
+    /// again).
+    public enum RendezvousRow: Equatable {
+        case presence
+        case welcome(Data)
+    }
+
+    public static func classify(row: Data, isPresence: (Data) -> Bool) -> RendezvousRow {
+        isPresence(row) ? .presence : .welcome(row)
+    }
 
     /// At most this many handled knock ids are kept (knocks live seven days).
     public static let maxHandledKnocks = 256
@@ -98,6 +147,50 @@ public enum DeviceGroupRejoin {
         return latestEpoch > localEpoch
     }
 
+    /// Signed reads of the DeviceGroup journal refused in a row (not for the
+    /// clock: that is its own error) after which the device takes the
+    /// journal as reset under it (third amendment, point 5). Three, so a
+    /// refusal racing a commit's registration is not enough (the same number
+    /// on web and Android). Chosen, not measured.
+    public static let lostAfterRefusedReads = 3
+
+    /// Is this device lost because its journal was reset under it? Its
+    /// signed read was refused `refusedReads` times in a row while it did not
+    /// found the journal itself (a founding whose claim has not landed is
+    /// refused too, and is claimed again instead), or a drained read names a
+    /// newest epoch below the one this device holds (a chain it does not
+    /// hold) with no commit of its own in flight.
+    public static func isLost(
+        refusedReads: Int, foundingClaimPending: Bool,
+        localEpoch: UInt64?, drained: Bool, latestEpoch: UInt64?, commitPending: Bool
+    ) -> Bool {
+        if !foundingClaimPending, refusedReads >= lostAfterRefusedReads { return true }
+        guard !commitPending, drained, let localEpoch, let latestEpoch else { return false }
+        return latestEpoch < localEpoch
+    }
+
+    /// An error as a log label: its type and case (and an HTTP status),
+    /// never its text, which may carry a journal or rendezvous id.
+    public static func errorLabel(_ error: Error) -> String {
+        if let ds = error as? DsClientError {
+            switch ds {
+            case .http(let status, _, _): return "DsClientError.http(\(status))"
+            case .network: return "DsClientError.network"
+            case .clockSkew: return "DsClientError.clockSkew"
+            case .argument: return "DsClientError.argument"
+            }
+        }
+        if let statement = error as? DsStatementError, case .http(let status, _) = statement {
+            return "DsStatementError.http(\(status))"
+        }
+        let mirror = Mirror(reflecting: error)
+        if mirror.displayStyle == .enum {
+            if let label = mirror.children.first?.label { return "\(type(of: error)).\(label)" }
+            return "\(type(of: error)).\(String(describing: error))"
+        }
+        return String(describing: type(of: error))
+    }
+
     /// What a sibling decides about one knock.
     public enum AdmissionVerdict: Equatable {
         case admit
@@ -113,8 +206,6 @@ public enum DeviceGroupRejoin {
         /// The key is not listed in the account's directory with a verified
         /// binding (unknown, deleted, tombstoned).
         case notListed
-        /// Waiting for the designated admitter.
-        case notMineYet
         /// The previous leaf is present, the policy wants its removal
         /// authorised, and the knock carries no self-removal proof that
         /// covers it; a passkey attestation this device cannot obtain.
@@ -132,7 +223,9 @@ public enum DeviceGroupRejoin {
         }
     }
 
-    /// Everything ``admissionVerdict(_:)`` reads.
+    /// Everything ``admissionVerdict(_:)`` reads. `roster` and `nowMs` are
+    /// kept for the callers' convenience; since the third amendment no rule
+    /// waits on the roster's order or on time.
     public struct AdmissionInput: Equatable {
         public var knockId: Int64
         public var knockAtMs: Int64
@@ -188,10 +281,6 @@ public enum DeviceGroupRejoin {
         if input.keyPackageAlreadyIn { return .alreadyAdmitted }
         if let added = input.lastAddedAtMs, added >= input.knockAtMs { return .alreadyAdmitted }
         if !input.listed { return .notListed }
-        let others = input.roster.filter { $0.key != input.key }
-        let lowest = others.min { $0.leaf < $1.leaf }
-        let designated = lowest?.key == input.ownKey
-        if !designated, input.nowMs - input.knockAtMs < fallbackAdmitAfterMs { return .notMineYet }
         let present = input.roster.contains { $0.key == input.key }
         if present, input.policyRequiresAttestation, !input.selfRemovalProofCovers { return .needsAttestation }
         return .admit
@@ -251,12 +340,17 @@ public struct DeviceGroupRejoinState: Codable, Equatable {
     /// KeyPackage's private keys), standard base64.
     public var joinerSnapshotB64: String
     public var knockedAtMs: Int64
+    /// A presence note answered this knock: a device of the account is
+    /// running, so the Welcome is waited for until the re-knock time. `nil`
+    /// or `false` (the answer window had not passed, a crash) knocks again.
+    public var answered: Bool?
 
-    public init(rendezvousB64: String, joinerSnapshotB64: String, knockedAtMs: Int64) {
+    public init(rendezvousB64: String, joinerSnapshotB64: String, knockedAtMs: Int64, answered: Bool? = nil) {
         self.v = 1
         self.rendezvousB64 = rendezvousB64
         self.joinerSnapshotB64 = joinerSnapshotB64
         self.knockedAtMs = knockedAtMs
+        self.answered = answered
     }
 
     public func encoded() throws -> Data { try JSONEncoder().encode(self) }
@@ -268,12 +362,33 @@ public struct DeviceGroupRejoinState: Codable, Equatable {
         return state
     }
 
-    /// Whether a rejoin knocked long enough ago to knock again (or the clock
-    /// went back).
+    /// Whether to knock (again): no knock out, a knock no presence note
+    /// answered (its answer window is over, or a restart cut it short), a
+    /// knock long enough ago, or the clock went back.
     public static func shouldKnockAgain(_ state: DeviceGroupRejoinState?, nowMs: Int64) -> Bool {
         guard let state else { return true }
+        if state.answered != true { return true }
         return nowMs - state.knockedAtMs >= DeviceGroupRejoin.reknockAfterMs || nowMs < state.knockedAtMs
     }
+}
+
+/// A knock built and kept, not yet posted.
+public struct DeviceGroupPreparedKnock {
+    public let state: DeviceGroupRejoinState
+    public let payload: Data
+
+    public init(state: DeviceGroupRejoinState, payload: Data) {
+        self.state = state
+        self.payload = payload
+    }
+}
+
+/// A long poll on one rejoin rendezvous, open from its creation.
+@MainActor
+public protocol DeviceGroupRendezvousWatch: AnyObject {
+    /// The next row, or `nil` when `untilMs` (unix ms) passed first.
+    func next(untilMs: Int64) async -> DeviceGroupRejoin.RendezvousRow?
+    func close()
 }
 
 /// What one rejoin attempt needs.
@@ -283,41 +398,52 @@ public struct DeviceGroupRejoinPorts {
     public var dropLocalState: () -> Void
     /// Make sure this device's directory KeyPackage is published.
     public var publishDirectoryKeyPackage: () async throws -> Void
+    /// Whether a knock can name the account (its login handle is known). A
+    /// knock that names nothing no sibling can admit, so the device founds.
+    public var canKnock: () -> Bool
     public var loadState: () -> DeviceGroupRejoinState?
     public var saveState: (DeviceGroupRejoinState) throws -> Void
     /// Build a fresh joiner (DeviceGroup KeyPackage from the device identity)
-    /// and knock with it; returns the state to keep (already saved before
-    /// the knock went out).
-    public var knock: (_ nowMs: Int64) async throws -> DeviceGroupRejoinState
-    /// Wait for the Welcome at the state's rendezvous until `deadlineMs`;
-    /// `nil` on a timeout.
-    public var awaitWelcome: (DeviceGroupRejoinState, _ deadlineMs: Int64) async throws -> Data?
+    /// and the knock payload; the returned state is already saved.
+    public var prepareKnock: (_ nowMs: Int64) async throws -> DeviceGroupPreparedKnock
+    /// Open the long poll on the state's rendezvous (it starts at once).
+    public var openWatch: (DeviceGroupRejoinState) -> DeviceGroupRendezvousWatch
+    /// Post the knock.
+    public var postKnock: (DeviceGroupPreparedKnock) async throws -> Void
     /// Join from the Welcome with the joiner kept in the state and persist
     /// the joined DeviceGroup (fail-closed).
     public var join: (DeviceGroupRejoinState, Data) async throws -> Void
     public var clearState: () -> Void
     public var now: () -> Int64
+    /// One line, numbers only.
+    public var log: (String) -> Void
 
     public init(
         dropLocalState: @escaping () -> Void,
         publishDirectoryKeyPackage: @escaping () async throws -> Void,
+        canKnock: @escaping () -> Bool,
         loadState: @escaping () -> DeviceGroupRejoinState?,
         saveState: @escaping (DeviceGroupRejoinState) throws -> Void,
-        knock: @escaping (Int64) async throws -> DeviceGroupRejoinState,
-        awaitWelcome: @escaping (DeviceGroupRejoinState, Int64) async throws -> Data?,
+        prepareKnock: @escaping (Int64) async throws -> DeviceGroupPreparedKnock,
+        openWatch: @escaping (DeviceGroupRejoinState) -> DeviceGroupRendezvousWatch,
+        postKnock: @escaping (DeviceGroupPreparedKnock) async throws -> Void,
         join: @escaping (DeviceGroupRejoinState, Data) async throws -> Void,
         clearState: @escaping () -> Void,
-        now: @escaping () -> Int64
+        now: @escaping () -> Int64,
+        log: @escaping (String) -> Void = { NSLog("%@", $0) }
     ) {
         self.dropLocalState = dropLocalState
         self.publishDirectoryKeyPackage = publishDirectoryKeyPackage
+        self.canKnock = canKnock
         self.loadState = loadState
         self.saveState = saveState
-        self.knock = knock
-        self.awaitWelcome = awaitWelcome
+        self.prepareKnock = prepareKnock
+        self.openWatch = openWatch
+        self.postKnock = postKnock
         self.join = join
         self.clearState = clearState
         self.now = now
+        self.log = log
     }
 }
 
@@ -328,28 +454,171 @@ extension DeviceGroupRejoin {
         case joined
         /// The caller should call again.
         case waiting
+        /// No device of the account answered: the caller founds the
+        /// DeviceGroup (third amendment, point 4).
+        case found
     }
 
-    /// One pass of the device side: drop the state (first pass only), make
-    /// sure a knock is out, wait for its Welcome until the re-knock time.
+    /// One pass of the device side: drop the state (first pass only); knock
+    /// when no answered knock is out, with the rendezvous long poll open
+    /// first, and wait ``answerWindowMs(rttMs:)`` for an answer; with a
+    /// presence note, or an answered knock kept from before, wait for the
+    /// Welcome until the re-knock time.
     @MainActor
     public static func rejoinOnce(ports: DeviceGroupRejoinPorts, firstPass: Bool) async throws -> PassOutcome {
         if firstPass {
             ports.dropLocalState()
             try await ports.publishDirectoryKeyPackage()
         }
-        var state = ports.loadState()
-        if DeviceGroupRejoinState.shouldKnockAgain(state, nowMs: ports.now()) {
-            let knocked = try await ports.knock(ports.now())
-            try ports.saveState(knocked)
-            state = knocked
+        guard ports.canKnock() else {
+            ports.log("DeviceGroupSync rejoin: no login handle to knock with; founding")
+            return .found
         }
-        guard let current = state else { return .waiting }
-        guard let welcome = try await ports.awaitWelcome(current, current.knockedAtMs + reknockAfterMs) else {
-            return .waiting
+        let kept = ports.loadState()
+        if !DeviceGroupRejoinState.shouldKnockAgain(kept, nowMs: ports.now()), let kept {
+            let watch = ports.openWatch(kept)
+            defer { watch.close() }
+            return try await waitForWelcome(
+                watch: watch, state: kept, untilMs: kept.knockedAtMs + reknockAfterMs, ports: ports)
         }
-        try await ports.join(current, welcome)
+        let prepared = try await ports.prepareKnock(ports.now())
+        let watch = ports.openWatch(prepared.state)
+        defer { watch.close() }
+        let postedAt = ports.now()
+        try await ports.postKnock(prepared)
+        let rtt = max(0, ports.now() - postedAt)
+        let window = answerWindowMs(rttMs: rtt)
+        let first = await watch.next(untilMs: ports.now() + window)
+        guard let first else {
+            ports.log("DeviceGroupSync rejoin: no answer within \(window) ms (knock rtt \(rtt) ms); founding")
+            return .found
+        }
+        ports.log("DeviceGroupSync rejoin: answered after \(max(0, ports.now() - postedAt)) ms (knock rtt \(rtt) ms)")
+        switch first {
+        case .welcome(let welcome):
+            try await join(prepared.state, welcome, ports: ports)
+            return .joined
+        case .presence:
+            var answered = prepared.state
+            answered.answered = true
+            try ports.saveState(answered)
+            return try await waitForWelcome(
+                watch: watch, state: answered, untilMs: answered.knockedAtMs + reknockAfterMs, ports: ports)
+        }
+    }
+
+    /// Join, or (a row that is no Welcome for this joiner) mark the knock
+    /// unanswered so the next pass knocks again instead of reading the same
+    /// row.
+    @MainActor
+    private static func join(
+        _ state: DeviceGroupRejoinState, _ welcome: Data, ports: DeviceGroupRejoinPorts
+    ) async throws {
+        do {
+            try await ports.join(state, welcome)
+        } catch {
+            var unanswered = state
+            unanswered.answered = false
+            try? ports.saveState(unanswered)
+            throw error
+        }
         ports.clearState()
-        return .joined
+    }
+
+    @MainActor
+    private static func waitForWelcome(
+        watch: DeviceGroupRendezvousWatch, state: DeviceGroupRejoinState, untilMs: Int64,
+        ports: DeviceGroupRejoinPorts
+    ) async throws -> PassOutcome {
+        while let row = await watch.next(untilMs: untilMs) {
+            // More presence notes: more than one device is running.
+            guard case .welcome(let welcome) = row else { continue }
+            try await join(state, welcome, ports: ports)
+            return .joined
+        }
+        return .waiting
+    }
+}
+
+/// The rendezvous long poll of a rejoin: one request held open on the DS
+/// (which wakes it when a row is posted), started when the watch is made, so
+/// it is open before the knock goes out. Rows are kept in order until read.
+/// A failed read is retried after a short pause; nothing is thrown out.
+@MainActor
+public final class DeviceGroupRendezvousLongPoll: DeviceGroupRendezvousWatch {
+    /// The server-side wait of one read. Chosen, not measured.
+    static let waitSecs = 15
+
+    public typealias Fetch = (_ after: Int64, _ waitSecs: Int) async throws -> FetchResult
+
+    private let fetch: Fetch
+    private let isPresence: (Data) -> Bool
+    private var rows: [Data] = []
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+
+    public init(fetch: @escaping Fetch, isPresence: @escaping (Data) -> Bool) {
+        self.fetch = fetch
+        self.isPresence = isPresence
+        pollTask = Task { [weak self] in await self?.run() }
+    }
+
+    private func run() async {
+        var cursor: Int64 = 0
+        while !Task.isCancelled {
+            do {
+                let result = try await fetch(cursor, Self.waitSecs)
+                guard !Task.isCancelled else { return }
+                for message in result.messages where message.id > cursor {
+                    cursor = message.id
+                    rows.append(message.payload)
+                }
+                if !result.messages.isEmpty { wake() }
+            } catch {
+                guard !Task.isCancelled else { return }
+                // A rendezvous nobody wrote yet, the network, the DS: wait a
+                // little and read again (never a tight loop).
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func wake() {
+        let w = waiter
+        waiter = nil
+        w?.resume()
+    }
+
+    public func next(untilMs: Int64) async -> DeviceGroupRejoin.RendezvousRow? {
+        while true {
+            if !rows.isEmpty {
+                return DeviceGroupRejoin.classify(row: rows.removeFirst(), isPresence: isPresence)
+            }
+            let remainingMs = untilMs - Int64(Date().timeIntervalSince1970 * 1000)
+            if remainingMs <= 0 || Task.isCancelled || pollTask == nil { return nil }
+            let timer = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(remainingMs) * 1_000_000)
+                self?.wake()
+            }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    if Task.isCancelled || !rows.isEmpty || pollTask == nil {
+                        c.resume()
+                        return
+                    }
+                    wake()
+                    waiter = c
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.wake() }
+            }
+            timer.cancel()
+        }
+    }
+
+    public func close() {
+        pollTask?.cancel()
+        pollTask = nil
+        wake()
     }
 }

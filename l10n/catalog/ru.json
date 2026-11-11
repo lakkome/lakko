@@ -8006,7 +8006,7 @@
       "status": "machine"
     },
     "recovery.method.passkey.sub": {
-      "text": "Позволяет войти. Возвращает и чаты, если вы включили это для этого ключа доступа.",
+      "text": "Входит в аккаунт. Возвращает и чаты, если ключ доступа может хранить ваши ключи.",
       "status": "machine"
     },
     "recovery.method.passkey.title": {
@@ -8486,7 +8486,7 @@
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
-      "text": "Если вы включили восстановление ключей аккаунта для ключа доступа.",
+      "text": "Если у вас есть ключ доступа для этого аккаунта.",
       "status": "machine"
     },
     "restore_identity.not_you": {

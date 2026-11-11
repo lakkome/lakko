@@ -5384,3 +5384,19 @@ pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 pub fn call_invite_max_uses() -> u32 {
     RUST_CALL_INVITE_MAX_USES
 }
+
+/// ADR-0081 (third amendment): the note a running device posts to a rejoin
+/// knock's rendezvous at once, meaning "a device of this account is online".
+#[wasm_bindgen(js_name = composeRejoinPresent)]
+#[must_use]
+pub fn compose_rejoin_present() -> Vec<u8> {
+    lakko_contacts::rejoin_present::compose_rejoin_present()
+}
+
+/// Is this rendezvous row exactly a rejoin presence note (and so not a
+/// Welcome)?
+#[wasm_bindgen(js_name = isRejoinPresent)]
+#[must_use]
+pub fn is_rejoin_present(row: &[u8]) -> bool {
+    lakko_contacts::rejoin_present::is_rejoin_present(row)
+}

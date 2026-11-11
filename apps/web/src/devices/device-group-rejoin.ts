@@ -23,36 +23,46 @@
  *   needed for a commit "still on its way" any more; the one exception is
  *   this device's own outbox entry, which is finished first.
  *
- * ## The device's side
+ * ## The device's side (ADR-0081 third amendment, 2026-11-11)
  *
  * 1. Delete the local DeviceGroup state (snapshot, pending commit) and make
  *    sure its own directory KeyPackage is published (ADR-0050; it carries the
  *    signed device binding, published under the device-bound session).
  * 2. Build a DeviceGroup KeyPackage from the same device identity (same leaf
- *    key) and post it to the DeviceGroup's knock (ADR-0053, one `ds-knock`
- *    token) as the ADR-0056 pairing payload: login handle, KeyPackage and a
+ *    key) and the ADR-0056 pairing payload: login handle, KeyPackage and a
  *    fresh rendezvous id. The DeviceGroup id is derived from the account seed
  *    (ADR-0078 phase 6). The joiner's provider and the rendezvous are kept
  *    (`pending`, `rejoin:`) so a reload keeps waiting for the same Welcome.
- * 3. Poll the rendezvous for the Welcome; join from it. Knock again with a
- *    fresh KeyPackage after {@link REKNOCK_AFTER_MS} without one.
+ * 3. Open the long poll on the rendezvous, THEN post the knock (ADR-0053, one
+ *    `ds-knock` token), measuring the knock request's own round trip.
+ * 4. Wait {@link answerWindowMs} for a presence note (`isRejoinPresent`) or a
+ *    Welcome. A presence note means a device of the account is running: wait
+ *    for its Welcome with no deadline, knocking again with a fresh KeyPackage
+ *    after {@link REKNOCK_AFTER_MS}. Silence means every listed device is
+ *    gone or not running: this device founds the DeviceGroup (a root reset of
+ *    the journal it is claimed under) and starts at once.
+ *
+ * An account with no username this device knows has no login handle a
+ * sibling could match, so nobody can answer its knock: it founds at once.
  *
  * ## A sibling's side
  *
- * A device holding the DeviceGroup reads the knocks once its journal is read
- * to the head and admits a knock only when {@link admissionVerdict} says so:
- * the payload names this account's login handle; the KeyPackage's leaf key is
- * listed in the account's directory with a device binding that verifies under
- * the account key (a deleted device is tombstoned there, ADR-0074, and not
- * listed); the knock is newer than every addition of that key this device has
- * seen and newer than when it started watching; this device is the
- * designated admitter (the lowest leaf other than the knocking key) or the
- * knock has waited {@link FALLBACK_ADMIT_AFTER_MS}. To admit it replaces the
- * key's previous leaf, if still in the roster, by the KeyPackage in ONE
- * commit (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf is
- * there - one ordinary DeviceGroup commit through the outbox
- * (`device-group-commit.ts`), so the DS arbitrates two siblings acting at
- * once - and the Welcome goes to the knock's rendezvous.
+ * A device holding the DeviceGroup keeps a long poll on its knocks while it
+ * is in the foreground. On a knock whose payload names this account's login
+ * handle and that {@link knockScreen} does not set aside, it first posts a
+ * presence note to the knock's rendezvous (before any directory lookup, so
+ * the answer costs one round trip), then admits the knock when
+ * {@link admissionVerdict} says so: the KeyPackage's leaf key is listed in the
+ * account's directory with a device binding that verifies under the account
+ * key (a deleted device is tombstoned there, ADR-0074, and not listed); the
+ * knock is newer than every addition of that key this device has seen and
+ * newer than when it started watching. Every running device that passes the
+ * checks admits at once: the DS commit route lets exactly one commit take the
+ * epoch, the others get `409` and drop theirs. To admit it replaces the key's
+ * previous leaf, if still in the roster, by the KeyPackage in ONE commit
+ * (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf is there,
+ * through the outbox (`device-group-commit.ts`), and the Welcome goes to the
+ * knock's rendezvous.
  *
  * Under the ADR-0015 policy a removal needs a passkey attestation OR (ADR-0081
  * amendment) the device's own self-removal proof: the rejoining device signs,
@@ -68,13 +78,41 @@
  *  with a fresh KeyPackage. Chosen, not measured. */
 export const REKNOCK_AFTER_MS = 30 * 60_000;
 
-/** How long a knock waits for the designated admitter before any sibling
- *  admits it. Chosen, not measured. */
-export const FALLBACK_ADMIT_AFTER_MS = 10 * 60_000;
+/** The shortest answer window ({@link answerWindowMs}). Chosen, not
+ *  measured (ADR-0081 third amendment). */
+export const ANSWER_WINDOW_MIN_MS = 1_000;
 
-/** How often a sibling reads the knocks while its journal is at the head.
- *  Chosen, not measured. */
-export const KNOCK_CHECK_INTERVAL_MS = 30_000;
+/** How many times the knock's own round trip the new device waits for an
+ *  answer. Chosen, not measured: the answer is a DS wake, one read and one
+ *  write on the sibling, and this device's read. */
+export const ANSWER_WINDOW_RTT_FACTOR = 4;
+
+/** How long the new device waits for a presence note or a Welcome after its
+ *  knock came back in `rttMs`: `max(4 x rtt, 1 s)`. A round trip that cannot
+ *  be read (negative, not finite) counts as zero. */
+export function answerWindowMs(rttMs: number): number {
+  const rtt = Number.isFinite(rttMs) && rttMs > 0 ? rttMs : 0;
+  return Math.max(ANSWER_WINDOW_RTT_FACTOR * rtt, ANSWER_WINDOW_MIN_MS);
+}
+
+/** A knock already waiting when this device starts listening is answered
+ *  only when it is at most this old: coming back to the app does not post
+ *  presence notes to a week of old knocks (their devices founded or knocked
+ *  again long ago). Chosen, not measured; the same on every client. */
+export const STALE_KNOCK_AT_LISTEN_START_MS = 30_000;
+
+/** How many refused signed reads of its DeviceGroup journal in a row make a
+ *  device read its journal as reset under it (ADR-0081 third amendment,
+ *  point 5). Refusals for a wrong device clock never count. Chosen, not
+ *  measured. */
+export const RESET_REFUSALS_BEFORE_REJOIN = 3;
+
+/** Does this run of refused reads mean the journal was reset under this
+ *  device? `consecutiveRefusals` counts signed reads refused with `401`
+ *  while the device clock was right. */
+export function journalResetUnder(consecutiveRefusals: number): boolean {
+  return consecutiveRefusals >= RESET_REFUSALS_BEFORE_REJOIN;
+}
 
 /**
  * Is this device behind its DeviceGroup for good? `drained`: this poll's
@@ -102,6 +140,9 @@ export type AdmissionVerdict =
   /** From before this device started watching the journal: it cannot know
    *  whether another device admitted it; the knocker knocks again. */
   | "before-watching"
+  /** Already waiting, and older than {@link STALE_KNOCK_AT_LISTEN_START_MS},
+   *  when this device started listening: neither answered nor admitted. */
+  | "stale"
   /** The key was added after the knock: someone already admitted it. */
   | "already-admitted"
   /** The knocking key is this device's own. */
@@ -109,8 +150,6 @@ export type AdmissionVerdict =
   /** The key is not listed in the account's directory with a verified
    *  binding (unknown, deleted, tombstoned). */
   | "not-listed"
-  /** Waiting for the designated admitter. */
-  | "not-mine-yet"
   /** The previous leaf is present and the policy wants a passkey
    *  attestation for its removal, which this device cannot obtain. */
   | "needs-attestation";
@@ -140,26 +179,56 @@ export interface AdmissionInput {
    *  replacement keeps the key (often the leaf index too), so the roster of
    *  keys cannot tell. */
   readonly keyPackageAlreadyIn: boolean;
+  /** When this device's current knock long poll started (unix ms); absent
+   *  for a caller that does not listen. */
+  readonly listeningSinceMs?: number;
   readonly nowMs: number;
 }
 
-/** The pure admission rule (see the module doc). */
-export function admissionVerdict(input: AdmissionInput): AdmissionVerdict {
+/** The part of {@link AdmissionInput} that this device decides alone, with
+ *  no directory lookup. */
+export type KnockScreenInput = Pick<
+  AdmissionInput,
+  | "knockId"
+  | "knockAtMs"
+  | "keyHex"
+  | "ownKeyHex"
+  | "handled"
+  | "watchingSinceMs"
+  | "lastAddedAtMs"
+  | "keyPackageAlreadyIn"
+  | "listeningSinceMs"
+>;
+
+/**
+ * The checks this device makes on a knock that names its account before it
+ * answers it: the verdict that sets the knock aside, or `null` when the knock
+ * is open and this device posts a presence note and goes on to
+ * {@link admissionVerdict}.
+ */
+export function knockScreen(input: KnockScreenInput): AdmissionVerdict | null {
   if (input.handled.has(input.knockId)) return "handled";
   if (input.keyHex === input.ownKeyHex) return "own-key";
   if (input.knockAtMs < input.watchingSinceMs) return "before-watching";
+  if (
+    input.listeningSinceMs !== undefined &&
+    input.knockAtMs < input.listeningSinceMs - STALE_KNOCK_AT_LISTEN_START_MS
+  ) {
+    return "stale";
+  }
   if (input.keyPackageAlreadyIn) return "already-admitted";
   if (input.lastAddedAtMs !== undefined && input.lastAddedAtMs >= input.knockAtMs) {
     return "already-admitted";
   }
+  return null;
+}
+
+/** The pure admission rule (see the module doc). Every running device that
+ *  passes it admits at once; the DS commit route picks one. */
+export function admissionVerdict(input: AdmissionInput): AdmissionVerdict {
+  const screened = knockScreen(input);
+  if (screened !== null) return screened;
   if (!input.listed) return "not-listed";
-  const others = input.roster.filter((m) => m.keyHex !== input.keyHex);
-  const lowest = others.reduce<{ leaf: number; keyHex: string } | null>(
-    (best, m) => (best === null || m.leaf < best.leaf ? m : best),
-    null,
-  );
-  const designated = lowest !== null && lowest.keyHex === input.ownKeyHex;
-  if (!designated && input.nowMs - input.knockAtMs < FALLBACK_ADMIT_AFTER_MS) return "not-mine-yet";
   const present = input.roster.some((m) => m.keyHex === input.keyHex);
   if (present && input.policyRequiresAttestation && !input.selfRemovalProofCovers) return "needs-attestation";
   return "admit";
@@ -260,6 +329,28 @@ export function shouldKnockAgain(state: RejoinState | null, nowMs: number): bool
 // The rejoining device's run, over ports
 // ----------------------------------------------------------------------------
 
+/** One answer on a rejoin rendezvous. */
+export type RejoinAnswer =
+  /** A device of the account is running and saw the knock. */
+  | { readonly kind: "present" }
+  | { readonly kind: "welcome"; readonly bytes: Uint8Array };
+
+/** The long poll on a rejoin rendezvous, open from creation. */
+export interface AnswerWatch {
+  /** The next answer not yet returned, or `null` when `deadlineMs` passes
+   *  with none while the rendezvous was read. Rejects when the wait ends
+   *  with no answer and a read failed during it: silence is only silence
+   *  when this device was listening. */
+  next(deadlineMs: number): Promise<RejoinAnswer | null>;
+  close(): void;
+}
+
+/** A knock built and ready to post. */
+export interface PreparedKnock {
+  readonly state: RejoinState;
+  readonly payload: Uint8Array;
+}
+
 /** What one rejoin attempt needs. */
 export interface RejoinPorts {
   /** Delete the local DeviceGroup state (snapshot and pending commit). */
@@ -269,38 +360,125 @@ export interface RejoinPorts {
   loadState(): Promise<RejoinState | null>;
   saveState(state: RejoinState): Promise<void>;
   /** Build a fresh joiner (DeviceGroup KeyPackage from the device identity)
-   *  and knock with it; resolves to the state to keep. */
-  knock(nowMs: number): Promise<RejoinState>;
-  /** Wait for the Welcome at `state`'s rendezvous until `deadlineMs`;
-   *  `null` on a timeout. */
-  awaitWelcome(state: RejoinState, deadlineMs: number): Promise<Uint8Array | null>;
+   *  and the knock payload. `null` when this device knows no username of
+   *  the account, so no sibling could match a knock. */
+  prepareKnock(nowMs: number): Promise<PreparedKnock | null>;
+  /** Open the long poll on `state`'s rendezvous. */
+  watch(state: RejoinState): AnswerWatch;
+  /** Post the knock. */
+  postKnock(knock: PreparedKnock): Promise<void>;
   /** Join from the Welcome with the joiner kept in `state` and persist the
    *  joined DeviceGroup (fail-closed). */
   join(state: RejoinState, welcome: Uint8Array): Promise<void>;
+  /** Found the DeviceGroup with this device as its only leaf (a root reset
+   *  of its journal) and persist it (fail-closed). */
+  found(): Promise<void>;
   clearState(): Promise<void>;
+  /** The knock's answer came `ms` after the knock was sent (`null`: none). */
+  noteAnswer(ms: number | null, kind: RejoinAnswer["kind"] | null): void;
   now(): number;
 }
 
+/** What one pass ended in. */
+export type RejoinOutcome =
+  /** A member again (its DeviceGroup is on disk). */
+  | "joined"
+  /** Nobody answered: this device founded the DeviceGroup (on disk). */
+  | "founded"
+  /** Answered, no Welcome before the re-knock time: call again. */
+  | "waiting";
+
 /**
- * One pass of the device side: drop the state (first pass only), make sure a
- * knock is out, wait for its Welcome until the re-knock time. `"joined"` when
- * the device is a member again (its DeviceGroup is on disk), `"waiting"`
- * when the caller should call again.
+ * One pass of the device side (see the module doc): drop the state (first
+ * pass only), resume a knock already out or knock, and then join, found or
+ * wait.
  */
-export async function rejoinOnce(ports: RejoinPorts, firstPass: boolean): Promise<"joined" | "waiting"> {
+export async function rejoinOnce(ports: RejoinPorts, firstPass: boolean): Promise<RejoinOutcome> {
   if (firstPass) {
     await ports.dropLocalState();
     await ports.publishDirectoryKeyPackage();
   }
-  let state = await ports.loadState();
-  if (shouldKnockAgain(state, ports.now())) {
-    state = await ports.knock(ports.now());
-    await ports.saveState(state);
+  const kept = await ports.loadState();
+  if (kept !== null && !shouldKnockAgain(kept, ports.now())) {
+    // A reload while a knock was out: an answer already on the rendezvous is
+    // read at once; none means the knock was never answered, so knock again.
+    const watch = ports.watch(kept);
+    try {
+      const answer = await watch.next(ports.now() + ANSWER_WINDOW_MIN_MS);
+      if (answer?.kind === "welcome") return await joinWith(ports, kept, answer.bytes);
+      if (answer?.kind === "present") return await awaitWelcome(ports, kept, watch);
+    } finally {
+      watch.close();
+    }
   }
-  if (state === null) return "waiting";
-  const welcome = await ports.awaitWelcome(state, state.knockedAtMs + REKNOCK_AFTER_MS);
-  if (welcome === null) return "waiting";
-  await ports.join(state, welcome);
+  const knock = await ports.prepareKnock(ports.now());
+  if (knock === null) return foundAlone(ports);
+  await ports.saveState(knock.state);
+  const watch = ports.watch(knock.state);
+  try {
+    const sentAt = ports.now();
+    await ports.postKnock(knock);
+    const rtt = ports.now() - sentAt;
+    const answer = await watch.next(ports.now() + answerWindowMs(rtt));
+    ports.noteAnswer(answer === null ? null : ports.now() - sentAt, answer?.kind ?? null);
+    if (answer === null) return await foundAlone(ports);
+    if (answer.kind === "welcome") return await joinWith(ports, knock.state, answer.bytes);
+    return await awaitWelcome(ports, knock.state, watch);
+  } finally {
+    watch.close();
+  }
+}
+
+async function foundAlone(ports: RejoinPorts): Promise<RejoinOutcome> {
+  await ports.found();
+  await ports.clearState();
+  return "founded";
+}
+
+/** A device answered: wait for its Welcome until the re-knock time. */
+async function awaitWelcome(ports: RejoinPorts, state: RejoinState, watch: AnswerWatch): Promise<RejoinOutcome> {
+  const deadline = state.knockedAtMs + REKNOCK_AFTER_MS;
+  for (;;) {
+    const answer = await watch.next(deadline);
+    if (answer === null) return "waiting";
+    if (answer.kind === "welcome") return joinWith(ports, state, answer.bytes);
+    // Another device saw the knock too; keep waiting.
+  }
+}
+
+async function joinWith(ports: RejoinPorts, state: RejoinState, welcome: Uint8Array): Promise<RejoinOutcome> {
+  try {
+    await ports.join(state, welcome);
+  } catch (err) {
+    // A Welcome this device cannot join from (or a write that failed): the
+    // next pass knocks afresh instead of reading the same Welcome again.
+    await ports.clearState().catch(() => undefined);
+    throw err;
+  }
   await ports.clearState();
   return "joined";
+}
+
+// ----------------------------------------------------------------------------
+// What a failed attempt logs
+// ----------------------------------------------------------------------------
+
+/** A short code for a rejoin failure, safe to log: no identifiers (long hex
+ *  or base64 runs are cut out, and the message is bounded). */
+export function rejoinFailureCode(err: unknown): string {
+  if (err === null || typeof err !== "object") return typeof err;
+  const e = err as { name?: unknown; message?: unknown; status?: unknown; clockSkewed?: unknown };
+  const name = typeof e.name === "string" ? e.name : "unknown";
+  if (typeof e.status === "number") {
+    return `${name} ${e.status}${e.clockSkewed === true ? " clock-skewed" : ""}`;
+  }
+  if (name === "DsNetworkError") return name;
+  const message = typeof e.message === "string" ? redactIdentifiers(e.message).slice(0, 120) : "";
+  return message.length === 0 ? name : `${name}: ${message}`;
+}
+
+/** `text` with every run that could be an identifier (16 or more hex digits,
+ *  or 20 or more base64 characters) replaced by `<id>`. */
+export function redactIdentifiers(text: string): string {
+  return text.replace(/[0-9a-fA-F]{16,}/g, "<id>").replace(/[A-Za-z0-9+/_=-]{20,}/g, "<id>");
 }

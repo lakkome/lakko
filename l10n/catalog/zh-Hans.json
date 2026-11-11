@@ -7765,10 +7765,6 @@
       "text": "另一台设备",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "让你登录。如果你已为此通行密钥开启该功能，还会找回你的聊天。",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "通行密钥",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "这些我都没有",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "如果你已为某个通行密钥开启恢复账号密钥。",
       "status": "machine"
     },
     "restore_identity.not_you": {

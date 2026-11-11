@@ -8316,7 +8316,7 @@
       "comment": "Recovery method: confirm from another signed-in device."
     },
     "recovery.method.passkey.sub": {
-      "text": "Logs you in. Brings back your chats too if you turned that on for this passkey.",
+      "text": "Logs you in. Brings back your chats too when the passkey can carry your keys.",
       "comment": "Subtitle of the passkey method on the \"Get back in\" screen. A passkey always signs in; it restores the chats only when the person chose that for the passkey in Settings.",
       "security_critical": true
     },
@@ -8843,7 +8843,7 @@
       "security_critical": true
     },
     "restore_identity.method.passkey.sub": {
-      "text": "If you turned on restoring keys for a passkey.",
+      "text": "If you have a passkey for this account.",
       "comment": "Subtitle of the passkey method on the \"Restore your keys\" screen. 'restoring keys' is the wording of the button settings.passkeys.keys.turn_on; no quotation marks.",
       "security_critical": true
     },

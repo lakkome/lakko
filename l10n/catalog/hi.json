@@ -7765,10 +7765,6 @@
       "text": "दूसरा डिवाइस",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "आपको लॉग इन कराती है। अगर आपने इस पासकी के लिए यह चालू किया था, तो आपकी चैट भी वापस लाती है।",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "पासकी",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "मेरे पास इनमें से कुछ नहीं है",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "अगर आपने किसी पासकी के लिए कुंजियाँ रिस्टोर करना चालू किया था।",
       "status": "machine"
     },
     "restore_identity.not_you": {

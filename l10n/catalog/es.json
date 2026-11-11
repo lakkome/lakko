@@ -7765,10 +7765,6 @@
       "text": "Otro dispositivo",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Inicia tu sesión. También recupera tus chats si lo activaste para esta llave de acceso.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Llave de acceso",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "No tengo nada de esto",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Si activaste la restauración de claves para una llave de acceso.",
       "status": "machine"
     },
     "restore_identity.not_you": {

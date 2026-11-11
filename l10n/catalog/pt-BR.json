@@ -7765,10 +7765,6 @@
       "text": "Outro dispositivo",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Faz você entrar. Também traz suas conversas de volta se você ativou isso para esta chave de acesso.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Chave de acesso",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "Não tenho nenhum destes",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Se você ativou a restauração das chaves da conta para uma chave de acesso.",
       "status": "machine"
     },
     "restore_identity.not_you": {

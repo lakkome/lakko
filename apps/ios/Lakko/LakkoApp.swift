@@ -724,6 +724,9 @@ struct LakkoApp: App {
                 // becoming active again sweeps at once, so an offer that
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
+                // ADR-0081 third amendment — only a device in the foreground
+                // listens for, and answers, a rejoining device's knock.
+                services.deviceGroupSync.setForeground(phase == .active)
                 if phase == .background {
                     // What the extension may need while the app is not
                     // running, written as it leaves.
@@ -771,6 +774,7 @@ struct LakkoApp: App {
             .task {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
+                services.deviceGroupSync.setForeground(scenePhase == .active)
                 // ADR-0080 — `onChange(of: scenePhase)` does not run for the
                 // initial value, so a cold launch installed no recogniser and
                 // took no foreground. Both are idempotent.

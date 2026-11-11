@@ -71,8 +71,8 @@ Choose how.
   [devices]  Another device                 >
              If you have one that is still signed in.
   [passkey]  Passkey                        >
-             Signs you in. Brings back your chats too if you
-             turned that on for this passkey.
+             Signs you in. Brings back your chats too when the
+             passkey can carry your keys.
   [key]      Recovery phrase                >
              Type your 12 words and choose a new password.
 

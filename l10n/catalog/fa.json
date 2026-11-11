@@ -7765,10 +7765,6 @@
       "text": "دستگاه دیگر",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "شما را وارد می‌کند. اگر این قابلیت را برای این کلید عبور روشن کرده باشید، گفتگوهایتان را هم برمی‌گرداند.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "کلید عبور",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "هیچ‌کدام از این‌ها را ندارم",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "اگر بازیابی کلیدهای حساب را برای یک کلید عبور روشن کرده‌اید.",
       "status": "machine"
     },
     "restore_identity.not_you": {

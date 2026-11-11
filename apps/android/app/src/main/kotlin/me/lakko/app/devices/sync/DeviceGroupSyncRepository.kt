@@ -204,10 +204,15 @@ public class DeviceGroupSyncRepository(
     /** ADR-0081 decision 4 — the sibling's admission record. */
     @Volatile private var admissions: AdmissionRecord? = null
 
-    /** When the knocks were last read, and the DS id of the last knock row
-     *  read this session. */
-    @Volatile private var lastKnockCheckAtMs: Long = 0L
+    /** The DS id of the last knock row the admission check handled this
+     *  session. */
     @Volatile private var knockCursor: Long = 0L
+
+    /** ADR-0081 third amendment — the knock listener read a knock the
+     *  admission check has not handled yet; [knockFetchNow] makes the poll's
+     *  next read immediate so the check runs at once. */
+    private val knocksPending = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val knockFetchNow = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** The folded state. Created lazily so constructing the repository never
      *  touches the native library. Every read-modify-republish runs under
@@ -422,19 +427,32 @@ public class DeviceGroupSyncRepository(
         // local add ([onLocalDeviceAdded]) keeps the one it already holds.
         if (accountIdentitySeed != null) {
             rootSigner = me.lakko.app.devices.DeviceGroupJournalAccess.rootOfSeed(accountIdentitySeed, groupId)
+        } else if (rootSigner == null) {
+            // A rejoin that ended in a founding starts with no seed in hand;
+            // the root of this journal comes from the stored account seed.
+            rootSigner = DeviceGroupJournalAccess.rootOf(applicationContext, accountIdB64, groupId)
         }
         installJournalSigner(groupId)
         installReachPublisher()
         val bound = sessionBinding.capture()
+        knocksPending.set(false)
+        knockFetchNow.set(false)
         pollJob = scope.launch {
-            claimJournalBestEffort(groupId, refounded = true)
-            runPollLoop(
-                bound = bound,
-                accountIdBytes = accountIdBytes,
-                accountIdB64 = accountIdB64,
-                groupId = groupId,
-                startCursor = startCursor,
-            )
+            // ADR-0081 third amendment — this device answers knocks while it
+            // shows; the listener ends with the poll loop.
+            val listener = launch { runKnockListener(bound, accountIdB64, groupId) }
+            try {
+                claimJournalBestEffort(groupId, refounded = true)
+                runPollLoop(
+                    bound = bound,
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                    groupId = groupId,
+                    startCursor = startCursor,
+                )
+            } finally {
+                listener.cancel()
+            }
         }
     }
 
@@ -2045,15 +2063,45 @@ public class DeviceGroupSyncRepository(
         }.getOrDefault(0L)
         var cursor = maxOf(startCursor, storedCursor)
         val durableCursor = JournalCursorTracker(cursor)
+        // ADR-0081 third amendment, point 5 — signed reads refused in a row.
+        var refusals = 0
         DsClient().use { ds ->
             while (currentCoroutineContextActive()) {
                 val result = try {
                     fetchOrKicked(ds, groupId, cursor) ?: continue
                 } catch (cancellation: CancellationException) {
                     throw cancellation
+                } catch (refused: me.lakko.app.ds.DsProofRefusedError) {
+                    if (refused.clockSkewed) {
+                        Log.w(LOG_TAG, "poll fetch refused: the device clock is off")
+                        delay(5000)
+                        continue
+                    }
+                    if (DeviceGroupJournalAccess.isFoundingUnconfirmed(applicationContext, accountIdB64)) {
+                        // This device's own founding is not claimed yet: claim
+                        // it (a root reset over the chain a gone group left).
+                        Log.w(LOG_TAG, "poll fetch refused before the founding was claimed; claiming")
+                        claimJournalBestEffort(groupId, refounded = true)
+                        delay(5000)
+                        continue
+                    }
+                    refusals += 1
+                    Log.w(LOG_TAG, "poll fetch refused ($refusals in a row)")
+                    val held = group.get() ?: return
+                    if (refusals >= REFUSALS_BEFORE_LOST &&
+                        RemovedDevice.rejoinAllowed(RemovedDevice.readActive { held.isActive() })
+                    ) {
+                        // The journal's chain is not this device's: it was
+                        // founded again while this device was not running.
+                        Log.w(LOG_TAG, "DeviceGroup journal refuses this device's chain; rejoining")
+                        enterRejoin(accountIdBytes, accountIdB64)
+                        return
+                    }
+                    delay(5000)
+                    continue
                 } catch (http: DsHttpError) {
                     if (http.status == 404) continue
-                    Log.w(LOG_TAG, "poll fetch http", http)
+                    Log.w(LOG_TAG, "poll fetch http ${http.status}")
                     delay(5000)
                     continue
                 } catch (_: DsNetworkError) {
@@ -2065,6 +2113,7 @@ public class DeviceGroupSyncRepository(
                     continue
                 }
 
+                refusals = 0
                 // The fetch answered, so the network works: send whatever of
                 // ours is still waiting.
                 flushPendingIfAny()
@@ -2385,10 +2434,23 @@ public class DeviceGroupSyncRepository(
                     enterRejoin(accountIdBytes, accountIdB64)
                     return
                 }
-                // At the head: a sibling reads the knocks (ADR-0081 decision 4).
-                val nowMs = System.currentTimeMillis()
-                if (drainedBatch && !commitPending && nowMs - lastKnockCheckAtMs >= KNOCK_CHECK_INTERVAL_MS) {
-                    lastKnockCheckAtMs = nowMs
+                // ADR-0081 third amendment, point 5 — the DS names an epoch
+                // below this handle's: the journal was founded again under it.
+                if (localEpoch != null &&
+                    isJournalReset(localEpoch, drainedBatch, result.latestEpoch) &&
+                    RemovedDevice.rejoinAllowed(RemovedDevice.readActive { held.isActive() })
+                ) {
+                    Log.w(
+                        LOG_TAG,
+                        "DeviceGroup journal below this device: local epoch $localEpoch, " +
+                            "DS epoch ${result.latestEpoch}; rejoining",
+                    )
+                    enterRejoin(accountIdBytes, accountIdB64)
+                    return
+                }
+                // At the head: admit the knocks the listener read (ADR-0081
+                // decision 4, third amendment: no timer, no designated admitter).
+                if (drainedBatch && !commitPending && knocksPending.getAndSet(false)) {
                     try {
                         // Not cancellable: an admission's commits reopen this
                         // runtime (which cancels this loop) and must finish.
@@ -2396,7 +2458,8 @@ public class DeviceGroupSyncRepository(
                     } catch (cancellation: CancellationException) {
                         throw cancellation
                     } catch (cause: Throwable) {
-                        Log.w(LOG_TAG, "DeviceGroup knock check failed (${cause.javaClass.simpleName})")
+                        knocksPending.set(true)
+                        Log.w(LOG_TAG, "DeviceGroup knock check failed (${rejoinFailureCode(cause)})")
                     }
                     if (!bound.isCurrent) return
                 }
@@ -2512,10 +2575,18 @@ public class DeviceGroupSyncRepository(
                 val outcome = rejoinOnce(ports, first)
                 first = false
                 if (outcome == RejoinPass.JOINED) break
+                if (outcome == RejoinPass.FOUND) {
+                    // ADR-0081 third amendment, point 4 — no device answered:
+                    // found the DeviceGroup here (a root reset of the chain the
+                    // gone devices left) and start at once.
+                    if (!bound.isCurrent || activeAccountIdB64.get() != accountIdB64) return
+                    if (foundAfterSilence(accountIdBytes, accountIdB64, seedState, accountIdentitySeed)) return
+                    delay(5000)
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (cause: Throwable) {
-                Log.w(LOG_TAG, "DeviceGroup rejoin attempt failed; trying again (${cause.javaClass.simpleName})")
+                Log.w(LOG_TAG, "DeviceGroup rejoin attempt failed; trying again (${rejoinFailureCode(cause)})")
                 delay(5000)
             }
         }
@@ -2523,6 +2594,81 @@ public class DeviceGroupSyncRepository(
         rejoinJob = null
         Log.i(LOG_TAG, "rejoined the account's DeviceGroup")
         openAndPoll(accountIdBytes, accountIdB64, seedState = seedState, accountIdentitySeed = accountIdentitySeed)
+    }
+
+    /** Found the DeviceGroup on this device after a knock nobody answered,
+     *  and follow it. `false` when the founding failed (the caller knocks
+     *  again). */
+    private fun foundAfterSilence(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        seedState: Boolean,
+        accountIdentitySeed: ByteArray?,
+    ): Boolean {
+        val seed = try {
+            me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+            )
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "founding after an unanswered knock: no device seed (${rejoinFailureCode(cause)})")
+            return false
+        }
+        val ensured = try {
+            DeviceGroupLifecycle.ensureDeviceGroup(
+                context = applicationContext,
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+                deviceIdentitySeed = seed,
+                found = true,
+            )
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "founding after an unanswered knock failed (${rejoinFailureCode(cause)})")
+            return false
+        } finally {
+            seed.fill(0)
+        }
+        Log.i(LOG_TAG, "no device answered the knock; DeviceGroup founded")
+        rejoinJob = null
+        adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
+        return true
+    }
+
+    /**
+     * Read a rejoin rendezvous until it holds an answer: a Welcome, or (with
+     * [acceptPresence]) a presence note. Runs until cancelled; network
+     * failures are retried.
+     */
+    private suspend fun readRendezvous(rendezvous: ByteArray, acceptPresence: Boolean): RendezvousAnswer {
+        var cursor = 0L
+        DsClient().use { ds ->
+            while (true) {
+                val result = try {
+                    ds.fetchRendezvous(rendezvous, after = cursor, waitSecs = KNOCK_LISTEN_WAIT_SECS)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (http: DsHttpError) {
+                    if (http.status != 404) Log.w(LOG_TAG, "rejoin rendezvous read: http ${http.status}")
+                    delay(250)
+                    continue
+                } catch (_: DsNetworkError) {
+                    delay(250)
+                    continue
+                }
+                if (result.messages.isEmpty()) continue
+                cursor = result.messages.maxOf { it.id }
+                val answer = rendezvousAnswer(result.messages.map { it.payload }) {
+                    uniffi.lakko_ffi_uniffi.isRejoinPresent(it)
+                }
+                when {
+                    answer is RendezvousAnswer.Welcome -> return answer
+                    answer == RendezvousAnswer.Present && acceptPresence -> return answer
+                    else -> continue
+                }
+            }
+        }
+        @Suppress("UNREACHABLE_CODE")
+        error("unreachable")
     }
 
     private fun rejoinPorts(accountIdBytes: ByteArray, accountIdB64: String): RejoinPorts = object : RejoinPorts {
@@ -2548,11 +2694,13 @@ public class DeviceGroupSyncRepository(
             )
         }
 
-        override suspend fun knock(nowMs: Long): RejoinState {
-            val loginHandle = loginHandleProvider?.invoke()
-                ?: throw IllegalStateException("no login handle for this account")
+        override fun hasLoginHandle(): Boolean = knockLoginHandle(accountIdB64) != null
+
+        override suspend fun knockAndListen(nowMs: Long): KnockAnswer {
+            val loginHandle = knockLoginHandle(accountIdB64)
+                ?: throw RejoinUnavailable("no-login-handle")
             val groupId = DeviceGroupLifecycle.groupId(applicationContext, accountIdB64)
-                ?: throw DeviceGroupLifecycle.NoAccountSeed()
+                ?: throw RejoinUnavailable("no-account-seed")
             val seed = me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
                 context = applicationContext, accountIdB64 = accountIdB64,
             )
@@ -2561,9 +2709,12 @@ public class DeviceGroupSyncRepository(
             } finally {
                 seed.fill(0)
             }
+            val rendezvous: ByteArray
+            val payload: ByteArray
+            val state: RejoinState
             try {
                 val keyPackage = joiner.createKeyPackage()
-                val rendezvous = me.lakko.app.devices.PairingCodec.generateRendezvousPseudonym()
+                rendezvous = me.lakko.app.devices.PairingCodec.generateRendezvousPseudonym()
                 // ADR-0081 amendment — the device identity's key IS this
                 // device's old DeviceGroup leaf key: it signs that its leaf may
                 // be replaced by this KeyPackage in the commit leaving the
@@ -2572,7 +2723,7 @@ public class DeviceGroupSyncRepository(
                 // attested-removal policy without a passkey. An unclaimed
                 // journal names no epoch: no proof.
                 val probeEpoch = DsClient().use { ds -> ds.knock(groupId, emptyList()) }.epoch
-                val payload = if (probeEpoch == null) {
+                payload = if (probeEpoch == null) {
                     me.lakko.app.devices.PairingCodec.buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
                 } else {
                     val proof = uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(
@@ -2583,7 +2734,7 @@ public class DeviceGroupSyncRepository(
                     )
                 }
                 val snapshot = joiner.snapshotStorage()
-                val state = try {
+                state = try {
                     RejoinState(
                         rendezvousB64 = b64e.encodeToString(rendezvous),
                         joinerSnapshotB64 = b64e.encodeToString(snapshot),
@@ -2592,21 +2743,44 @@ public class DeviceGroupSyncRepository(
                 } finally {
                     snapshot.fill(0)
                 }
-                // Kept BEFORE the knock: the joiner's provider is the only
-                // thing that can open the Welcome a sibling sends.
-                saveState(state)
-                DsClient().use { ds -> ds.knock(groupId, listOf(payload)) }
-                return state
             } finally {
                 joiner.close()
             }
+            // Kept BEFORE the knock: the joiner's provider is the only thing
+            // that can open the Welcome a sibling sends.
+            saveState(state)
+            // ADR-0081 third amendment, point 3 — the rendezvous is read
+            // before the knock goes out, the knock's own round trip is timed,
+            // and the answer is waited for max(4 x rtt, 1 s).
+            val answer = coroutineScope {
+                val reader = async { readRendezvous(rendezvous, acceptPresence = true) }
+                try {
+                    val sent = System.nanoTime()
+                    DsClient().use { ds -> ds.knock(groupId, listOf(payload)) }
+                    val knocked = System.nanoTime()
+                    val rttMs = (knocked - sent) / 1_000_000L
+                    val windowMs = rejoinAnswerWindowMs(rttMs)
+                    val got = withTimeoutOrNull(windowMs) { reader.await() }
+                    if (got == null) {
+                        Log.i(LOG_TAG, "rejoin knock: no answer in $windowMs ms (knock rtt $rttMs ms)")
+                    } else {
+                        val tookMs = (System.nanoTime() - knocked) / 1_000_000L
+                        val what = if (got is RendezvousAnswer.Welcome) "a Welcome" else "a presence note"
+                        Log.i(LOG_TAG, "rejoin knock: $what after $tookMs ms (knock rtt $rttMs ms, window $windowMs ms)")
+                    }
+                    got
+                } finally {
+                    reader.cancel()
+                }
+            }
+            return KnockAnswer(state, answer)
         }
 
         override suspend fun awaitWelcome(state: RejoinState, deadlineMs: Long): ByteArray? {
             val rendezvous = b64d.decode(state.rendezvousB64)
             val remaining = (deadlineMs - System.currentTimeMillis()).coerceIn(1L, REKNOCK_AFTER_MS)
-            val outcome = me.lakko.app.devices.WelcomeCourier.pollForWelcome(rendezvous, timeoutMillis = remaining)
-            return (outcome as? me.lakko.app.devices.WelcomeCourier.WelcomeOutcome.Received)?.welcomeBytes
+            val got = withTimeoutOrNull(remaining) { readRendezvous(rendezvous, acceptPresence = false) }
+            return (got as? RendezvousAnswer.Welcome)?.bytes
         }
 
         override suspend fun join(state: RejoinState, welcome: ByteArray) {
@@ -2719,6 +2893,117 @@ public class DeviceGroupSyncRepository(
         }
 
     /**
+     * ADR-0081 third amendment, points 1 and 2 — while this device shows, a
+     * long poll on its DeviceGroup's knocks. A knock naming this account's
+     * login handle gets a presence note on its rendezvous at once, before any
+     * directory lookup, so the knocking device learns in one round trip that
+     * a device is running; the admission check then runs at the poll's next
+     * pass. In the background (or not running) this device does not answer.
+     */
+    private suspend fun runKnockListener(bound: me.lakko.app.Binding, accountIdB64: String, groupId: ByteArray) {
+        var cursor = 0L
+        var firstRead = true
+        val answered = HashSet<Long>()
+        DsClient().use { ds ->
+            while (currentCoroutineContextActive() && bound.isCurrent) {
+                appForeground.first { it }
+                val loginHandle = knockLoginHandle(accountIdB64)
+                if (loginHandle == null) {
+                    delay(5000)
+                    continue
+                }
+                val result = try {
+                    coroutineScope {
+                        val wentAway = async { appForeground.first { !it } }
+                        val fetch = async {
+                            ds.fetchKnocks(
+                                groupId,
+                                after = cursor,
+                                waitSecs = if (firstRead) 0 else KNOCK_LISTEN_WAIT_SECS,
+                            )
+                        }
+                        val got = select<me.lakko.app.ds.FetchResult?> {
+                            fetch.onAwait { it }
+                            wentAway.onAwait { null }
+                        }
+                        wentAway.cancel()
+                        fetch.cancel()
+                        got
+                    }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "DeviceGroup knock listen failed (${rejoinFailureCode(cause)})")
+                    delay(5000)
+                    continue
+                } ?: continue
+                if (!bound.isCurrent) return
+                val backlog = firstRead
+                firstRead = false
+                if (result.messages.isEmpty()) continue
+                cursor = result.messages.maxOf { it.id }
+                val ownKey = runCatching { identity.get()?.signaturePublicKey() }.getOrNull()
+                val nowMs = System.currentTimeMillis()
+                var forThisAccount = false
+                for (knock in result.messages) {
+                    if (!answered.add(knock.id)) continue
+                    val decoded = try {
+                        me.lakko.app.devices.PairingCodec.parsePairingQrPayload(knock.payload, loginHandle)
+                    } catch (_: Throwable) {
+                        continue // not a payload for this account
+                    }
+                    forThisAccount = true
+                    val knockingKey = runCatching {
+                        uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage)
+                    }.getOrNull()
+                    if (knockingKey != null && ownKey != null && knockingKey.contentEquals(ownKey)) continue
+                    if (backlog && !shouldAnswerBacklogKnock(parseMs(knock.createdAt), nowMs)) continue
+                    try {
+                        DsClient().use {
+                            it.publishRendezvous(decoded.rendezvousPseudonym, uniffi.lakko_ffi_uniffi.composeRejoinPresent())
+                        }
+                        Log.i(LOG_TAG, "answered a knock with a presence note")
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "presence note not posted (${rejoinFailureCode(cause)})")
+                    }
+                }
+                if (answered.size > MAX_HANDLED_KNOCKS) {
+                    val keep = answered.sorted().takeLast(MAX_HANDLED_KNOCKS)
+                    answered.clear()
+                    answered.addAll(keep)
+                }
+                if (forThisAccount) {
+                    knocksPending.set(true)
+                    knockFetchNow.set(true)
+                    headKick.trySend(Unit)
+                }
+            }
+        }
+    }
+
+    /**
+     * This account's login handle for a knock: the session's, else the one
+     * the account's own-username register names (a passkey restore lands
+     * with no username in the session, and the register the backup restored
+     * goes live only once this runtime runs).
+     */
+    private fun knockLoginHandle(accountIdB64: String): ByteArray? {
+        loginHandleProvider?.invoke()?.let { return it }
+        val name = synchronized(stateLock) { runCatching { syncedState?.ownUsername() }.getOrNull() }
+            ?: runCatching {
+                DeviceGroupSnapshotStore.getSnapshot(
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
+                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                )?.let { bytes -> SyncedState.fromBytes(bytes).use { it.ownUsername() } }
+            }.getOrNull()
+        val trimmed = name?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching { uniffi.lakko_ffi_uniffi.loginHandle(trimmed) }.getOrNull()
+    }
+
+    /**
      * A sibling's side: read the DeviceGroup's knocks and admit each one
      * [admissionVerdict] allows — replace the device's previous leaf, if it
      * is still in the roster, by its KeyPackage in one commit carrying its
@@ -2729,10 +3014,11 @@ public class DeviceGroupSyncRepository(
         val g = group.get() ?: return
         val id = identity.get() ?: return
         if (admissions == null) return
-        val loginHandle = loginHandleProvider?.invoke() ?: return
+        val loginHandle = knockLoginHandle(accountIdB64) ?: return
         val knocks = DsClient().use { ds -> ds.fetchKnocks(g.groupId(), after = knockCursor) }
         if (!bound.isCurrent || knocks.messages.isEmpty()) return
-        knockCursor = knocks.messages.last().id
+        // A page that was full: the next check reads on.
+        if (knocks.hasMore) knocksPending.set(true)
         val roster = runCatching { g.devices() }.getOrNull()?.map {
             RosterMember(it.leafIndex, hexOf(it.signaturePublicKey))
         } ?: return
@@ -2743,6 +3029,9 @@ public class DeviceGroupSyncRepository(
         var directory: Map<String, ByteArray>? = null
         for (knock in knocks.messages) {
             if (!bound.isCurrent) return
+            // Advanced knock by knock: an admission returns early (its commit
+            // reopens this runtime), and the knocks after it are read again.
+            knockCursor = maxOf(knockCursor, knock.id)
             val decoded = try {
                 me.lakko.app.devices.PairingCodec.parsePairingQrPayload(knock.payload, loginHandle)
             } catch (_: Throwable) {
@@ -2842,8 +3131,13 @@ public class DeviceGroupSyncRepository(
                 admissions = admissions?.noteAdded(keyHex, nowMs)?.noteHandled(knock.id)
                 saveAdmissions(accountIdB64)
                 Log.i(LOG_TAG, "a device of this account was admitted again")
+            } else {
+                // Another running device took the epoch (409), or the commit
+                // was not needed: nothing of this one is on the DS.
+                Log.i(LOG_TAG, "a knock was not admitted here (another device took the epoch, or nothing to do)")
             }
             // The commits reopened this runtime; the next pass re-reads.
+            if (knocks.messages.last().id > knock.id) knocksPending.set(true)
             return
         }
     }
@@ -2888,7 +3182,7 @@ public class DeviceGroupSyncRepository(
     /** One journal read: at once while a head waiter exists, else a long poll
      *  that a new waiter cuts short (`null`: read again at once). */
     private suspend fun fetchOrKicked(ds: DsClient, groupId: ByteArray, after: Long) =
-        if (headWaiters.get() > 0) {
+        if (headWaiters.get() > 0 || knockFetchNow.getAndSet(false)) {
             ds.fetchGroup(groupId = groupId, after = after, limit = null, waitSecs = 0)
         } else {
             coroutineScope {
@@ -3138,7 +3432,8 @@ public class DeviceGroupSyncRepository(
         group.set(null)
         handleGeneration = null
         admissions = null
-        lastKnockCheckAtMs = 0L
+        knocksPending.set(false)
+        knockFetchNow.set(false)
         knockCursor = 0L
         rootSigner = null
         reachPublisher?.let { installed ->
@@ -3208,6 +3503,15 @@ public class DeviceGroupSyncRepository(
          *  the app root; `null` for a guest, who has no other device. */
         @Volatile
         public var loginHandleProvider: (() -> ByteArray?)? = null
+
+        /** ADR-0081 third amendment — whether the app is showing. A device
+         *  answers knocks only then (set from `MainActivity`). */
+        private val appForeground: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+        /** The app came to the foreground ([shown]) or left it. */
+        public fun setAppForeground(shown: Boolean) {
+            appForeground.value = shown
+        }
 
         /** ADR-0081 decision 4 — publish this device's directory KeyPackage
          *  (a rejoining device's first step: its signed device binding is
@@ -3355,3 +3659,21 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
  */
 private suspend fun currentCoroutineContextActive(): Boolean =
     kotlinx.coroutines.currentCoroutineContext().isActive
+
+/** A rejoin that cannot be made on this device right now, with a fixed code
+ *  (never an identifier). */
+internal class RejoinUnavailable(val code: String) : IllegalStateException("rejoin unavailable: $code")
+
+/**
+ * What a rejoin or knock failure was, for a log line: the class and, for the
+ * DS, the status and its error code. Never the message (a DS error's names
+ * the journal's id) and never an identifier.
+ */
+internal fun rejoinFailureCode(cause: Throwable): String = when (cause) {
+    is RejoinUnavailable -> "unavailable ${cause.code}"
+    is me.lakko.app.ds.DsProofRefusedError ->
+        if (cause.clockSkewed) "proof refused, device clock off" else "proof refused"
+    is DsHttpError -> listOfNotNull("http ${cause.status}", dsErrorCode(cause.body)).joinToString(" ")
+    is DsNetworkError -> "network ${cause.cause?.javaClass?.simpleName ?: "error"}"
+    else -> cause.javaClass.simpleName.ifEmpty { "error" }
+}

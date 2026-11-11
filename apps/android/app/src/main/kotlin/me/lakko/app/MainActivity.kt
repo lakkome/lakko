@@ -433,6 +433,9 @@ class MainActivity : ComponentActivity() {
         me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
         me.lakko.app.devices.DeviceCardCenter.foreground = true
+        // ADR-0081 third amendment - a device answers DeviceGroup knocks only
+        // while it shows.
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.setAppForeground(true)
         // ADR-0060 §4 — the scheduled `fof` rotation fires when the app is
         // active, never from a background job of its own.
         me.lakko.app.reach.ReachManager.peek()?.onAppActive()
@@ -467,6 +470,7 @@ class MainActivity : ComponentActivity() {
         super.onPause()
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(false)
         me.lakko.app.devices.DeviceCardCenter.foreground = false
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.setAppForeground(false)
     }
 
     override fun onNewIntent(intent: Intent) {

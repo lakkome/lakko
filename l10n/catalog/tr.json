@@ -7765,10 +7765,6 @@
       "text": "Başka bir cihaz",
       "status": "machine"
     },
-    "recovery.method.passkey.sub": {
-      "text": "Giriş yapmanızı sağlar. Bu geçiş anahtarı için açtıysanız sohbetlerinizi de geri getirir.",
-      "status": "machine"
-    },
     "recovery.method.passkey.title": {
       "text": "Geçiş anahtarı",
       "status": "machine"
@@ -8243,10 +8239,6 @@
     },
     "restore_identity.lost.summary": {
       "text": "Bunların hiçbiri bende yok",
-      "status": "machine"
-    },
-    "restore_identity.method.passkey.sub": {
-      "text": "Bir geçiş anahtarı için hesap anahtarlarını geri yüklemeyi açtıysanız.",
       "status": "machine"
     },
     "restore_identity.not_you": {
