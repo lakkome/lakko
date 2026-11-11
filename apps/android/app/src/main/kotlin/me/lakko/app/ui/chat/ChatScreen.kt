@@ -3581,7 +3581,11 @@ internal fun Composer(
                     placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = false,
                     maxLines = 5,
-                    enabled = !sending,
+                    // Not disabled while a message is on its way: the draft was
+                    // cleared when it was sent, and a disabled field loses the
+                    // focus, so the keyboard closed after every message and what
+                    // was typed next went nowhere (base scenario 17, seen
+                    // 2026-11-11). Send stays off until the message is out.
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -171,6 +172,10 @@ internal fun AddMembersScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // The Scaffold's safeDrawing padding already holds the keyboard;
+                // without consuming it, imePadding subtracts the keyboard twice and
+                // the list under a picked chip is left a few pixels tall.
+                .consumeWindowInsets(padding)
                 .imePadding(),
         ) {
             OutlinedTextField(
@@ -287,7 +292,9 @@ private fun PickRow(
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.titleMedium)
-            line?.let {
+            // A person with no display name is titled "@username"; the line would
+            // repeat it.
+            line?.takeIf { it != name }?.let {
                 Text(
                     it,
                     style = MaterialTheme.typography.bodySmall,

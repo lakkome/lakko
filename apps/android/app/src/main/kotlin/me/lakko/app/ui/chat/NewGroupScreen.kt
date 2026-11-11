@@ -293,7 +293,9 @@ public fun NewGroupScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(resolved.primary, style = MaterialTheme.typography.titleMedium)
                                 val line = when {
-                                    canPick -> resolved.verifiedUsername?.let { "@$it" }
+                                    // A contact with no display name is titled "@username"; the
+                                    // line would repeat it.
+                                    canPick -> resolved.verifiedUsername?.let { "@$it" }?.takeIf { it != resolved.primary }
                                     else -> t("chats.new_group.accept_again")
                                 }
                                 line?.let {

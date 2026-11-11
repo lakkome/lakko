@@ -137,6 +137,10 @@ export default function NewGroup(): JSX.Element {
     setPicked(next);
   };
   const labelOf = (c: AcceptedContact): string => profiles.resolve(c.signaturePubkeyB64).name;
+  const usernameLineOf = (c: AcceptedContact): string | null => {
+    const username = profiles.resolve(c.signaturePubkeyB64).username;
+    return username !== null && username !== labelOf(c) ? username : null;
+  };
 
   /** UX 3.1 — Create is enabled when the @name is well formed and, if Public,
    *  there is a name. Nobody has to be picked. */
@@ -441,8 +445,13 @@ export default function NewGroup(): JSX.Element {
                   <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} personKey={c.signaturePubkeyB64} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{labelOf(c)}</span>
-                    <Show when={!addable(c)}>
-                      <span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>
+                    <Show
+                      when={addable(c)}
+                      fallback={<span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>}
+                    >
+                      {/* The username as Add members, iOS and Android show it; not
+                          when the title already is the username. */}
+                      <Show when={usernameLineOf(c)}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
                     </Show>
                   </div>
                 </label>
