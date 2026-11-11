@@ -50,6 +50,12 @@ private struct LakkoLongPressMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // The press that opened the menu must not also reach the control it
+            // started on: without this, a long press on a chat row opened the
+            // menu AND the chat when the finger lifted (base scenario 29, seen
+            // 2026-11-11). The same rule as `MessageMenuHost`. Inside the
+            // gesture and the sheet, so the menu's own rows stay enabled.
+            .disabled(shown != nil)
             .simultaneousGesture(
                 LongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds).onEnded { _ in
                     let list = items()

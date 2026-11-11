@@ -2509,6 +2509,12 @@ html[data-open-in-app] .lk-feed-import {
   margin: 4px 6px;
   background: var(--surface-border);
 }
+/* A separator with nothing above it (a channel row's menu opens on Add to
+   folder) draws a stray line; base scenario 29, 2026-11-11. */
+.lk-menu > .lk-menu-sep:first-child,
+.lk-menu > .lk-menu-subanchor:first-child > .lk-menu-sep:first-child {
+  display: none;
+}
 
 /* A selectable contact row (New group). */
 .lk-row.pick {

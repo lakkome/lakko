@@ -87,7 +87,8 @@ class ChannelTimelineTest {
 
     @Test
     fun subscriberBandsAreTheDirectorysBands() {
-        assertEquals("7", subscriberBand(7))
+        assertEquals("<10", subscriberBand(7))
+        assertEquals("<10", subscriberBand(1))
         assertEquals("10+", subscriberBand(10))
         assertEquals("100+", subscriberBand(450))
         assertEquals("1k+", subscriberBand(1_000))

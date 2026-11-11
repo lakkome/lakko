@@ -140,5 +140,7 @@ public fun subscriberBand(count: Long): String = when {
     count >= 1_000 -> "1k+"
     count >= 100 -> "100+"
     count >= 10 -> "10+"
-    else -> count.toString()
+    // The directory's first band (services/channels BANDS), as iOS and web show
+    // it: an exact count read "1 subscribers" (base scenario 29, 2026-11-11).
+    else -> "<10"
 }
