@@ -293,7 +293,15 @@ export interface ChatListSummary {
 export function summarizeGroupSlot(
   slot: PersistedGroup | undefined,
   syncedReadUpTo: bigint | null,
+  ownPersonKeyB64: string | null = null,
 ): ChatListSummary {
+  // A message this account sent from another of its devices arrives as an
+  // incoming row; the timeline draws it as the person's own by its author
+  // key, and so does the list: "You: ..." and never unread (base scenario
+  // 33, 2026-11-11: the list read "Ada Two: ..." for the person's own line).
+  const fromSelf = (m: PersistedMessage): boolean =>
+    m.direction === "outgoing" ||
+    (ownPersonKeyB64 !== null && m.direction === "incoming" && m.authorKeyB64 === ownPersonKeyB64);
   const messages = slot?.messages ?? [];
   let readUpTo: bigint | null = syncedReadUpTo;
   if (slot?.lastViewedMessageId !== undefined) {
@@ -310,7 +318,7 @@ export function summarizeGroupSlot(
   const historyThrough = floor === undefined ? null : BigInt(floor);
   let unread = 0;
   for (const m of messages) {
-    if (m.direction !== "incoming") continue;
+    if (m.direction !== "incoming" || fromSelf(m)) continue;
     const id = idOf(m);
     if (id === null) continue;
     if (historyThrough !== null && id <= historyThrough) continue;
@@ -330,10 +338,10 @@ export function summarizeGroupSlot(
   return {
     unread,
     preview: last === undefined ? null : previewText(last),
-    previewIsOwn: last?.direction === "outgoing",
+    previewIsOwn: last !== undefined && fromSelf(last),
     lastAt: last?.createdAt ?? null,
     lastAuthorKeyB64:
-      last !== undefined && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
+      last !== undefined && !fromSelf(last) && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
         ? last.authorKeyB64
         : null,
   };

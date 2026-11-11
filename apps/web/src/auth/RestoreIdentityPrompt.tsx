@@ -303,7 +303,11 @@ export default function RestoreIdentityPrompt(): JSX.Element {
               </Match>
               <Match when={picked() === "device"}>
                 <div class="lk-stack">
-                  <p class="lk-muted">{t("restore_identity.device_intro")}</p>
+                  {/* With the account known the panel asks at once and says
+                      the same in the spec's words; the intro would repeat it. */}
+                  <Show when={(account()?.username.trim().length ?? 0) === 0}>
+                    <p class="lk-muted">{t("restore_identity.device_intro")}</p>
+                  </Show>
                   <Show when={(account()?.username.trim().length ?? 0) === 0}>
                     <div>
                       <UsernameField
@@ -316,6 +320,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                   <RestoreViaDevicePanel
                     prepare={prepareDeviceFlow}
                     requestHandle={() => pairingHandle}
+                    autoStart={(account()?.username.trim().length ?? 0) > 0}
                     onRestored={async (outcome) => {
                       // The panel disposes the flow only after this resolves,
                       // so the anonymous join is still alive for its persist.

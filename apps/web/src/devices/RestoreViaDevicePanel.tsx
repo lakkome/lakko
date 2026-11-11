@@ -23,7 +23,7 @@ import { isAbandoned } from "../auth/binding-epoch";
 import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-copy";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
-import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, Switch, Match, type JSX } from "solid-js";
 import { BrandedQr } from "../ui/BrandedQr";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { AuthClient, AuthHttpError } from "../auth/client";
@@ -90,6 +90,13 @@ export default function RestoreViaDevicePanel(props: {
    *  never by an account id. Evaluated after `prepare()`. `null` keeps the
    *  QR-only behaviour. */
   readonly requestHandle?: () => Uint8Array | null;
+  /** Ask the other device at once, with no Start press: for a device already
+   *  signed in as the account, whose name nobody has to type first
+   *  (`docs/ux/identity-recovery.md` section 3: choosing Another device is
+   *  the request). Base scenario 33, 2026-11-11: an extra "Show pairing
+   *  code" press sent nothing until pressed, and the signed-in device
+   *  stayed silent. */
+  readonly autoStart?: boolean;
 }): JSX.Element {
   type State =
     | { kind: "idle" }
@@ -364,6 +371,10 @@ export default function RestoreViaDevicePanel(props: {
       s.abort.abort();
     }
   }
+
+  onMount(() => {
+    if (props.autoStart === true && props.disabled !== true) void start();
+  });
 
   onCleanup(() => {
     disposed = true;

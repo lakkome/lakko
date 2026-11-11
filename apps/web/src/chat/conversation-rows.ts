@@ -190,7 +190,8 @@ export function createConversationRows() {
     );
     const syncedReadUpTo =
       upTo === null ? null : upTo === "all" ? BigInt(Number.MAX_SAFE_INTEGER) : BigInt(upTo);
-    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+    const own = ownPersonKeyB64(chats.identity());
+    const summary = summarizeGroupSlot(logSlots()[hex], syncedReadUpTo, own);
     if (summary.preview !== null || summary.lastAt !== null) return summary;
     // A successor nothing was said in yet: the row keeps the last line and
     // the place of the conversation's earlier part, so it neither goes blank
@@ -203,6 +204,7 @@ export function createConversationRows() {
     const earlier = summarizeGroupSlot(
       logSlots()[syncGroupIdHex(previous.group.groupId)],
       BigInt(Number.MAX_SAFE_INTEGER),
+      own,
     );
     return { ...earlier, unread: summary.unread };
   }

@@ -173,6 +173,21 @@ public final class ProfileDirectory: ObservableObject {
         return try setOwnProfile(displayName: input, avatar: avatar, accountIdB64: account)
     }
 
+    /// ADR-0076 — the username is part of the profile, so a rename is a new
+    /// profile: the stored name and photo saved again with a fresh stamp.
+    /// With the old stamp every receiver took the republished envelope for
+    /// one it already held, and a rename never reached a contact or a group
+    /// (base scenario 3, 2026-11-11; Android re-stamps the same way).
+    public func restampOwnProfile() {
+        guard let account = accountIdB64 else { return }
+        let own = ownStore.load(accountIdB64: account)
+        do {
+            try setOwnProfile(displayName: own?.displayName ?? "", avatar: own?.avatar, accountIdB64: account)
+        } catch {
+            NSLog("ADR-0076: the own profile was not re-stamped after a rename")
+        }
+    }
+
     /// ADR-0084 — set the own display name and profile photo together, as one
     /// new profile with a fresh stamp (a new or removed photo is an update
     /// exactly like a new name). Throws ``DisplayNameRuleViolation``.

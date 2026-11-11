@@ -450,6 +450,7 @@ struct LakkoApp: App {
         // the member cards (the reach sync's inputs changed).
         auth.onUsernameRenamed = { [weak auth, weak chat] account, certificate in
             ProfileDirectory.shared.activate(accountIdB64: account.accountIdB64, username: account.username)
+            ProfileDirectory.shared.restampOwnProfile()
             ReachCenter.shared.setOwnUsernameCertificate(certificate)
             let token = auth?.identitySecrets?.sessionToken
             Task { @MainActor in

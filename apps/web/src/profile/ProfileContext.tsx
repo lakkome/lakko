@@ -756,6 +756,16 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     async usernameClaimed(certificate) {
       if (certificate !== null) ownCertSlot.put(accountId(), certificate);
       else await ensureOwnCertificate();
+      // The username is part of the profile, so a new one is a new profile:
+      // re-stamp the saved fields. With the old stamp every receiver took the
+      // republished envelope for one it already held, and a rename never
+      // reached a contact or a group (base scenario 3, 2026-11-11).
+      const account = accountId();
+      if (account !== null) {
+        const mine = ownProfile();
+        saveOwnProfileFields(account, { displayName: mine.displayName, avatar: mine.avatar }, Date.now());
+        setOwnProfileTick((t) => t + 1);
+      }
       bump();
       ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));

@@ -135,7 +135,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
       const g = c.head;
       const hex = syncGroupIdHex(g.group.groupId);
       const kind = conversationKindOf(g.group);
-      const summary = summarizeGroupSlot(logSlots()[hex], null);
+      const summary = summarizeGroupSlot(logSlots()[hex], null, ownPersonKeyB64(chats.identity()));
       const line = previewLine({
         preview: summary.preview,
         isOwn: summary.previewIsOwn,
