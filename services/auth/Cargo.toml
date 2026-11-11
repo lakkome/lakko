@@ -115,6 +115,10 @@ lakko-call-jwt.workspace = true
 # `webauthn_states` table between the two-step request pair —
 # webauthn-rs's defaults assume in-memory state which doesn't
 # survive across axum requests.
+# The option types webauthn-rs builds (already in the tree through it, same
+# version): passkey registration asks for a discoverable credential, which
+# webauthn-rs's passkey builder does not (see `require_discoverable`).
+webauthn-rs-proto = "=0.5.5"
 webauthn-rs = { version = "0.5", features = [
     # Park PasskeyRegistration / PasskeyAuthentication state in the
     # `webauthn_states` row between /start and /finish. Required

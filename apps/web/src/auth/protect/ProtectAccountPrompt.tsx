@@ -113,7 +113,7 @@ export default function ProtectAccountPrompt(): JSX.Element {
           />
         </Match>
         <Match when={picked() === "passkey"}>
-          {/* The existing passkey creation, with its own keys choice, under
+          {/* The existing passkey creation, which stores the keys for it, under
               the sign-up's proof; then back to the step. */}
           <PasskeyOffer standalone onAdded={() => setHasPasskey(true)} onDone={() => setPicked(null)} />
         </Match>

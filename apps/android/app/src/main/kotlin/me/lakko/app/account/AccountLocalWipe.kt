@@ -232,6 +232,8 @@ public object AccountLocalWipe {
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
         Step("group-settings") { ctx, acct -> me.lakko.app.chat.GroupSettingsStore.deleteAccount(ctx, acct) },
         Step("requests-sent") { ctx, acct -> me.lakko.app.chat.RequestsSentStore.deleteAccount(ctx, acct) },
+        // UX 10.2 - the passkeys this device learned cannot carry keys.
+        Step("passkeys-no-prf") { ctx, acct -> me.lakko.app.webauthn.PasskeyNoPrfStore.deleteAccount(ctx, acct) },
         Step("unseen-reactions") { ctx, acct -> me.lakko.app.chat.UnseenReactions.deleteAccount(ctx, acct) },
         Step("conversation-joined") { ctx, acct -> me.lakko.app.chat.ConversationJoinedStore.deleteAccount(ctx, acct) },
         // ADR-0073 "Phase 2 revised" — what an accepted reset of a contact

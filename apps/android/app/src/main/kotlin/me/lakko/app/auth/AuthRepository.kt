@@ -5039,7 +5039,7 @@ public class AuthRepository(
         val parked = pendingRecovery.get()
         val assertion = runPasskeyCeremony(
             activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
+            accountIdB64Url = me.lakko.app.webauthn.passkeyStartAccountId(target.accountIdBytes),
             wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
         )
         try {
@@ -6066,7 +6066,7 @@ public class AuthRepository(
         )
         val assertion = runPasskeyCeremony(
             activityContext,
-            accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
+            accountIdB64Url = me.lakko.app.webauthn.passkeyStartAccountId(pending.accountIdBytes),
             wipes = wipes,
         )
         try {
@@ -6107,9 +6107,9 @@ public class AuthRepository(
     }
 
     /**
-     * "Turn on" for one passkey: store the account's keys for it, sealed
-     * under the passkey's own secret. Opt-in, per passkey; nothing is stored
-     * unless the person chose this. The rule is
+     * Store the account's keys for one passkey, sealed under the passkey's
+     * own secret (UX 10.2): right after the passkey is created, and from its
+     * row's "Restore keys with this passkey". There is no choice. The rule is
      * [me.lakko.app.webauthn.turnOnPasskeyKeys]; this supplies the device's
      * phrase and seed, the limited ceremony, and the seal + upload. The
      * passkey's secret never leaves this device.
@@ -6157,16 +6157,6 @@ public class AuthRepository(
         )
     }
 
-    /** "Stop restoring keys": delete what is stored for one passkey. It then
-     *  only signs in; keys already restored on other devices stay there. */
-    public suspend fun stopPasskeyKeys(credentialIdB64: String): Boolean {
-        val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError(
-            "no session",
-            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
-        )
-        return authClientFactory().use { it.passkeyVaultDelete(secrets.sessionToken, credentialIdB64) }
-    }
-
     /** Run the passkey ceremony (discoverable when [accountIdB64Url] is
      *  `null`, else limited to that account's passkeys), asking for the PRF
      *  evaluation that protects the keys. Failures are rethrown with the
@@ -6209,11 +6199,7 @@ public class AuthRepository(
     }
 
     private fun accountIdOfAssertion(assertion: PasskeyLoginResult): ByteArray {
-        val bytes = try {
-            base64UrlDecodeNoPad(assertion.accountIdB64)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
+        val bytes = me.lakko.app.webauthn.passkeyFinishAccountId(assertion.accountIdB64)
         if (bytes == null || bytes.size != ACCOUNT_ID_LENGTH) {
             throw AuthClientArgError(
                 "malformed account id in the passkey sign-in",

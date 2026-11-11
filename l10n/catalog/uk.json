@@ -5109,10 +5109,6 @@
       "text": "Посилання-запрошення та посилання на дзвінок, створені раніше, перестануть працювати. Створіть нові.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Ви отримаєте нову фразу відновлення. Стара перестане працювати.",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "Цей браузер або пристрій зараз не може створити ключ доступу.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Увімкнути відновлення ключів облікового запису",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Якщо залишити вимкненим, ключ доступу дає змогу лише увійти. Ключі облікового запису відновлюються за фразою відновлення або з іншого пристрою.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Якщо ввімкнути, цей ключ доступу сам зможе перенести ключі вашого облікового запису на новий пристрій. Ключі доступу зазвичай синхронізуються через Apple, Google або менеджер паролів. Той, хто отримає доступ до вашого облікового запису Apple, Google або менеджера паролів, зможе читати ваші майбутні повідомлення й діяти від вашого імені.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "Скасовано. Цей ключ доступу й далі дає змогу лише увійти.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "Тепер цей ключ доступу відновлює ключі облікового запису.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Відповів інший ключ доступу. Спробуйте ще раз і виберіть той ключ доступу, для якого ви це вмикаєте.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Ця фраза відновлення не належить до цього облікового запису. Нічого не змінено.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Це можна змінити пізніше для кожного ключа доступу.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "З цим ключем доступу можна увійти, але на цьому пристрої та з цим постачальником ключів доступу він не може зберігати ключі облікового запису. Збережіть фразу відновлення.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Введіть фразу відновлення, щоб увімкнути це.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Лише вхід",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Дозволити цьому ключу доступу відновлювати ключі облікового запису?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Увімкнути",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Лише вхід",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Входьте за допомогою Touch ID, Face ID або апаратного ключа замість пароля. Ключ доступу також може відновлювати ключі облікового запису на новому пристрої, якщо ви це ввімкнете. Фраза відновлення теж завжди працює.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Входьте за відбитком пальця, обличчям чи блокуванням екрана або з апаратним ключем замість пароля. Ключ доступу також може відновлювати ключі облікового запису на новому пристрої, якщо ви це ввімкнете. Фраза відновлення теж завжди працює.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "Ваші ключі доступу було видалено під час скидання ключів облікового запису. Додайте ключ доступу, щоб знову входити за допомогою Face ID, Touch ID або відбитка пальця.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Вимкнути відновлення ключів облікового запису",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Цей ключ доступу даватиме змогу лише увійти. Ключі облікового запису, уже відновлені на інших пристроях, залишаться там.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Тепер цей ключ доступу дає змогу лише увійти.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Вимкнути відновлення ключів облікового запису для цього ключа доступу?",
       "status": "machine"
     },
     "settings.passkeys.title": {

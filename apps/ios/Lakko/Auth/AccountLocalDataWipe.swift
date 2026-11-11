@@ -164,6 +164,7 @@ enum AccountLocalDataWipe {
         step("device-key") { DeviceKeyStore.deleteDeviceKey(accountIdB64: accountIdB64) }
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("three-words-budget") { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
+        step("passkeys-no-prf") { PasskeyNoPrfStore().clear(accountIdB64: accountIdB64) }
         step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
         // ADR-0075 — the protection flags, the notice cursor and the "I did
         // this" markers.

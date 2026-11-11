@@ -126,6 +126,7 @@ import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearKeyResetOwed } from "./key-reset-owed";
 import { clearGenesisRecorded, clearKnownDeviceId } from "./session-device";
+import { clearNoPrfPasskeys } from "./passkey-no-prf";
 import { clearLogoutOwed } from "./logout-owed";
 import { clearRemovals } from "../devices/removal";
 import { deleteRecallRecord } from "./recall-record";
@@ -315,6 +316,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // was finishing (they need the account seed, which is gone).
     { name: "known-device-id", run: () => clearKnownDeviceId(storage, accountIdB64) },
     { name: "genesis-recorded", run: () => clearGenesisRecorded(storage, accountIdB64) },
+    // UX 10.2: the passkeys this device found cannot carry keys.
+    { name: "passkey-no-prf", run: () => clearNoPrfPasskeys(storage, accountIdB64) },
     { name: "logout-owed", run: () => clearLogoutOwed(storage, accountIdB64) },
     { name: "device-removals-owed", run: () => clearRemovals(storage, accountIdB64) },
     // ADR-0074 part 3: a key rotation this device was finishing, the "keys

@@ -5109,10 +5109,6 @@
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "आपको नई रिकवरी फ़्रेज़ मिलती है। पुरानी काम करना बंद कर देती है।",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "यह ब्राउज़र / डिवाइस अभी पासकी नहीं बना सकता।",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "कुंजियाँ रिस्टोर करना चालू करें",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "अगर आप इसे बंद रखते हैं, तो पासकी आपको सिर्फ़ लॉग इन कराती है। कुंजियाँ आप अपनी रिकवरी फ़्रेज़ या दूसरे डिवाइस से रिस्टोर करते हैं।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "अगर आप इसे चालू करते हैं, तो अकेली यह पासकी आपके खाते की कुंजियाँ नए डिवाइस पर ला सकती है। पासकी आम तौर पर Apple, Google या आपके पासवर्ड मैनेजर से सिंक होती हैं। जो भी आपके Apple, Google या पासवर्ड मैनेजर के खाते में घुस सकता है, वह फिर आपके आगे के मैसेज पढ़ सकता है और आपकी जगह काम कर सकता है।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "रद्द किया गया। यह पासकी अब भी आपको सिर्फ़ लॉग इन कराती है।",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "यह पासकी अब आपकी कुंजियाँ रिस्टोर करती है।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "किसी दूसरी पासकी ने जवाब दिया। फिर से कोशिश करें और वही पासकी चुनें जिसके लिए आप इसे चालू कर रहे हैं।",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "यह रिकवरी फ़्रेज़ इस खाते की नहीं है। कुछ नहीं बदला।",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "आप इसे बाद में हर पासकी के लिए बदल सकते हैं।",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "यह पासकी आपको लॉग इन करा सकती है, पर इस डिवाइस और पासकी प्रोवाइडर पर यह आपकी कुंजियाँ नहीं रख सकती। अपनी रिकवरी फ़्रेज़ संभालकर रखें।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "इसे चालू करने के लिए अपनी रिकवरी फ़्रेज़ टाइप करें।",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "सिर्फ़ लॉग इन",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "इस पासकी को आपकी कुंजियाँ रिस्टोर करने दें?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "चालू करें",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "सिर्फ़ लॉग इन कराती है",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "पासवर्ड की जगह Touch ID, Face ID या सिक्योरिटी की से लॉग इन करें। अगर आप यह चालू करें, तो पासकी नए डिवाइस पर आपकी कुंजियाँ भी रिस्टोर कर सकती है। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "पासवर्ड की जगह अपने फ़िंगरप्रिंट, चेहरे या स्क्रीन लॉक से, या सिक्योरिटी की से लॉग इन करें। अगर आप यह चालू करें, तो पासकी नए डिवाइस पर आपकी कुंजियाँ भी रिस्टोर कर सकती है। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "अकाउंट की कुंजियाँ रीसेट होने पर आपकी पासकी मिटा दी गईं। Face ID, Touch ID या अपने फ़िंगरप्रिंट से फिर से लॉग इन करने के लिए पासकी जोड़ें।",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "कुंजियाँ रिस्टोर करना बंद करें",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "यह पासकी आपको सिर्फ़ लॉग इन कराएगी। दूसरे डिवाइस पर पहले से रिस्टोर की गई कुंजियाँ वहीं रहेंगी।",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "यह पासकी अब आपको सिर्फ़ लॉग इन कराती है।",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "इस पासकी से कुंजियाँ रिस्टोर करना बंद करें?",
       "status": "machine"
     },
     "settings.passkeys.title": {

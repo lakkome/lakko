@@ -38,6 +38,7 @@
  */
 
 import { DEFAULT_BASE_URL } from "./client";
+import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
 import { sessionFetch } from "./session-fetch";
 import type { SessionPairWire } from "./session-pair";
 import { FRESH_GRANT_HEADER } from "./fresh-auth";
@@ -230,6 +231,9 @@ export interface AuthFinishRequest {
 /** `POST /webauthn/auth/finish`: the account id plus the session pair
  *  (ADR-0073) every login route returns. */
 export interface AuthFinishResponse extends SessionPairWire {
+  /** The server sends URL-safe base64 without padding; `loginWithPasskey`
+   *  returns it in the client's own form, standard base64 with padding
+   *  (`account-id.ts` `base64Encode`), the form every account key uses. */
   readonly account_id_b64: string;
   /** The fresh-auth grant a passkey sign-in mints (`fresh-auth.ts`). */
   readonly fresh_grant?: string;
@@ -472,7 +476,7 @@ export class WebauthnClient {
       "/webauthn/auth/start",
       options.accountIdB64 === undefined
         ? {}
-        : { account_id_b64: options.accountIdB64 },
+        : { account_id_b64: accountIdToWire(options.accountIdB64) },
     );
     const publicKey = decodeRequestOptions(start.options.publicKey);
     if (options.prfSalt !== undefined) {
@@ -500,7 +504,11 @@ export class WebauthnClient {
         ...(options.deviceIdB64 !== undefined ? { device_id_b64: options.deviceIdB64 } : {}),
       },
     );
-    return { ...finish, ...ceremonyExtras(pk) };
+    return {
+      ...finish,
+      account_id_b64: accountIdFromWire(finish.account_id_b64),
+      ...ceremonyExtras(pk),
+    };
   }
 
   /**
@@ -698,6 +706,20 @@ export async function actionHashForDeleteAccount(
   accountId: Uint8Array,
 ): Promise<string> {
   return deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId);
+}
+
+/** An account id in the client's form (standard base64, padded) or
+ *  already in URL-safe form, as `services/auth` reads it: URL-safe base64
+ *  without padding. */
+export function accountIdToWire(accountIdB64: string): string {
+  return base64UrlEncodeNoPad(new Uint8Array(base64urlToBuffer(accountIdB64.replace(/=+$/, ""))));
+}
+
+/** The account id `services/auth` sends (URL-safe base64, no padding) in
+ *  the client's form, so it compares equal to the account keys the client
+ *  already holds. */
+export function accountIdFromWire(wire: string): string {
+  return base64Encode(new Uint8Array(base64urlToBuffer(wire.replace(/=+$/, ""))));
 }
 
 function base64urlToBuffer(s: string): ArrayBuffer {

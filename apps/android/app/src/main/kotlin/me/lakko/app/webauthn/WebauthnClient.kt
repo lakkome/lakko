@@ -606,6 +606,32 @@ public data class ActionFinishResponse(
 )
 
 /**
+ * The account id as `POST /webauthn/auth/start` takes it: URL-safe base64
+ * without padding (`services/auth` decodes it with `URL_SAFE_NO_PAD`; a
+ * padded or standard-alphabet value is a `400`). Elsewhere on Android an
+ * account id is held as standard base64 with padding ([me.lakko.app.auth.base64Encode]),
+ * so the passkey path converts at this boundary, from the bytes.
+ */
+public fun passkeyStartAccountId(accountIdBytes: ByteArray): String =
+    me.lakko.app.auth.base64UrlEncodeNoPad(accountIdBytes)
+
+/**
+ * The 16 account-id bytes of a `POST /webauthn/auth/finish` answer, whose
+ * `account_id_b64` is URL-safe base64 without padding; `null` when it is
+ * not that or not 16 bytes. Callers compare the bytes, never the text.
+ */
+public fun passkeyFinishAccountId(accountIdB64: String): ByteArray? {
+    val bytes = try {
+        me.lakko.app.auth.base64UrlDecodeNoPad(accountIdB64)
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    return bytes.takeIf { it.size == PASSKEY_ACCOUNT_ID_LENGTH }
+}
+
+private const val PASSKEY_ACCOUNT_ID_LENGTH = 16
+
+/**
  * The result of [WebauthnClient.loginWithPasskey]: the session triple the
  * server issued, plus what stays on this device: the id of the passkey that
  * answered and its PRF output when the provider returned one.

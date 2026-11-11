@@ -33,13 +33,12 @@ import me.lakko.app.l10n.UiText
  *
  *   * [refresh]            — `GET /webauthn/credentials` and, for the
  *     per-passkey label, `GET /vault/passkeys`
- *   * [addPasskey]         — create a passkey; nothing is stored for it
- *     beyond the credential. When the provider can protect keys with it the
- *     opt-in choice opens ([PasskeysUiState.choice]); otherwise the result
- *     line says it signs in only.
- *   * [openChoice] / [onChoiceDone] — "Let this passkey restore your keys?"
- *   * [stopRestoring]      — `DELETE /vault/passkey`
- *   * [deleteCredential]   — `DELETE /webauthn/credentials/:id`
+ *   * [addPasskey]         — create a passkey and store the keys for it,
+ *     with nothing to choose (UX 10.2, amended 2026-11-11)
+ *   * [restoreKeys] / [cancelRepair] — a row's "Restore keys with this
+ *     passkey", with the phrase input when this device holds no phrase
+ *   * [deleteCredential]   — `DELETE /webauthn/credentials/:id` (the server
+ *     also deletes what the passkey stored for restoring keys)
  */
 public class PasskeysViewModel(
     private val repo: AuthRepository,
@@ -49,9 +48,12 @@ public class PasskeysViewModel(
     private val onAccountDeleted: () -> Unit,
     private val client: WebauthnClient = WebauthnClient(),
     private val registration: WebauthnRegistration = WebauthnRegistration(),
+    /** For the passkeys this device learned cannot carry keys
+     *  ([PasskeyNoPrfStore]); without it none is known. */
+    private val appContext: Context? = null,
 ) : ViewModel() {
 
-    /** The repository, for the keys choice the screen hosts. */
+    /** The repository, for the proof blocks the screen hosts. */
     public val repository: AuthRepository get() = repo
 
     private val mutableState: MutableStateFlow<PasskeysUiState> =
@@ -94,8 +96,14 @@ public class PasskeysViewModel(
                 // when the server cannot say, and every passkey then reads
                 // "Signs in only", which is what it can do.
                 val withKeys = repo.identitySecrets.value?.let { repo.passkeysWithKeys(it.sessionToken) }
+                val knownNoPrf = knownNoPrf(res.credentials.map { it.credentialIdB64 }.toSet())
                 mutableState.update {
-                    it.copy(loading = false, credentials = res.credentials, withKeys = withKeys)
+                    it.copy(
+                        loading = false,
+                        credentials = res.credentials,
+                        withKeys = withKeys,
+                        knownNoPrf = knownNoPrf,
+                    )
                 }
             } catch (e: WebauthnHttpError) {
                 if (e.status == 401) {
@@ -148,36 +156,21 @@ public class PasskeysViewModel(
         mutableState.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
-                val added = addPasskeyForSession(
+                // UX 10.2: the keys are stored for the new passkey with
+                // nothing to choose; the line says how that ended.
+                val added = addPasskeyWithKeys(
                     context = context,
                     repo = repo,
                     nickname = trimmed,
                     client = client,
                     registration = registration,
                 )
-                // Nothing is stored for the new passkey here. When the
-                // provider can protect keys with it, the person is asked;
-                // otherwise the line says it signs in only.
-                val offer = passkeyAddOutcome(
-                    prfOutput = added.prfOutput != null,
-                    prfEnabled = added.prfEnabled,
-                ) == PasskeyAddOutcome.OfferKeysChoice
+                val text = addedPasskeyText(added.keys, trimmed)
                 mutableState.update {
                     it.copy(
                         busy = false,
                         nickname = "",
-                        message = Message.Ok(
-                            if (offer) {
-                                UiText("settings.passkeys.added", texts = mapOf("name" to trimmed))
-                            } else {
-                                UiText("settings.passkeys.added_no_keys")
-                            },
-                        ),
-                        choice = if (offer) {
-                            PasskeyChoice(added.credentialIdB64, trimmed, added.prfOutput)
-                        } else {
-                            null
-                        },
+                        message = if (addedPasskeyIsError(added.keys)) Message.Error(text) else Message.Ok(text),
                     )
                 }
                 refresh()
@@ -209,59 +202,72 @@ public class PasskeysViewModel(
         }
     }
 
-    /** Open "Let this passkey restore your keys?" for an existing passkey
-     *  (its row's "Turn on restoring keys"). The passkey's secret then comes
-     *  from one more prompt limited to that passkey. */
-    public fun openChoice(credential: CredentialSummary) {
+    /**
+     * A row's "Restore keys with this passkey" (UX 10.2): one passkey prompt
+     * limited to [credential]. When this device holds no recovery phrase the
+     * phrase input opens first ([PasskeysUiState.repair]) and the person's
+     * [typedPhrase] comes back here, checked against this account.
+     */
+    public fun restoreKeys(context: Context, credential: CredentialSummary, typedPhrase: String? = null) {
+        rebindSession()
         if (mutableState.value.busy) return
-        mutableState.update {
-            it.copy(
-                message = null,
-                choice = PasskeyChoice(credential.credentialIdB64, credential.nickname, prfOutput = null),
-            )
-        }
-    }
-
-    /** The choice ended: say what happened and refresh the labels. */
-    public fun onChoiceDone(end: KeysChoiceEnd) {
-        mutableState.value.choice?.prfOutput?.fill(0)
-        val text = keysChoiceEndText(end)
-        mutableState.update {
-            it.copy(
-                choice = null,
-                message = when {
-                    text == null -> it.message
-                    end == KeysChoiceEnd.Stored -> Message.Ok(text)
-                    else -> Message.Error(text)
-                },
-            )
-        }
-        refresh()
-    }
-
-    /** "Stop restoring keys" for one passkey: it then only signs in. Keys
-     *  already restored on other devices stay there. */
-    public fun stopRestoring(credentialIdB64: String) {
-        if (mutableState.value.busy) return
-        mutableState.update { it.copy(busy = true, message = null) }
+        val credentialIdB64 = credential.credentialIdB64
+        mutableState.update { it.copy(busy = true, message = null, repairError = null) }
         viewModelScope.launch {
-            try {
-                repo.stopPasskeyKeys(credentialIdB64)
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        message = Message.Ok(UiText("settings.passkeys.stop_restoring.done")),
-                    )
-                }
-                refresh()
-            } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.w("PasskeysViewModel", "WARN stop restoring keys failed: ${e.javaClass.simpleName}")
-                mutableState.update {
-                    it.copy(busy = false, message = Message.Error(PASSKEYS_GENERIC))
+            val end = runPasskeyKeysStore(
+                onFailure = { cause ->
+                    Log.w("PasskeysViewModel", "WARN restoring keys with a passkey failed: ${cause.javaClass.simpleName}")
+                },
+            ) {
+                repo.turnOnPasskeyKeys(
+                    activityContext = context,
+                    credentialIdB64 = credentialIdB64,
+                    registrationPrfOutput = null,
+                    typedPhrase = typedPhrase,
+                )
+            }
+            if (end == PasskeyKeysStoreEnd.NoPrf) {
+                (repo.state.value as? AuthState.Session)?.let { session ->
+                    PasskeyNoPrfStore.record(context, session.account.accountIdB64, credentialIdB64)
                 }
             }
+            val text = restoreKeysText(end)
+            mutableState.update { s ->
+                val open = s.repair?.takeIf { it.credentialIdB64 == credentialIdB64 }
+                when (end) {
+                    PasskeyKeysStoreEnd.PhraseNeeded -> s.copy(
+                        busy = false,
+                        repair = PasskeyRepair(credentialIdB64, credential.nickname),
+                    )
+                    // The sheet was dismissed: nothing changed, nothing to say.
+                    PasskeyKeysStoreEnd.Cancelled -> s.copy(busy = false)
+                    PasskeyKeysStoreEnd.Stored -> s.copy(busy = false, repair = null, message = text?.let(Message::Ok))
+                    PasskeyKeysStoreEnd.NoPrf -> s.copy(busy = false, repair = null, message = text?.let(Message::Error))
+                    // A refusal while the phrase input is open stays inside it.
+                    else -> if (open != null) {
+                        s.copy(busy = false, repairError = text)
+                    } else {
+                        s.copy(busy = false, message = text?.let(Message::Error))
+                    }
+                }
+            }
+            if (end == PasskeyKeysStoreEnd.Stored || end == PasskeyKeysStoreEnd.NoPrf) refresh()
         }
+    }
+
+    /** The phrase input of a repair was closed: nothing changed. */
+    public fun cancelRepair() {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(repair = null, repairError = null) }
+    }
+
+    /** The passkeys among [current] this device learned cannot carry keys;
+     *  ids of passkeys the account no longer has are dropped. */
+    private fun knownNoPrf(current: Set<String>): Set<String> {
+        val context = appContext ?: return emptySet()
+        val account = (repo.state.value as? AuthState.Session)?.account?.accountIdB64 ?: return emptySet()
+        PasskeyNoPrfStore.retain(context, account, current)
+        return PasskeyNoPrfStore.of(context, account)
     }
 
     public fun deleteCredential(
@@ -528,8 +534,14 @@ public data class PasskeysUiState(
     /** The credential ids (base64url, no padding) whose passkeys restore
      *  keys; `null` when not known. */
     val withKeys: List<String>? = null,
-    /** The open "Let this passkey restore your keys?" choice, or `null`. */
-    val choice: PasskeyChoice? = null,
+    /** The credential ids this device learned cannot carry keys: their rows
+     *  offer no "Restore keys with this passkey". */
+    val knownNoPrf: Set<String> = emptySet(),
+    /** The open phrase input of a "Restore keys with this passkey", or
+     *  `null`. */
+    val repair: PasskeyRepair? = null,
+    /** Why the open repair did not store the keys, shown inside it. */
+    val repairError: UiText? = null,
     /** Why the account was not deleted, shown inside the delete dialog. */
     val deleteError: UiText? = null,
     /** [deleteError] says the passkey sheet was dismissed: drawn as a plain
@@ -537,12 +549,11 @@ public data class PasskeysUiState(
     val deleteCancelled: Boolean = false,
 )
 
-/** One open keys choice. [prfOutput] is what the registration yielded, when
- *  it yielded it; otherwise "Turn on" asks the passkey once more. */
-public class PasskeyChoice(
+/** A "Restore keys with this passkey" waiting for the recovery phrase,
+ *  which this device does not hold. */
+public data class PasskeyRepair(
     public val credentialIdB64: String,
     public val nickname: String,
-    public val prfOutput: ByteArray?,
 )
 
 public sealed interface Message {

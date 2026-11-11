@@ -5109,10 +5109,6 @@
       "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Yeni bir kurtarma ifadesi alırsınız. Eskisi artık çalışmaz.",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "Bu tarayıcı / cihaz şu anda geçiş anahtarı oluşturamıyor.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Hesap anahtarlarını geri yüklemeyi aç",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Kapalı bırakırsanız geçiş anahtarı yalnızca giriş yapmanızı sağlar. Hesap anahtarlarını kurtarma ifadenizle veya başka bir cihazla geri yüklersiniz.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Bunu açarsanız yalnızca bu geçiş anahtarı hesabınızın anahtarlarını yeni bir cihaza getirebilir. Geçiş anahtarları genellikle Apple, Google veya şifre yöneticiniz tarafından eşitlenir. Apple, Google veya şifre yöneticisi hesabınıza girebilen kişi bundan sonra gelecekteki mesajlarınızı okuyabilir ve sizin adınıza işlem yapabilir.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "İptal edildi. Bu geçiş anahtarı hâlâ yalnızca giriş yapmanızı sağlıyor.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "Bu geçiş anahtarı artık hesap anahtarlarınızı geri yüklüyor.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Farklı bir geçiş anahtarı yanıt verdi. Tekrar deneyin ve bunu açtığınız geçiş anahtarını seçin.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Bu kurtarma ifadesi bu hesaba ait değil. Hiçbir şey değiştirilmedi.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Bunu daha sonra her geçiş anahtarı için değiştirebilirsiniz.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "Bu geçiş anahtarı giriş yapmanızı sağlayabilir, ancak bu cihazda ve bu geçiş anahtarı sağlayıcısında hesap anahtarlarınızı taşıyamaz. Kurtarma ifadenizi saklayın.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Bunu açmak için kurtarma ifadenizi yazın.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Yalnızca giriş",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Bu geçiş anahtarı hesap anahtarlarınızı geri yükleyebilsin mi?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Aç",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Yalnızca giriş yapar",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Şifreniz yerine Touch ID, Face ID veya bir güvenlik anahtarıyla giriş yapın. Açarsanız bir geçiş anahtarı hesap anahtarlarınızı yeni bir cihazda da geri yükleyebilir. Kurtarma ifadeniz de her zaman işe yarar.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Şifreniz yerine parmak iziniz, yüzünüz veya ekran kilidinizle ya da bir güvenlik anahtarıyla giriş yapın. Açarsanız bir geçiş anahtarı hesap anahtarlarınızı yeni bir cihazda da geri yükleyebilir. Kurtarma ifadeniz de her zaman işe yarar.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "Hesap anahtarları sıfırlandığında geçiş anahtarlarınız silindi. Yeniden Face ID, Touch ID veya parmak izinizle giriş yapmak için bir geçiş anahtarı ekleyin.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Hesap anahtarlarını geri yüklemeyi durdur",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Bu geçiş anahtarı yalnızca giriş yapmanızı sağlayacak. Diğer cihazlarda zaten geri yüklenmiş hesap anahtarları orada kalır.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Bu geçiş anahtarı artık yalnızca giriş yapmanızı sağlıyor.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Bu geçiş anahtarıyla hesap anahtarlarını geri yükleme durdurulsun mu?",
       "status": "machine"
     },
     "settings.passkeys.title": {

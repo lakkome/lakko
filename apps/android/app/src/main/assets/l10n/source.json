@@ -5422,7 +5422,7 @@
       "security_critical": true
     },
     "devices.rotate.effect_passkeys": {
-      "text": "Your passkeys still sign you in. \"Restore keys with this passkey\" is turned off until you turn it on again.",
+      "text": "Your passkeys still sign you in. To restore keys with one again, choose “Restore keys with this passkey” on its row.",
       "comment": "Removing a lost or stolen device and changing the account keys while keeping the other devices (UX identity-recovery 18.1).",
       "security_critical": true
     },
@@ -9556,6 +9556,11 @@
       "text": "Passkey \"{name}\" added.",
       "comment": "Confirmation after a passkey is created; {name} is the name the person gave it."
     },
+    "settings.passkeys.added_keys_failed": {
+      "text": "The passkey was added. It logs you in only for now; restore keys with it from its row.",
+      "comment": "A passkey was created but storing the keys for it failed (offline or a server error). The row offers Restore keys with this passkey.",
+      "security_critical": true
+    },
     "settings.passkeys.added_last_used": {
       "text": "Added {added} · last used {used}",
       "comment": "Passkey row subtitle; {added} and {used} are dates and times formatted for the locale."
@@ -9567,6 +9572,11 @@
     "settings.passkeys.added_no_keys": {
       "text": "Passkey added. It logs you in. On this device and passkey provider it cannot restore your keys, so keep your recovery phrase.",
       "comment": "Result line after adding a passkey that cannot protect keys on this device or provider.",
+      "security_critical": true
+    },
+    "settings.passkeys.added_restores": {
+      "text": "Passkey added. It logs you in and restores your keys.",
+      "comment": "Settings > Security > Passkeys: a passkey was added and the keys were stored for it (docs/ux/identity-recovery.md 10.2).",
       "security_critical": true
     },
     "settings.passkeys.empty": {
@@ -9597,23 +9607,18 @@
       "text": "This browser / device can't create passkeys right now.",
       "comment": "The platform refused to create a passkey."
     },
+    "settings.passkeys.keys.error.other_passkey": {
+      "text": "A different passkey answered. Try again and choose this passkey.",
+      "comment": "Row action Restore keys with this passkey: the person picked another passkey in the system sheet.",
+      "security_critical": true
+    },
     "settings.passkeys.keys.turn_on": {
-      "text": "Turn on restoring keys",
-      "comment": "Button on a passkey that only signs in; opens the screen that asks whether this passkey may restore the account's keys."
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "If you leave it off, the passkey only logs you in. You restore keys with your recovery phrase or another device.",
-      "comment": "What leaving it off means.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "If you turn this on, this passkey alone can bring your account's keys to a new device. Passkeys are usually synced by Apple, Google or your password manager. Whoever can get into your Apple, Google or password-manager account can then read your future messages and act as you.",
-      "comment": "What turning it on means: the safety of the keys then also depends on the Apple, Google or password-manager account that syncs the passkey. Apple and Google are company names.",
-      "security_critical": true
+      "text": "Restore keys with this passkey",
+      "comment": "Button on a passkey that holds no keys (created before passkeys always restored keys, on another client, or after the account keys changed): one passkey prompt stores the keys for it."
     },
     "settings.passkeys.keys_choice.cancelled": {
-      "text": "Cancelled. This passkey still only logs you in.",
-      "comment": "The person dismissed the passkey prompt while turning on restoring keys.",
+      "text": "The passkey was added. It logs you in only; restore keys with it from its row.",
+      "comment": "The person dismissed the second passkey prompt that stores the keys for a passkey just added.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.done": {
@@ -9622,7 +9627,7 @@
       "security_critical": true
     },
     "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "A different passkey answered. Try again and choose the passkey you are turning this on for.",
+      "text": "A different passkey answered. Try again and choose the passkey you just added.",
       "comment": "The passkey prompt was answered by another passkey than the one being changed.",
       "security_critical": true
     },
@@ -9631,34 +9636,14 @@
       "comment": "The typed phrase is not this account's; the passkey stays sign-in only.",
       "security_critical": true
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "You can change this later for each passkey.",
-      "comment": "Last line of the passkey choice screen.",
-      "security_critical": true
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "This passkey can log you in, but on this device and passkey provider it cannot carry your keys. Keep your recovery phrase.",
       "comment": "The browser or the passkey provider did not give what is needed to protect keys with this passkey.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Type your recovery phrase to turn this on.",
+      "text": "Type your recovery phrase to restore keys with this passkey.",
       "comment": "Shown above the 12 word fields when this device does not hold the recovery phrase.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Log in only",
-      "comment": "Button: keep this passkey for signing in only. Same weight as the other button; neither is the default.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "Let this passkey restore your keys?",
-      "comment": "Title of the screen that asks whether one passkey may restore the account's keys on a new device.",
-      "security_critical": true
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Turn on",
-      "comment": "Button: let this passkey restore the keys. Same weight as the other button; neither is the default.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -9677,11 +9662,11 @@
       "security_critical": true
     },
     "settings.passkeys.lede": {
-      "text": "Log in with Touch ID, Face ID or a security key instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "text": "Log in with Touch ID, Face ID or a security key instead of your password. A passkey also restores your keys on a new device. Your recovery phrase always works too.",
       "comment": "iOS: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Names Apple's Touch ID and Face ID; settings.passkeys.lede_device is the wording for web and Android."
     },
     "settings.passkeys.lede_device": {
-      "text": "Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "text": "Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey also restores your keys on a new device. Your recovery phrase always works too.",
       "comment": "Web and Android: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Platform-neutral on purpose (the web runs on any system): fingerprint, face, screen lock or a hardware security key. settings.passkeys.lede is the iOS wording with Touch ID and Face ID."
     },
     "settings.passkeys.name.label": {
@@ -9729,26 +9714,6 @@
     "settings.passkeys.reset_note": {
       "text": "Your passkeys were deleted when the account keys were reset. Add a passkey to sign in with Face ID, Touch ID or your fingerprint again.",
       "comment": "Under the empty passkey list after the account keys were reset on this device (UX identity-recovery 15.3).",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Stop restoring keys",
-      "comment": "Button on a passkey that restores keys, and the action button of its confirmation dialog.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "This passkey will only log you in. Keys already restored on other devices stay there.",
-      "comment": "Confirmation dialog body before a passkey stops restoring keys.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "This passkey now only logs you in.",
-      "comment": "Confirmation after a passkey stopped restoring keys.",
-      "security_critical": true
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "Stop restoring keys with this passkey?",
-      "comment": "Confirmation dialog title.",
       "security_critical": true
     },
     "settings.passkeys.title": {

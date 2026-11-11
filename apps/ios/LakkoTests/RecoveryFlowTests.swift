@@ -254,8 +254,8 @@ final class RecoveryFlowTests: XCTestCase {
         return UserDefaults(suiteName: suite)!
     }
 
-    private func newAccount() -> (bytes: Data, b64: String) {
-        let bytes = randomBytes(16)
+    private func newAccount(_ fixed: Data? = nil) -> (bytes: Data, b64: String) {
+        let bytes = fixed ?? randomBytes(16)
         let b64 = base64Encode(bytes)
         accountIdsToClean.append(b64)
         return (bytes, b64)
@@ -1246,6 +1246,68 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertTrue(isNeedsKeys(h.repository))
     }
 
+    // MARK: - The account id's two spellings
+    //
+    // The auth service speaks URL-safe base64 without padding for the account
+    // id on the passkey routes (`/webauthn/auth/start` decodes it so, the
+    // finish sends it so); every store on this device uses the standard
+    // padded form. An id whose two spellings differ must survive both ways.
+
+    /// 16 bytes whose standard spelling holds `+`, `/` and `==` and whose
+    /// URL-safe one holds `-` and `_` instead.
+    private static let twoSpellingsId = Data(Array(repeating: [UInt8(0xFB), 0xFF, 0xBF], count: 5).flatMap { $0 } + [0x00])
+
+    func testTheFixtureIdHasTwoDifferentSpellings() {
+        let standard = base64Encode(Self.twoSpellingsId)
+        let urlSafe = base64UrlEncodeNoPad(Self.twoSpellingsId)
+        XCTAssertEqual(Self.twoSpellingsId.count, 16)
+        XCTAssertTrue(standard.contains("+") && standard.contains("/") && standard.hasSuffix("=="), standard)
+        XCTAssertTrue(urlSafe.contains("-") && urlSafe.contains("_") && !urlSafe.contains("="), urlSafe)
+    }
+
+    func testADiscoverablePasskeySignInLandsTheStandardSpellingOfAUrlSafeId() async throws {
+        let account = newAccount(Self.twoSpellingsId)
+        let h = harness()
+        // What the finish response carries: URL-safe, no padding.
+        h.passkey.result = assertion(account.bytes)
+        h.directory.lookup = .success(account.bytes)
+
+        try await h.repository.loginWithPasskey(usernameHint: "alice")
+
+        guard case .needsRecoveryPhrase(let parked) = h.repository.state else {
+            return XCTFail("expected the restore prompt")
+        }
+        XCTAssertEqual(parked.accountIdB64, account.b64)
+        XCTAssertEqual(parked.username, "alice")
+        XCTAssertEqual(h.store.load()?.accountIdB64, account.b64, "the marker uses the standard spelling")
+    }
+
+    func testThePasskeyRowNamesTheAccountUrlSafeAndAcceptsItsOwnAccount() async throws {
+        let account = newAccount(Self.twoSpellingsId)
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.passkey.result = assertion(account.bytes)
+
+        let outcome = try await h.repository.restoreKeysWithPasskey()
+
+        XCTAssertEqual(h.passkey.askedFor, [base64UrlEncodeNoPad(account.bytes)])
+        XCTAssertNotEqual(h.passkey.askedFor.first ?? nil, account.b64)
+        XCTAssertEqual(outcome, .noKeys, "its own account: not refused as another account's passkey")
+    }
+
+    func testAPasskeyProofNamesTheAccountUrlSafeAndAcceptsItsOwnAccount() async throws {
+        let (h, account) = try await sessionWithKeys(Self.twoSpellingsId)
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"),
+            freshGrant: FreshAuthGrant(grant: "grant-passkey", expiresAtMs: 1_600_000))
+
+        try await h.repository.proveWithPasskey()
+
+        XCTAssertEqual(h.passkey.askedFor, [base64UrlEncodeNoPad(account.bytes)])
+        XCTAssertEqual(h.repository.liveFreshGrant(), "grant-passkey")
+    }
+
     func testThePasskeyRowNeedsAParkedSignIn() async {
         let h = harness()
         do {
@@ -1920,8 +1982,8 @@ final class RecoveryFlowTests: XCTestCase {
     // MARK: - The fresh-auth proof (ADR-0073, amended 2026-10-06; UX 17)
 
     /// A device that holds the keys, signed in with the authenticator code.
-    private func sessionWithKeys() async throws -> (Harness, (bytes: Data, b64: String)) {
-        let account = newAccount()
+    private func sessionWithKeys(_ fixed: Data? = nil) async throws -> (Harness, (bytes: Data, b64: String)) {
+        let account = newAccount(fixed)
         let h = harness(routes: totpRoute(account.bytes))
         let mine = RecoveryMnemonic.generate()
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mine.toSeed())

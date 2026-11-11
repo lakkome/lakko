@@ -3051,11 +3051,13 @@ private fun SessionRoot(
                 }
                 for (route in listOf(Routes.PASSKEYS, Routes.DELETE_ACCOUNT)) {
                     composable(route) {
+                        val passkeysAppContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
                         val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
                             factory = singletonViewModelFactory {
                                 me.lakko.app.webauthn.PasskeysViewModel(
                                     repo = authRepository,
                                     onAccountDeleted = forgetDevice,
+                                    appContext = passkeysAppContext,
                                 )
                             },
                         )

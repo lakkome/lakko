@@ -5109,10 +5109,6 @@
       "text": "Los enlaces de invitación y de llamada que creaste antes dejarán de funcionar. Crea otros nuevos.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "Recibes una nueva frase de recuperación. La anterior deja de funcionar.",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "Este navegador o dispositivo no puede crear llaves de acceso en este momento.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "Activar la restauración de claves",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "Si lo dejas desactivado, la llave de acceso solo inicia tu sesión. Las claves las restauras con tu frase de recuperación o con otro dispositivo.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "Si activas esto, esta llave de acceso por sí sola puede llevar las claves de tu cuenta a un dispositivo nuevo. Las llaves de acceso suelen sincronizarse a través de Apple, Google o tu gestor de contraseñas. Quien pueda entrar en tu cuenta de Apple, de Google o de tu gestor de contraseñas podrá entonces leer tus mensajes futuros y hacerse pasar por ti.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "Cancelado. Esta llave de acceso sigue iniciando tu sesión solamente.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "Esta llave de acceso ahora restaura tus claves.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "Respondió otra llave de acceso. Inténtalo de nuevo y elige la llave de acceso para la que estás activando esto.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "Esa frase de recuperación no pertenece a esta cuenta. No se cambió nada.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "Puedes cambiar esto más tarde para cada llave de acceso.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "Esta llave de acceso puede iniciar tu sesión, pero en este dispositivo y con este proveedor de llaves de acceso no puede llevar tus claves. Conserva tu frase de recuperación.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "Escribe tu frase de recuperación para activar esto.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "Solo iniciar sesión",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "¿Permitir que esta llave de acceso restaure tus claves?",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "Activar",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "Solo inicia sesión",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "Inicia sesión con Touch ID, Face ID o una llave de seguridad en lugar de tu contraseña. Una llave de acceso también puede restaurar tus claves en un dispositivo nuevo si lo activas. Tu frase de recuperación también funciona siempre.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "Inicia sesión con tu huella, tu cara o el bloqueo de pantalla, o con una llave de seguridad, en lugar de tu contraseña. Una llave de acceso también puede restaurar tus claves en un dispositivo nuevo si lo activas. Tu frase de recuperación también funciona siempre.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "Tus llaves de acceso se eliminaron al restablecer las claves de la cuenta. Añade una llave de acceso para volver a iniciar sesión con Face ID, Touch ID o tu huella.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "Dejar de restaurar claves",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "Esta llave de acceso solo iniciará tu sesión. Las claves ya restauradas en otros dispositivos se quedan allí.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "Esta llave de acceso ahora solo inicia tu sesión.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "¿Dejar de restaurar claves con esta llave de acceso?",
       "status": "machine"
     },
     "settings.passkeys.title": {

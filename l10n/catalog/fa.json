@@ -5109,10 +5109,6 @@
       "text": "پیوندهای دعوت و پیوندهای تماسی که قبلاً ساخته‌اید دیگر کار نمی‌کنند. پیوندهای تازه بسازید.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "یک عبارت بازیابی جدید می‌گیرید. عبارت قبلی دیگر کار نمی‌کند.",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "این مرورگر یا دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "روشن کردن بازیابی کلیدهای حساب",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "اگر خاموش بماند، کلید عبور فقط شما را وارد می‌کند. کلیدهای حساب را با عبارت بازیابی یا دستگاه دیگر بازیابی می‌کنید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "اگر این را روشن کنید، همین کلید عبور به‌تنهایی می‌تواند کلیدهای حساب شما را به دستگاه جدید بیاورد. کلیدهای عبور معمولاً توسط Apple، Google یا برنامه مدیریت رمز عبور شما همگام‌سازی می‌شوند. هر کسی که بتواند وارد حساب Apple، Google یا برنامه مدیریت رمز عبور شما شود، پس از آن می‌تواند پیام‌های آینده شما را بخواند و به جای شما عمل کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "لغو شد. این کلید عبور همچنان فقط شما را وارد می‌کند.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "این کلید عبور اکنون کلیدهای حساب شما را بازیابی می‌کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "کلید عبور دیگری پاسخ داد. دوباره تلاش کنید و کلید عبوری را انتخاب کنید که این قابلیت را برایش روشن می‌کنید.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "این عبارت بازیابی متعلق به این حساب نیست. چیزی تغییر نکرد.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "می‌توانید بعداً این را برای هر کلید عبور تغییر دهید.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "این کلید عبور می‌تواند شما را وارد کند، اما در این دستگاه و با این ارائه‌دهنده کلید عبور نمی‌تواند کلیدهای حساب شما را همراه داشته باشد. عبارت بازیابی خود را نگه دارید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "برای روشن کردن این قابلیت، عبارت بازیابی خود را وارد کنید.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "فقط ورود",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "این کلید عبور بتواند کلیدهای حساب شما را بازیابی کند؟",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "روشن کردن",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "فقط وارد می‌کند",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "به‌جای رمز عبور با Touch ID، Face ID یا یک کلید امنیتی وارد شوید. اگر این قابلیت را روشن کنید، کلید عبور می‌تواند کلیدهای حساب شما را روی دستگاه جدید هم بازیابی کند. عبارت بازیابی شما هم همیشه کار می‌کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "به‌جای رمز عبور با اثر انگشت، چهره یا قفل صفحه، یا با یک کلید امنیتی وارد شوید. اگر این قابلیت را روشن کنید، کلید عبور می‌تواند کلیدهای حساب شما را روی دستگاه جدید هم بازیابی کند. عبارت بازیابی شما هم همیشه کار می‌کند.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "کلیدهای عبور شما هنگام بازنشانی کلیدهای حساب حذف شدند. برای ورود دوباره با Face ID، Touch ID یا اثر انگشت، یک کلید عبور اضافه کنید.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "توقف بازیابی کلیدهای حساب",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "این کلید عبور فقط شما را وارد خواهد کرد. کلیدهای حسابی که قبلاً در دستگاه‌های دیگر بازیابی شده‌اند همان‌جا می‌مانند.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "این کلید عبور اکنون فقط شما را وارد می‌کند.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "بازیابی کلیدهای حساب با این کلید عبور متوقف شود؟",
       "status": "machine"
     },
     "settings.passkeys.title": {

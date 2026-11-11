@@ -173,14 +173,6 @@ class PasskeyPrfTest {
     }
 
     @Test
-    fun `the keys choice follows a registration only where the provider can protect keys`() {
-        assertEquals(PasskeyAddOutcome.OfferKeysChoice, passkeyAddOutcome(prfOutput = true, prfEnabled = null))
-        assertEquals(PasskeyAddOutcome.OfferKeysChoice, passkeyAddOutcome(prfOutput = false, prfEnabled = true))
-        assertEquals(PasskeyAddOutcome.SignInOnly, passkeyAddOutcome(prfOutput = false, prfEnabled = false))
-        assertEquals(PasskeyAddOutcome.SignInOnly, passkeyAddOutcome(prfOutput = false, prfEnabled = null))
-    }
-
-    @Test
     fun `the restore prompt hides the passkey row only when no passkey carries keys`() {
         assertTrue(restoreOffersPasskey(null))
         assertTrue(restoreOffersPasskey(2))

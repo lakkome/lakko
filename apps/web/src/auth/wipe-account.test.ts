@@ -47,6 +47,7 @@ import { writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
+import { addNoPrfPasskey } from "./passkey-no-prf";
 import { markLogoutOwed } from "./logout-owed";
 import { newRemoval, writeRemoval } from "../devices/removal";
 import { markRotatedNotice, newRotation, writeRotation } from "../devices/key-rotation";
@@ -247,6 +248,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   // auth" mark, a logout still owed, and a device removal still finishing.
   writeKnownDeviceId(local, acct, "B".repeat(43));
   writeGenesisRecorded(local, acct, "a2V5");
+  // UX 10.2: a passkey this device found cannot carry keys.
+  addNoPrfPasskey(local, acct, "Y3JlZA");
   markLogoutOwed(local, acct);
   writeRemoval(local, acct, "C".repeat(43), newRemoval("C".repeat(43), 1));
   // ADR-0074 part 3: a key rotation this device was finishing, the "keys
@@ -636,6 +639,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:key-reset-owed:": "account",
   "lakko:device-id:": "account",
   "lakko:genesis-recorded:": "account",
+  "lakko:passkey-no-prf:": "account",
   "lakko:logout-owed:": "account",
   "lakko:device-removal-owed:": "account",
   "lakko:key-rotation-owed:": "account",

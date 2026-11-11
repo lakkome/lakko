@@ -1503,7 +1503,8 @@ export class AuthClient {
 
   /** `PUT /vault/passkey` — store the phrase entropy sealed under one of
    *  this account's passkeys, so that passkey can restore the keys on a new
-   *  device (ADR-0072 decision 6; opt-in per passkey). Bearer-authenticated. */
+   *  device (ADR-0072 decision 6, amended 2026-11-11: every passkey that can).
+   *  Bearer-authenticated. */
   async passkeyVaultPut(
     sessionToken: string,
     credentialId: Uint8Array,

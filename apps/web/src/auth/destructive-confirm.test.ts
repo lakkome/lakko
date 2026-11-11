@@ -19,7 +19,6 @@ import {
   deleteAccountConfirmation,
   forgetDeviceConfirmation,
   removePasskeyConfirmation,
-  stopRestoringKeysConfirmation,
 } from "./destructive-confirm";
 
 describe("the remove-passkey confirmation", () => {
@@ -131,15 +130,3 @@ describe("all three", () => {
   });
 });
 
-describe("the stop-restoring-keys confirmation", () => {
-  it("states what stops and what stays, and is not styled as destructive", () => {
-    const c = stopRestoringKeysConfirmation();
-    expect(c.title).toBe("Stop restoring keys with this passkey?");
-    expect(c.body).toBe(
-      "This passkey will only log you in. Keys already restored on other devices stay there.",
-    );
-    expect(c.confirmLabel).toBe("Stop restoring keys");
-    expect(c.cancelLabel).toBe("Cancel");
-    expect(c.tone).toBe("neutral");
-  });
-});

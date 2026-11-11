@@ -5109,10 +5109,6 @@
       "text": "روابط الدعوة وروابط المكالمات التي أنشأتها سابقًا ستتوقف عن العمل. أنشئ روابط جديدة.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
-      "status": "machine"
-    },
     "devices.rotate.effect_phrase": {
       "text": "تحصل على عبارة استرداد جديدة. العبارة القديمة تتوقف عن العمل.",
       "status": "machine"
@@ -8901,56 +8897,16 @@
       "text": "لا يستطيع هذا المتصفح أو الجهاز إنشاء مفاتيح مرور الآن.",
       "status": "machine"
     },
-    "settings.passkeys.keys.turn_on": {
-      "text": "تفعيل استعادة مفاتيح الحساب",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_off": {
-      "text": "إذا تركته معطّلًا، فمفتاح المرور يسجّل دخولك فقط. وتستعيد مفاتيح الحساب بعبارة الاسترداد أو بجهاز آخر.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.body_on": {
-      "text": "إذا فعّلت هذا، يستطيع مفتاح المرور هذا وحده نقل مفاتيح حسابك إلى جهاز جديد. تُزامَن مفاتيح المرور عادةً عبر Apple أو Google أو مدير كلمات المرور لديك. ومن يستطيع الدخول إلى حسابك لدى Apple أو Google أو مدير كلمات المرور يستطيع عندها قراءة رسائلك المستقبلية والتصرف باسمك.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.cancelled": {
-      "text": "أُلغي. مفتاح المرور هذا ما زال يسجّل دخولك فقط.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.done": {
       "text": "مفتاح المرور هذا يستعيد الآن مفاتيح حسابك.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.error.other_passkey": {
-      "text": "استجاب مفتاح مرور مختلف. حاول مجددًا واختر مفتاح المرور الذي تفعّل هذا له.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.error.phrase_mismatch": {
       "text": "عبارة الاسترداد هذه لا تخص هذا الحساب. لم يتغيّر شيء.",
       "status": "machine"
     },
-    "settings.passkeys.keys_choice.later": {
-      "text": "يمكنك تغيير هذا لاحقًا لكل مفتاح مرور.",
-      "status": "machine"
-    },
     "settings.passkeys.keys_choice.no_prf": {
       "text": "يستطيع مفتاح المرور هذا تسجيل دخولك، لكنه على هذا الجهاز ومع مزوّد مفاتيح المرور هذا لا يستطيع حمل مفاتيح حسابك. احتفظ بعبارة الاسترداد.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.phrase_needed": {
-      "text": "اكتب عبارة الاسترداد لتفعيل هذا.",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.signin_only": {
-      "text": "تسجيل الدخول فقط",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.title": {
-      "text": "هل تسمح لمفتاح المرور هذا باستعادة مفاتيح حسابك؟",
-      "status": "machine"
-    },
-    "settings.passkeys.keys_choice.turn_on": {
-      "text": "تفعيل",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.unavailable": {
@@ -8963,14 +8919,6 @@
     },
     "settings.passkeys.label.signin_only": {
       "text": "يسجّل الدخول فقط",
-      "status": "machine"
-    },
-    "settings.passkeys.lede": {
-      "text": "سجّل الدخول باستخدام Touch ID أو Face ID أو مفتاح أمان بدلًا من كلمة المرور. ويمكن لمفتاح المرور أيضًا استعادة مفاتيح حسابك على جهاز جديد إذا فعّلت ذلك. تعمل عبارة الاسترداد دائمًا أيضًا.",
-      "status": "machine"
-    },
-    "settings.passkeys.lede_device": {
-      "text": "سجّل الدخول ببصمة إصبعك أو وجهك أو قفل الشاشة، أو بمفتاح أمان، بدلًا من كلمة المرور. ويمكن لمفتاح المرور أيضًا استعادة مفاتيح حسابك على جهاز جديد إذا فعّلت ذلك. تعمل عبارة الاسترداد دائمًا أيضًا.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -9011,22 +8959,6 @@
     },
     "settings.passkeys.reset_note": {
       "text": "حُذفت مفاتيح المرور عند إعادة تعيين مفاتيح الحساب. أضف مفتاح مرور لتسجيل الدخول مجددًا باستخدام Face ID أو Touch ID أو بصمة إصبعك.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.action": {
-      "text": "إيقاف استعادة مفاتيح الحساب",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.body": {
-      "text": "سيسجّل مفتاح المرور هذا دخولك فقط. مفاتيح الحساب التي استُعيدت بالفعل على أجهزة أخرى تبقى هناك.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.done": {
-      "text": "مفتاح المرور هذا يسجّل الآن دخولك فقط.",
-      "status": "machine"
-    },
-    "settings.passkeys.stop_restoring.title": {
-      "text": "إيقاف استعادة مفاتيح الحساب بمفتاح المرور هذا؟",
       "status": "machine"
     },
     "settings.passkeys.title": {

@@ -23,8 +23,8 @@ decisions and with what was built on web. The model:
   holds the account's keys and phrase. They sign the person in there and
   nothing more. There is nothing to set up and nothing about them on a
   server.
-- **A passkey can restore keys** when the person turned that on for the
-  passkey and the platform supports it.
+- **A passkey restores keys** wherever the platform supports it, with no
+  choice to make (amended 2026-11-11, section 10.2).
 - **Another device is the first route** everywhere.
 - **Every device that has the keys also has the phrase**, so it can show it,
   check three words and hand the keys to a further device.
@@ -370,7 +370,7 @@ messages here.
   [devices]  Another device                 >
              If you have one that is still signed in.
   [passkey]  Passkey                        >
-             If you turned on "restore keys" for a passkey.
+             A passkey that restores your keys.
   [key]      Recovery phrase                >
              Type your 12 words.
 
@@ -511,64 +511,67 @@ Authenticator app
 - **Authenticator app** is the existing setup, unchanged.
 - There is no email, phone or guardian row, and no three-word switch.
 
-### 10.2 Passkeys, and letting a passkey restore keys
+### 10.2 Passkeys restore keys
+
+**Amended 2026-11-11 (maintainer):** there is no choice any more between a
+passkey that only signs in and one that also restores keys. Every passkey
+restores keys wherever the device and the passkey provider can carry them;
+the choice screen, its warning and **Stop restoring keys** are gone. The
+cost is stated in ADR-0072 (decision 6, amended): whoever can use the
+person's synced passkeys can read their future messages and act as them.
 
 The list shows each passkey with its name, when it was added and last used,
-and one of two labels: **Signs in and restores keys** or **Signs in only**.
+and one of two labels, which are a state and not a setting: **Logs in and
+restores keys** or **Logs in only**.
 
 Adding a passkey:
 
-1. **Add passkey** > name it > the system sheet creates it. **Nothing about
-   the keys is stored by adding a passkey.**
-2. If the platform returned what is needed to protect keys with this passkey,
-   the choice screen follows. Otherwise the result reads: "Passkey added. It
-   signs you in. On this device and passkey provider it cannot restore your
-   keys, so keep your recovery phrase." and the row is **Signs in only**.
+1. **Add passkey** > name it > the system sheet creates it.
+2. The keys are then stored for it, with nothing to choose: from what the
+   creation returned, else from one more system sheet for that passkey (some
+   platforms give what is needed only when a passkey is used). Result:
+   "Passkey added. It logs you in and restores your keys." and the row is
+   **Logs in and restores keys**.
+3. When the platform cannot protect keys with this passkey: "Passkey added.
+   It logs you in. On this device and passkey provider it cannot restore your
+   keys, so keep your recovery phrase." and the row is **Logs in only**.
+4. Storing the keys needs the recovery phrase on this device (every device
+   with the keys holds it, ADR-0072). If it is missing, the passkey is added
+   as **Logs in only** and its row offers **Restore keys with this passkey**
+   (below), which asks for the phrase.
 
-The choice screen:
+States while storing: working; cancelled at the second sheet ("The passkey
+was added. It logs you in only; restore keys with it from its row."); a
+different passkey answered ("A different passkey answered. Try again and
+choose the passkey you just added."); `503` ("Restoring keys with a passkey
+is not available on this server."); offline or another failure after the
+passkey was created ("The passkey was added. It logs you in only for now;
+restore keys with it from its row."). The second sheet is skipped only when
+the platform said at creation that the passkey cannot carry keys; when it
+said nothing, the sheet runs. A passkey this device found cannot carry keys
+is remembered on the device, so its row does not offer the repair again.
 
-```
-Let this passkey restore your keys?
+A passkey that can carry keys but holds none (created before this change,
+on another client, or after the account keys changed) shows **Logs in only**
+with one action on its row, **Restore keys with this passkey**: one system
+sheet, the twelve-slot input first when this device does not hold the phrase
+("Type your recovery phrase to restore keys with this passkey."; the phrase
+must be this account's: "That recovery phrase does not belong to this
+account. Nothing was changed."), then "This passkey now restores your keys."
+A different passkey answering here reads "A different passkey answered. Try
+again and choose this passkey."; dismissing the sheet changes nothing and
+shows nothing.
+This is a repair, not a choice: there is nothing to turn off.
 
-If you turn this on, this passkey alone can bring your account's
-keys to a new device. Passkeys are usually synced by Apple,
-Google or your password manager. Whoever can use that account's
-passkeys can then read your future messages and act as you.
-
-If you leave it off, the passkey only signs you in. You restore
-keys with your recovery phrase or another device.
-
-You can change this later for each passkey.
-
-[ Turn on ]        [ Sign-in only ]
-```
-
-- Neither button is pre-selected or styled as the default; both are the same
-  weight. The person must pick one.
-- **Turn on** needs the recovery phrase on this device. If the device does
-  not hold it, a twelve-slot input follows ("Type your recovery phrase to
-  turn this on."); the typed phrase must be this account's ("That recovery
-  phrase does not belong to this account. Nothing was changed.").
-- Some platforms can only produce what is needed when the passkey is used,
-  not when it is created. Then **Turn on** triggers one more system sheet
-  for that passkey. If a different passkey answers: "A different passkey
-  answered. Try again and choose the passkey you are turning this on for."
-- States: working; cancelled ("Cancelled. This passkey still only signs you
-  in."); the passkey cannot carry keys here ("This passkey can sign you in,
-  but on this device and passkey provider it cannot carry your keys. Keep
-  your recovery phrase."); `503` ("Restoring keys with a passkey is not
-  available on this server."); offline; success ("This passkey now restores
-  your keys.").
-
-Per passkey, later: **Turn on restoring keys** (the same choice screen) or
-**Stop restoring keys** (confirmation "Stop restoring keys with this
-passkey?" / "This passkey will only sign you in. Keys already restored on
-other devices stay there."; then "This passkey now only signs you in.").
 Removing a passkey also removes what it stored for restoring keys; the
 existing passkey-confirmation step for removal is unchanged.
 
-A passkey created before this feature, or on another client, shows **Signs in
-only** until the person turns it on.
+The passkey offer at the end of signup follows step 2 and 3: the passkey
+restores keys when it can, with no choice.
+
+Every passkey is registered as discoverable (the server asks for a resident
+key), so a device that holds no account yet finds it with **Use passkey** and
+no username.
 
 ### 10.3 Password
 
@@ -581,10 +584,10 @@ not edit it. The groups that carry this spec: `recovery.*`,
 `recovery.words.*`, `recovery.passkey.*`, `recovery.new_password.*`,
 `recovery_phrase.*` (including `recovery_phrase.fresh.*`),
 `restore_identity.*`, `settings.recovery.*`, `settings.passkeys.*` (including
-`keys_choice.*`, `stop_restoring.*`, `label.*`), `settings.password.*`,
+`keys.*`, `keys_choice.*`, `label.*`), `settings.password.*`,
 `auth.signup.passkey.*`, `device_link.keys_not_sent`.
 
-Every string in the passkey choice screen, the three-word lines, the
+Every passkey add and repair line, the three-word lines, the
 start-over warning and the "could not finish" state is security-critical in
 the ADR-0061 sense (shown translated only when reviewed).
 
@@ -1794,8 +1797,8 @@ what it holds useless.
 - Your other devices keep their chats and get the new keys by
   themselves.
 - You get a new recovery phrase. The old one stops working.
-- Your passkeys still sign you in. "Restore keys with this passkey"
-  is turned off until you turn it on again.
+- Your passkeys still sign you in. To restore keys with one again,
+  choose "Restore keys with this passkey" on its row.
 - The people you talk to do not have to do anything.
 
 [proof block]
@@ -2002,7 +2005,7 @@ in a translation until a native reviewer has passed it).
 | `devices.rotate.lede` | A lost device still holds your account keys. Changing them makes what it holds useless. | sc |
 | `devices.rotate.effect_devices` | Your other devices keep their chats and get the new keys by themselves. | sc |
 | `devices.rotate.effect_phrase` | You get a new recovery phrase. The old one stops working. | sc |
-| `devices.rotate.effect_passkeys` | Your passkeys still sign you in. "Restore keys with this passkey" is turned off until you turn it on again. | sc |
+| `devices.rotate.effect_passkeys` | Your passkeys still sign you in. To restore keys with one again, choose "Restore keys with this passkey" on its row. | sc |
 | `devices.rotate.effect_contacts` | The people you talk to do not have to do anything. | sc |
 | `devices.rotate.confirm` | Remove and change keys | |
 | `devices.rotate.step_remove` | Removing the device | |

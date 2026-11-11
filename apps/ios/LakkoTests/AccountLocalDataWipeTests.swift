@@ -325,6 +325,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, seed: Data(repeating: 5, count: DeviceIdentityStore.seedLength))
         try DeviceIdentityStore.putDeviceBinding(accountIdB64: x, binding: Data([6, 6]))
         InviteLinkSecretStore.shared.put(accountIdB64: x, slug: "slug", secret: Data(repeating: 7, count: 12))
+        PasskeyNoPrfStore().insert("cred", accountIdB64: x)
         KeychainAnonTokenStore().save(
             accountKey: x, context: .pushRegister,
             tokens: [AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "h")])

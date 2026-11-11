@@ -87,33 +87,6 @@ export function removePasskeyConfirmation(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Stop a passkey restoring keys
-// ---------------------------------------------------------------------------
-
-/** The question. */
-export const STOP_RESTORING_TITLE_KEY = "settings.passkeys.stop_restoring.title";
-/** The consequence (docs/ux/identity-recovery.md 10.2). */
-export const STOP_RESTORING_BODY_KEY = "settings.passkeys.stop_restoring.body";
-/** The action. */
-export const STOP_RESTORING_CONFIRM_KEY = "settings.passkeys.stop_restoring.action";
-
-/**
- * "Stop restoring keys" for one passkey. Not destructive to the account:
- * the passkey keeps signing in and keys already restored elsewhere stay, so
- * the tone is plain. What is removed is what the server stored for that
- * passkey.
- */
-export function stopRestoringKeysConfirmation(): ConfirmRequest {
-  return {
-    title: t(STOP_RESTORING_TITLE_KEY),
-    body: t(STOP_RESTORING_BODY_KEY),
-    confirmLabel: t(STOP_RESTORING_CONFIRM_KEY),
-    cancelLabel: t("common.cancel"),
-    tone: "neutral",
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Forget this device
 // ---------------------------------------------------------------------------
 

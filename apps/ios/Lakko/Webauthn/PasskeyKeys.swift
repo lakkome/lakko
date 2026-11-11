@@ -13,18 +13,26 @@ struct AddedPasskey: Equatable {
     let nickname: String
     /// What the registration yielded for protecting keys, when it did.
     let prfOutput: Data?
-    /// Whether the keys choice follows, or the passkey signs in only.
-    let outcome: PasskeyVault.AddOutcome
+    /// What creation reported for the new credential's PRF support:
+    /// `false` an explicit "cannot carry keys" (also a system older than
+    /// iOS 18, which has no PRF API), `nil` nothing said.
+    let prfSupported: Bool?
+
+    /// Whether the platform can protect keys with this passkey at all.
+    var canCarryKeys: Bool {
+        PasskeyVault.canCarryKeys(prfOutput: prfOutput != nil, prfSupported: prfSupported)
+    }
 }
 
 /// Adding a passkey to the signed-in account: the one sequence behind
 /// Settings > Security > Passkeys and the passkey offer at the end of
-/// signup. Mirror of `apps/web/src/auth/passkey-add.ts`.
+/// signup.
 ///
-/// It registers the passkey (asking for the PRF evaluation), turns on
-/// attested device removals (G-13, ADR-0015), and says whether the keys
-/// choice can follow. Nothing is stored for the passkey here: letting it
-/// restore keys is the person's own choice (``PasskeyKeysChoiceView``).
+/// It registers the passkey (asking for the PRF evaluation) and turns on
+/// attested device removals (G-13, ADR-0015). Storing the keys for the new
+/// passkey follows with nothing to choose
+/// (``PasskeyKeysEnrollment/storeAfterAdd(_:)``, UX
+/// `docs/ux/identity-recovery.md` 10.2).
 @MainActor
 enum PasskeyAdder {
 
@@ -72,39 +80,25 @@ enum PasskeyAdder {
             credentialIdB64: finish.credential_id_b64,
             nickname: nickname,
             prfOutput: registered.prfOutput,
-            outcome: PasskeyVault.addOutcome(
-                prfOutput: registered.prfOutput != nil,
-                prfSupported: registered.prfSupported
-            )
+            prfSupported: PasskeyVault.reportedPrfSupport(
+                registrationReported: registered.prfSupported,
+                prfApiAvailable: PasskeysViewModel.prfApiAvailable)
         )
     }
 }
 
-/// How the keys choice ended.
-enum KeysChoiceResult: Equatable {
+/// How storing the keys for a passkey ended.
+enum KeysStoreResult: Equatable {
     /// The keys are stored for the passkey.
     case stored
-    /// The person chose sign-in only; nothing was stored.
-    case signInOnly
     /// The passkey gave no secret to protect keys with.
     case noPrf
     /// The server does not store keys for passkeys.
     case unavailable
-
-    /// The catalog key of the result line, or `nil` when there is nothing
-    /// to say (the person chose sign-in only).
-    var messageKey: String? {
-        switch self {
-        case .stored: return "settings.passkeys.keys_choice.done"
-        case .signInOnly: return nil
-        case .noPrf: return "settings.passkeys.keys_choice.no_prf"
-        case .unavailable: return "settings.passkeys.keys_choice.unavailable"
-        }
-    }
 }
 
-/// The ports "Turn on" drives, so the sequence can be tested without a
-/// system sheet or a server.
+/// The ports storing the keys for a passkey drives, so the sequence can be
+/// tested without a system sheet or a server.
 struct PasskeyKeysEnrollment {
     /// The phrase stored on this device for the signed-in account, or `nil`.
     var devicePhrase: () -> String?
@@ -117,16 +111,19 @@ struct PasskeyKeysEnrollment {
     var store: (_ credentialId: Data, _ sealed: Data) async throws -> Bool
     /// Keep a typed phrase that proved to be the account's on this device.
     var rememberPhrase: (_ phrase: String) -> Void
+    /// Remember on this device that the passkey cannot carry keys, so its
+    /// row stops offering the repair.
+    var rememberNoPrf: (_ credentialIdB64: String) -> Void = { _ in }
 
     enum Step: Equatable {
         /// The phrase is not on this device: ask for the 12 words.
         case needsPhrase
-        case done(KeysChoiceResult)
+        case done(KeysStoreResult)
         case refused(String)
     }
 
-    /// "Turn on": store the keys for this passkey. Every refusal leaves the
-    /// passkey "Signs in only".
+    /// Store the keys for this passkey. Every refusal leaves the passkey
+    /// "Logs in only".
     ///
     ///   1. The phrase: stored on this device, else typed and checked
     ///      against the identity this device holds (the account's own keys).
@@ -168,13 +165,122 @@ struct PasskeyKeysEnrollment {
             }
             prfOutput = PasskeyVault.usablePrfOutput(extras.prfOutput)
         }
-        guard let prfOutput else { return .done(.noPrf) }
+        guard let prfOutput else {
+            rememberNoPrf(credentialIdB64)
+            return .done(.noPrf)
+        }
         guard let credentialId = base64UrlDecodeNoPad(credentialIdB64) else {
             return .refused("settings.passkeys.error.generic")
         }
 
         let sealed = try passkeyVaultSeal(mnemonic: mnemonic, prfOutput: prfOutput)
         return .done(try await store(credentialId, sealed) ? .stored : .unavailable)
+    }
+
+    /// Store the keys for a passkey just added, with nothing to choose (UX
+    /// 10.2 steps 2 to 4). Never throws: every failure is an outcome, and
+    /// the passkey itself is added whatever it is.
+    func storeAfterAdd(_ added: AddedPasskey) async -> PasskeyKeysAddOutcome {
+        guard added.canCarryKeys else {
+            rememberNoPrf(added.credentialIdB64)
+            return .noPrf
+        }
+        do {
+            let step = try await turnOn(
+                credentialIdB64: added.credentialIdB64,
+                registrationPrfOutput: added.prfOutput,
+                typedPhrase: nil
+            )
+            switch step {
+            case .needsPhrase: return .phraseMissing
+            case .done(.stored): return .stored
+            case .done(.noPrf): return .noPrf
+            case .done(.unavailable): return .unavailable
+            case .refused("settings.passkeys.keys_choice.error.other_passkey"): return .otherPasskey
+            case .refused: return .keysFailed
+            }
+        } catch {
+            return PasskeyKeysAddOutcome.failure(error)
+        }
+    }
+}
+
+/// The line of "Restore keys with this passkey" for a refusal of
+/// ``PasskeyKeysEnrollment/turnOn(credentialIdB64:registrationPrfOutput:typedPhrase:)``:
+/// a different passkey answering reads "choose this passkey" on a row, where
+/// the add flow says "the passkey you just added".
+enum PasskeyKeysRepair {
+    static func refusalKey(_ key: String) -> String {
+        key == "settings.passkeys.keys_choice.error.other_passkey"
+            ? "settings.passkeys.keys.error.other_passkey"
+            : key
+    }
+}
+
+/// What adding a passkey ended with, for its result line (UX 10.2).
+enum PasskeyKeysAddOutcome: Equatable {
+    /// The keys are stored: the row is "Logs in and restores keys".
+    case stored
+    /// The platform or the passkey provider gave no secret to protect keys
+    /// with: "Logs in only", and no repair is offered.
+    case noPrf
+    /// This device does not hold the recovery phrase: "Logs in only", and
+    /// the row offers "Restore keys with this passkey".
+    case phraseMissing
+    /// The second passkey sheet was dismissed.
+    case cancelled
+    /// A different passkey answered the second sheet.
+    case otherPasskey
+    /// `503`: the server does not store keys for passkeys.
+    case unavailable
+    /// Offline, or another failure after the passkey was created: "Logs in
+    /// only for now", and the row offers the repair.
+    case keysFailed
+
+    /// The catalog key of the result line.
+    var messageKey: String {
+        switch self {
+        case .stored: return "settings.passkeys.added_restores"
+        case .noPrf: return "settings.passkeys.added_no_keys"
+        case .phraseMissing: return "settings.passkeys.added"
+        case .cancelled: return "settings.passkeys.keys_choice.cancelled"
+        case .otherPasskey: return "settings.passkeys.keys_choice.error.other_passkey"
+        case .unavailable: return "settings.passkeys.keys_choice.unavailable"
+        case .keysFailed: return "settings.passkeys.added_keys_failed"
+        }
+    }
+
+    /// Whether the line reads as a failure. The passkey is added in every
+    /// case; only storing the keys did not happen.
+    var isError: Bool {
+        switch self {
+        case .stored, .noPrf, .phraseMissing: return false
+        case .cancelled, .otherPasskey, .unavailable, .keysFailed: return true
+        }
+    }
+
+    /// The line itself (`settings.passkeys.added` names the passkey).
+    func message(nickname: String) -> UiText {
+        self == .phraseMissing
+            ? .key(messageKey, texts: ["name": nickname])
+            : .key(messageKey)
+    }
+
+    /// The outcome of a failure thrown while storing.
+    static func failure(_ error: Error) -> PasskeyKeysAddOutcome {
+        if AuthErrorCopy.isPasskeyCancelled(error) { return .cancelled }
+        if !isOffline(error) {
+            NSLog("[passkeys] WARN storing the keys for a new passkey failed")
+        }
+        return .keysFailed
+    }
+
+    /// Whether the failure is the network's: the passkey service or the
+    /// vault could not be reached.
+    static func isOffline(_ error: Error) -> Bool {
+        if case .network = error as? WebauthnClientError { return true }
+        if case .network = error as? AuthClientError { return true }
+        return false
     }
 }
 
@@ -204,118 +310,12 @@ extension PasskeyKeysEnrollment {
             },
             rememberPhrase: { phrase in
                 guard case .session(let account) = authRepository.state else { return }
-                DevicePhrase.store(phrase, accountIdB64: account.accountIdB64, context: "passkey-keys-choice", since: nil)
+                DevicePhrase.store(phrase, accountIdB64: account.accountIdB64, context: "passkey-keys", since: nil)
+            },
+            rememberNoPrf: { credentialIdB64 in
+                guard case .session(let account) = authRepository.state else { return }
+                PasskeyNoPrfStore().insert(credentialIdB64, accountIdB64: account.accountIdB64)
             }
         )
-    }
-}
-
-/// "Let this passkey restore your keys?": the choice shown after a passkey
-/// is added, and from a passkey's row later. Used by Settings > Security >
-/// Passkeys and by the passkey offer at the end of signup.
-///
-/// Storing the keys for a passkey is OPT-IN, per passkey, and informed: the
-/// safety of the keys then also rests on whoever syncs the passkey. Nothing
-/// is stored unless the person presses "Turn on"; the two buttons carry the
-/// same weight and neither is the default.
-struct PasskeyKeysChoiceView: View {
-    let credentialIdB64: String
-    let nickname: String
-    /// What the registration yielded, when it yielded it.
-    let prfOutput: Data?
-    let enrollment: PasskeyKeysEnrollment
-    let onDone: (KeysChoiceResult) -> Void
-
-    @State private var askingPhrase = false
-    @State private var typedPhrase = ""
-    @State private var busy = false
-    @State private var error: UiText?
-    @ObservedObject private var l10n = Localization.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(l10n.t("settings.passkeys.keys_choice.title"))
-                .font(.headline)
-                .foregroundStyle(Color.lakkoText)
-            if !nickname.isEmpty {
-                Text(nickname)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoTextMuted)
-            }
-            Text(l10n.t("settings.passkeys.keys_choice.body_on"))
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoText)
-            Text(l10n.t("settings.passkeys.keys_choice.body_off"))
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoText)
-            Text(l10n.t("settings.passkeys.keys_choice.later"))
-                .font(.footnote)
-                .foregroundStyle(Color.lakkoTextMuted)
-
-            if askingPhrase {
-                Text(l10n.t("settings.passkeys.keys_choice.phrase_needed"))
-                    .font(.subheadline)
-                    .foregroundStyle(Color.lakkoText)
-                PhraseEntryGrid(phrase: $typedPhrase, disabled: busy)
-            }
-            if let error {
-                AuthHint(text: error.text, isError: true)
-            }
-
-            // Same weight, no default: the person must pick one.
-            HStack(spacing: 12) {
-                AuthSecondaryButton(
-                    title: l10n.t(busy ? "common.checking" : "settings.passkeys.keys_choice.turn_on"),
-                    disabled: busy,
-                    action: turnOn
-                )
-                AuthSecondaryButton(
-                    title: l10n.t("settings.passkeys.keys_choice.signin_only"),
-                    disabled: busy,
-                    action: { onDone(.signInOnly) }
-                )
-            }
-        }
-        .padding(16)
-        .background(Color.lakkoSurface)
-        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: LakkoRadius.card)
-                .stroke(Color.lakkoBorder, lineWidth: 1)
-        )
-        .accessibilityElement(children: .contain)
-    }
-
-    private func turnOn() {
-        guard !busy else { return }
-        busy = true
-        error = nil
-        Task {
-            defer { busy = false }
-            do {
-                let step = try await enrollment.turnOn(
-                    credentialIdB64: credentialIdB64,
-                    registrationPrfOutput: prfOutput,
-                    typedPhrase: askingPhrase ? typedPhrase : nil
-                )
-                switch step {
-                case .needsPhrase:
-                    askingPhrase = true
-                case .refused(let key):
-                    error = .key(key)
-                case .done(let result):
-                    onDone(result)
-                }
-            } catch {
-                if AuthErrorCopy.isPasskeyCancelled(error) {
-                    // Cancelled in the system sheet: the passkey stays
-                    // sign-in only.
-                    self.error = .key("settings.passkeys.keys_choice.cancelled")
-                } else {
-                    NSLog("[passkeys] WARN turning on restoring keys failed")
-                    self.error = .key("settings.passkeys.error.generic")
-                }
-            }
-        }
     }
 }

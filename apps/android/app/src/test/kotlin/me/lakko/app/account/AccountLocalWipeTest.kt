@@ -343,6 +343,8 @@ class AccountLocalWipeTest {
             check(me.lakko.app.auth.guestAccountState(it, acct)?.claimedUsername == "mira")
         }
         DeviceGroupJournalAccess.markFoundingUnconfirmed(context, acct)
+        // A passkey this device learned cannot carry keys (UX 10.2).
+        me.lakko.app.webauthn.PasskeyNoPrfStore.record(context, acct, "cred-$marker")
         StateBundle.saveKnownGroupIds(context, acct, listOf(group))
         check(deviceLinkAnswerLimit(context, acct).tryConsume() != null)
         DeviceReadmission.recordRemoved(context, acct, group, before = listOf("k1", "k2"), after = listOf("k1"))
@@ -581,7 +583,7 @@ class AccountLocalWipeTest {
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
-            "lakko-guest-account",
+            "lakko-guest-account", "lakko-passkeys-no-prf",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -598,7 +600,7 @@ class AccountLocalWipeTest {
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
-            "lakko-guest-account",
+            "lakko-guest-account", "lakko-passkeys-no-prf",
             CHANNEL_PUBLISHER_PREFS,
         )
 
