@@ -212,6 +212,9 @@ enum AccountLocalDataWipe {
         step("backup-restored-device") {
             RestoredDeviceStore.clear(accountIdB64: accountIdB64)
         }
+        step("devicegroup-rejoin-answer") {
+            RestoredRejoinAnswerStore.clear(accountIdB64: accountIdB64)
+        }
         step("channel-pending-handles") {
             PendingChannelHandleStore.clear(accountIdB64: accountIdB64)
         }

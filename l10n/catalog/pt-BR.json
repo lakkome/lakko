@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "Seus outros dispositivos estão adicionando este às suas conversas.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "Suas chaves foram restauradas. Suas conversas voltam quando seus contatos abrirem o Lakko. As mensagens anteriores não são restauradas.",
       "status": "machine"

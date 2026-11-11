@@ -716,6 +716,16 @@ public class WebauthnHttpError(
     public val body: String,
 ) : WebauthnClientError("webauthn $endpoint → $status: $body")
 
+/** The passkey provider refused to create a passkey because it already
+ *  holds one for this account (WebAuthn `InvalidStateError`). Nothing was
+ *  created; the line is `settings.passkeys.error.already_exists`. */
+public class PasskeyAlreadyExistsError(cause: Throwable? = null) :
+    WebauthnClientError("the passkey provider already holds a passkey for this account") {
+    init {
+        if (cause != null) initCause(cause)
+    }
+}
+
 /** The user dismissed the platform sheet, or the authenticator
  *  refused. Mirror of the web `WebauthnUserCancelledError`; the
  *  action-binding gates treat a throw as "do not perform the

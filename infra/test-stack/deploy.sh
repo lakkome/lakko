@@ -98,6 +98,21 @@ if [[ $SKIP_BACKEND != 1 ]]; then
   install -m 755 lakko-svc-* /opt/lakko-test/bin/
   systemctl daemon-reload
   systemctl enable lakko-test.target lakko-test-*.service >/dev/null 2>&1
+  # Passkeys from the Android app sign as "android:apk-key-hash:<base64url
+  # of the signing certificate's SHA-256>", not as https://<domain>. Auth
+  # accepts the origins listed in LAKKO_WEBAUTHN_EXTRA_ORIGINS; the value is
+  # derived from the fingerprint the shipped assetlinks.json names, and kept
+  # in the env so a backend-only deploy keeps it.
+  if [[ -f web/.well-known/assetlinks.json ]]; then
+    android_origins="$(python3 -c 'import json,base64; a=json.load(open("web/.well-known/assetlinks.json")); fps=[f for e in a for f in e["target"].get("sha256_cert_fingerprints",[])]; print(",".join("android:apk-key-hash:"+base64.urlsafe_b64encode(bytes.fromhex(f.replace(":",""))).decode().rstrip("=") for f in fps))')"
+    if [[ -n $android_origins ]]; then
+      if grep -q '^LAKKO_WEBAUTHN_EXTRA_ORIGINS=' /etc/lakko-test/lakko.env; then
+        sed -i "s|^LAKKO_WEBAUTHN_EXTRA_ORIGINS=.*|LAKKO_WEBAUTHN_EXTRA_ORIGINS=${android_origins}|" /etc/lakko-test/lakko.env
+      else
+        printf 'LAKKO_WEBAUTHN_EXTRA_ORIGINS=%s\n' "$android_origins" >> /etc/lakko-test/lakko.env
+      fi
+    fi
+  fi
   # The SFU fetches the JWKS from auth at startup, so auth goes first.
   systemctl restart lakko-test-auth
   # ADR-0073: discovery and the DS pin auth's attestation verifying key to
@@ -131,7 +146,9 @@ if [[ $SKIP_WEB != 1 ]]; then
   team_id="$(sed -n 's/^LAKKO_APPLE_TEAM_ID=//p' /etc/lakko-test/lakko.env | tr -d '"'"'"' \r' | head -n1)"
   if [[ -n $team_id ]]; then
     install -d -m 755 /var/www/lakko-test-web/.well-known
-    printf '{"applinks":{"details":[{"appIDs":["%s.me.lakko.dev"],"components":[{"/":"/i/*"},{"/":"/g/*"},{"/":"/c/*"},{"/":"/feed/import"}]}]}}\n' "$team_id" \
+    # webcredentials lets the app create and use passkeys for this domain
+    # (the relying-party id); without it iOS refuses every passkey sheet.
+    printf '{"applinks":{"details":[{"appIDs":["%s.me.lakko.dev"],"components":[{"/":"/i/*"},{"/":"/g/*"},{"/":"/c/*"},{"/":"/feed/import"}]}]},"webcredentials":{"apps":["%s.me.lakko.dev"]}}\n' "$team_id" "$team_id" \
       > /var/www/lakko-test-web/.well-known/apple-app-site-association
   else
     echo "[deploy-test] WARN LAKKO_APPLE_TEAM_ID is not set in /etc/lakko-test/lakko.env; no apple-app-site-association written (iOS links open in Safari)"

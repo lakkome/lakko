@@ -424,14 +424,6 @@ public fun ChatListScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
-                if (restoredChats == me.lakko.app.backup.RestoredChatsHint.BANNER) {
-                    Text(
-                        t("chats.restored.banner_other_devices"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
                 // group-and-channel-privacy section 6.2 — `Requests sent`,
                 // above the list while one is open.
                 val requestsSentFlow = remember(repository) { repository.requestsSent() }

@@ -230,6 +230,8 @@ final class DeviceGroupRejoinTests: XCTestCase {
         var watches: [FakeWatch] = []
         var postEndedAt: Int64 = 0
         var joinFails = false
+        /// How many times the run said a device of the account answered.
+        var answeredNotes = 0
         struct JoinFailed: Error {}
 
         var ports: DeviceGroupRejoinPorts {
@@ -263,6 +265,7 @@ final class DeviceGroupRejoinTests: XCTestCase {
                 },
                 clearState: { [unowned self] in self.log.append("clear"); self.state = nil },
                 now: { [unowned self] in self.now },
+                noteAnswered: { [unowned self] in self.answeredNotes += 1 },
                 log: { [unowned self] in self.lines.append($0) }
             )
         }
@@ -359,6 +362,52 @@ final class DeviceGroupRejoinTests: XCTestCase {
         } catch {}
         XCTAssertEqual(m.state?.answered, false)
         XCTAssertTrue(DeviceGroupRejoinState.shouldKnockAgain(m.state, nowMs: m.now))
+    }
+
+    // MARK: Section 7.2 — the answer the chat list reads
+
+    func testAPresenceNoteIsNotedAsAnsweredBeforeTheWelcomeWait() async throws {
+        let m = RunModel()
+        m.answer = [(20, .presence)]
+        let outcome = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(outcome, .waiting, "no Welcome yet")
+        XCTAssertEqual(m.answeredNotes, 1, "the answer is kept without waiting for the Welcome")
+    }
+
+    func testAWelcomeInTheWindowIsNotedAsAnswered() async throws {
+        let m = RunModel()
+        m.answer = [(10, .welcome(Data([7])))]
+        _ = try await DeviceGroupRejoin.rejoinOnce(ports: m.ports, firstPass: true)
+        XCTAssertEqual(m.answeredNotes, 1)
+    }
+
+    func testSilenceAndNoLoginHandleAreNotNotedAsAnswered() async throws {
+        let silent = RunModel()
+        let silentOutcome = try await DeviceGroupRejoin.rejoinOnce(ports: silent.ports, firstPass: true)
+        XCTAssertEqual(silentOutcome, .found)
+        XCTAssertEqual(silent.answeredNotes, 0)
+        let late = RunModel()
+        late.answer = [(5_000, .presence)]  // after the window
+        let lateOutcome = try await DeviceGroupRejoin.rejoinOnce(ports: late.ports, firstPass: true)
+        XCTAssertEqual(lateOutcome, .found)
+        XCTAssertEqual(late.answeredNotes, 0)
+        let noHandle = RunModel()
+        noHandle.canKnock = false
+        let noHandleOutcome = try await DeviceGroupRejoin.rejoinOnce(ports: noHandle.ports, firstPass: true)
+        XCTAssertEqual(noHandleOutcome, .found)
+        XCTAssertEqual(noHandle.answeredNotes, 0)
+    }
+
+    func testARestartWithAnAnsweredKnockNotesItAgainAndAnUnansweredOneDoesNot() async throws {
+        let answered = RunModel()
+        answered.state = DeviceGroupRejoinState(
+            rendezvousB64: "kept", joinerSnapshotB64: "s", knockedAtMs: 1_000, answered: true)
+        _ = try await DeviceGroupRejoin.rejoinOnce(ports: answered.ports, firstPass: false)
+        XCTAssertGreaterThanOrEqual(answered.answeredNotes, 1)
+        let unanswered = RunModel()
+        unanswered.state = DeviceGroupRejoinState(rendezvousB64: "kept", joinerSnapshotB64: "s", knockedAtMs: 1_000)
+        _ = try await DeviceGroupRejoin.rejoinOnce(ports: unanswered.ports, firstPass: false)
+        XCTAssertEqual(unanswered.answeredNotes, 0)
     }
 
     func testNoLoginHandleFoundsWithoutKnocking() async throws {

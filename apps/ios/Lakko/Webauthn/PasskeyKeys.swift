@@ -55,6 +55,8 @@ enum PasskeyAdder {
             userName: start.options.publicKey.user.name,
             userID: userId,
             prfSalt: PasskeyVault.prfSalt,
+            excludedCredentials: (start.options.publicKey.excludeCredentials ?? [])
+                .compactMap { try? base64UrlDecode($0.id) },
             presentationAnchor: presentationAnchor
         )
         let finish = try await client.finishRegistration(

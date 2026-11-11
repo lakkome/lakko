@@ -43,7 +43,11 @@ import { ProofBlock } from "./ProofBlock";
 import { addedPasskeyMessage, storeKeysForPasskey, type StoreKeysOutcome } from "./passkey-keys-store";
 import { addNoPrfPasskey } from "./passkey-no-prf";
 import { useWebauthnClient } from "./use-webauthn-client";
-import { WebauthnClient, WebauthnUserCancelledError } from "./webauthn-client";
+import {
+  WebauthnClient,
+  WebauthnCredentialExistsError,
+  WebauthnUserCancelledError,
+} from "./webauthn-client";
 
 type Step = "show" | "confirm" | "passkey";
 
@@ -201,7 +205,10 @@ export function PasskeyOffer(props: {
       setResult(addedPasskeyMessage(outcome));
     } catch (err) {
       const failure = gate.failed(err, grant).kind;
-      if (
+      if (err instanceof WebauthnCredentialExistsError) {
+        // The provider already holds a passkey for this account (UX 10.2).
+        setError(t("settings.passkeys.error.already_exists"));
+      } else if (
         !(err instanceof WebauthnUserCancelledError) &&
         failure !== "required" &&
         failure !== "rate-limited" &&

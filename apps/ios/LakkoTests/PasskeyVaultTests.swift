@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import AuthenticationServices
 import XCTest
 import LakkoCore
 @testable import Lakko
@@ -100,6 +101,23 @@ final class PasskeyVaultTests: XCTestCase {
         XCTAssertEqual(
             PasskeyKeysRepair.refusalKey("settings.passkeys.keys_choice.error.phrase_mismatch"),
             "settings.passkeys.keys_choice.error.phrase_mismatch")
+    }
+
+    // MARK: - A refused registration
+
+    func testAMatchedExcludedCredentialReadsAsAlreadyExisting() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("the refusal has its own code from iOS 18") }
+        let refused = WebauthnRegistration.registrationError(for: ASAuthorizationError(.matchedExcludedCredential))
+        guard case .alreadyExists = refused else { return XCTFail("got \(refused)") }
+    }
+
+    func testOtherRegistrationFailuresKeepTheirMeaning() {
+        let cancelled = WebauthnRegistration.registrationError(for: ASAuthorizationError(.canceled))
+        guard case .cancelled = cancelled else { return XCTFail("got \(cancelled)") }
+        let failed = WebauthnRegistration.registrationError(for: ASAuthorizationError(.failed))
+        guard case .underlying = failed else { return XCTFail("got \(failed)") }
+        let other = WebauthnRegistration.registrationError(for: URLError(.notConnectedToInternet))
+        guard case .underlying = other else { return XCTFail("got \(other)") }
     }
 
     // MARK: - Settings labels and the restore prompt's row

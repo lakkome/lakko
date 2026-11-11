@@ -495,7 +495,7 @@ public struct ChatListScreen: View {
     private var restoredNotice: RestoredListNotice {
         RestoredListNotice.decide(
             record: restored, listEmpty: allRows.isEmpty && invitedRows.isEmpty,
-            otherDeviceSignedIn: deviceGroupSync.otherDeviceSignedIn)
+            rejoinAnswer: deviceGroupSync.rejoinAnswer)
     }
 
     private func reloadRestored() {
@@ -531,16 +531,6 @@ public struct ChatListScreen: View {
         .padding(.top, 80)
     }
 
-    private var restoredBanner: some View {
-        Text(l10n.t("chats.restored.banner_other_devices"))
-            .font(.footnote)
-            .foregroundStyle(Color.lakkoTextMuted)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-    }
-
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
@@ -556,9 +546,6 @@ public struct ChatListScreen: View {
                     switch restoredNotice {
                     case .card:
                         restoredCard
-                    case .banner:
-                        restoredBanner
-                        emptyState
                     case .none:
                         emptyState
                     }

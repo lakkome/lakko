@@ -2530,6 +2530,9 @@ public class DeviceGroupSyncRepository(
                         return@launch
                     }
                     Log.i(LOG_TAG, "no other device listed; DeviceGroup founded")
+                    me.lakko.app.backup.BackupRestoreStore.recordRejoinAnswer(
+                        applicationContext, accountIdB64, me.lakko.app.backup.RestoreRejoinAnswer.FOUNDED,
+                    )
                     rejoinJob = null
                     adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
                     return@launch
@@ -2638,6 +2641,9 @@ public class DeviceGroupSyncRepository(
             seed.fill(0)
         }
         Log.i(LOG_TAG, "no device answered the knock; DeviceGroup founded")
+        me.lakko.app.backup.BackupRestoreStore.recordRejoinAnswer(
+            applicationContext, accountIdB64, me.lakko.app.backup.RestoreRejoinAnswer.FOUNDED,
+        )
         rejoinJob = null
         forgetCachedJournalSigners(accountIdB64)
         adopt(ensured, accountIdBytes, accountIdB64, seedState, accountIdentitySeed, 0L, false)
@@ -2705,6 +2711,12 @@ public class DeviceGroupSyncRepository(
         }
 
         override fun hasLoginHandle(): Boolean = knockLoginHandle(accountIdB64) != null
+
+        override fun recordAnswered() {
+            me.lakko.app.backup.BackupRestoreStore.recordRejoinAnswer(
+                applicationContext, accountIdB64, me.lakko.app.backup.RestoreRejoinAnswer.ANSWERED,
+            )
+        }
 
         override suspend fun knockAndListen(nowMs: Long): KnockAnswer {
             val loginHandle = knockLoginHandle(accountIdB64)

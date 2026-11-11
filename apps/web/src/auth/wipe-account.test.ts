@@ -63,7 +63,7 @@ import {
   loadRestoredKnownGroups,
 } from "../backup/restored-known-groups";
 import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
-import { markRestoreFinished } from "../backup/restored-marker";
+import { markRestoreFinished, recordRestoreAnswer } from "../backup/restored-marker";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -318,6 +318,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   addRestoredKnownGroups(acct, [G]);
   markBackupRestoreOwed(acct);
   markRestoreFinished(acct, 1);
+  recordRestoreAnswer(acct, "answered");
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -690,6 +691,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.backup.restored-groups.v1.": "account",
   "lakko.backup.restore-owed.v1.": "account",
   "lakko.backup.restored-marker.v1.": "account",
+  "lakko.backup.restore-answer.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",

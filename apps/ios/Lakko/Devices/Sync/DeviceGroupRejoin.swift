@@ -415,6 +415,12 @@ public struct DeviceGroupRejoinPorts {
     public var join: (DeviceGroupRejoinState, Data) async throws -> Void
     public var clearState: () -> Void
     public var now: () -> Int64
+    /// A device of the account answered this device's knock (a presence
+    /// note or a Welcome within the answer window, or an answered knock kept
+    /// from before): section 7.2 of `docs/ux/identity-recovery.md` then shows
+    /// the ordinary list, not the card. Called before the device waits for
+    /// its Welcome.
+    public var noteAnswered: () -> Void
     /// One line, numbers only.
     public var log: (String) -> Void
 
@@ -430,6 +436,7 @@ public struct DeviceGroupRejoinPorts {
         join: @escaping (DeviceGroupRejoinState, Data) async throws -> Void,
         clearState: @escaping () -> Void,
         now: @escaping () -> Int64,
+        noteAnswered: @escaping () -> Void = {},
         log: @escaping (String) -> Void = { NSLog("%@", $0) }
     ) {
         self.dropLocalState = dropLocalState
@@ -443,6 +450,7 @@ public struct DeviceGroupRejoinPorts {
         self.join = join
         self.clearState = clearState
         self.now = now
+        self.noteAnswered = noteAnswered
         self.log = log
     }
 }
@@ -476,6 +484,7 @@ extension DeviceGroupRejoin {
         }
         let kept = ports.loadState()
         if !DeviceGroupRejoinState.shouldKnockAgain(kept, nowMs: ports.now()), let kept {
+            if kept.answered == true { ports.noteAnswered() }
             let watch = ports.openWatch(kept)
             defer { watch.close() }
             return try await waitForWelcome(
@@ -494,6 +503,7 @@ extension DeviceGroupRejoin {
             return .found
         }
         ports.log("DeviceGroupSync rejoin: answered after \(max(0, ports.now() - postedAt)) ms (knock rtt \(rtt) ms)")
+        ports.noteAnswered()
         switch first {
         case .welcome(let welcome):
             try await join(prepared.state, welcome, ports: ports)

@@ -39,6 +39,10 @@
 //!   authenticator UI (`Lakko`).
 //! - `LAKKO_WEBAUTHN_RP_ORIGIN` — full origin (`https://lakko.me`,
 //!   `http://localhost:5173` in dev).
+//! - `LAKKO_WEBAUTHN_EXTRA_ORIGINS` — optional, comma-separated further
+//!   origins accepted by exact match. A native Android app signs as
+//!   `android:apk-key-hash:<base64url SHA-256 of its signing certificate>`,
+//!   not as the web origin, so the Android client's passkeys need it.
 //!
 //! ## State persistence
 //!
@@ -840,12 +844,34 @@ pub(crate) fn load_webauthn() -> anyhow::Result<Option<Arc<Webauthn>>> {
 
     let origin_url = Url::parse(&rp_origin)
         .map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
-    let webauthn = WebauthnBuilder::new(&rp_id, &origin_url)
+    let extra =
+        parse_extra_origins(&std::env::var("LAKKO_WEBAUTHN_EXTRA_ORIGINS").unwrap_or_default())?;
+    let mut builder = WebauthnBuilder::new(&rp_id, &origin_url)
         .map_err(|e| anyhow::anyhow!("WebauthnBuilder::new: {e}"))?
-        .rp_name(&rp_name)
+        .rp_name(&rp_name);
+    for origin in &extra {
+        builder = builder.append_allowed_origin(origin);
+    }
+    let webauthn = builder
         .build()
         .map_err(|e| anyhow::anyhow!("WebauthnBuilder::build: {e}"))?;
+    tracing::info!(extra_origins = extra.len(), "webauthn configured");
     Ok(Some(Arc::new(webauthn)))
+}
+
+/// The further origins of `LAKKO_WEBAUTHN_EXTRA_ORIGINS`: comma-separated,
+/// blanks ignored, each a URL (an `android:apk-key-hash:...` origin parses
+/// as one with the `android` scheme). An entry that does not parse refuses
+/// the start, rather than leaving a client unable to sign in unexplained.
+pub(crate) fn parse_extra_origins(raw: &str) -> anyhow::Result<Vec<Url>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            Url::parse(s)
+                .map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_EXTRA_ORIGINS entry parse: {e}"))
+        })
+        .collect()
 }
 
 /// Authenticated principal injected by the session-token
@@ -1600,6 +1626,46 @@ impl IntoResponse for ApiError {
 impl From<crate::limits::LimitError> for ApiError {
     fn from(e: crate::limits::LimitError) -> Self {
         Self::Limit(e)
+    }
+}
+
+#[cfg(test)]
+mod extra_origin_tests {
+    use super::parse_extra_origins;
+    use url::Url;
+    use webauthn_rs::prelude::WebauthnBuilder;
+
+    const ANDROID: &str = "android:apk-key-hash:LzZYH_1lt2CydanB0V530qXBoc8jdpYFJyS0YaibshI";
+
+    #[test]
+    fn empty_and_blank_entries_give_no_origin() {
+        assert!(parse_extra_origins("").unwrap().is_empty());
+        assert!(parse_extra_origins(" , ,").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_android_app_origin_parses_and_matches_only_itself() {
+        let extra = parse_extra_origins(&format!(" {ANDROID} ")).unwrap();
+        assert_eq!(extra.len(), 1);
+        let own = Url::parse(ANDROID).unwrap();
+        let other = Url::parse("android:apk-key-hash:AAAA").unwrap();
+        assert!(webauthn_rs_core::WebauthnCore::origins_match(
+            false, false, &own, &extra[0]
+        ));
+        assert!(!webauthn_rs_core::WebauthnCore::origins_match(
+            false, false, &other, &extra[0]
+        ));
+        let web = Url::parse("https://test.lakko.example").unwrap();
+        let webauthn = WebauthnBuilder::new("test.lakko.example", &web)
+            .unwrap()
+            .append_allowed_origin(&extra[0])
+            .build();
+        assert!(webauthn.is_ok());
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_url_refuses_the_start() {
+        assert!(parse_extra_origins("not a url").is_err());
     }
 }
 

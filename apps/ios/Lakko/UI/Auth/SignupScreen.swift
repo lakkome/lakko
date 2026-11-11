@@ -292,6 +292,8 @@ struct SignupProtectScreen: View {
                     // appears, with no error styling. Nothing was added.
                     authRepository.dropFreshAuth()
                     proof.proofExpired()
+                case .alreadyExists:
+                    self.error = .key("settings.passkeys.error.already_exists")
                 case .error:
                     NSLog("[signup] WARN adding a passkey failed")
                     self.error = .key("auth.signup.passkey.error")
@@ -309,12 +311,16 @@ enum SignupPasskeyStep {
         case stay
         /// `403 fresh-auth-required`: the proof block appears.
         case proofNeeded
+        /// The device's passkey provider already holds a passkey for this
+        /// account: nothing was created, and it is not a device failure.
+        case alreadyExists
         case error
     }
 
     /// What a failed add leaves on the step.
     static func failure(_ error: Error) -> Failure {
         if AuthErrorCopy.isPasskeyCancelled(error) { return .stay }
+        if case .alreadyExists = error as? WebauthnRegistration.RegistrationError { return .alreadyExists }
         if FreshAuthRefusal.isRequired(error) { return .proofNeeded }
         return .error
     }

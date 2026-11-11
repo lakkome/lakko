@@ -4129,10 +4129,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "Другие ваши устройства добавляют это устройство в чаты.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "Ключи восстановлены. Чаты вернутся, когда ваши контакты откроют Lakko. Прежние сообщения не восстанавливаются.",
       "status": "machine"
@@ -9151,6 +9147,10 @@
     },
     "settings.passkeys.empty": {
       "text": "Ключей доступа пока нет.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.already_exists": {
+      "text": "На этом устройстве уже есть ключ доступа для этого аккаунта.",
       "status": "machine"
     },
     "settings.passkeys.error.cancelled": {

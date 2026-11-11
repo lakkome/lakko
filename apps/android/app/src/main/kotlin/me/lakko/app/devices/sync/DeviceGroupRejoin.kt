@@ -328,6 +328,11 @@ public interface RejoinPorts {
 
     public fun clearState()
 
+    /** Another device answered this device's knock (a presence note or a
+     *  Welcome inside the answer window): recorded for the chat list
+     *  (`docs/ux/identity-recovery.md` 7.2). */
+    public fun recordAnswered()
+
     public fun now(): Long
 }
 
@@ -365,11 +370,13 @@ public suspend fun rejoinOnce(ports: RejoinPorts, firstPass: Boolean): RejoinPas
                 return RejoinPass.FOUND
             }
             is RendezvousAnswer.Welcome -> {
+                ports.recordAnswered()
                 ports.join(knocked.state, answer.bytes)
                 ports.clearState()
                 return RejoinPass.JOINED
             }
             RendezvousAnswer.Present -> {
+                ports.recordAnswered()
                 val answered = knocked.state.copy(answered = true)
                 ports.saveState(answered)
                 state = answered

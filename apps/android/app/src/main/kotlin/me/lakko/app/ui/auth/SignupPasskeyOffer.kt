@@ -94,6 +94,10 @@ public fun SignupPasskeyOffer(
                             proof.onProofRefused()
                         } catch (_: WebauthnUserCancelledError) {
                             // Dismissed: back to the offer.
+                        } catch (_: me.lakko.app.webauthn.PasskeyAlreadyExistsError) {
+                            // UX 10.2: this device has one for the account
+                            // already; never "cannot create passkeys".
+                            error = UiText("settings.passkeys.error.already_exists")
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             Log.w("lakko-auth", "adding a passkey at sign-up failed: ${cause.javaClass.simpleName}")

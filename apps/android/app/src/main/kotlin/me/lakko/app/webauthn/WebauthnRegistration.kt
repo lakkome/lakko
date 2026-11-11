@@ -134,7 +134,7 @@ public class WebauthnRegistration {
         } catch (_: CreateCredentialCancellationException) {
             Outcome.Cancelled
         } catch (e: CreateCredentialException) {
-            Outcome.Failed(e)
+            Outcome.Failed(registrationFailure(e))
         } catch (e: Throwable) {
             Outcome.Failed(e)
         }
@@ -180,6 +180,23 @@ public class WebauthnRegistration {
         }
     }
 }
+
+/**
+ * What a refused registration means. The provider refusing because it
+ * already holds a passkey for this account (WebAuthn `InvalidStateError`,
+ * the excluded-credential case) is [PasskeyAlreadyExistsError]: the device
+ * can create passkeys, it just has one for this account (UX 10.2). Every
+ * other refusal is returned as it was.
+ */
+public fun registrationFailure(e: Throwable): Throwable =
+    if (
+        e is androidx.credentials.exceptions.publickeycredential.CreatePublicKeyCredentialDomException &&
+        e.domError is androidx.credentials.exceptions.domerrors.InvalidStateError
+    ) {
+        PasskeyAlreadyExistsError(e)
+    } else {
+        e
+    }
 
 /** Convenience: extract the inner `publicKey` field from a
  *  webauthn-rs envelope (`CreationChallengeResponse` /

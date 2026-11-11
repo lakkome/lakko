@@ -57,33 +57,38 @@ public struct PasskeysView: View {
                             .padding(.vertical, 4)
                     }
                 } else {
-                    List {
+                    // A plain column, not a List: a List inside this
+                    // ScrollView with its own scrolling disabled took the
+                    // height of one row and cut every further passkey off
+                    // (seen on an iPhone 2026-11-11 with two passkeys).
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(viewModel.credentials) { cred in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(cred.nickname.isEmpty
-                                    ? l10n.t("settings.passkeys.unnamed")
-                                    : cred.nickname)
-                                    .font(.body)
-                                Text(metadataLine(for: cred))
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                keysLine(for: cred)
-                            }
-                            .swipeActions {
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(cred.nickname.isEmpty
+                                        ? l10n.t("settings.passkeys.unnamed")
+                                        : cred.nickname)
+                                        .font(.body)
+                                    Text(metadataLine(for: cred))
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                    keysLine(for: cred)
+                                }
+                                Spacer(minLength: 0)
                                 Button(role: .destructive) {
                                     Task { await viewModel.deleteCredential(cred) }
                                 } label: {
-                                    Label(l10n.t("common.remove"), systemImage: "trash")
+                                    Text(l10n.t("common.remove"))
                                 }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.isBusy)
+                            }
+                            .padding(.vertical, 10)
+                            if cred.id != viewModel.credentials.last?.id {
+                                Divider()
                             }
                         }
                     }
-                    .listStyle(.plain)
-                    .scrollDisabled(true)
-                    // Rebuilt on a layout-direction switch (a UIKit-backed
-                    // List keeps the mirroring it was built with).
-                    .id(l10n.layoutDirection)
-                    .frame(minHeight: 100, maxHeight: 360)
                 }
 
                 if let credentialIdB64 = viewModel.repairAskingPhrase {

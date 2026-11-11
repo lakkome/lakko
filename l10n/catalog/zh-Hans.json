@@ -4013,10 +4013,6 @@
       "text": "{name}：{text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "你的其他设备正在把这台设备加入聊天。",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "你的密钥已恢复。联系人打开 Lakko 后，你的聊天会回来。之前的消息不会恢复。",
       "status": "machine"

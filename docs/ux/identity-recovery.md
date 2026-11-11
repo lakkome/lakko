@@ -350,8 +350,24 @@ Confirm new password   [ ............ ]
 | Route | Chat list |
 |---|---|
 | Another device | Fills as the other device adds this one to each chat; banner "Catching up with your other device..." until done. |
-| Recovery phrase or passkey, another device of the account is still signed in | Fills as that device notices this one and adds it (this can take until that device is next open); banner "Your other devices are adding this one to your chats." |
-| Recovery phrase or passkey, no other device left | Fills as contacts open Lakko and their devices add this one. Until the first chat arrives the empty list carries a card: "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored." with a button to Contacts. Not a loading state; no spinner. A restored device that knew no conversation shows the ordinary empty list. |
+| Recovery phrase or passkey, another device of the account answered | Fills as that device adds this one. No banner: what happens in the background is not the person's to act on (amended 2026-11-11, maintainer). |
+| Recovery phrase or passkey, no other device answered | Fills as contacts open Lakko and their devices add this one. Until the first chat arrives the empty list carries a card: "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored." with a button to Contacts. Not a loading state; no spinner. |
+
+Amended 2026-11-11 (maintainer). "Answered" is the ADR-0081 third
+amendment's answer: after a restore the device knocks on the account's
+DeviceGroup, and a running device answers at once (a presence note or a
+Welcome). Whether another device is merely listed in the directory says
+nothing: a lost device stays listed, which put the banner on exactly the
+restores where no other device existed. A device that founded the
+DeviceGroup because nobody answered (or because no other device was
+listed) shows the card; one that was answered shows the ordinary list (the
+banner "Your other devices are adding this one to your chats." is removed
+on every client). The card needs a restored device that knew at least one
+conversation (the backup's list of
+conversations); one that knew none shows the ordinary empty list, since
+there is nothing to add it to. Both go away when the first conversation
+arrives, as before. The answer is kept per account on the device, so a
+restart shows the same state.
 
 ## 8. Restore your keys (signed in, no keys on this device)
 
@@ -539,6 +555,12 @@ Adding a passkey:
    with the keys holds it, ADR-0072). If it is missing, the passkey is added
    as **Logs in only** and its row offers **Restore keys with this passkey**
    (below), which asks for the phrase.
+
+When the system sheet refuses because this device's passkey provider
+already holds a passkey for this account (WebAuthn `InvalidStateError`, the
+excluded-credential case), the line is "This device already has a passkey
+for this account." and nothing changes; it is never shown as the browser or
+device being unable to create passkeys (amended 2026-11-11).
 
 States while storing: working; cancelled at the second sheet ("The passkey
 was added. It logs you in only; restore keys with it from its row."); a

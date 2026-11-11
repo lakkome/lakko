@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "आपके दूसरे डिवाइस इसे आपकी चैट में जोड़ रहे हैं।",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "आपकी कुंजियाँ बहाल हो गईं। जब आपके संपर्क Lakko खोलेंगे, आपकी चैट लौट आएँगी। पुराने संदेश बहाल नहीं होते।",
       "status": "machine"

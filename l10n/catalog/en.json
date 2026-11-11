@@ -4229,10 +4229,6 @@
       "text": "{name}: {text}",
       "comment": "Chat list row of a group, second line: {name} is who sent the last message, {text} the message or its kind."
     },
-    "chats.restored.banner_other_devices": {
-      "text": "Your other devices are adding this one to your chats.",
-      "comment": "Banner on the chat list of a restored device while another device of the account is still signed in."
-    },
     "chats.restored.card": {
       "text": "Your keys are restored. Your chats come back as your contacts open Lakko. Messages from before are not restored.",
       "comment": "Card on the empty chat list of a device restored from the recovery phrase or a passkey. It is not a loading state."
@@ -9582,6 +9578,10 @@
     "settings.passkeys.empty": {
       "text": "No passkeys yet.",
       "comment": "Empty passkey list."
+    },
+    "settings.passkeys.error.already_exists": {
+      "text": "This device already has a passkey for this account.",
+      "comment": "Adding a passkey (Settings > Passkeys, the signup offer): the device's passkey provider refused because it already holds a passkey for this account (WebAuthn InvalidStateError / excluded credential). Not a failure of the browser or the device."
     },
     "settings.passkeys.error.cancelled": {
       "text": "Cancelled. No passkey was created.",

@@ -128,6 +128,11 @@ class DeviceGroupRejoinTest {
         var knocks = 0
         val log = mutableListOf<String>()
         var state: RejoinState? = null
+        var answeredRecorded = 0
+
+        override fun recordAnswered() {
+            answeredRecorded += 1
+        }
 
         override fun dropLocalState() {
             log += "drop"
@@ -251,6 +256,26 @@ class DeviceGroupRejoinTest {
         assertEquals(RejoinPass.WAITING, rejoinOnce(m, firstPass = true))
         assertEquals(RejoinPass.FOUND, rejoinOnce(m, firstPass = false))
         assertEquals(2, m.log.count { it == "knock" })
+    }
+
+    @Test
+    fun `a presence note or a Welcome in the window is recorded as answered`() = runTest {
+        val present = RunModel(welcomeAfter = 0, windows = listOf("present"))
+        assertEquals(RejoinPass.JOINED, rejoinOnce(present, firstPass = true))
+        assertEquals(1, present.answeredRecorded)
+        val welcome = RunModel(welcomeAfter = null, windows = listOf("welcome"))
+        assertEquals(RejoinPass.JOINED, rejoinOnce(welcome, firstPass = true))
+        assertEquals(1, welcome.answeredRecorded)
+    }
+
+    @Test
+    fun `silence or no username is never recorded as answered`() = runTest {
+        val silence = RunModel(welcomeAfter = null, windows = listOf("silence"))
+        assertEquals(RejoinPass.FOUND, rejoinOnce(silence, firstPass = true))
+        assertEquals(0, silence.answeredRecorded)
+        val noHandle = RunModel(welcomeAfter = null, loginHandleKnown = false)
+        assertEquals(RejoinPass.FOUND, rejoinOnce(noHandle, firstPass = true))
+        assertEquals(0, noHandle.answeredRecorded)
     }
 
     @Test

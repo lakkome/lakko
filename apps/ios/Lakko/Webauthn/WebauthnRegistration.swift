@@ -72,6 +72,10 @@ public final class WebauthnRegistration: NSObject {
 
     public enum RegistrationError: Error, LocalizedError {
         case cancelled
+        /// The passkey provider already holds a passkey for this account
+        /// (an excluded credential matched): nothing was created. Not a
+        /// failure of the device (UX `docs/ux/identity-recovery.md` 10.2).
+        case alreadyExists
         case noCredential
         case underlying(Error)
 
@@ -79,6 +83,8 @@ public final class WebauthnRegistration: NSObject {
             switch self {
             case .cancelled:
                 return "Cancelled. No passkey was created."
+            case .alreadyExists:
+                return "This device already has a passkey for this account."
             case .noCredential:
                 return "No passkey credential was returned."
             case .underlying(let err):
@@ -112,6 +118,7 @@ public final class WebauthnRegistration: NSObject {
         userName: String,
         userID: Data,
         prfSalt: Data? = nil,
+        excludedCredentials: [Data] = [],
         presentationAnchor: ASPresentationAnchor
     ) async throws -> Result {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
@@ -124,6 +131,18 @@ public final class WebauthnRegistration: NSObject {
         )
         if let prfSalt, #available(iOS 18.0, *) {
             request.prf = .inputValues(.saltInput1(prfSalt))
+        }
+        // The account's existing passkeys (the server's `excludeCredentials`):
+        // a provider that holds one refuses instead of creating a second, or
+        // silently replacing it. Set from iOS 18 only, the first system with
+        // a distinct error for the refusal
+        // (`ASAuthorizationError.matchedExcludedCredential`); what an older
+        // system returns for it is not known, and a generic failure there
+        // would read as "cannot create passkeys".
+        if !excludedCredentials.isEmpty, #available(iOS 18.0, *) {
+            request.excludedCredentials = excludedCredentials.map {
+                ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0)
+            }
         }
         // Apple's default UV policy matches what webauthn-rs's
         // Passkey flow expects (Required). No additional knob
@@ -173,6 +192,28 @@ private final class ControllerBridge: NSObject,
     /// one of the terminal callbacks fires.
     func attach(controller: ASAuthorizationController) {
         self.retainedController = controller
+        Self.keepAlive(self)
+    }
+
+    /// The bridges whose sheet is still open. `ASAuthorizationController`
+    /// holds its delegate and presentation context provider weakly, and
+    /// nothing else holds the bridge once `run` has called
+    /// `performRequests`, so without this it was released at once and
+    /// the sheet's answer resumed nothing ("Adding..." forever, a leaked
+    /// continuation; seen on an iPhone 2026-11-11).
+    private static let liveLock = NSLock()
+    nonisolated(unsafe) private static var live: [ObjectIdentifier: ControllerBridge] = [:]
+
+    private static func keepAlive(_ bridge: ControllerBridge) {
+        liveLock.lock()
+        live[ObjectIdentifier(bridge)] = bridge
+        liveLock.unlock()
+    }
+
+    private static func letGo(_ bridge: ControllerBridge) {
+        liveLock.lock()
+        live[ObjectIdentifier(bridge)] = nil
+        liveLock.unlock()
     }
 
     func presentationAnchor(
@@ -188,6 +229,7 @@ private final class ControllerBridge: NSObject,
         defer {
             self.continuation = nil
             self.retainedController = nil
+            Self.letGo(self)
         }
         guard
             let registration = authorization.credential
@@ -241,21 +283,22 @@ private final class ControllerBridge: NSObject,
         defer {
             self.continuation = nil
             self.retainedController = nil
+            Self.letGo(self)
         }
+        self.continuation?.resume(throwing: WebauthnRegistration.registrationError(for: error))
+    }
+}
+
+extension WebauthnRegistration {
+    /// The ``RegistrationError`` for what the system sheet failed with.
+    nonisolated static func registrationError(for error: Error) -> RegistrationError {
         if let asError = error as? ASAuthorizationError {
-            switch asError.code {
-            case .canceled:
-                self.continuation?.resume(
-                    throwing: WebauthnRegistration.RegistrationError.cancelled
-                )
-                return
-            default:
-                break
+            if asError.code == .canceled { return .cancelled }
+            if #available(iOS 18.0, *), asError.code == .matchedExcludedCredential {
+                return .alreadyExists
             }
         }
-        self.continuation?.resume(
-            throwing: WebauthnRegistration.RegistrationError.underlying(error)
-        )
+        return .underlying(error)
     }
 }
 

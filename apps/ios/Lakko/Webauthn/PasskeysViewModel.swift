@@ -310,6 +310,8 @@ public final class PasskeysViewModel: ObservableObject {
             switch error {
             case .cancelled:
                 message = .error(.key("settings.passkeys.error.cancelled"))
+            case .alreadyExists:
+                message = .error(.key("settings.passkeys.error.already_exists"))
             case .noCredential, .underlying:
                 NSLog("[passkeys] WARN registration failed: \(error)")
                 message = .error(.key("settings.passkeys.error.generic"))

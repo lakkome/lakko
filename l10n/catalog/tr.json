@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "Diğer cihazlarınız bunu sohbetlerinize ekliyor.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "Anahtarlarınız geri yüklendi. Kişileriniz Lakko’yu açtıkça sohbetleriniz geri gelir. Önceki iletiler geri yüklenmez.",
       "status": "machine"

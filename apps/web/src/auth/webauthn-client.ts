@@ -75,6 +75,15 @@ export class WebauthnUnsupportedError extends Error {
   override name = "WebauthnUnsupportedError";
 }
 
+/** Creating a passkey was refused because this device's passkey provider
+ *  already holds one for this account (`InvalidStateError` from
+ *  `navigator.credentials.create`, the excluded-credential case). Not the
+ *  browser or device being unable to create passkeys
+ *  (docs/ux/identity-recovery.md 10.2, amended 2026-11-11). */
+export class WebauthnCredentialExistsError extends Error {
+  override name = "WebauthnCredentialExistsError";
+}
+
 /** User dismissed the platform sheet, or the authenticator
  *  refused (no matching credential, locked, etc.). The DOM
  *  surface folds all of these into a single `NotAllowedError`;
@@ -370,7 +379,7 @@ export class WebauthnClient {
     try {
       cred = await navigator.credentials.create({ publicKey });
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "create");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -490,7 +499,7 @@ export class WebauthnClient {
       }
       cred = await navigator.credentials.get(getOptions);
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "get");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -559,7 +568,7 @@ export class WebauthnClient {
     try {
       cred = await navigator.credentials.get({ publicKey });
     } catch (err) {
-      throw mapDomError(err);
+      throw mapDomError(err, "get");
     }
     if (cred === null) {
       throw new WebauthnUserCancelledError();
@@ -651,10 +660,20 @@ async function safeReadBody(response: Response): Promise<string> {
 
 // ---- DOM-error mapping ------------------------------------------
 
-function mapDomError(err: unknown): Error {
+/**
+ * The typed error for a DOM exception of a WebAuthn ceremony. `ceremony` is
+ * which call threw: an `InvalidStateError` from `create` means the
+ * authenticator already holds a credential from `excludeCredentials` (WebAuthn
+ * L3, section 5.1.3), so it is {@link WebauthnCredentialExistsError}; from
+ * `get` it keeps the earlier reading, unsupported.
+ */
+export function mapDomError(err: unknown, ceremony: "create" | "get"): Error {
   if (err instanceof Error) {
     if (err.name === "NotAllowedError" || err.name === "AbortError") {
       return new WebauthnUserCancelledError();
+    }
+    if (err.name === "InvalidStateError" && ceremony === "create") {
+      return new WebauthnCredentialExistsError();
     }
     if (
       err.name === "NotSupportedError" ||

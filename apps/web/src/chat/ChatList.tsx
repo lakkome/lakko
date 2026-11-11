@@ -593,9 +593,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       {/* docs/ux/identity-recovery.md 18.4: the account was taken back here. */}
       <RecallDoneNotice />
       <KeysRotatedNotice />
-      <Show when={restoredList() === "banner"}>
-        <RestoredNotice state="banner" />
-      </Show>
       {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
           exists. Hidden while searching - a search covers everything. */}
       <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>
@@ -612,7 +609,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <Show
         when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
         fallback={
-          <Show when={restoredList() !== "card"} fallback={<RestoredNotice state="card" />}>
+          <Show when={restoredList() !== "card"} fallback={<RestoredNotice />}>
             <div class="lk-empty">
               <Icon name="chat" size={40} strokeWidth={1.4} />
               <strong>{copy().emptyTitle()}</strong>

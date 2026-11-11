@@ -410,6 +410,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         RestoredKnownGroupsStore.add(
             accountIdB64: x, groupIdsHex: [String(repeating: "ab", count: 32)])
         BackupRestoreRetryStore.mark(accountIdB64: x)
+        RestoredDeviceStore.noteRestored(accountIdB64: x, knownConversations: 1)
+        RestoredRejoinAnswerStore.record(.answered, accountIdB64: x)
         // The guest marker.
         GuestAccountMarker().mark(accountIdB64: x, nowMs: 1_760_000_000_000)
         GuestAccountMarker().noteUsernameClaimed(accountIdB64: x, username: "mira")

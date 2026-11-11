@@ -118,10 +118,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// (docs/ux/second-device.md section 3.1). Reset on sign-out and on an
     /// account switch.
     @Published public private(set) var deviceRemoved: Bool = false
-    /// Whether another device of this account is signed in, as far as this
-    /// one knows: the DeviceGroup roster, or the directory while this device
-    /// holds no DeviceGroup. `nil` until it is known.
-    @Published public private(set) var otherDeviceSignedIn: Bool?
+    /// Whether another device of the account answered this device's
+    /// DeviceGroup rejoin (ADR-0081 third amendment), as last decided for the
+    /// bound account and kept in ``RestoredRejoinAnswerStore``; `nil` while
+    /// no rejoin has decided. The chat list's section 7.2 notice reads it.
+    @Published public private(set) var rejoinAnswer: RestoredRejoinAnswerStore.Answer?
 
     // MARK: - Internals
 
@@ -282,6 +283,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         deviceRemoved = false
         activeAccountIdB64 = accountIdB64
         activeAccountId = secrets.accountId
+        rejoinAnswer = RestoredRejoinAnswerStore.load(accountIdB64: accountIdB64)
         let seed: Data
         do {
             seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
@@ -402,7 +404,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         activeAccountId = nil
         ready = false
         deviceRemoved = false
-        otherDeviceSignedIn = nil
+        rejoinAnswer = nil
         syncedState = SyncedState()
         pending = nil
         refreshDerived()
@@ -1665,8 +1667,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             guard let self, let mayFound, !Task.isCancelled, bound.isCurrent,
                   self.activeAccountIdB64 == accountIdB64 else { return }
-            self.otherDeviceSignedIn = !mayFound
             if mayFound {
+                self.noteRejoinAnswer(.founded, accountIdB64: accountIdB64)
                 NSLog("DeviceGroupSync: no other device listed; founding the DeviceGroup")
                 await self.foundAndAdopt(
                     accountIdBytes: accountIdBytes, accountIdB64: accountIdB64, bound: bound)
@@ -1721,6 +1723,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
         }
         guard !Task.isCancelled, bound.isCurrent, activeAccountIdB64 == accountIdB64 else { return }
+        noteRejoinAnswer(outcome == .found ? .founded : .answered, accountIdB64: accountIdB64)
         if outcome == .found {
             // ADR-0081 third amendment, point 4 — no device of the account
             // answered: this device founds the DeviceGroup (the claim is a
@@ -1738,6 +1741,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         } catch {
             NSLog("DeviceGroupSync: the joined DeviceGroup did not load (%@)", DeviceGroupRejoin.errorLabel(error))
         }
+    }
+
+    /// The rejoin decided whether another device of the account answered
+    /// (section 7.2 of `docs/ux/identity-recovery.md`): kept per account so
+    /// a restart shows the same state.
+    private func noteRejoinAnswer(_ answer: RestoredRejoinAnswerStore.Answer, accountIdB64: String) {
+        guard activeAccountIdB64 == accountIdB64 else { return }
+        RestoredRejoinAnswerStore.record(answer, accountIdB64: accountIdB64)
+        rejoinAnswer = answer
     }
 
     /// Found the DeviceGroup with this device as its first leaf and start
@@ -1869,7 +1881,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             clearState: {
                 store.deletePending(accountIdB64: accountIdB64, kind: .rejoin)
             },
-            now: { Int64(Date().timeIntervalSince1970 * 1000) }
+            now: { Int64(Date().timeIntervalSince1970 * 1000) },
+            noteAnswered: { [weak self] in
+                self?.noteRejoinAnswer(.answered, accountIdB64: accountIdB64)
+            }
         )
     }
 
@@ -2317,7 +2332,6 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func reportRoster(group g: DeviceGroup) {
         guard let accountIdB64 = activeAccountIdB64, !deviceRemoved,
               let devices = try? g.devices(), !devices.isEmpty else { return }
-        otherDeviceSignedIn = devices.count > 1
         let own = (try? g.ownLeafIndex()).flatMap { leaf in
             devices.first { $0.leafIndex == leaf }?.signaturePublicKey
         }

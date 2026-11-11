@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "تضيف أجهزتك الأخرى هذا الجهاز إلى محادثاتك.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "تمت استعادة مفاتيحك. تعود محادثاتك عندما يفتح جهات اتصالك Lakko. لا تتم استعادة الرسائل السابقة.",
       "status": "machine"

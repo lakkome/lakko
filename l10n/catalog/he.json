@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "המכשירים האחרים שלכם מוסיפים את המכשיר הזה לצ׳אטים.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "המפתחות שלכם שוחזרו. הצ׳אטים חוזרים כשאנשי הקשר שלכם פותחים את Lakko. הודעות קודמות לא משוחזרות.",
       "status": "machine"

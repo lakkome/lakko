@@ -159,6 +159,19 @@ build it on a fresh host, as root, after the main one-time setup:
    `:5351` only; a STUN binding to UDP 3478 of edge2 over IPv4 and IPv6 answers; a call with
    only `turns:edge.lakko.me:443` connects in Firefox.
 
+## Passkeys in the apps
+
+The relying-party id is the stack's domain. iOS creates and uses passkeys
+for it only when the app carries `webcredentials:<domain>` (in
+`apps/ios/Lakko/Lakko.entitlements`) and the domain's
+`apple-app-site-association` names the app under `webcredentials` (the web
+deploy writes it with the applinks, from `LAKKO_APPLE_TEAM_ID`). Android
+needs the `delegate_permission/common.get_login_creds` relation in
+`assetlinks.json`, and auth must accept the app's origin,
+`android:apk-key-hash:<base64url SHA-256 of the signing certificate>`: the
+deploy derives it from the fingerprint in the shipped `assetlinks.json` and
+writes `LAKKO_WEBAUTHN_EXTRA_ORIGINS` into `/etc/lakko-test/lakko.env`.
+
 ## App links (a tapped link opens the installed app)
 
 The web build ships `/.well-known/assetlinks.json` (Android; it names the

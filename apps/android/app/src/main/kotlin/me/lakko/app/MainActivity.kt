@@ -3503,19 +3503,27 @@ private fun restoredChatsHint(chatRepository: ChatRepository): me.lakko.app.back
     val state by chatRepository.state.collectAsStateWithLifecycle()
     val accountIdB64 = chatRepository.activeAccountIdB64
     val listEmpty = state.bootstrapped && state.threads.isEmpty()
-    val knew = remember(accountIdB64, state.bootstrapped, state.threads.size) {
-        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.restoredChats(context, it) }
+    // What this device's DeviceGroup rejoin came to (another device answered
+    // its knock, or it founded): recorded by the rejoin, kept per account.
+    val rejoinFlow = remember(accountIdB64) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.rejoinAnswerFlow(context, it) }
+            ?: kotlinx.coroutines.flow.flowOf(null)
     }
-    var otherDevice by remember(accountIdB64) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(accountIdB64, knew != null) {
-        if (knew != null) otherDevice = chatRepository.ownOtherDeviceListed()
+    val rejoinInitial = remember(accountIdB64) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.rejoinAnswer(context, it) }
+    }
+    val rejoin by rejoinFlow.collectAsStateWithLifecycle(initialValue = rejoinInitial)
+    // Read again when the rejoin decides: the restore may finish after the
+    // list first drew.
+    val knew = remember(accountIdB64, state.bootstrapped, state.threads.size, rejoin) {
+        accountIdB64?.let { me.lakko.app.backup.BackupRestoreStore.restoredChats(context, it) }
     }
     LaunchedEffect(accountIdB64, knew != null, state.threads.isNotEmpty()) {
         if (knew != null && state.threads.isNotEmpty() && accountIdB64 != null) {
             me.lakko.app.backup.BackupRestoreStore.clearRestoredChats(context, accountIdB64)
         }
     }
-    return me.lakko.app.backup.restoredChatsHint(knew, listEmpty, otherDevice)
+    return me.lakko.app.backup.restoredChatsHint(knew, listEmpty, rejoin)
 }
 
 @Composable

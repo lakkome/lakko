@@ -39,6 +39,7 @@ import {
 } from "./passkey-keys-store";
 import { PhraseInput } from "../ui/PhraseInput";
 import { addNoPrfPasskey, readNoPrfPasskeys, removeNoPrfPasskey } from "./passkey-no-prf";
+import { passkeyErrorKey } from "./passkey-error-key";
 import {
   createEffect,
   createMemo,
@@ -54,9 +55,6 @@ import { requestConfirm } from "../ui/confirm-dialog";
 import {
   WebauthnClient,
   WebauthnHttpError,
-  WebauthnNetworkError,
-  WebauthnUnsupportedError,
-  WebauthnUserCancelledError,
   actionHashForDeleteCredential,
   type CredentialSummary,
 } from "./webauthn-client";
@@ -461,38 +459,12 @@ function formatTimestamp(ms: number | null): string {
   return d.toLocaleString(displayLocale());
 }
 
-/** The catalog key for an error (ADR-0061 section 6: never the server's
- *  or the browser's prose, which goes to the log). */
-function explainError(err: unknown): string {
-  if (err instanceof WebauthnUserCancelledError) {
-    return "settings.passkeys.error.cancelled";
-  }
-  if (err instanceof WebauthnUnsupportedError) {
-    return "settings.passkeys.error.unsupported";
-  }
-  if (err instanceof WebauthnHttpError) {
-    if (err.status === 503) {
-      return "auth.passkey.error.server_disabled";
-    }
-    if (err.status === 401) {
-      return "common.error.session_expired";
-    }
-    console.warn("[passkeys] server error", err.status, err.body);
-    return "settings.passkeys.error.server_status";
-  }
-  if (err instanceof WebauthnNetworkError) {
-    return "settings.passkeys.error.network";
-  }
-  console.warn("[passkeys] failed", err);
-  return "settings.passkeys.error.generic";
-}
-
 function errorMessage(err: unknown): {
   readonly kind: "error";
   readonly key: string;
   readonly args?: L10nArgs;
 } {
-  const key = explainError(err);
+  const key = passkeyErrorKey(err);
   return key === "settings.passkeys.error.server_status" && err instanceof WebauthnHttpError
     ? { kind: "error", key, args: { status: String(err.status) } }
     : { kind: "error", key };

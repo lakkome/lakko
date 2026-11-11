@@ -108,6 +108,7 @@ import {
   type RejoinPorts,
 } from "../device-group-rejoin";
 import { openRejoinWatch } from "../rejoin-watch";
+import { answerForRejoinOutcome, recordRestoreAnswer } from "../../backup/restored-marker";
 import { runKnockListener } from "../knock-listener";
 import { createReplacementQueue } from "./handle-replacements";
 import { isRecoveryPayloadRow } from "../recovery-payload";
@@ -860,6 +861,9 @@ export function DeviceGroupSyncProvider(props: {
     identity = ensured.identity;
     group = ensured.group;
     handleGeneration = ensured.generation;
+    // docs/ux/identity-recovery.md 7.2: founded here because no other device
+    // of the account was listed, so no device will add this one to its chats.
+    if (ensured.bootstrapped) recordRestoreAnswer(accountIdB64, "founded");
 
     // Removed while the app was closed: the persisted snapshot already
     // carries the commit that removed this device. Nothing is polled, folded
@@ -2772,6 +2776,9 @@ export function DeviceGroupSyncProvider(props: {
         try {
           const outcome = await rejoinOnce(ports, first);
           first = false;
+          // docs/ux/identity-recovery.md 7.2: whether another device answered
+          // the knock decides whether the restored chat list shows its card.
+          recordRestoreAnswer(account, answerForRejoinOutcome(outcome));
           if (outcome === "joined" || outcome === "founded") {
             // eslint-disable-next-line no-console
             console.info(`DeviceGroup rejoin: ${outcome}`);
@@ -2913,6 +2920,8 @@ export function DeviceGroupSyncProvider(props: {
         }
       },
       noteAnswer(ms, kind) {
+        // A presence note or a Welcome: a device of the account is running.
+        if (kind !== null) recordRestoreAnswer(account, "answered");
         // eslint-disable-next-line no-console
         console.info(
           ms === null

@@ -4013,10 +4013,6 @@
       "text": "{name}: {text}",
       "status": "machine"
     },
-    "chats.restored.banner_other_devices": {
-      "text": "دستگاه‌های دیگرتان این دستگاه را به گفتگوها اضافه می‌کنند.",
-      "status": "machine"
-    },
     "chats.restored.card": {
       "text": "کلیدهای شما بازیابی شد. گفتگوهایتان وقتی مخاطبانتان Lakko را باز کنند برمی‌گردند. پیام‌های قبلی بازیابی نمی‌شوند.",
       "status": "machine"

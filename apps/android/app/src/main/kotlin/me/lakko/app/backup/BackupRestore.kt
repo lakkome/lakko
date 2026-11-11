@@ -6,6 +6,10 @@ package me.lakko.app.backup
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import uniffi.lakko_ffi_uniffi.BackupContactRecord
 import uniffi.lakko_ffi_uniffi.BackupOwnPredecessor
 
@@ -372,6 +376,7 @@ public object BackupRestoreStore {
     private const val GROUPS_PREFIX = "restored-groups:"
     private const val RETRY_PREFIX = "retry:"
     private const val RESTORED_CHATS_PREFIX = "restored-chats:"
+    private const val REJOIN_ANSWER_PREFIX = "restored-rejoin:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -464,7 +469,45 @@ public object BackupRestoreStore {
 
     /** The first conversation arrived: the hint is gone for good. */
     public fun clearRestoredChats(context: Context, accountIdB64: String) {
-        prefs(context).edit().remove(RESTORED_CHATS_PREFIX + accountIdB64).apply()
+        prefs(context).edit()
+            .remove(RESTORED_CHATS_PREFIX + accountIdB64)
+            .remove(REJOIN_ANSWER_PREFIX + accountIdB64)
+            .apply()
+    }
+
+    /**
+     * Record what this device's DeviceGroup rejoin came to (ADR-0081 third
+     * amendment): another device answered its knock, or it founded the
+     * DeviceGroup itself. The latest decision wins. Read by the chat list
+     * ([restoredChatsHint]), so a restart shows the same state.
+     */
+    public fun recordRejoinAnswer(context: Context, accountIdB64: String, answer: RestoreRejoinAnswer) {
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putString(REJOIN_ANSWER_PREFIX + accountIdB64, answer.stored).apply()
+        }
+    }
+
+    /** What the rejoin came to, or `null` while it has not decided. */
+    public fun rejoinAnswer(context: Context, accountIdB64: String): RestoreRejoinAnswer? =
+        RestoreRejoinAnswer.fromStored(prefs(context).getString(REJOIN_ANSWER_PREFIX + accountIdB64, null))
+
+    /** [rejoinAnswer], and every change of it after. */
+    public fun rejoinAnswerFlow(
+        context: Context,
+        accountIdB64: String,
+    ): Flow<RestoreRejoinAnswer?> {
+        val key = REJOIN_ANSWER_PREFIX + accountIdB64
+        val held = prefs(context)
+        return callbackFlow {
+            val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, changed ->
+                if (changed == null || changed == key) {
+                    trySend(RestoreRejoinAnswer.fromStored(held.getString(key, null)))
+                }
+            }
+            held.registerOnSharedPreferenceChangeListener(listener)
+            trySend(RestoreRejoinAnswer.fromStored(held.getString(key, null)))
+            awaitClose { held.unregisterOnSharedPreferenceChangeListener(listener) }
+        }.distinctUntilChanged()
     }
 
     /** Forget device / Delete account: everything of [accountIdB64]. */
@@ -473,7 +516,26 @@ public object BackupRestoreStore {
             .remove(GROUPS_PREFIX + accountIdB64)
             .remove(RETRY_PREFIX + accountIdB64)
             .remove(RESTORED_CHATS_PREFIX + accountIdB64)
+            .remove(REJOIN_ANSWER_PREFIX + accountIdB64)
             .apply()
+    }
+}
+
+/** What this device's DeviceGroup rejoin came to after a restore
+ *  (`docs/ux/identity-recovery.md` 7.2, amended 2026-11-11). */
+public enum class RestoreRejoinAnswer(internal val stored: String) {
+    /** Another device of the account answered the knock (a presence note
+     *  or a Welcome inside the answer window). */
+    ANSWERED("answered"),
+
+    /** Nobody answered, or no other device was listed: this device founded
+     *  the DeviceGroup. */
+    FOUNDED("founded"),
+    ;
+
+    public companion object {
+        /** `null` for anything this build did not write. */
+        public fun fromStored(value: String?): RestoreRejoinAnswer? = entries.firstOrNull { it.stored == value }
     }
 }
 
@@ -484,25 +546,28 @@ public enum class RestoredChatsHint {
 
     /** The card on the empty list, with a button to Contacts. */
     CARD,
-
-    /** The line that another device is adding this one. */
-    BANNER,
 }
 
 /**
+ * `docs/ux/identity-recovery.md` 7.2 (amended 2026-11-11). Whether another
+ * device is merely listed in the directory says nothing (a lost device stays
+ * listed); only an answer to this device's rejoin knock does. A device that
+ * founded the DeviceGroup because nobody answered shows the card; one that
+ * another device answered shows the ordinary list (that device adds it to
+ * the chats in the background, nothing the person can act on).
+ *
  * @param knewConversations [BackupRestoreStore.restoredChats]: `null` when no
- *        restore is waiting for its first conversation.
+ *        restore is waiting for its first conversation, else whether the
+ *        backup named at least one conversation.
  * @param listEmpty no conversation on this device yet.
- * @param otherDevice whether another device of the account is signed in;
- *        `null` until that was read.
+ * @param rejoin [BackupRestoreStore.rejoinAnswer]: `null` until the rejoin
+ *        decided.
  */
 public fun restoredChatsHint(
     knewConversations: Boolean?,
     listEmpty: Boolean,
-    otherDevice: Boolean?,
+    rejoin: RestoreRejoinAnswer?,
 ): RestoredChatsHint = when {
-    knewConversations == null || !listEmpty || otherDevice == null -> RestoredChatsHint.NONE
-    otherDevice -> RestoredChatsHint.BANNER
-    knewConversations -> RestoredChatsHint.CARD
+    knewConversations == true && listEmpty && rejoin == RestoreRejoinAnswer.FOUNDED -> RestoredChatsHint.CARD
     else -> RestoredChatsHint.NONE
 }

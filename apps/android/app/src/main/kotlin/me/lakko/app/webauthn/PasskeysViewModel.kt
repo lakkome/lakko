@@ -184,6 +184,14 @@ public class PasskeysViewModel(
                         message = Message.Error(UiText("settings.passkeys.error.cancelled")),
                     )
                 }
+            } catch (_: PasskeyAlreadyExistsError) {
+                // UX 10.2: this device has one already; nothing changed.
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error(UiText("settings.passkeys.error.already_exists")),
+                    )
+                }
             } catch (e: WebauthnHttpError) {
                 mutableState.update {
                     it.copy(busy = false, message = Message.Error(explain(e)))

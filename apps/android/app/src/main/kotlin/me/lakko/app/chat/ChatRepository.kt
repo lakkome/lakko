@@ -1445,13 +1445,6 @@ public class ChatRepository(
         return registered
     }
 
-    /** Whether the directory lists another device of this account. A failed
-     *  read counts as none. */
-    public suspend fun ownOtherDeviceListed(): Boolean {
-        val identity = canonicalIdentity.get() ?: return false
-        return ownOtherDevices(identity).isNotEmpty()
-    }
-
     /** ADR-0079 - one-to-ones founded for a won invite-link request and not
      *  yet held, by hex id. In memory; after a restart the group is loaded
      *  from the MLS snapshot the founding persisted. */
