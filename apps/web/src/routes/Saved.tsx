@@ -187,6 +187,17 @@ export default function Saved(): JSX.Element {
 
   return (
     <section class="lk-page lk-saved">
+      {/* Saved opens from the Chats menu and is not a tab: without this it had
+          no way back on any width (base scenario 30, 2026-11-11). */}
+      <button
+        type="button"
+        class="ghost small"
+        style={{ "align-self": "flex-start" }}
+        onClick={() => navigate(paths.home)}
+      >
+        <Icon name="back" size={16} />
+        {t("nav.chats")}
+      </button>
       <div class="lk-page-head">
         <h1>{t("saved.title")}</h1>
       </div>

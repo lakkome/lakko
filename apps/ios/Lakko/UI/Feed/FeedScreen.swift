@@ -38,9 +38,11 @@ struct FeedScreen: View {
     let onOpenChannel: (_ channelId: String) -> Void
     /// Go to the conversation list.
     let onGoToChats: () -> Void
-    /// ADR-0059 — open the subscribe screen for a channel a Discover card's
-    /// handle was verified to name.
-    let onOpenFoundChannel: (_ channelId: String, _ handle: String) -> Void
+    /// ADR-0059 — subscribe to the channel a Discover card's handle was
+    /// verified to name: the card's Subscribe was the press, so the screen
+    /// it opens subscribes at once, as Android's does (base scenario 32,
+    /// 2026-11-11: a second Subscribe was asked for, under the bare handle).
+    let onSubscribeFoundChannel: (_ channelId: String, _ handle: String, _ name: String) -> Void
 
     static let scrollSpace = "feed-scroll"
     /// Within this many points of the top, new items show at once.
@@ -131,7 +133,7 @@ struct FeedScreen: View {
         .overlay(alignment: .bottom) { toast }
         .onAppear {
             model.start()
-            model.discover.onOpen = { card in onOpenFoundChannel(card.channelIdHex, card.handle) }
+            model.discover.onOpen = { card in onSubscribeFoundChannel(card.channelIdHex, card.handle, card.name) }
             model.discover.onOpenChannel = { onOpenChannel($0) }
             media.reloadPlayed()
             media.callActive = callOwnsCapture

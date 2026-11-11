@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.discover
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -277,6 +275,7 @@ private fun DiscoverSettings(model: DiscoverModel, mixRandom: Boolean, onEditTop
 }
 
 /** The pick-topics card (first open, and "Edit topics"). */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> Unit) {
     var chosen by remember { mutableStateOf(model.prefs.value.topics.toSet()) }
@@ -289,20 +288,18 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(DiscoverCopy.PICK_TITLE.text(), style = MaterialTheme.typography.titleMedium)
             Text(DiscoverCopy.PICK_BODY.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            // Chips in rows of a scrolling strip each, so a long list never
-            // pushes the actions off screen.
-            for (row in model.topics.chunked(4)) {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    for (id in row) {
-                        FilterChip(
-                            selected = id in chosen,
-                            onClick = { chosen = if (id in chosen) chosen - id else chosen + id },
-                            label = { Text(model.topicName(id).text()) },
-                        )
-                    }
+            // Every topic in view, wrapped onto as many lines as it takes, as on
+            // iOS and web: rows of four that each scrolled sideways cut the
+            // last chips at the card's edge (base scenario 32, 2026-11-11).
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for (id in model.topics) {
+                    FilterChip(
+                        selected = id in chosen,
+                        onClick = { chosen = if (id in chosen) chosen - id else chosen + id },
+                        label = { Text(model.topicName(id).text()) },
+                    )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {

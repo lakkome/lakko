@@ -206,7 +206,13 @@ public struct ChatListScreen: View {
             .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
+            // Always shown: with the folder bar inset above the list the system
+            // collapsed the field and never brought it back, so Chats had no
+            // search once a folder existed (base scenario 31, 2026-11-11).
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text(l10n.t("chats.search.placeholder")))
             .onChange(of: searchText) { _, text in peopleSearch?.update(query: text) }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).

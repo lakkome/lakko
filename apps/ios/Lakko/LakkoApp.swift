@@ -1688,8 +1688,8 @@ private struct SessionRoot: View, Equatable {
                     onOpenConversation: { push(.chat(groupIdHex: $0), on: .feed) },
                     onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
                     onGoToChats: { selectedTab = .chats },
-                    onOpenFoundChannel: { channelId, handle in
-                        push(.channelFound(channelId: channelId, handle: handle), on: .feed)
+                    onSubscribeFoundChannel: { channelId, handle, name in
+                        push(.channelSubscribe(channelId: channelId, handle: handle, name: name), on: .feed)
                     }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }

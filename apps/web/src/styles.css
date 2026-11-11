@@ -7714,6 +7714,15 @@ html.lk-call-window-doc body {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* A Discover card is a feed item for its frame, not for its layout: the feed
+   item's 40px avatar column took the whole body and the actions sat beside
+   it, over the channel's name (base scenario 32, 2026-11-11). The body and
+   the actions carry their own padding. */
+.lk-feed-item.lk-discover-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 .lk-discover-card-body {
   display: flex;
   flex-direction: column;
@@ -8379,7 +8388,17 @@ button.lk-folder-new {
   align-items: center;
   color: var(--surface-muted);
 }
-/* The Saved screen (section 3). */
+/* The Saved screen (section 3). A route of its own with no pane around it:
+   the screen's own margins, as the feed import has (it sat against the
+   window's edge; base scenario 30, 2026-11-11). */
+.lk-saved {
+  margin: 0 auto;
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+}
 .lk-saved-list {
   list-style: none;
   margin: 0;

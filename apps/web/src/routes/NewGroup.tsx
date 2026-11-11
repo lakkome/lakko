@@ -280,10 +280,12 @@ export default function NewGroup(): JSX.Element {
           type="button"
           class="ghost small lk-narrow-only"
           style={{ "align-self": "flex-start" }}
-          onClick={() => navigate(paths.groups)}
+          // Back to the one Chats list, as New channel does (base scenario 30:
+          // it read "Groups", a section the app no longer has).
+          onClick={() => navigate(paths.home)}
         >
           <Icon name="back" size={16} />
-          {t("new_group.back")}
+          {t("nav.chats")}
         </button>
         <div class="lk-page-head">
           <h1>{t("chats.new_group.title")}</h1>
@@ -464,7 +466,7 @@ export default function NewGroup(): JSX.Element {
           <button type="submit" class="primary" disabled={!mayCreate()}>
             {busy() ? t("chats.new_group.creating") : t("chats.create.group")}
           </button>
-          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.groups)}>
+          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.home)}>
             {t("common.cancel")}
           </button>
         </div>
