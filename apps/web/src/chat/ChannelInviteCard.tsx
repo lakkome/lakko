@@ -101,7 +101,7 @@ export function ChannelInviteCard(props: {
     if (account === null) return null;
     return loadPendingPublisherRequests(account).find((r) => r.channelIdHex === channelIdHex) ?? null;
   };
-  // The 7 days are crossed while the card is on screen too.
+  // The day is crossed while the card is on screen too.
   const [now, setNow] = createSignal(Date.now());
   const clock = setInterval(() => setNow(Date.now()), 60_000);
   onCleanup(() => clearInterval(clock));
@@ -115,7 +115,7 @@ export function ChannelInviteCard(props: {
 
   /** UX 15.2.2 — `Ask again`: the same link, fetched again; when it still
    *  works, the request goes out once more exactly as the first `Accept`
-   *  (the record is replaced and the 7 days start again). A dead link keeps
+   *  (the record is replaced and the day starts again). A dead link keeps
    *  the earlier record (a late approval still lands) and the card keeps the
    *  invalid-link line; no network keeps `Ask again`. */
   async function askAgain(): Promise<void> {

@@ -393,7 +393,7 @@ without.
 
 | Layer | Bound |
 |---|---|
-| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per 7 days |
+| Requester | one `ds-knock` token per knock (quota 200 a day); a device asks once per group per day (7 days until 2026-11-12) |
 | DS, per journal | new cap: 4,096 rows (chosen, not measured), refused with `429 knock-queue-full` before a token is spent. The count and the insert are not one transaction, so knocks arriving on one journal at the same moment can end the queue at most their own payloads (4 per knock) past the cap; locking would give every unclaimed journal a lock row (decided 2026-11-02) |
 | DS, row | 16 KiB, 7 days (existing) |
 | Admin device | 64 retained (`MAX_PENDING_EXTERNAL_JOINS`); **the knock cursor stops while the queue is full**, so the backlog stays on the DS instead of being lost |
@@ -968,6 +968,18 @@ a removed publisher cannot derive the next epoch's seed, and after a step-down t
 owner rotates with the remaining publishers. `PublisherGroup::members()` lists the
 publishers with their account keys, which is the member list the `Publishers` block
 and `DELETE .../copublishers/{pk}` needed.
+
+**A day, not 7 days (amended 2026-11-12, maintainer decision).** A device asks once per
+group, and once per channel for a publisher request, per day: "No answer yet." and `Ask
+again` appear a day after the request, not 7 days. Seen walking base scenario 20: the page
+a group's invite link opens offered `Request again` at once (the September invite-page
+spec), while the Requests sent list said "Waiting for an admin." for the same request, so a
+refused person could re-send without limit. The invite page now follows section 6 of the
+UX spec: "Request sent. An admin will see it when they next open Lakko.", no button until
+the day is over, and the chat opens by itself when the join lands. Where this ADR says 7
+days for a request below, read a day; the DS row lifetime of 7 days is unchanged (a second
+request from the same device is the same joiner to the admin's pending list, ADR-0027
+dedup by signature key).
 
 **A publisher request with no answer (amended 2026-11-08, maintainer decision).** A
 publisher request the owner's device rejected or never answered follows a group request

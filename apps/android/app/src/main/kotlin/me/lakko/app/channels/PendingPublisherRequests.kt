@@ -74,7 +74,7 @@ public object PendingPublisherRequests {
         decode(prefs(context).getString(account, null))
 
     /** When the pending request for [channelIdHex] was sent, `null` when
-     *  none is pending (UX 15.2.2: `Ask again` after seven days). */
+     *  none is pending (UX 15.2.2: `Ask again` after a day). */
     public fun sentAtMs(context: Context, account: String, channelIdHex: String): Long? =
         load(context, account).firstOrNull { it.channelIdHex == channelIdHex }?.requestedAtMs
 

@@ -6695,10 +6695,6 @@
       "text": "Request to join",
       "comment": "Button on the group invite page that sends the join request to the group's admins."
     },
-    "group.join.request_again": {
-      "text": "Request again",
-      "comment": "Button on the group invite page that sends the join request again."
-    },
     "group.join.request_failed": {
       "text": "Your request didn't go through. Check your connection and try again.",
       "comment": "Sending the request to join a group failed for a reason with no message of its own."
@@ -6720,12 +6716,8 @@
       "comment": "Heading of the group invite page while it loads, or when the link cannot be used."
     },
     "group.join.wait_primary": {
-      "text": "Request sent. An admin approves it, then the change is applied to the group.",
-      "comment": "Group invite page after the person asked to join: an admin must approve, then the change is applied."
-    },
-    "group.join.wait_secondary": {
-      "text": "If nothing happens, you can send the request again.",
-      "comment": "Second line on the group invite page while a join request is waiting: the request can be sent again."
+      "text": "Request sent. An admin will see it when they next open Lakko.",
+      "comment": "Group invite page after the person asked to join: an admin must approve; the person is never told a request was refused (docs/ux/group-and-channel-privacy.md 6.1)."
     },
     "group_delete.action": {
       "text": "Delete group",
@@ -8760,11 +8752,11 @@
     },
     "requests_sent.ask_again": {
       "text": "Ask again",
-      "comment": "Button on a request with no answer after 7 days: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
+      "comment": "Button on a request with no answer after a day: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Sends the same request again."
     },
     "requests_sent.no_answer": {
       "text": "No answer yet.",
-      "comment": "Line of a request sent 7 days ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
+      "comment": "Line of a request sent a day ago or more: a request to join a group, or a request to be a publisher of a channel (on the invitation card). Never say it was refused."
     },
     "requests_sent.title": {
       "text": "Requests sent",
@@ -8772,7 +8764,7 @@
     },
     "requests_sent.waiting": {
       "text": "Waiting for an admin.",
-      "comment": "Line of a request to join sent less than 7 days ago. Never say it was refused."
+      "comment": "Line of a request to join sent less than a day ago. Never say it was refused."
     },
     "restore_identity.device_intro": {
       "text": "A device that is still logged in shows a six-digit code; type it here. No camera needed; a QR code is there if you prefer.",

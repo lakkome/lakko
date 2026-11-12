@@ -6325,10 +6325,6 @@
       "text": "申请加入",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "重新申请",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "你的请求未能发送。请检查网络连接后重试。",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "请求已发送。管理员批准后，变更会应用到群组。",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "如果没有动静，你可以再次发送请求。",
+      "text": "已发送申请。管理员下次打开 Lakko 时会看到。",
       "status": "machine"
     },
     "group_delete.action": {

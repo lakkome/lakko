@@ -7,7 +7,8 @@ package me.lakko.app.ui.channels
  * UX `docs/ux/group-and-channel-privacy.md` section 15.2 — what a publisher
  * invitation offers, on the card in the one-to-one and on the `/g/` page
  * alike. A request has no deadline and a refusal is never told: once sent it
- * waits; after seven days the person may ask again, once per seven days; a
+ * waits; after a day the person may ask again, once per day (amended
+ * 2026-11-12, it was seven days; the rule is `requestStillWaiting`); a
  * link that stopped working shows so in place of the button, while the
  * earlier request still lands if the owner approves it late.
  */
@@ -24,10 +25,10 @@ public enum class PublisherInviteControl {
      *  owner to approve...". */
     SENDING,
 
-    /** Sent under seven days ago: the waiting line, no button. */
+    /** Sent under a day ago: the waiting line, no button. */
     WAITING,
 
-    /** Sent seven days ago or more: "No answer yet." and `Ask again`. */
+    /** Sent a day ago or more: "No answer yet." and `Ask again`. */
     ASK_AGAIN,
 
     /** The link no longer works: "This invite link is invalid or has
@@ -35,8 +36,9 @@ public enum class PublisherInviteControl {
     LINK_INVALID,
 }
 
-/** Seven days, the wait before `Ask again` (UX section 15.2.2). */
-public const val PUBLISHER_ASK_AGAIN_AFTER_MS: Long = 7L * 24L * 60L * 60L * 1000L
+/** The wait before `Ask again` (UX section 15.2.2): the group request's own
+ *  day, [me.lakko.app.chat.ASK_AGAIN_AFTER_MS], not a second copy. */
+public const val PUBLISHER_ASK_AGAIN_AFTER_MS: Long = me.lakko.app.chat.ASK_AGAIN_AFTER_MS
 
 /**
  * The control for a publisher invitation. [pendingSentAtMs]: when the
@@ -54,8 +56,8 @@ public fun publisherInviteControl(
     isPublisher -> PublisherInviteControl.OPEN
     linkDead -> PublisherInviteControl.LINK_INVALID
     pendingSentAtMs == null -> PublisherInviteControl.ACCEPT
-    nowMs - pendingSentAtMs >= PUBLISHER_ASK_AGAIN_AFTER_MS -> PublisherInviteControl.ASK_AGAIN
-    else -> PublisherInviteControl.WAITING
+    me.lakko.app.chat.requestStillWaiting(pendingSentAtMs, nowMs) -> PublisherInviteControl.WAITING
+    else -> PublisherInviteControl.ASK_AGAIN
 }
 
 /** Why an Accept or Ask again failed, for its line. */

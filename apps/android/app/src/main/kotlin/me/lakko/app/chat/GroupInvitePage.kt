@@ -299,6 +299,9 @@ public class GroupInviteCard(
     /** The opened capability's plaintext wire bytes: what the join request,
      *  the consume dedup tag and the join attribution are computed over. */
     public val capabilityWire: ByteArray = ByteArray(0),
+    /** The group the link points at, lowercase hex: how the page finds a
+     *  request this device already sent (UX 6.2) or a group it already holds. */
+    public val groupIdHex: String = "",
 )
 
 /** Why a `/g/` link did not open, as the page shows it. */

@@ -6325,10 +6325,6 @@
       "text": "शामिल होने का अनुरोध करें",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "फिर से अनुरोध भेजें",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "आपका अनुरोध नहीं जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "अनुरोध भेजा गया। कोई एडमिन इसे स्वीकार करेगा, फिर बदलाव ग्रुप पर लागू होगा।",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "अगर कुछ नहीं होता, तो आप अनुरोध दोबारा भेज सकते हैं।",
+      "text": "अनुरोध भेजा गया। एडमिन अगली बार Lakko खोलने पर इसे देखेंगे।",
       "status": "machine"
     },
     "group_delete.action": {

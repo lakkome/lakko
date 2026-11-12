@@ -33,7 +33,7 @@ export interface PendingPublisherRequest {
   readonly name: string;
   readonly description: string;
   /** When the request was last sent: the first `Accept`, or the last
-   *  `Ask again` that went out (UX 15.2.2: the 7 days start from it). */
+   *  `Ask again` that went out (UX 15.2.2: the day starts from it). */
   readonly requestedAtMs: number;
   /** `Ask again` found the link no longer works (UX 15.2.2). The record
    *  stays, so an approval of the earlier request still lands. */

@@ -13,14 +13,22 @@ import kotlinx.serialization.json.Json
 
 /*
  * group-and-channel-privacy.md section 6.2 — the requests to join this device
- * sent, kept until the group appears (joined). A request cannot be withdrawn
- * and is never said to be refused: under 7 days it is "Waiting for an
- * admin.", after that "No answer yet." with `Ask again`. A device asks once
- * per group per 7 days. The web twin is `chat/requests-sent.ts`.
+ * sent, kept until the group appears (joined): from a public group's card in
+ * search, and from a group's invite link (`/g/`). A request cannot be
+ * withdrawn and is never said to be refused: under a day it is "Waiting for
+ * an admin.", after that "No answer yet." with `Ask again`. A device asks once
+ * per group per day (amended 2026-11-12, it was 7 days). The same day governs
+ * the invite page and a channel publisher request (section 15.2.2). The web
+ * twin is `chat/requests-sent.ts`.
  */
 
-/** A request may be asked again after this long (UX 6.2). */
-public const val ASK_AGAIN_AFTER_MS: Long = 7L * 24 * 60 * 60 * 1000
+/** A request may be asked again after this long (UX 6.2, 15.2.2): one day. */
+public const val ASK_AGAIN_AFTER_MS: Long = 24L * 60 * 60 * 1000
+
+/** The one rule: a request sent at [sentAtMs] still waits at [nowMs] (no
+ *  `Ask again` yet). Every caller (the Requests sent list, the invite page,
+ *  the publisher invitation card) goes through it. Pure. */
+public fun requestStillWaiting(sentAtMs: Long, nowMs: Long): Boolean = nowMs - sentAtMs < ASK_AGAIN_AFTER_MS
 
 /** One request this device sent. */
 @Serializable
@@ -31,16 +39,26 @@ public data class SentRequest(
     val handle: String,
     val sentAtMs: Long,
     val avatar: me.lakko.app.profile.AvatarRefs? = null,
-    /** The group's knock public key (base64) and version, for `Ask again`. */
-    val knockKeyB64: String,
+    /** A request from search: the group's knock public key (base64) and
+     *  version, for `Ask again`. Empty for a link request. */
+    val knockKeyB64: String = "",
     val knockVersion: Int = 0,
+    /** A request from an invite link: the opened capability's plaintext wire
+     *  and the ledger id (base64), for `Ask again`; no link secret. Empty for
+     *  a request from search. */
+    val capabilityB64: String = "",
+    val blobIdB64: String = "",
 )
 
+/** Whether [r] was sent through an invite link (its `Ask again` goes through
+ *  the link again). */
+public val SentRequest.fromLink: Boolean get() = capabilityB64.isNotEmpty()
+
 /** The line a request shows (UX 6.2). Pure. */
-public fun sentRequestWaiting(r: SentRequest, nowMs: Long): Boolean = nowMs - r.sentAtMs < ASK_AGAIN_AFTER_MS
+public fun sentRequestWaiting(r: SentRequest, nowMs: Long): Boolean = requestStillWaiting(r.sentAtMs, nowMs)
 
 /** Whether this device may ask again now. Pure. */
-public fun mayAskAgain(r: SentRequest?, nowMs: Long): Boolean = r == null || nowMs - r.sentAtMs >= ASK_AGAIN_AFTER_MS
+public fun mayAskAgain(r: SentRequest?, nowMs: Long): Boolean = r == null || !requestStillWaiting(r.sentAtMs, nowMs)
 
 private val sentJson = Json { ignoreUnknownKeys = true }
 

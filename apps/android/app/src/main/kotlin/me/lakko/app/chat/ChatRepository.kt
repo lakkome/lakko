@@ -4443,6 +4443,7 @@ public class ChatRepository(
                     valid = cap.isValidNow(nowMs),
                     preview = outcome.preview,
                     capabilityWire = cap.wire(),
+                    groupIdHex = DsClient.pseudonymHex(cap.groupId()).lowercase(),
                 )
             }
         } finally {
@@ -7900,8 +7901,60 @@ public class ChatRepository(
         )
     }
 
-    /** Section 6.2 — `Ask again` on a request older than 7 days. */
+    /**
+     * Section 6.2 — the group-invite page's request (`Request to join`):
+     * [requestToJoinFromLink], then the request is recorded under `Requests
+     * sent` with what `Ask again` needs (the capability and the ledger id, no
+     * link secret), so the list shows it and the page opened again within the
+     * day shows the wait instead of a second request.
+     */
+    public suspend fun requestToJoinFromLinkRecorded(
+        capabilityWire: ByteArray,
+        nowMs: ULong,
+        blobId: ByteArray,
+        name: String?,
+    ): Pair<ByteArray, ByteArray> {
+        val result = requestToJoinFromLink(capabilityWire, nowMs, blobId)
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        val encoder = java.util.Base64.getEncoder()
+        RequestsSentStore.record(
+            applicationContext,
+            SentRequest(
+                idHex = DsClient.pseudonymHex(result.first).lowercase(),
+                name = name.orEmpty(),
+                handle = "",
+                sentAtMs = System.currentTimeMillis(),
+                capabilityB64 = encoder.encodeToString(capabilityWire),
+                blobIdB64 = encoder.encodeToString(blobId),
+            ),
+        )
+        return result
+    }
+
+    /** Section 6.2 — the request this device sent to [groupIdHex] that has
+     *  not led to the group yet, or `null`. A held group's row is dropped. */
+    public fun openSentRequest(groupIdHex: String): SentRequest? {
+        currentAccountIdB64.get()?.let { RequestsSentStore.open(applicationContext, it) }
+        if (holdsGroup(groupIdHex)) return null
+        return RequestsSentStore.of(groupIdHex)
+    }
+
+    /** Section 6.2 — `Ask again` on a request a day old or more, from the
+     *  `Requests sent` list and from the invite page alike: the same request
+     *  again, and the day starts over. A link request goes through its link
+     *  again ([requestToJoinFromLinkRecorded]); a request from search is sealed
+     *  again to the knock key the public record named. */
     public suspend fun askAgain(request: SentRequest) {
+        if (request.fromLink) {
+            val decoder = java.util.Base64.getDecoder()
+            requestToJoinFromLinkRecorded(
+                decoder.decode(request.capabilityB64),
+                System.currentTimeMillis().toULong(),
+                decoder.decode(request.blobIdB64),
+                request.name,
+            )
+            return
+        }
         val id = hexToBytes(request.idHex) ?: throw IllegalArgumentException("bad id")
         val key = java.util.Base64.getDecoder().decode(request.knockKeyB64)
         sendKnockFromSearch(id, key, request.knockVersion.toUShort(), uniffi.lakko_ffi_uniffi.FfiHandleRecordKind.GROUP)

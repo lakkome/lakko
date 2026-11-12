@@ -169,13 +169,13 @@ final class ChannelPublisherContractTests: XCTestCase {
     }
 
     @MainActor
-    func testTheCardWaitsThenOffersAskAgainAfterSevenDays() {
+    func testTheCardWaitsThenOffersAskAgainAfterADay() {
         XCTAssertEqual(state(), .accept)
         XCTAssertEqual(state(phase: .sending), .sending)
         XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 1), .waiting)
-        XCTAssertEqual(state(sentAt: 0, now: 7 * day - 1), .waiting, "after a restart")
-        XCTAssertEqual(state(sentAt: 0, now: 7 * day), .noAnswer)
-        XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 8 * day), .noAnswer)
+        XCTAssertEqual(state(sentAt: 0, now: day - 1), .waiting, "after a restart")
+        XCTAssertEqual(state(sentAt: 0, now: day), .noAnswer)
+        XCTAssertEqual(state(phase: .waiting, sentAt: 0, now: 2 * day), .noAnswer)
         XCTAssertEqual(state(publisher: true, sentAt: 0, now: 8 * day), .open, "approved")
     }
 

@@ -6325,10 +6325,6 @@
       "text": "Надіслати запит на приєднання",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Надіслати запит знову",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Запит не надіслано. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Запит надіслано. Адміністратор схвалить його, потім зміну буде застосовано до групи.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Якщо нічого не відбувається, запит можна надіслати знову.",
+      "text": "Запит надіслано. Адміністратор побачить його, коли наступного разу відкриє Lakko.",
       "status": "machine"
     },
     "group_delete.action": {

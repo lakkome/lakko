@@ -6325,10 +6325,6 @@
       "text": "Pedir para entrar",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Pedir de novo",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Seu pedido não foi enviado. Verifique sua conexão e tente novamente.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Pedido enviado. Um administrador aprova e depois a alteração é aplicada ao grupo.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Se nada acontecer, você pode enviar o pedido de novo.",
+      "text": "Pedido enviado. Um administrador verá quando abrir o Lakko novamente.",
       "status": "machine"
     },
     "group_delete.action": {

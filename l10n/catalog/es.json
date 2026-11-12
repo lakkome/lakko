@@ -6325,10 +6325,6 @@
       "text": "Solicitar unirse",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Volver a solicitar",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Tu solicitud no se envió. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Solicitud enviada. Un administrador la aprueba y luego el cambio se aplica al grupo.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Si no pasa nada, puedes enviar la solicitud de nuevo.",
+      "text": "Solicitud enviada. Un administrador la verá la próxima vez que abra Lakko.",
       "status": "machine"
     },
     "group_delete.action": {

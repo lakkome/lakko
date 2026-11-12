@@ -6325,10 +6325,6 @@
       "text": "درخواست پیوستن",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "درخواست دوباره",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "درخواست شما ارسال نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "درخواست ارسال شد. یکی از مدیران آن را تأیید می‌کند و سپس تغییر در گروه اعمال می‌شود.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "اگر اتفاقی نیفتاد، می‌توانید درخواست را دوباره بفرستید.",
+      "text": "درخواست فرستاده شد. یک مدیر دفعهٔ بعد که Lakko را باز کند آن را می‌بیند.",
       "status": "machine"
     },
     "group_delete.action": {

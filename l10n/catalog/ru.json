@@ -6445,10 +6445,6 @@
       "text": "Запросить вступление",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Запросить снова",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "Запрос не отправлен. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
@@ -6470,11 +6466,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "Запрос отправлен. Администратор одобрит его, затем изменение будет применено к группе.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Если ничего не происходит, запрос можно отправить снова.",
+      "text": "Запрос отправлен. Администратор увидит его, когда в следующий раз откроет Lakko.",
       "status": "machine"
     },
     "group_delete.action": {

@@ -12,8 +12,8 @@ import SwiftUI
 /// `docs/ux/group-invite-page.md` section 3, and on `Request to join` KNOCKS
 /// (ADR-0053): a probe learns the group's epoch and a second knock carries the
 /// external-join proposal (ADR-0027). The Welcome then reaches this device's
-/// own mailbox, the session inbox poll joins it, and this screen surfaces
-/// "You joined the group." with "Open chat" once the group appears. The link conveys the
+/// own mailbox, the session inbox poll joins it, and once the group appears
+/// this screen moves straight to its chat. The link conveys the
 /// `group_id` and a claim about who is inviting to what; the admin approval
 /// gate is the security boundary.
 ///
@@ -46,21 +46,30 @@ import SwiftUI
 /// Welcome arriving is byte-for-byte what *no admin has approved yet* looks
 /// like, which is the ordinary state.
 ///
-/// So the wait copy states the truth about the wait, and the screen offers the
-/// one repair this side has: `Request again`, user-driven, which mints a fresh
-/// KeyPackage. It never claims that is why.
+/// So the wait copy states the truth about the wait and offers nothing to
+/// press for a day: a device asks once per group per day
+/// (`RequestsSentStore.askAgainAfterMs`, `docs/ux/group-invite-page.md`
+/// "After `Request to join`"). After a day the page says "No answer yet." and
+/// offers `Ask again`, the same request the Requests sent list's `Ask again`
+/// sends, which mints a fresh KeyPackage and restarts the day. It never
+/// claims that is why. Opened again for a group this device already asked to
+/// join, the page goes straight to the same state.
 @MainActor
 public final class JoinGroupLandingViewModel: ObservableObject {
     /// Local FSM. `loading` (resolve + verify the capability) → `ready` (the
     /// card, waiting for `Request to join`) → `requesting` → `waiting` (poll
-    /// loop) → `joined`; `invalid` for a link that does not verify or has
+    /// loop; `noAnswer` once the request is a day old) → `joined` (the view
+    /// opens the chat); `invalid` for a link that does not verify or has
     /// expired, `damaged` for a link whose fragment is present but does not
     /// open the preview, `failed` for everything else.
     public enum State: Equatable {
         case loading
         case ready
         case requesting
+        /// Sent under a day ago: the waiting line, nothing to press.
         case waiting
+        /// Sent a day ago or more: "No answer yet." and `Ask again`.
+        case noAnswer
         case joined(groupIdHex: String)
         case invalid
         /// The fragment is not a link secret, or the preview does not open
@@ -91,13 +100,13 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     private var didRun = false
     private var pollTask: Task<Void, Never>?
     /// The opened (plaintext) capability bytes + the ledger pointer they came from, kept
-    /// from `run()` so `Request to join` and `Request again` post against the
+    /// from `run()` so `Request to join` and `Ask again` post against the
     /// bytes the person was shown, not a second fetch.
     private var resolved: (capabilityWire: Data, blobId: Data)?
-    /// In flight, so `Request again` cannot be double-tapped into two journal
-    /// rows. Separate from `state`, which STAYS `.waiting` across a re-request:
-    /// going back through `.requesting` would hide the wait copy and read as a
-    /// restart of something that never stopped.
+    /// In flight, so `Ask again` cannot be double-tapped into two journal
+    /// rows. Separate from `state`, which STAYS `.noAnswer` while an
+    /// `Ask again` is sent: going back through `.requesting` would hide the
+    /// card's line and read as a restart of something that never stopped.
     @Published public private(set) var requesting = false
 
     public init(
@@ -184,7 +193,49 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         // The PLAINTEXT capability: what the consume's joiner tag and the join
         // attribution are computed over.
         resolved = (cap.wire(), located.blobId)
-        state = .ready
+        // A channel's link page subscribes; it has no join request.
+        guard channel == nil else {
+            state = .ready
+            return
+        }
+        // Opened again for a group this device already asked to join: the
+        // same state as right after the request, never a second
+        // `Request to join` inside the day.
+        let groupId = cap.groupId()
+        let sentAtMs = AcceptedContactsStore.boundAccountIdB64.flatMap {
+            RequestsSentStore.entry(accountIdB64: $0, groupIdHex: AttachmentBridge.hex(groupId))?.sentAtMs
+        }
+        let groupIdHex = DsClient.pseudonymHex(groupId)
+        state = Self.stateOnOpen(
+            groupIdHex: groupIdHex, requestSentAtMs: sentAtMs,
+            groupHeld: repository.hasGroup(groupIdHex: groupIdHex),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        if state == .waiting || state == .noAnswer {
+            startPolling(groupId: groupId)
+        }
+    }
+
+    /// The page's state once the link opened, pure: `ready` when this device
+    /// never asked to join; the joined group when it asked and the group is
+    /// here; otherwise the wait, by the request's age.
+    nonisolated static func stateOnOpen(
+        groupIdHex: String, requestSentAtMs: Int64?, groupHeld: Bool, nowMs: Int64
+    ) -> State {
+        guard let requestSentAtMs else { return .ready }
+        if groupHeld { return .joined(groupIdHex: groupIdHex) }
+        return waitState(sentAtMs: requestSentAtMs, nowMs: nowMs)
+    }
+
+    /// Under a day: the waiting line with nothing to press; a day or more:
+    /// "No answer yet." and `Ask again`. The rule of the Requests sent list.
+    nonisolated static func waitState(sentAtMs: Int64, nowMs: Int64) -> State {
+        RequestsSentStore.mayAskAgain(sentAtMs: sentAtMs, nowMs: nowMs) ? .noAnswer : .waiting
+    }
+
+    /// The chat the page hands over to: set once the join landed.
+    nonisolated static func chatToOpen(_ state: State) -> String? {
+        if case .joined(let groupIdHex) = state { return groupIdHex }
+        return nil
     }
 
     /// What the link's secret does to the card.
@@ -224,13 +275,14 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     }
 
     /// ADR-0045 S7 residual 1 — send the request. Reached from the card's
-    /// `Request to join` and again from the `Request again` control, which is
-    /// the joiner's only repair: a fresh request mints a fresh KeyPackage.
-    /// Deliberately user-driven and never automatic — each press is a journal
-    /// row held to the DS's 30-day TTL, and a timer would spin against a group
-    /// that is merely quiet.
+    /// `Request to join` and, a day later, from `Ask again`, which is the
+    /// joiner's only repair: a fresh request mints a fresh KeyPackage and
+    /// restarts the day. Deliberately user-driven and never automatic — each
+    /// press is a journal row held to the DS's 30-day TTL, and a timer would
+    /// spin against a group that is merely quiet.
     public func request() async {
-        guard !requesting, let resolved else { return }
+        // Inside the day there is nothing to press; refuse a stray call too.
+        guard !requesting, state != .waiting, let resolved else { return }
         requesting = true
         defer { requesting = false }
         if state == .ready { state = .requesting }
@@ -252,7 +304,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                     capabilityWire: resolved.capabilityWire, blobId: resolved.blobId,
                     accountIdB64: accountIdB64, nowMs: Int64(nowMs))
             }
-            state = .waiting
+            state = Self.waitState(sentAtMs: Int64(nowMs), nowMs: Int64(nowMs))
             startPolling(groupId: result.groupId)
         } catch {
             NSLog("group join: the request failed: %@", String(describing: error))
@@ -341,6 +393,12 @@ public struct JoinGroupLandingScreen: View {
         .navigationTitle(viewModel.channel.map { $0.name.isEmpty ? l10n.t("channels.meta.title") : $0.name }
             ?? l10n.t("group.join.title"))
         .task { await viewModel.run() }
+        // The join landed: straight to the group's chat, no extra step.
+        .onChange(of: viewModel.state) { _, state in
+            guard let groupIdHex = JoinGroupLandingViewModel.chatToOpen(state) else { return }
+            viewModel.dismiss()
+            onOpenChat(groupIdHex)
+        }
     }
 
     @ViewBuilder
@@ -427,31 +485,30 @@ public struct JoinGroupLandingScreen: View {
                     .tint(.lakkoAccent)
                 footer
             case .waiting:
+                // Inside the day: the one line, nothing to press.
                 headlineBlock
                 Text(joinWaitPrimary)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(joinWaitSecondary)
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoTextMuted)
+                footer
+            case .noAnswer:
+                headlineBlock
+                Text(l10n.t("requests_sent.no_answer"))
+                    .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(joinRequestAgain) {
+                Button(l10n.t("requests_sent.ask_again")) {
                     Task { await viewModel.request() }
                 }
+                .buttonStyle(.bordered)
                 .tint(.lakkoAccent)
                 .disabled(viewModel.requesting)
                 footer
-            case .joined(let groupIdHex):
+            case .joined:
+                // Shown only while the chat opens (the `onChange` below).
                 headlineBlock
-                Text(joinSucceededMessage)
+                Text(l10n.t("group.join.succeeded_opening"))
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(joinOpenChat) {
-                    viewModel.dismiss()
-                    onOpenChat(groupIdHex)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.lakkoAccent)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -8,10 +8,12 @@
  * waiting lives on the card, never in `Requests sent`. Pure, so the rules
  * are asserted without a component.
  */
+import { ASK_AGAIN_AFTER_MS, askAgainState } from "./ask-again";
 
-/** UX 15.2.2: after 7 days a request reads "No answer yet." with
- *  `Ask again`; a device asks again at most once per channel per 7 days. */
-export const PUBLISHER_ASK_AGAIN_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** UX 15.2.2: after a day a request reads "No answer yet." with
+ *  `Ask again`; a device asks again at most once per channel per day. The
+ *  same rule as a group request (`./ask-again.ts`), not a copy of it. */
+export const PUBLISHER_ASK_AGAIN_AFTER_MS = ASK_AGAIN_AFTER_MS;
 
 /** The card's control. */
 export type PublisherCardControl =
@@ -20,9 +22,9 @@ export type PublisherCardControl =
   /** Sending (the first `Accept` or `Ask again`): the button, disabled,
    *  reads the waiting line. */
   | "busy"
-  /** Sent, under 7 days: the waiting line, no button (never withdrawn). */
+  /** Sent, under a day: the waiting line, no button (never withdrawn). */
   | "waiting"
-  /** Sent 7 days ago or more: "No answer yet." and `Ask again`. */
+  /** Sent a day ago or more: "No answer yet." and `Ask again`. */
   | "no-answer"
   /** `Ask again` found the link no longer works: the invalid-link line, for
    *  good. The earlier request still lands if the owner approves it. */
@@ -49,13 +51,13 @@ export function publisherCardControl(input: {
   const p = input.pending;
   if (p === null) return "accept";
   if (p.linkDead === true) return "dead";
-  return input.nowMs - p.requestedAtMs >= PUBLISHER_ASK_AGAIN_AFTER_MS ? "no-answer" : "waiting";
+  return askAgainState(p.requestedAtMs, input.nowMs);
 }
 
 /** What `Ask again` came to, and what the card does with it. */
 export type AskAgainOutcome =
   /** The link opened and the request went out again: the record is new and
-   *  the 7 days start again. */
+   *  the day starts again. */
   | { readonly kind: "sent" }
   /** Approved meanwhile: open the channel. */
   | { readonly kind: "joined" }

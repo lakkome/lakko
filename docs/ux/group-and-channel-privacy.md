@@ -420,13 +420,19 @@ opens a list: avatar, name, `@name`, and one line.
 
 | State | Line | Control |
 |---|---|---|
-| Sent, under 7 days | Waiting for an admin. | none |
-| Over 7 days | No answer yet. | `Ask again` |
+| Sent, under a day | Waiting for an admin. | none |
+| A day or more | No answer yet. | `Ask again` |
 | Joined | The row leaves; the group appears in Chats. | none |
 
 The person is never told a request was refused. It goes unanswered. "No answer yet" is
-true either way, and the app claims no more than that. A device asks once per group per 7
-days.
+true either way, and the app claims no more than that. A device asks once per group per
+day (amended 2026-11-12, maintainer: it was 7 days, which was too long to wait).
+
+The page a group's invite link opens follows the same rules: after `Request to join` it
+shows "Request sent. An admin will see it when they next open Lakko." and no other
+control; opened again within the day, it shows the same line; after a day, "No answer
+yet." and `Ask again`. There is no `Request again`. When the join lands, the page moves
+straight to the group's chat, with no button in between.
 
 **Admitted.** The group appears in Chats with an ordinary notification, "You joined
 {name}". History before the join is not there.
@@ -922,8 +928,8 @@ requests to join that a person sent from search.
 | State | Card shows | Control |
 |---|---|---|
 | Sending | The button, disabled, reads "Waiting for the channel owner to approve..." | none |
-| Sent, under 7 days | "Waiting for the channel owner to approve..." | none |
-| Sent 7 days ago or more | "No answer yet." | `Ask again` |
+| Sent, under a day | "Waiting for the channel owner to approve..." | none |
+| Sent a day ago or more | "No answer yet." | `Ask again` |
 | Asking again | The button, disabled, reads "Waiting for the channel owner to approve..." | none |
 | The link no longer works | "This invite link is invalid or has expired." | none |
 | Approved | `Open`; the channel is in Chats | `Open` |
@@ -933,9 +939,9 @@ requests to join that a person sent from search.
 - **`Ask again`** sends the same request again through the same link the card carries:
   the card fetches the link again, and when it still works the device asks the owner's
   device once more, as on the first `Accept`. The link counts the person once, so asking
-  again does not use up a link meant for one person. The 7 days start again from the new
-  request. A device asks again at most once per channel per 7 days; `Ask again` is not
-  shown before that.
+  again does not use up a link meant for one person. The day starts again from the new
+  request. A device asks again at most once per channel per day; `Ask again` is not
+  shown before that (amended 2026-11-12: it was 7 days, as for a group).
 - **When the link no longer works** (the owner revoked it, it expired, or the channel is
   gone), `Ask again` shows "This invite link is invalid or has expired." in place of the
   button, and the card keeps that line. The earlier request is not withdrawn: if the
@@ -957,7 +963,7 @@ requests to join that a person sent from search.
 | Bad form | 3 to 32 characters: letters a-z, digits and _. |
 | Request sent | Request sent. An admin will see it when they next open Lakko. |
 | Waiting | Waiting for an admin. |
-| Past 7 days | No answer yet. |
+| Past a day | No answer yet. |
 | Publisher request, waiting (section 15.2.2) | Waiting for the channel owner to approve... / No answer yet. / Ask again |
 | Removed | You are no longer in {name}. |
 | Comments | Comment / Show {n} more comments / Write a comment / {n} new comments |

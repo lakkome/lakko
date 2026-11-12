@@ -6325,10 +6325,6 @@
       "text": "Katılmak iste",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "Yeniden iste",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "İsteğiniz iletilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "İstek gönderildi. Bir yönetici onaylar, ardından değişiklik gruba uygulanır.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
+      "text": "İstek gönderildi. Bir yönetici Lakko'yu bir sonraki açışında görecek.",
       "status": "machine"
     },
     "group_delete.action": {

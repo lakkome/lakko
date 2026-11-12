@@ -3,14 +3,14 @@
 
 /**
  * `docs/ux/group-and-channel-privacy.md` section 6.2 — the **Requests sent**
- * list: avatar, name, `@name`, one line. Under 7 days "Waiting for an admin."
- * with no control; after that "No answer yet." with `Ask again`. A request
+ * list: avatar, name, `@name`, one line. Under a day "Waiting for an admin."
+ * with no control; after that "No answer yet." with `Ask again` (the rule and
+ * the resend are `./ask-again.ts`, shared with the `/g/` page). A request
  * cannot be withdrawn, and is never said to be refused.
  */
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Decode } from "../auth/account-id";
 import { ContactsClient } from "../contacts/client";
 import { t } from "../l10n";
 import { useProfiles } from "../profile/ProfileContext";
@@ -20,6 +20,7 @@ import { Avatar } from "../ui/Avatar";
 import { PushedScreen } from "../ui/PushedScreen";
 import { useChats } from "./ChatContext";
 import { durableSnapshotHook, sessionAccountOf } from "./persist-hooks";
+import { sendRequestAgain } from "./ask-again";
 import { recordRequestSent, requestsSent, sentRequestState, type SentRequest } from "./requests-sent";
 
 export function RequestsSentScreen(props: { readonly open: boolean; readonly onBack: () => void }): JSX.Element {
@@ -28,6 +29,10 @@ export function RequestsSentScreen(props: { readonly open: boolean; readonly onB
   const profiles = useProfiles();
   const [busy, setBusy] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  // The day is crossed while the list is on screen too.
+  const [now, setNow] = createSignal(Date.now());
+  const clock = setInterval(() => setNow(Date.now()), 60_000);
+  onCleanup(() => clearInterval(clock));
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
@@ -38,13 +43,10 @@ export function RequestsSentScreen(props: { readonly open: boolean; readonly onB
     setBusy(r.idB64);
     setError(null);
     try {
-      await client.requestToJoinSealed(
-        auth.identitySecrets(),
-        base64Decode(r.idB64),
-        base64Decode(r.knockKeyB64),
-        r.knockVersion,
-      );
-      recordRequestSent({ ...r, sentAtMs: Date.now() });
+      await sendRequestAgain(client, auth.identitySecrets(), r, Date.now(), auth.identitySecrets()?.accountId);
+      const sentAtMs = Date.now();
+      recordRequestSent({ ...r, sentAtMs });
+      setNow(sentAtMs);
     } catch (err) {
       setError(requestErrorText(err));
     } finally {
@@ -65,15 +67,19 @@ export function RequestsSentScreen(props: { readonly open: boolean; readonly onB
         <For each={requestsSent()}>
           {(r) => {
             rememberCardAvatar(`conv:${r.idB64}`, r.avatar);
-            const state = (): "waiting" | "no-answer" => sentRequestState(r, Date.now());
+            const state = (): "waiting" | "no-answer" => sentRequestState(r, now());
+            const name = (): string => (r.name.length > 0 ? r.name : t("chat.group.fallback_name"));
             return (
               <div class="lk-row">
-                <Avatar label={r.name} id={r.idB64} personKey={`conv:${r.idB64}`} />
+                <Avatar label={name()} id={r.idB64} personKey={`conv:${r.idB64}`} />
                 <div class="lk-row-body">
-                  <span class="lk-row-title">{r.name}</span>
+                  <span class="lk-row-title">{name()}</span>
                   <span class="lk-row-sub">
-                    <span dir="ltr">{`@${r.handle}`}</span>
-                    {" · "}
+                    {/* A request from a link knows no `@name`. */}
+                    <Show when={r.handle.length > 0}>
+                      <span dir="ltr">{`@${r.handle}`}</span>
+                      {" · "}
+                    </Show>
                     {state() === "waiting" ? t("requests_sent.waiting") : t("requests_sent.no_answer")}
                   </span>
                 </div>

@@ -223,8 +223,6 @@ class LinkJoinKnockTest {
         assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", refused())).en)
         assertEquals(generic, joinFailureCopy(me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = false, body = "")).en)
         assertEquals(generic, joinFailureCopy(RuntimeException("raw protocol text")).en)
-        assertEquals("You joined the group.", JOIN_SUCCESS_TEXT.en)
-        assertEquals("Open chat", JOIN_OPEN_CHAT_TEXT.en)
         assertEquals("Try again", JOIN_TRY_AGAIN_TEXT.en)
     }
 

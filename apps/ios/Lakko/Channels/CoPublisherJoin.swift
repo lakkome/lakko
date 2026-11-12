@@ -302,10 +302,6 @@ final class CoPublisherAcceptance: ObservableObject {
         case linkDead
     }
 
-    /// UX 15.2.2 — `Ask again` shows once a request has waited this long
-    /// (7 days), at most once per channel per 7 days (asking restarts it).
-    nonisolated static let askAgainAfterMs: Int64 = 7 * 24 * 60 * 60 * 1000
-
     /// What the card in the one-to-one shows.
     enum CardState: Equatable {
         /// This device publishes the channel: `Open`.
@@ -314,9 +310,12 @@ final class CoPublisherAcceptance: ObservableObject {
         case accept
         /// Being sent: the waiting line, nothing to press.
         case sending
-        /// Sent under 7 days ago: the waiting line.
+        /// Sent under a day ago: the waiting line. UX 15.2.2 — `Ask again`
+        /// shows once a request has waited a day, at most once per channel
+        /// per day (asking restarts it): the group join request's rule,
+        /// `RequestsSentStore.mayAskAgain(sentAtMs:nowMs:)`.
         case waiting
-        /// Sent 7 days ago or more: "No answer yet." and `Ask again`.
+        /// Sent a day ago or more: "No answer yet." and `Ask again`.
         case noAnswer
         /// The link no longer works.
         case linkDead
@@ -339,7 +338,8 @@ final class CoPublisherAcceptance: ObservableObject {
             return .failed(failure, askAgain: requestedAtMs != nil)
         case .waiting?, nil:
             guard let requestedAtMs else { return phase == nil ? .accept : .waiting }
-            return nowMs - requestedAtMs >= askAgainAfterMs ? .noAnswer : .waiting
+            return RequestsSentStore.mayAskAgain(sentAtMs: requestedAtMs, nowMs: nowMs)
+                ? .noAnswer : .waiting
         }
     }
 

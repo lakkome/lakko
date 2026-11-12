@@ -87,9 +87,16 @@ import me.lakko.app.ui.components.LkIcon
  * with no rendezvous for us is byte-for-byte what *no admin has approved yet*
  * looks like, which is the ordinary state.
  *
- * So the wait copy states the truth about the wait, and the screen offers the
- * one repair this side has: `Request again`, user-driven, which mints a fresh
- * KeyPackage. It never claims that is why.
+ * So the wait copy states the truth about the wait and nothing more (UX
+ * `group-and-channel-privacy.md` 6.2, amended 2026-11-12): "Request sent. An
+ * admin will see it when they next open Lakko." and no control. A device asks
+ * once per group per day: the page opened again within the day finds the
+ * recorded request and shows the same line; after a day it shows "No answer
+ * yet." and `Ask again`, which sends the same request again exactly as the
+ * `Requests sent` list's `Ask again` does ([ChatRepository.askAgain]) and
+ * restarts the day. A fresh request mints a fresh KeyPackage, the one repair
+ * this side has; the page never claims that is why. When the join lands the
+ * page moves straight to the chat.
  */
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
@@ -100,7 +107,8 @@ public class JoinGroupLandingViewModel(
 ) : ViewModel() {
 
     /** Local FSM: Loading -> Invalid | Ready -> Requesting -> Waiting (poll
-     *  loop) -> Joined / Failed. */
+     *  loop) -> Joined / Failed. Opened again for a group this device already
+     *  asked to join: Loading -> Waiting; for a group it holds: -> Joined. */
     public sealed interface State {
         /** Resolving the slug and opening the preview. */
         public data object Loading : State
@@ -118,7 +126,13 @@ public class JoinGroupLandingViewModel(
         /** The card is on screen; nothing has been sent yet. */
         public data object Ready : State
         public data object Requesting : State
-        public data object Waiting : State
+
+        /** A request was sent at [sentAtMs] (Unix ms) and the group has not
+         *  appeared: the wait line, then after a day `Ask again`
+         *  ([joinWaitOffersAskAgain]). */
+        public data class Waiting(val sentAtMs: Long) : State
+
+        /** The group is here: the page moves to its chat ([groupToOpenOnJoin]). */
         public data class Joined(val groupIdHex: String) : State
         /** [message] is one of the fixed sentences [me.lakko.app.chat.joinFailureCopy]
          *  returns — never a raw or protocol message. */
@@ -142,10 +156,10 @@ public class JoinGroupLandingViewModel(
 
     private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
-    /** In flight, so `Request again` cannot be double-tapped into two journal
-     *  rows. Separate from [state], which STAYS `Waiting` across a re-request:
-     *  going back through `Requesting` would hide the wait copy and read as a
-     *  restart of something that never stopped. */
+    /** In flight, so `Ask again` cannot be double-tapped into two journal
+     *  rows. Separate from [state], which STAYS `Waiting` across an ask
+     *  again: going back through `Requesting` would hide the wait copy and
+     *  read as a restart of something that never stopped. */
     public val requesting: StateFlow<Boolean> = mutableRequesting.asStateFlow()
 
     private var pollJob: kotlinx.coroutines.Job? = null
@@ -183,7 +197,22 @@ public class JoinGroupLandingViewModel(
                 }
                 resolved = Pair(card.capabilityWire, sealedAndBlob.second)
                 mutableCard.value = card
-                mutableState.value = State.Ready
+                // UX 6.2 — a group this device already asked to join (within
+                // the day or not) shows the wait, never a second `Request to
+                // join`; a group it holds opens. Channel links are not group
+                // requests and keep their own page.
+                val groupLink = card.preview?.channelId == null && card.groupIdHex.isNotEmpty()
+                val opened = if (groupLink) {
+                    joinPageStateOnOpen(
+                        holdsGroup = repository.holdsGroup(card.groupIdHex),
+                        sentAtMs = repository.openSentRequest(card.groupIdHex)?.sentAtMs,
+                        groupIdHex = card.groupIdHex,
+                    )
+                } else {
+                    State.Ready
+                }
+                mutableState.value = opened
+                if (opened is State.Waiting) startPolling(card.groupIdHex, null)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -212,36 +241,28 @@ public class JoinGroupLandingViewModel(
     }
 
     /**
-     * ADR-0045 S7 residual 1 — send the request. Reached from the card's
-     * `Request to join` and again from the `Request again` control, which is
-     * the joiner's only repair: a fresh request mints a fresh KeyPackage.
-     * Deliberately user-driven and never automatic — each press is a journal
-     * row held to the DS's 30-day TTL, and a timer would spin against a group
-     * that is merely quiet.
+     * ADR-0045 S7 residual 1 — send the request: the card's `Request to join`
+     * and `Try again` after a failure. Recorded under `Requests sent` (UX 6.2)
+     * so the list shows it and a reopened page shows the wait. Deliberately
+     * user-driven and never automatic — each press is a journal row held to
+     * the DS's 30-day TTL, and a timer would spin against a group that is
+     * merely quiet.
      */
     public fun request() {
         if (mutableRequesting.value) return
         val ticket = resolved ?: return
         mutableRequesting.value = true
-        // Only the first request passes through `Requesting` (and a `Try
-        // again` after a failure); a re-request keeps the wait copy on screen.
-        val before = mutableState.value
-        if (before == State.Ready || before is State.Failed) mutableState.value = State.Requesting
-        // A re-request replaces the poll rather than adding a second one.
+        mutableState.value = State.Requesting
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
-            val nowMs = System.currentTimeMillis().toULong()
-            val groupId: ByteArray
-            val joinerKey: ByteArray
-            try {
-                // Request to join, registering a consume against the ledger.
-                val result = repository.requestToJoinFromLink(
+            val nowMs = System.currentTimeMillis()
+            val result = try {
+                repository.requestToJoinFromLinkRecorded(
                     ticket.first,
-                    nowMs,
+                    nowMs.toULong(),
                     ticket.second,
+                    mutableCard.value?.preview?.groupName,
                 )
-                groupId = result.first
-                joinerKey = result.second
             } catch (e: kotlinx.coroutines.CancellationException) {
                 mutableRequesting.value = false
                 throw e
@@ -253,38 +274,121 @@ public class JoinGroupLandingViewModel(
                 mutableRequesting.value = false
                 return@launch
             }
-            mutableState.value = State.Waiting
-            // Cleared as soon as the request itself is on the wire: the poll
-            // below runs for the rest of the wait, and holding the flag across
-            // it would disable `Request again` forever.
+            mutableState.value = State.Waiting(nowMs)
             mutableRequesting.value = false
-            val groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(groupId)
-            while (isActive) {
-                // ADR-0053 — the sweep delivers the Welcome to this device's
-                // mailbox only; the app-wide mailbox poll may join it before
-                // the poll below runs, so the group already being ours is the
-                // first thing checked.
-                if (repository.state.value.threads.any { it.groupIdHex.equals(groupIdHex, ignoreCase = true) }) {
-                    mutableState.value = State.Joined(groupIdHex)
-                    return@launch
-                }
+            pollUntilJoined(me.lakko.app.ds.DsClient.pseudonymHex(result.first), result.first, result.second)
+        }
+    }
+
+    /**
+     * UX 6.2 — `Ask again`, offered a day after the request: the same request
+     * again through [ChatRepository.askAgain], exactly as the `Requests sent`
+     * list sends it; the day starts over.
+     */
+    public fun askAgain() {
+        if (mutableRequesting.value) return
+        val ticket = resolved ?: return
+        val groupIdHex = mutableCard.value?.groupIdHex?.takeIf { it.isNotEmpty() } ?: return
+        mutableRequesting.value = true
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
+            val encoder = java.util.Base64.getEncoder()
+            // The stored row, or (when the list already dropped it) the same
+            // request rebuilt from the link this page opened.
+            val row = repository.openSentRequest(groupIdHex) ?: me.lakko.app.chat.SentRequest(
+                idHex = groupIdHex,
+                name = mutableCard.value?.preview?.groupName.orEmpty(),
+                handle = "",
+                sentAtMs = 0L,
+                capabilityB64 = encoder.encodeToString(ticket.first),
+                blobIdB64 = encoder.encodeToString(ticket.second),
+            )
+            try {
+                repository.askAgain(row)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                mutableRequesting.value = false
+                throw e
+            } catch (e: Throwable) {
+                android.util.Log.w("JoinGroupLanding", "ask again failed", e)
+                mutableState.value = State.Failed(me.lakko.app.chat.joinFailureCopy(e))
+                mutableRequesting.value = false
+                return@launch
+            }
+            mutableState.value = State.Waiting(System.currentTimeMillis())
+            mutableRequesting.value = false
+            pollUntilJoined(groupIdHex, hexBytesOrNull(groupIdHex), null)
+        }
+    }
+
+    private fun startPolling(groupIdHex: String, joinerKey: ByteArray?) {
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch { pollUntilJoined(groupIdHex, hexBytesOrNull(groupIdHex), joinerKey) }
+    }
+
+    /** Wait for the group to appear, then [State.Joined]. */
+    private suspend fun pollUntilJoined(groupIdHex: String, groupId: ByteArray?, joinerKey: ByteArray?) {
+        while (viewModelScope.isActive) {
+            // ADR-0053 — the sweep delivers the Welcome to this account's
+            // mailbox only; the app-wide mailbox poll may join it before the
+            // pass below runs, so the group already being ours is the first
+            // thing checked.
+            if (repository.state.value.threads.any { it.groupIdHex.equals(groupIdHex, ignoreCase = true) }) {
+                mutableState.value = State.Joined(groupIdHex)
+                return
+            }
+            if (groupId != null) {
                 try {
-                    val hex = repository.pollForJoinWelcome(groupId, joinerKey)
+                    val hex = repository.pollForJoinWelcome(groupId, joinerKey ?: ByteArray(0))
                     if (hex != null) {
                         mutableState.value = State.Joined(hex)
-                        return@launch
+                        return
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    // One missed mailbox pass is not a failed join: the
-                    // request is on the server and the next pass (or the
-                    // app-wide mailbox poll) still joins the Welcome.
+                    // One missed pass is not a failed join: the request is on
+                    // the server and the next pass (or the app-wide mailbox
+                    // poll) still joins the Welcome.
                     android.util.Log.w("JoinGroupLanding", "mailbox pass failed; waiting on", e)
                 }
-                delay(3_000)
             }
+            delay(3_000)
         }
+    }
+}
+
+/**
+ * UX 6.2 — what the page shows once the link opened, for a group link: the
+ * chat when this device holds the group, the wait when it already asked
+ * ([sentAtMs] the request's time), else the card with `Request to join`. Pure.
+ */
+internal fun joinPageStateOnOpen(
+    holdsGroup: Boolean,
+    sentAtMs: Long?,
+    groupIdHex: String,
+): JoinGroupLandingViewModel.State = when {
+    holdsGroup -> JoinGroupLandingViewModel.State.Joined(groupIdHex)
+    sentAtMs != null -> JoinGroupLandingViewModel.State.Waiting(sentAtMs)
+    else -> JoinGroupLandingViewModel.State.Ready
+}
+
+/** UX 6.2 — whether the wait shows "No answer yet." and `Ask again` (a day
+ *  or more since the request) rather than the wait line alone. The rule is
+ *  [me.lakko.app.chat.requestStillWaiting], shared with the list. Pure. */
+internal fun joinWaitOffersAskAgain(sentAtMs: Long, nowMs: Long): Boolean =
+    !me.lakko.app.chat.requestStillWaiting(sentAtMs, nowMs)
+
+/** The chat the page moves to, with no `Open chat` step: the joined group,
+ *  else `null`. Pure. */
+internal fun groupToOpenOnJoin(state: JoinGroupLandingViewModel.State): String? =
+    (state as? JoinGroupLandingViewModel.State.Joined)?.groupIdHex
+
+private fun hexBytesOrNull(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    return try {
+        ByteArray(hex.length / 2) { i -> hex.substring(2 * i, 2 * i + 2).toInt(16).toByte() }
+    } catch (_: NumberFormatException) {
+        null
     }
 }
 
@@ -308,7 +412,7 @@ public fun JoinGroupLandingScreen(
     /** Section 15.2.2 — when the publisher request this account sent for
      *  the channel [channelIdHex] was sent, `null` when none is pending (a
      *  pending one lands by itself): the page shows the waiting line, then
-     *  `Ask again` after seven days, never a second `Accept`. */
+     *  `Ask again` after a day, never a second `Accept`. */
     publisherRequestSentAtMs: (channelIdHex: String) -> Long? = { null },
     /** This account already publishes in the channel: `Open`. */
     isPublisherOf: (channelIdHex: String) -> Boolean = { false },
@@ -317,6 +421,8 @@ public fun JoinGroupLandingScreen(
     val card by viewModel.card.collectAsStateWithLifecycle()
     val requesting by viewModel.requesting.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { viewModel.start() }
+    // UX 6.2 — the join landed: straight to the chat, no `Open chat` step.
+    LaunchedEffect(state) { groupToOpenOnJoin(state)?.let(onOpenChat) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -428,27 +534,25 @@ public fun JoinGroupLandingScreen(
             is JoinGroupLandingViewModel.State.Waiting -> {
                 InviteHeadline(card)
                 Spacer(Modifier.height(16.dp))
-                CircularProgressIndicator()
-                Spacer(Modifier.height(8.dp))
-                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY.text(), textAlign = TextAlign.Center)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = me.lakko.app.chat.JOIN_WAIT_SECONDARY.text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = { viewModel.request() },
-                    enabled = !requesting,
-                ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN.text()) }
+                if (joinWaitOffersAskAgain(s.sentAtMs, System.currentTimeMillis())) {
+                    Text(
+                        t("requests_sent.no_answer"),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = { viewModel.askAgain() },
+                        enabled = !requesting,
+                    ) { Text(t("requests_sent.ask_again")) }
+                } else {
+                    Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY.text(), textAlign = TextAlign.Center)
+                }
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {
-                Text(me.lakko.app.chat.JOIN_SUCCESS_TEXT.text(), textAlign = TextAlign.Center)
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { onOpenChat(s.groupIdHex) }) { Text(me.lakko.app.chat.JOIN_OPEN_CHAT_TEXT.text()) }
+                // Shown only for the moment the navigation takes.
+                Text(t("group.join.succeeded_opening"), textAlign = TextAlign.Center)
             }
             is JoinGroupLandingViewModel.State.Failed -> {
                 InviteHeadline(card)

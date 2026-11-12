@@ -1223,7 +1223,7 @@ public final class ChatListViewModel: ObservableObject {
             accountIdB64: accountIdB64, heldGroups: Set(threads.map(\.groupIdHex)))
     }
 
-    /// UX 6.2 — `Ask again` on a request over 7 days old.
+    /// UX 6.2 — `Ask again` on a request a day old or more.
     func askAgain(_ entry: RequestsSentStore.Entry) async {
         guard let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -1468,7 +1468,7 @@ struct MembershipEndToast: View {
 }
 
 /// UX 6.2 — the requests to join this device sent: avatar, name, one line;
-/// `Ask again` after 7 days with no answer. A request is never withdrawn, and
+/// `Ask again` after a day with no answer. A request is never withdrawn, and
 /// the person is never told one was refused.
 struct RequestsSentList: View {
     @ObservedObject var viewModel: ChatListViewModel

@@ -6325,10 +6325,6 @@
       "text": "בקשת הצטרפות",
       "status": "machine"
     },
-    "group.join.request_again": {
-      "text": "שליחת בקשה שוב",
-      "status": "machine"
-    },
     "group.join.request_failed": {
       "text": "הבקשה שלכם לא נשלחה. בדקו את החיבור ונסו שוב.",
       "status": "machine"
@@ -6350,11 +6346,7 @@
       "status": "machine"
     },
     "group.join.wait_primary": {
-      "text": "הבקשה נשלחה. אחד המנהלים מאשר אותה, ואז השינוי מוחל על הקבוצה.",
-      "status": "machine"
-    },
-    "group.join.wait_secondary": {
-      "text": "אם לא קורה כלום, אפשר לשלוח את הבקשה שוב.",
+      "text": "הבקשה נשלחה. מנהל יראה אותה כשיפתח את Lakko בפעם הבאה.",
       "status": "machine"
     },
     "group_delete.action": {
