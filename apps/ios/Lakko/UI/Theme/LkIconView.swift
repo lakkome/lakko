@@ -15,9 +15,9 @@ import SwiftUI
 /// way an SF Symbol in a text-style font did; `relativeTo: nil` keeps it
 /// fixed, for sites whose symbol used a fixed `.system(size:)` font.
 ///
-/// Without `label` the image is hidden from VoiceOver (an asset image would
-/// otherwise be read by its file name) and the control around it carries the
-/// label. An icon that stands alone as information (a sent mark, a muted mark)
+/// The image is decorative (VoiceOver never reads an asset name, even where
+/// a Label, a toolbar or a tab item builds its own element from it); without
+/// `label` it is also hidden, and the control around it carries the label. An icon that stands alone as information (a sent mark, a muted mark)
 /// passes `label`, which is what VoiceOver reads for it. A label added with
 /// `.accessibilityLabel` after the view does not reach a hidden image.
 struct LkIconView: View {
@@ -40,8 +40,13 @@ struct LkIconView: View {
         let image = icon.image
             .scaledToFit()
             .frame(width: side, height: side)
+        // The image itself is decorative (no asset-name label, see
+        // `LkIcon.image`); a label goes on an element of its own around it.
         if let label {
-            image.accessibilityLabel(label)
+            image
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityAddTraits(.isImage)
         } else {
             image.accessibilityHidden(true)
         }
@@ -52,7 +57,7 @@ extension LkIcon {
     /// The icon at its drawn 24-point size, not resizable: for a place that
     /// takes an `Image` and lays it out itself (the tab bar).
     var fixedImage: Image {
-        Image(assetName).renderingMode(.template)
+        Image(decorative: assetName).renderingMode(.template)
     }
 }
 

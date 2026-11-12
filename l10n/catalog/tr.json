@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Davet kabul edilmedi",
+      "text": "Davet açılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

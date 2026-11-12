@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "ההזמנה לא אושרה",
+      "text": "לא ניתן היה לפתוח את ההזמנה. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

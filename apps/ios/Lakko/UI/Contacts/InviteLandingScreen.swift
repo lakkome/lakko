@@ -174,7 +174,7 @@ public struct InviteLandingScreen: View {
 
         case .openFailed:
             Text(l10n.t("invite.contact.result.failed_title"))
-                .font(.title2.weight(.semibold))
+                .font(.body)
                 .multilineTextAlignment(.center)
             Button(l10n.t("common.try_again")) {
                 Task { await viewModel.retryOpen() }
@@ -303,7 +303,7 @@ public struct SignedOutInviteScreen: View {
 
         case .openFailed:
             Text(l10n.t("invite.contact.result.failed_title"))
-                .font(.title2.weight(.semibold))
+                .font(.body)
                 .multilineTextAlignment(.center)
             Button(l10n.t("common.try_again")) {
                 Task { await viewModel.retry() }

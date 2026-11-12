@@ -60,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerType
@@ -882,15 +883,22 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
             size = LkIconSize.Row,
         )
     }
+    // The circle is drawn by this node into its parent's drawing, not into a
+    // layer of its own (no clip, no alpha layer). While the call is in the
+    // system's picture-in-picture window the chat is laid out 152 dp wide and
+    // this button gets no width at all; on the way back a separate layer kept
+    // the circle it had recorded at zero size and only the glyph came back
+    // (seen on a Pixel 7a, 2026-11-12). The disabled fade is in the colours,
+    // so it reaches the circle as well as the glyph.
+    val fade = if (disabled != null) 0.4f else 1f
+    val circle = (if (holding) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+        .let { it.copy(alpha = it.alpha * fade) }
+    val glyph = MaterialTheme.colorScheme.onPrimary.let { it.copy(alpha = it.alpha * fade) }
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .size(48.dp)
-            .clip(CircleShape)
-            .background(
-                if (holding) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-            )
-            .alpha(if (disabled != null) 0.4f else 1f)
+            .drawBehind { drawCircle(circle) }
             .semantics {
                 contentDescription = label
                 if (disabled != null) {
@@ -947,7 +955,7 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
         LkIcon(
             icon = if (kind == CaptureKind.VOICE) R.drawable.ic_lk_mic_fill else R.drawable.ic_lk_video_fill,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onPrimary,
+            tint = glyph,
             size = LkIconSize.Row,
         )
     }

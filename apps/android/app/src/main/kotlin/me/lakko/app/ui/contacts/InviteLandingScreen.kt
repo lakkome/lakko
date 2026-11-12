@@ -114,7 +114,11 @@ public fun InviteLandingScreen(
                     Button(onClick = viewModel::retryOpen) { Text(t("common.try_again")) }
                 }
                 InviteLandingState.OpenFailed -> {
-                    Title(t("invite.contact.result.failed_title"))
+                    Text(
+                        text = t("invite.contact.result.failed_title"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
                     Spacer(Modifier.height(24.dp))
                     Button(onClick = viewModel::retryOpen) { Text(t("common.try_again")) }
                 }
@@ -220,7 +224,11 @@ public fun SignedOutInviteScreen(
                 Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
             }
             SignedOutInviteState.OpenFailed -> {
-                Title(t("invite.contact.result.failed_title"))
+                Text(
+                    text = t("invite.contact.result.failed_title"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(24.dp))
                 Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
             }

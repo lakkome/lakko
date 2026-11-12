@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "لم تُقبل الدعوة",
+      "text": "تعذّر فتح الدعوة. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

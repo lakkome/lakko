@@ -6950,7 +6950,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Приглашение не принято",
+      "text": "Не удалось открыть приглашение. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

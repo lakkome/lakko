@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "دعوت پذیرفته نشد",
+      "text": "باز کردن دعوت ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

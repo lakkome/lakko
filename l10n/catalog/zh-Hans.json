@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "未能接受邀请",
+      "text": "无法打开邀请。请检查网络连接后重试。",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

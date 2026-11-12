@@ -714,7 +714,14 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 me.lakko.app.ui.translation.TranscriptSlot(ref, hub, MaterialTheme.colorScheme.onSurface, onLongPress)
             }
         }
-        Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
+        // Outside any bubble colour: under the sender's own note the inherited
+        // content colour was the bubble's white, unreadable on the chat
+        // background (seen on a Pixel 7a, 2026-11-12).
+        Text(
+            formatTotalClock(duration),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         val failures by hub.failures.collectAsStateWithLifecycle()
         val failure = failures[key]
         if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {

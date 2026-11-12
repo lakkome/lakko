@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "इनवाइट स्वीकार नहीं हुआ",
+      "text": "आमंत्रण नहीं खुल सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {

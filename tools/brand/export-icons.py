@@ -143,8 +143,9 @@ enum LkIcon: String, CaseIterable, Sendable {{
     /// The asset-catalog name.
     var assetName: String {{ "Icons/" + rawValue }}
 
-    /// The icon as a resizable template image.
-    var image: Image {{ Image(assetName).renderingMode(.template).resizable() }}
+    /// The icon as a resizable template image. Decorative: VoiceOver never
+    /// reads the asset name; a control or `LkIconView(label:)` names it.
+    var image: Image {{ Image(decorative: assetName).renderingMode(.template).resizable() }}
 
     /// Whether the icon points in the reading direction (mirrored right to left;
     /// the asset catalog mirrors these by itself).

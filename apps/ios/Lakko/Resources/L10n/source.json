@@ -7204,8 +7204,8 @@
       "comment": "Headline on the contact invite screen when the link has expired. The explanation under it is a separate message."
     },
     "invite.contact.result.failed_title": {
-      "text": "Invite not accepted",
-      "comment": "Headline on the contact invite screen when accepting failed for another reason."
+      "text": "Could not open the invite. Check your connection and try again.",
+      "comment": "Shown on the contact invite screen when the link could not be opened: the network failed or the server answered with an error other than no such link or too many attempts. A Try again button follows."
     },
     "invite.contact.result.not_found_title": {
       "text": "Invite not found",

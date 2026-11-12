@@ -6830,7 +6830,7 @@
       "status": "machine"
     },
     "invite.contact.result.failed_title": {
-      "text": "Запрошення не прийнято",
+      "text": "Не вдалося відкрити запрошення. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
     "invite.contact.result.not_found_title": {
