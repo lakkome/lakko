@@ -39,7 +39,7 @@ const SWITCHES: ReadonlyArray<{
   },
   {
     key: "openAtLogin",
-    icon: "monitor",
+    icon: "laptop",
     titleKey: "settings.desktop.open_at_login.title",
     subKey: null,
   },
@@ -116,7 +116,7 @@ export function AntiCensorshipCard(): JSX.Element {
       <h2>{t("settings.anti_censorship.title")}</h2>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="shield" size={18} />
+          <Icon name="network-shield" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("settings.anti_censorship.toggle")}</span>
@@ -194,7 +194,7 @@ export function DesktopNotificationsSection(): JSX.Element {
               <>
                 <div class="lk-card-row">
                   <span class="lk-card-row-icon">
-                    <Icon name={s.icon} size={18} />
+                    <Icon name={s.icon} size={20} />
                   </span>
                   <div class="lk-card-row-body">
                     <span class="lk-card-row-title">{t(s.titleKey)}</span>
@@ -240,7 +240,7 @@ export function ReactionNotificationsRow(): JSX.Element {
   return (
     <div class="lk-card-row">
       <span class="lk-card-row-icon">
-        <Icon name="heart" size={18} />
+        <Icon name="face-smiling" size={20} />
       </span>
       <div class="lk-card-row-body">
         <span class="lk-card-row-title">{t("settings.notifications.reactions")}</span>

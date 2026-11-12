@@ -20,7 +20,12 @@ public struct RestoreIdentityPromptScreen: View {
     /// The wait a reset's `429` asked for (UX 15.1: the shared line with its
     /// countdown, the panel stays open).
     @StateObject private var resetWait = RetryCountdown()
+    /// The confirmation-word field has the cursor.
+    @FocusState private var resetWordFocused: Bool
     @ObservedObject private var l10n = Localization.shared
+
+    /// The id the scroll view brings into view above the keyboard.
+    private static let resetButtonId = "restore-identity.reset-button"
 
     public init(
         authRepository: AuthRepository,
@@ -31,6 +36,54 @@ public struct RestoreIdentityPromptScreen: View {
     }
 
     public var body: some View {
+        ScrollViewReader { proxy in
+            content
+                // UX 15.1 — the keyboard must not cover "Reset account keys":
+                // the button comes into view above it while the word is typed
+                // and when the cursor moves into the word field.
+                .onChange(of: viewModel.resetConfirmation) { _, _ in
+                    revealResetButton(proxy, afterKeyboard: false)
+                }
+                .onChange(of: resetWordFocused) { _, focused in
+                    if focused { revealResetButton(proxy, afterKeyboard: true) }
+                }
+        }
+    }
+
+    /// Scroll "Reset account keys" (and the line above it) into view. When
+    /// the keyboard is still appearing, after it has: the scroll view's
+    /// bottom inset changes with it.
+    private func revealResetButton(_ proxy: ScrollViewProxy, afterKeyboard: Bool) {
+        guard showingStartOver else { return }
+        Task { @MainActor in
+            if afterKeyboard { try? await Task.sleep(nanoseconds: 350_000_000) }
+            withAnimation { proxy.scrollTo(Self.resetButtonId, anchor: .bottom) }
+        }
+    }
+
+    private var resetButtonEnabled: Bool {
+        KeyResetReturnKey.buttonEnabled(
+            busy: viewModel.busy, canReset: viewModel.canReset, waiting: resetWait.waiting)
+    }
+
+    /// The return key of the password or the word field.
+    private func returnKey(from field: KeyResetReturnKey.Field) {
+        switch KeyResetReturnKey.action(
+            from: field,
+            buttonEnabled: resetButtonEnabled,
+            wordTyped: KeyResetConfirmation.matches(viewModel.resetConfirmation)
+        ) {
+        case .submit:
+            resetWordFocused = false
+            viewModel.startFresh()
+        case .focusWord:
+            resetWordFocused = true
+        case .nothing:
+            break
+        }
+    }
+
+    private var content: some View {
         AuthScreen {
             if viewModel.resetting {
                 // UX 15.1 — after the tap: "Resetting..." with no cancel; the
@@ -81,7 +134,7 @@ public struct RestoreIdentityPromptScreen: View {
 
         if let notice = authRepository.restoreNotice {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "info.circle")
+                LkIconView(.infoCircle, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                 Text(l10n.t(notice.catalogKey))
                     .font(.subheadline)
@@ -118,25 +171,25 @@ public struct RestoreIdentityPromptScreen: View {
         case .email:
             return RecoveryMethodRow(
                 id: method.rawValue,
-                systemImage: "envelope",
+                icon: .envelope,
                 title: l10n.t("recovery.email.row.title"),
                 detail: l10n.t("recovery.email.row.body"))
         case .device:
             return RecoveryMethodRow(
                 id: method.rawValue,
-                systemImage: "iphone.gen3.radiowaves.left.and.right",
+                icon: .smartphoneWaves,
                 title: l10n.t("recovery.method.device.title"),
                 detail: l10n.t("recovery.method.device.sub"))
         case .passkey:
             return RecoveryMethodRow(
                 id: method.rawValue,
-                systemImage: "person.badge.key",
+                icon: .passkey,
                 title: l10n.t("recovery.method.passkey.title"),
                 detail: l10n.t("restore_identity.method.passkey.sub"))
         case .phrase:
             return RecoveryMethodRow(
                 id: method.rawValue,
-                systemImage: "key",
+                icon: .key,
                 title: l10n.t("recovery.method.phrase.title"),
                 detail: l10n.t("recovery.method.phrase.restore_sub"))
         }
@@ -149,7 +202,7 @@ public struct RestoreIdentityPromptScreen: View {
         Button {
             method = nil
         } label: {
-            Label(l10n.t("recovery.methods.back"), systemImage: "chevron.backward")
+            Label(l10n.t("recovery.methods.back"), icon: .chevronBack, size: 14, relativeTo: .footnote)
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(Color.lakkoAccent)
         }
@@ -307,8 +360,7 @@ public struct RestoreIdentityPromptScreen: View {
                 HStack(spacing: 6) {
                     Text(l10n.t("restore_identity.lost.summary"))
                         .font(.footnote.weight(.medium))
-                    Image(systemName: showingStartOver ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.semibold))
+                    LkIconView(showingStartOver ? .chevronUp : .chevronDown, size: 14, relativeTo: .caption)
                 }
                 .foregroundStyle(Color.lakkoAccent)
             }
@@ -347,7 +399,7 @@ public struct RestoreIdentityPromptScreen: View {
                     } else {
                         // UX 17.2 — the proof block (absent while a proof is
                         // live), then the typed word, then the button.
-                        FreshAuthBlock(model: viewModel.resetProof, onSubmit: viewModel.startFresh)
+                        FreshAuthBlock(model: viewModel.resetProof, onSubmit: { returnKey(from: .password) })
                         if viewModel.showsResetNoPasswordLink {
                             Button(l10n.t("proof.no_password_link")) {
                                 viewModel.resetKnowsPassword(false)
@@ -367,7 +419,8 @@ public struct RestoreIdentityPromptScreen: View {
                             autocorrect: false,
                             disabled: viewModel.busy,
                             submitLabel: .go,
-                            onSubmit: viewModel.startFresh
+                            onSubmit: { returnKey(from: .word) },
+                            isFocused: $resetWordFocused
                         )
                         if method == nil, let error = viewModel.error {
                             AuthHint(text: error, isError: true)
@@ -386,8 +439,9 @@ public struct RestoreIdentityPromptScreen: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .disabled(viewModel.busy || !viewModel.canReset || resetWait.waiting)
+                        .disabled(!resetButtonEnabled)
                         .opacity(viewModel.canReset && !resetWait.waiting ? 1 : 0.5)
+                        .id(Self.resetButtonId)
                     }
                     Button(l10n.t("common.cancel")) {
                         viewModel.resetPanelClosed()

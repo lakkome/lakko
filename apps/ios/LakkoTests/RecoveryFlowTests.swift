@@ -833,6 +833,238 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.deviceGroupCalls.map(\.accountIdB64), [account.b64])
     }
 
+    // MARK: - Waiting for the directory (UX 15.4, amended 2026-11-12)
+
+    func testTheDirectorysCoolDownStartsAWaitOfTheTimeItNamedAndOnlyThat() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":2400}"#)
+
+        let before = SessionRestore.nowMs()
+        _ = try await mint(h)
+        let after = SessionRestore.nowMs()
+
+        XCTAssertTrue(h.repository.freshPublishPending)
+        let wait = try XCTUnwrap(h.repository.keyResetPublishWait, "the reset's own publish learned the wait")
+        XCTAssertEqual(wait.accountIdB64, account.b64)
+        XCTAssertGreaterThanOrEqual(wait.untilMs, before + 2_400_000)
+        XCTAssertLessThanOrEqual(wait.untilMs, after + 2_400_000)
+
+        // The same refusal with no readable time: back to "could not finish".
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity", body: #"{"error":"identity-changed-too-recently"}"#)
+        do {
+            try await h.repository.retryFreshPublish()
+            XCTFail("the directory still refuses")
+        } catch {}
+        XCTAssertNil(h.repository.keyResetPublishWait)
+
+        // A network failure: "could not finish" too.
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":60}"#)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNotNil(h.repository.keyResetPublishWait)
+        h.directory.publishError = URLError(.notConnectedToInternet)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNil(h.repository.keyResetPublishWait)
+
+        // The retry once the directory accepts: nothing is owed or awaited.
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":1}"#)
+        do { try await h.repository.retryFreshPublish() } catch {}
+        XCTAssertNotNil(h.repository.keyResetPublishWait)
+        h.directory.publishError = nil
+        try await h.repository.retryFreshPublish()
+        XCTAssertNil(h.repository.keyResetPublishWait)
+        XCTAssertFalse(h.repository.freshPublishPending)
+        XCTAssertEqual(h.reset.resetCalls.count, 1, "never resets again")
+    }
+
+    // MARK: - This device's reset was reset again elsewhere (base scenario 4b)
+
+    /// The auth service, scripted beside the TOTP route: whether a refresh
+    /// answers `key-generation-superseded`.
+    private final class AuthGeneration {
+        var superseded = false
+        /// A refresh that is not superseded answers a new pair (else `503`).
+        var refreshAnswers = false
+        private(set) var refreshes = 0
+
+        func routes(_ account: Data, totp: @escaping (String, [String: Any]) -> (Int, String)?)
+            -> (String, [String: Any]) -> (Int, String)? {
+            { [unowned self] path, json in
+                switch path {
+                case "/auth/session/refresh":
+                    self.refreshes += 1
+                    if self.superseded { return (401, #"{"error":"key-generation-superseded"}"#) }
+                    guard self.refreshAnswers else { return (503, "") }
+                    return (200, """
+                    {"session_token":"tok-gen2-refreshed","session_expires_at_ms":4000000000000,"refresh_token":"r1.gen2-refreshed","refresh_expires_at_ms":4000000000000,"key_generation":2}
+                    """)
+                case "/backup":
+                    return (200, "{}")
+                default:
+                    return totp(path, json)
+                }
+            }
+        }
+    }
+
+    /// The baseline backup's storage and head mint, on the harness's
+    /// scripted host, for the duration of one test.
+    private func backupOnHost(_ host: String) -> () -> Void {
+        let previous = AuthRepository.makeBackupClient
+        AuthRepository.makeBackupClient = {
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [NameRouteStub.self]
+            let session = URLSession(configuration: config)
+            return BackupClient(
+                storage: StorageClient(baseURL: "http://\(host):9", session: session),
+                authBaseURL: "http://\(host):9", authSession: session)
+        }
+        return { AuthRepository.makeBackupClient = previous }
+    }
+
+    private func paths(_ host: String) -> [String] {
+        NameRouteStub.requests(host).map(\.path)
+    }
+
+    func testAPhraseParkedAtLaunchAsksAuthAndASupersededResetEndsOnTheRecallScreen() async throws {
+        // This device reset the keys and closed the app on its phrase screen,
+        // with the publish done. The keys were then reset again on another
+        // device, whose own publish is refused for an hour: the directory
+        // still holds THIS device's key at THIS device's generation, auth
+        // is one generation above it.
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
+        try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = mnemonic.toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(
+                access: "tok-gen2", refresh: "r1.gen2", refreshExpiresAtMs: Int64.max / 2, generation: 2)),
+            accountIdB64: account.b64)
+        let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
+        markers.markPhraseOwed(accountIdB64: account.b64)
+        let auth = AuthGeneration()
+        auth.superseded = true
+
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
+            persistence: persistence, markers: markers,
+            routes: auth.routes(account.bytes, totp: { _, _ in nil }))
+        h.directory.publishedKey = newKey
+        h.directory.publishedGeneration = 2
+
+        let signedOut = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(signedOut, "the superseded reset ends on Was it you?, not on its words")
+        XCTAssertEqual(auth.refreshes, 1, "the parked launch asked auth")
+        let wiped = await waitUntil { h.wiped.accounts == [account.b64] }
+        XCTAssertTrue(wiped, "the staged wipe ran")
+        XCTAssertNil(h.tokens.current)
+        XCTAssertTrue(h.directory.events.filter { $0.hasPrefix("publish") }.isEmpty, "nothing was published")
+    }
+
+    func testDoneOnAPhraseWhoseKeysWereResetAgainSignsOutBeforeAnyUpload() async throws {
+        let account = newAccount()
+        let auth = AuthGeneration()
+        let h = harness(routes: auth.routes(account.bytes, totp: totpRoute(account.bytes)))
+        let restore = backupOnHost(h.host)
+        defer { restore() }
+        try await parkWithoutKeys(h)
+        _ = try await mint(h)
+        XCTAssertFalse(h.repository.freshPublishPending, "this device's own publish landed")
+        let publishesBefore = h.directory.events.filter { $0.hasPrefix("publish") }
+        XCTAssertEqual(publishesBefore, ["publish+attest"])
+        // The scripted pair's refresh credential is valid on this clock.
+        h.tokens.nowMs = { 1_000_000 }
+
+        // Another device resets the keys while this phrase screen is open;
+        // its publish is refused by the directory's cool-down, so the
+        // directory still names this device's key at this generation.
+        auth.superseded = true
+        h.directory.publishedGeneration = 2
+
+        try h.repository.confirmFreshPhraseSaved()
+        let signedOut = await waitUntil { h.repository.recall != nil }
+        XCTAssertTrue(signedOut, "Done asked auth and the superseded keys ended on Was it you?")
+        let wiped = await waitUntil { h.wiped.accounts == [account.b64] }
+        XCTAssertTrue(wiped, "the staged wipe ran")
+        XCTAssertEqual(
+            h.directory.events.filter { $0.hasPrefix("publish") }, publishesBefore,
+            "the superseded keys were not uploaded again")
+        // The baseline backup waited for auth's answer and sent nothing:
+        // no head mint, no storage write (storage would have accepted the
+        // stale device's token).
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(paths(h.host).contains("/backup"), "\(paths(h.host))")
+        XCTAssertFalse(paths(h.host).contains("/auth/backup/head"), "\(paths(h.host))")
+    }
+
+    func testTheBaselineBackupAfterDoneGoesUpOnlyAfterAuthRefreshedThePair() async throws {
+        let account = newAccount()
+        let auth = AuthGeneration()
+        auth.refreshAnswers = true
+        let h = harness(routes: auth.routes(account.bytes, totp: totpRoute(account.bytes)))
+        let restore = backupOnHost(h.host)
+        defer { restore() }
+        try await parkWithoutKeys(h)
+        _ = try await mint(h)
+        h.tokens.nowMs = { 1_000_000 }
+
+        try h.repository.confirmFreshPhraseSaved()
+        let uploaded = await waitUntil { self.paths(h.host).contains("/backup") }
+        XCTAssertTrue(uploaded, "the baseline went up: \(paths(h.host))")
+        let seen = paths(h.host)
+        let refresh = try XCTUnwrap(seen.firstIndex(of: "/auth/session/refresh"))
+        let mint = try XCTUnwrap(seen.firstIndex(of: "/auth/backup/head"))
+        let put = try XCTUnwrap(seen.firstIndex(of: "/backup"))
+        XCTAssertLessThan(refresh, mint, "auth answered for the pair before the head mint")
+        XCTAssertLessThan(mint, put)
+        // With the refreshed pair.
+        let putRequest = try XCTUnwrap(NameRouteStub.requests(h.host).last { $0.path == "/backup" })
+        XCTAssertEqual(putRequest.authorization, "Bearer tok-gen2-refreshed")
+        XCTAssertNil(h.repository.recall)
+    }
+
+    func testAHeadMintThatSaysSupersededStopsTheUploadInsteadOfALegacyEnvelope() async throws {
+        let host = NameRouteStub.scope { _, path, _ in
+            switch path {
+            case "/auth/backup/head": return (401, #"{"error":"key-generation-superseded"}"#)
+            case "/backup": return (200, "{}")
+            default: return (503, "")
+            }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NameRouteStub.self]
+        let session = URLSession(configuration: config)
+        let client = BackupClient(
+            storage: StorageClient(baseURL: "http://\(host):9", session: session),
+            authBaseURL: "http://\(host):9", authSession: session,
+            ownPredecessors: InMemoryOwnPredecessorStore(),
+            ownEnvelopes: { _ in OwnBackupEnvelopes(ownProfile: nil, visibility: nil) })
+        client.setSessionToken("tok-stale")
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        do {
+            try await client.uploadNow(
+                accountId: account.bytes, accountIdB64: account.b64,
+                ed25519Seed: try Identity.fromSeed(seed: mnemonic.toSeed()).ed25519Seed(),
+                phraseBytes: Data(mnemonic.phrase().utf8), contacts: [])
+            XCTFail("a superseded mint must stop the upload")
+        } catch {
+            XCTAssertEqual(error as? BackupHeadMintError, .signedOut, "\(error)")
+        }
+        XCTAssertEqual(NameRouteStub.requests(host).map(\.path), ["/auth/backup/head"], "no legacy write")
+    }
+
     // MARK: - The password-fresh reset grant (ADR-0073, amended 2026-10-04)
 
     func testAResetWithoutAGrantOrAPasswordAsksForThePasswordBeforeAnyCall() async throws {

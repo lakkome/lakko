@@ -117,7 +117,7 @@ public struct RestoreViaDevicePanel: View {
                     link: link, typedCode: $typedCode,
                     onContinue: submitCode, onStartAgain: startCode)
             } else if case .error(let message) = ui {
-                Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                Label(message.text, icon: .warningFill)
                     .foregroundStyle(.red)
                     .font(.footnote)
             } else {
@@ -127,7 +127,7 @@ public struct RestoreViaDevicePanel: View {
                 ProgressView(DeviceLinkJoinCopy.restoring)
             }
             if case .done = ui {
-                Label(l10n.t("device_link.restored"), systemImage: "checkmark.circle.fill")
+                Label(l10n.t("device_link.restored"), icon: .checkmarkCircleFill)
                     .foregroundStyle(.green)
                     .font(.footnote)
             }
@@ -218,13 +218,13 @@ public struct RestoreViaDevicePanel: View {
                 ProgressView(l10n.t("device_link.transferring"))
 
             case .done:
-                Label(l10n.t("device_link.restored"), systemImage: "checkmark.circle.fill")
+                Label(l10n.t("device_link.restored"), icon: .checkmarkCircleFill)
                     .foregroundStyle(.green)
                     .font(.footnote)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, icon: .warningFill)
                         .foregroundStyle(.red)
                         .font(.footnote)
                     Button(l10n.t("common.try_again"), action: { ui = .idle })

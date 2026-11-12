@@ -22,7 +22,7 @@ const VIEW: CallWindowView = {
   encrypted: true,
   name: "Dana",
   others: 0,
-  mute: { icon: "mic", tone: "quiet", pressed: false, label: "Mute microphone", disabled: false },
+  mute: { icon: "mic-fill", tone: "quiet", pressed: false, label: "Mute microphone", disabled: false },
   picture: { kind: "frame" },
   inset: true,
   spoken: "Return to the call with Dana, 12 minutes",

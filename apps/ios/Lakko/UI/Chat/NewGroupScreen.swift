@@ -151,7 +151,7 @@ struct NewGroupScreen: View {
                 }
                 .disabled(busy)
                 LakkoPicker(
-                    l10n.t("group_type.who_can_join"), systemImage: "person.2",
+                    l10n.t("group_type.who_can_join"), icon: .person2,
                     selection: $isPublic,
                     options: [
                         LakkoPickerOption(value: false, label: l10n.t("group_type.private")),
@@ -245,7 +245,7 @@ struct NewGroupScreen: View {
                         }
                     }
                     Spacer()
-                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    LkIconView(isOn ? .checkmarkCircleFill : .circle, size: 20)
                         .foregroundStyle(isOn ? Color.lakkoAccent : Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                 }

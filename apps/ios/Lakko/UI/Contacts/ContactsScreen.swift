@@ -183,7 +183,7 @@ public struct ContactsScreen: View {
             .overlay {
                 if showsEmptyState {
                     ContentUnavailableView {
-                        Label(l10n.t("contacts.list.empty.title"), systemImage: "person.crop.circle.badge.plus")
+                        Label(l10n.t("contacts.list.empty.title"), icon: .personCirclePlus, size: 48, relativeTo: nil)
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
@@ -208,8 +208,8 @@ public struct ContactsScreen: View {
         }
         .lakkoActionSheet(isPresented: $addMenuOpen) {
             [
-                .action(l10n.t("contacts.add.share_invite"), systemImage: "link") { inviteLinksPresented = true },
-                .action(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder") { scanPresented = true },
+                .action(l10n.t("contacts.add.share_invite"), icon: .link) { inviteLinksPresented = true },
+                .action(l10n.t("contacts.scan_qr"), icon: .qrcodeScan) { scanPresented = true },
             ]
         }
         .sheet(isPresented: $inviteLinksPresented) {
@@ -252,7 +252,7 @@ public struct ContactsScreen: View {
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
         Button { addMenuOpen = true } label: {
-            Image(systemName: "person.badge.plus")
+            LkIconView(.personPlus, size: 24)
         }
         .accessibilityLabel(l10n.t("contacts.list.add"))
     }
@@ -357,7 +357,7 @@ private struct SentRequestRow: View {
                 name: line.name ?? "",
                 identity: request.recipientAccountIdB64,
                 size: 40,
-                placeholderSymbol: "person.fill",
+                placeholderIcon: .personFill,
                 photo: request.recipientKeyB64.flatMap(base64Decode).map { .person($0) },
                 playsVideo: hovering
             )
@@ -422,7 +422,7 @@ private struct InvitedRow: View {
                     name: stated ?? "",
                     identity: base64Encode(contact.signaturePubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill",
+                    placeholderIcon: .personFill,
                     photo: .person(contact.signaturePubkey),
                     playsVideo: hovering
                 )
@@ -459,7 +459,7 @@ private struct ContactRow: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
-                        placeholderSymbol: "person.fill",
+                        placeholderIcon: .personFill,
                         photo: .person(contact.request.fromPubkey),
                         playsVideo: hovering
                     )
@@ -528,7 +528,7 @@ struct IncomingRequestRow: View {
                     name: resolved.isPlaceholder ? "" : resolved.name,
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill",
+                    placeholderIcon: .personFill,
                     photo: .person(request.fromPubkey),
                     playsVideo: hovering
                 )

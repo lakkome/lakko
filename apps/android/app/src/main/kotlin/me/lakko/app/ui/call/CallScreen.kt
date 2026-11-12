@@ -44,13 +44,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material.icons.Icons
 import androidx.compose.runtime.key
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -167,6 +161,9 @@ import me.lakko.app.calls.showsCallEncryptionChip
 import me.lakko.app.calls.WebRtcPeerConnection
 import org.webrtc.RendererCommon
 import org.webrtc.VideoTrack
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * In-call UI (Phase 3c6-android).
@@ -1264,11 +1261,11 @@ private fun CollapseCallButton(onClick: () -> Unit, modifier: Modifier = Modifie
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = Icons.Filled.KeyboardArrowDown,
+        LkIcon(
+            icon = R.drawable.ic_lk_chevron_down,
             contentDescription = null,
             tint = LakkoDark.text,
-            modifier = Modifier.size(26.dp),
+            size = LkIconSize.Toolbar,
         )
     }
 }
@@ -1520,11 +1517,11 @@ private fun SwitchCameraButton(onClick: () -> Unit, modifier: Modifier = Modifie
             .semantics { contentDescription = flipLabel; role = Role.Button },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            Icons.Filled.FlipCameraAndroid,
+        LkIcon(
+            R.drawable.ic_lk_camera_flip,
             contentDescription = null,
             tint = LakkoDark.text,
-            modifier = Modifier.size(18.dp),
+            size = LkIconSize.Row,
         )
     }
 }
@@ -1674,11 +1671,11 @@ private fun CallEncryptionChip(onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(
-            Icons.Filled.Lock,
+        LkIcon(
+            R.drawable.ic_lk_lock_fill,
             contentDescription = null,
             tint = LakkoDark.success,
-            modifier = Modifier.size(12.dp),
+            size = LkIconSize.Mark,
         )
         Text(
             text = CALL_ENCRYPTION_CHIP_LABEL.text(),
@@ -1722,6 +1719,12 @@ private fun CallEncryptionSheet(
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            LkIcon(
+                R.drawable.ic_lk_lock_fill,
+                contentDescription = null,
+                tint = LakkoDark.success,
+                size = 26.dp,
+            )
             Text(
                 CALL_ENCRYPTION_SHEET_TITLE.text(),
                 color = LakkoDark.text,
@@ -1920,10 +1923,11 @@ private fun ParticipantListDrawer(state: CallUiState) {
                 modifier = Modifier.weight(1f),
             )
             IconButton(onClick = { state.setParticipantListOpen(false) }) {
-                Icon(
-                    Icons.Filled.Close,
+                LkIcon(
+                    R.drawable.ic_lk_xmark,
                     contentDescription = t("call.participants.close_a11y"),
                     tint = LakkoDark.textMuted,
+                    size = LkIconSize.Row,
                 )
             }
         }
@@ -1952,11 +1956,11 @@ private fun ParticipantListDrawer(state: CallUiState) {
                         modifier = Modifier.weight(1f),
                     )
                     if (!p.micOn) {
-                        Icon(
-                            Icons.Filled.MicOff,
+                        LkIcon(
+                            R.drawable.ic_lk_mic_slash_fill,
                             contentDescription = t("call.participant.muted_a11y"),
                             tint = LakkoDark.danger,
-                            modifier = Modifier.size(14.dp),
+                            size = LkIconSize.Mark,
                         )
                     }
                 }

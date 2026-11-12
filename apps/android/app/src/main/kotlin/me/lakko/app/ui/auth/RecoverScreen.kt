@@ -9,13 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Notes
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Password
-import androidx.compose.material.icons.automirrored.filled.ShortText
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -47,6 +40,7 @@ import me.lakko.app.auth.pauseRemainingMs
 import me.lakko.app.auth.triesLeft
 import me.lakko.app.l10n.listPositions
 import me.lakko.app.l10n.t
+import me.lakko.app.R
 
 /**
  * "Get back in": the ways back into an account as tappable rows, in two
@@ -109,7 +103,7 @@ public fun RecoverScreen(
             // UX 19.3 - first, above both groups: what it brings depends on
             // the account, and no row depends on server state.
             MethodRow(
-                icon = Icons.Filled.Email,
+                icon = R.drawable.ic_lk_envelope,
                 title = t("recovery.email.row.title"),
                 subtitle = t("recovery.email.row.body"),
                 onClick = {
@@ -120,19 +114,19 @@ public fun RecoverScreen(
             Spacer(Modifier.height(12.dp))
             GroupLabel(t("recovery.group.keys"))
             MethodRow(
-                icon = Icons.Filled.Devices,
+                icon = R.drawable.ic_lk_smartphone_waves,
                 title = t("recovery.method.device.title"),
                 subtitle = t("recovery.method.device.sub"),
                 onClick = { method = RecoverMode.AnotherDevice },
             )
             MethodRow(
-                icon = Icons.Filled.Key,
+                icon = R.drawable.ic_lk_passkey,
                 title = t("recovery.method.passkey.title"),
                 subtitle = t("recovery.method.passkey.sub"),
                 onClick = { method = RecoverMode.Passkey },
             )
             MethodRow(
-                icon = Icons.AutoMirrored.Filled.Notes,
+                icon = R.drawable.ic_lk_key,
                 title = t("recovery.method.phrase.title"),
                 subtitle = t("recovery.method.phrase.sub"),
                 onClick = { method = RecoverMode.Phrase },
@@ -142,7 +136,7 @@ public fun RecoverScreen(
             val wordsAccount = threeWords
             if (wordsAccount != null) {
                 MethodRow(
-                    icon = Icons.AutoMirrored.Filled.ShortText,
+                    icon = R.drawable.ic_lk_words,
                     title = t("recovery.method.words.title"),
                     subtitle = t("recovery.method.words.sub"),
                     onClick = {
@@ -152,7 +146,7 @@ public fun RecoverScreen(
                 )
             }
             MethodRow(
-                icon = Icons.Filled.Password,
+                icon = R.drawable.ic_lk_lock_rotation,
                 title = t("recovery.method.totp.title"),
                 subtitle = t("recovery.method.totp.sub"),
                 onClick = { method = RecoverMode.Authenticator },

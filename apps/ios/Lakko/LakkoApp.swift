@@ -113,6 +113,9 @@ struct LakkoApp: App {
         // frame-decryptor attachment gates at info level, which iOS suppresses.
         WebRTCDiagnosticLogging.installOnce()
         NewDeviceAttentionTabBadge.installAppearance()
+        // The back chevron and the search magnifier UIKit draws, from the
+        // Lakko icon set (design system section 8).
+        SystemGlyphAppearance.install()
         // G3-sframe-native N-4 — runtime probe for the non-public
         // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
         // libwebrtc M125's RTCRtpSender / RTCRtpReceiver carry.
@@ -492,8 +495,19 @@ struct LakkoApp: App {
         }
         // A superseded device with no pending envelope reads its DeviceGroup
         // journal to the head once before it treats the change as a reset.
-        auth.readDeviceGroupJournalToHead = { [weak sync] _ in
-            await sync?.waitForJournalHead() ?? false
+        // When the sync runtime is not running (a launch whose refresh was
+        // refused before any session landed), or did not reach the head, the
+        // journal is read once on a handle of its own and every service
+        // envelope goes to the key-rotation intake (ADR-0074 section 3.3).
+        auth.readDeviceGroupJournalToHead = { [weak sync, weak auth] accountIdB64 in
+            if await sync?.waitForJournalHead() == true { return .reached }
+            guard let accountIdBytes = base64Decode(accountIdB64) else { return .noState }
+            let reader = await DeviceGroupJournalOneShot.live(
+                accountIdBytes: accountIdBytes, accountIdB64: accountIdB64)
+            return await DeviceGroupJournalOneShot.drain(reader: reader) { envelope in
+                guard DeviceGroupSyncRepository.isKeyRotation(envelope) else { return }
+                auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
+            }
         }
         // ADR-0074 sections 3.2 step 6, 3.3 — the account's keys were
         // rotated and this device holds the new ones: what derives from the
@@ -1674,7 +1688,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
-            .tabItem { Label(l10n.t("nav.chats"), systemImage: "bubble.left") }
+            .tabItem { Label { Text(l10n.t("nav.chats")) } icon: { (selectedTab == .chats ? LkIcon.chatFill : LkIcon.chat).fixedImage } }
             .tag(SessionTab.chats)
 
             NavigationStack(path: $feedPath) {
@@ -1699,7 +1713,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
             }
-            .tabItem { Label(l10n.t("nav.feed"), systemImage: "newspaper") }
+            .tabItem { Label { Text(l10n.t("nav.feed")) } icon: { (selectedTab == .feed ? LkIcon.feedFill : LkIcon.feed).fixedImage } }
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
@@ -1710,7 +1724,7 @@ private struct SessionRoot: View, Equatable {
                     onOpenLink: { inviteIntake.handle($0) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
-            .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
+            .tabItem { Label { Text(l10n.t("nav.contacts")) } icon: { (selectedTab == .contacts ? LkIcon.personSquareFill : LkIcon.personSquare).fixedImage } }
             .badge(ContactsViewModel.requestsBadge(waiting: contactRequestsWaiting).map { Text($0) })
             .tag(SessionTab.contacts)
 
@@ -1733,10 +1747,10 @@ private struct SessionRoot: View, Equatable {
                 .task { services.chatRepository.backfillCallHistory() }
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
             }
-            .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
+            .tabItem { Label { Text(l10n.t("nav.calls")) } icon: { (selectedTab == .calls ? LkIcon.phoneFill : LkIcon.phone).fixedImage } }
             .tag(SessionTab.calls)
 
-            SettingsTabAttention {
+            SettingsTabAttention(selected: selectedTab == .settings) {
                 NavigationStack(path: guardedSettingsPath) {
                     SettingsScreen(
                         account: account,
@@ -2922,13 +2936,18 @@ enum AnonRoute: Hashable {
 private struct SettingsTabAttention<Content: View>: View {
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
     @ObservedObject private var l10n = Localization.shared
+    /// Whether the Settings tab is the selected one: a selected tab shows
+    /// the filled icon (design system section 8).
+    let selected: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
         let attention = notice.badgeVisible
         content
             .tabItem {
-                Label(l10n.t("nav.settings"), systemImage: "gearshape")
+                Label { Text(l10n.t("nav.settings")) } icon: {
+                    (selected ? LkIcon.gearFill : LkIcon.gear).fixedImage
+                }
                     .accessibilityLabel(
                         attention ? l10n.t("nav.settings.attention_a11y") : l10n.t("nav.settings"))
             }

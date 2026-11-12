@@ -135,7 +135,7 @@ struct CoPublisherInvitationCard: View {
         HStack(alignment: .top, spacing: 10) {
             InitialsAvatar(
                 name: facts.channelName, identity: facts.channelIdHex, size: 40,
-                placeholderSymbol: "megaphone.fill", photo: facts.avatar.map(AvatarPhoto.avatar))
+                placeholderIcon: .megaphoneFill, photo: facts.avatar.map(AvatarPhoto.avatar))
             VStack(alignment: .leading, spacing: 4) {
                 Text(l10n.t("channels.publishers.invite_page", texts: ["channel": facts.channelName]))
                     .font(.body)
@@ -246,7 +246,7 @@ struct ChannelInvitationCard: View {
         HStack(alignment: .top, spacing: 10) {
             InitialsAvatar(
                 name: facts.name, identity: facts.channelIdHex, size: 40,
-                placeholderSymbol: "megaphone.fill", photo: facts.avatar.map(AvatarPhoto.avatar))
+                placeholderIcon: .megaphoneFill, photo: facts.avatar.map(AvatarPhoto.avatar))
             VStack(alignment: .leading, spacing: 4) {
                 Text(facts.name)
                     .font(.body.weight(.semibold))

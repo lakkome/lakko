@@ -89,7 +89,7 @@ export function QuietIncomingCallPanel(props: QuietIncomingCallPanelProps): JSX.
           aria-label={t(props.video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y", { name: props.callerName })}
           onClick={() => props.onDecline()}
         >
-          <Icon name="phoneEnd" size={16} />
+          <Icon name="phone-down-fill" size={20} />
           {t("call.incoming.decline")}
         </button>
         <Show when={props.video}>
@@ -108,7 +108,7 @@ export function QuietIncomingCallPanel(props: QuietIncomingCallPanelProps): JSX.
           aria-label={t(props.video ? "call.incoming.accept_video_a11y" : "call.incoming.accept_voice_a11y", { name: props.callerName })}
           onClick={() => props.onAccept(props.video)}
         >
-          <Icon name={props.video ? "video" : "phone"} size={16} />
+          <Icon name={props.video ? "video-fill" : "phone-fill"} size={20} />
           {t("call.incoming.accept")}
         </button>
       </div>

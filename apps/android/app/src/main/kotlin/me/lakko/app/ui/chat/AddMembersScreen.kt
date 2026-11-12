@@ -22,9 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,6 +70,9 @@ import me.lakko.app.search.PeopleSearchService
 import me.lakko.app.search.searchNormalizer
 import me.lakko.app.search.searchStateMessage
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Add members (`docs/ux/conversation-info.md` section 2.4): pushed over the
@@ -156,7 +156,7 @@ internal fun AddMembersScreen(
                 title = { Text(t("chat.members.add.title")) },
                 navigationIcon = {
                     IconButton(onClick = viewModel::closeAddMembers) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
                 actions = {
@@ -258,10 +258,10 @@ private fun PickChip(pick: AddMemberPick, onRemove: () -> Unit) {
             )
         },
         trailingIcon = {
-            Icon(
-                Icons.Filled.Close,
+            LkIcon(
+                R.drawable.ic_lk_xmark,
                 contentDescription = removeLabel,
-                modifier = Modifier.size(InputChipDefaults.IconSize),
+                size = LkIconSize.Row,
             )
         },
     )

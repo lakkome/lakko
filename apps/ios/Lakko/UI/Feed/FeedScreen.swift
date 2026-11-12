@@ -83,7 +83,7 @@ struct FeedScreen: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { moreMenuOpen = true } label: {
-                    Image(systemName: "ellipsis.circle")
+                    LkIconView(.ellipsisCircle, size: 24)
                 }
                 .accessibilityLabel(l10n.t("feed.menu.a11y"))
             }
@@ -158,16 +158,16 @@ struct FeedScreen: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(FeedPresetKey.allCases, id: \.self) { key in
-                    chip(key.label, symbol: FeedIcons.presetSymbol(key), selected: model.selection == .preset(key)) {
+                    chip(key.label, icon: FeedIcons.presetIcon(key), selected: model.selection == .preset(key)) {
                         model.choose(.preset(key))
                     }
                 }
-                chip(l10n.t("feed.preset.discover"), symbol: FeedIcons.discoverSymbol, selected: model.selection == .discover) {
+                chip(l10n.t("feed.preset.discover"), icon: FeedIcons.discoverIcon, selected: model.selection == .discover) {
                     model.choose(.discover)
                 }
                 ForEach(model.saved) { saved in
                     chip(
-                        saved.rule.name, symbol: FeedIcons.symbol(saved.rule.icon),
+                        saved.rule.name, icon: FeedIcons.icon(saved.rule.icon),
                         selected: model.selection == .saved(saved.id)
                     ) {
                         model.choose(.saved(saved.id))
@@ -176,7 +176,7 @@ struct FeedScreen: View {
                 Button {
                     beginNew()
                 } label: {
-                    Label(l10n.t("feed.new"), systemImage: "plus")
+                    Label(l10n.t("feed.new"), icon: .plus, relativeTo: .subheadline)
                         .font(.subheadline)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -194,13 +194,11 @@ struct FeedScreen: View {
     }
 
     private func chip(
-        _ label: String, symbol: String, selected: Bool, action: @escaping () -> Void
+        _ label: String, icon: LkIcon, selected: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: symbol)
-                    .font(.caption)
-                    .accessibilityHidden(true)
+                LkIconView(icon, size: 14, relativeTo: .caption)
                 Text(label)
                     .lineLimit(1)
             }
@@ -280,7 +278,7 @@ struct FeedScreen: View {
 
     private var refreshFailedBanner: some View {
         HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle")
+            LkIconView(.warning, size: 20)
                 .foregroundStyle(Color.lakkoDanger)
                 .accessibilityHidden(true)
             Text(l10n.t("feed.refresh_failed"))
@@ -413,20 +411,20 @@ struct FeedScreen: View {
     /// shows its parent's menu.
     private func menuItems(_ ref: FeedCandidateRef) -> [LakkoMenuItem] {
         var items: [LakkoMenuItem] = [
-            .action(l10n.t("common.open"), systemImage: "arrow.up.right") { open(ref) },
+            .action(l10n.t("common.open"), icon: .arrowUpRight) { open(ref) },
         ]
         if FeedForward.canReply(ref) {
-            items.append(.action(l10n.t("chat.message.reply"), systemImage: "arrowshape.turn.up.left") {
+            items.append(.action(l10n.t("chat.message.reply"), icon: .reply) {
                 onReplyGroup(ref.source.idHex, ref.message.messageId)
             })
         }
         items.append(.action(
-            l10n.t("common.copy"), systemImage: "doc.on.doc", enabled: FeedForward.canCopy(ref.message)
+            l10n.t("common.copy"), icon: .copy, enabled: FeedForward.canCopy(ref.message)
         ) { model.copyText(ref) })
-        items.append(.action(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right") {
+        items.append(.action(l10n.t("chat.message.forward"), icon: .forward) {
             model.forwarding = ref
         })
-        items.append(.action(l10n.t("feed.action.hide"), systemImage: "eye.slash") {
+        items.append(.action(l10n.t("feed.action.hide"), icon: .eyeSlash) {
             model.hide(ref.source.key)
         })
         return items

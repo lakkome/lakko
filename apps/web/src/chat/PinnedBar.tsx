@@ -88,7 +88,7 @@ export function PinnedBar(props: {
             aria-label={t("chat.pinned_bar.all")}
             onClick={() => props.onOpenList()}
           >
-            <Icon name="lines" size={18} />
+            <Icon name="list" size={20} />
           </button>
         </div>
       )}
@@ -115,7 +115,7 @@ export function PinList(props: {
                 class="lk-row lk-pinned-row"
                 onClick={() => props.onPick(entry.messageId)}
               >
-                <Icon name="pin" size={16} />
+                <Icon name={entry.scope === "personal" ? "pin" : "pin-fill"} size={14} />
                 <span class="lk-row-body">
                   <span class="lk-row-title" classList={{ personal: entry.scope === "personal" }}>
                     {pinEntryLabel(entry)}

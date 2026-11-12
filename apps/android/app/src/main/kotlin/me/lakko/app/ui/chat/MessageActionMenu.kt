@@ -3,9 +3,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -30,15 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Forward
-import androidx.compose.material.icons.automirrored.filled.Reply
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +74,9 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The per-message action menu — `docs/ux/message-actions.md` sections 2, 3
@@ -595,7 +586,7 @@ internal fun MessageActionCard(
             if (actions.canReply) {
                 ActionRow(
                     label = t("chat.message.reply"),
-                    icon = Icons.AutoMirrored.Filled.Reply,
+                    icon = R.drawable.ic_lk_reply,
                     onClick = onReply,
                 )
             }
@@ -604,14 +595,14 @@ internal fun MessageActionCard(
                 // another conversation.
                 ActionRow(
                     label = t("chat.message.forward"),
-                    icon = Icons.AutoMirrored.Filled.Forward,
+                    icon = R.drawable.ic_lk_forward,
                     onClick = onForward,
                 )
             }
             if (actions.canCopy) {
                 ActionRow(
                     label = t("common.copy"),
-                    icon = Icons.Filled.ContentCopy,
+                    icon = R.drawable.ic_lk_copy,
                     onClick = onCopy,
                 )
             }
@@ -620,7 +611,12 @@ internal fun MessageActionCard(
                 // after Copy. Nothing leaves the device.
                 ActionRow(
                     label = actions.translateLabel,
-                    icon = Icons.Filled.Translate,
+                    // Show original reads as its own glyph, as on iOS and web.
+                    icon = if (actions.translateLabel == t("chat.message.show_original")) {
+                        R.drawable.ic_lk_text_bubble
+                    } else {
+                        R.drawable.ic_lk_translate
+                    },
                     onClick = onTranslate,
                 )
             }
@@ -629,7 +625,7 @@ internal fun MessageActionCard(
                 // entering the mode changes nothing until an action fires.
                 ActionRow(
                     label = me.lakko.app.chat.SELECT_ACTION_LABEL.text(),
-                    icon = Icons.Filled.CheckCircle,
+                    icon = R.drawable.ic_lk_checkmark_circle,
                     onClick = onSelect,
                 )
             }
@@ -639,7 +635,12 @@ internal fun MessageActionCard(
                 // `pinMenuFor` and rendered here.
                 ActionRow(
                     label = actions.pinLabel,
-                    icon = Icons.Filled.PushPin,
+                    // Unpin draws the slashed pin, as on iOS and web.
+                    icon = if (actions.pinLabel == t("chat.message.unpin")) {
+                        R.drawable.ic_lk_pin_slash
+                    } else {
+                        R.drawable.ic_lk_pin
+                    },
                     onClick = onPin,
                 )
             }
@@ -647,14 +648,14 @@ internal fun MessageActionCard(
                 // Saved section 2 — directly under Pin.
                 ActionRow(
                     label = t(if (actions.saved) "chat.message.unsave" else "chat.message.save"),
-                    icon = if (actions.saved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    icon = if (actions.saved) R.drawable.ic_lk_bookmark_slash else R.drawable.ic_lk_bookmark,
                     onClick = onSave,
                 )
             }
             if (actions.canEdit) {
                 ActionRow(
                     label = t("chat.message.edit"),
-                    icon = Icons.Filled.Edit,
+                    icon = R.drawable.ic_lk_pencil,
                     onClick = onEdit,
                 )
             }
@@ -681,7 +682,7 @@ internal fun MessageActionCard(
                     if (actions.canDelete) {
                         ActionRow(
                             label = t("common.delete"),
-                            icon = Icons.Filled.Delete,
+                            icon = R.drawable.ic_lk_trash,
                             onClick = onDelete,
                             tint = MaterialTheme.colorScheme.error,
                         )
@@ -689,7 +690,7 @@ internal fun MessageActionCard(
                     if (actions.canBan) {
                         ActionRow(
                             label = t("channels.moderation.ban"),
-                            icon = Icons.Filled.Block,
+                            icon = R.drawable.ic_lk_nosign,
                             onClick = onBan,
                             tint = MaterialTheme.colorScheme.error,
                         )
@@ -717,9 +718,9 @@ private val ROW_PADDING_HORIZONTAL: Dp = 8.dp
 private val ROW_RADIUS: Dp = 6.dp
 private val ROW_ICON_GAP: Dp = 8.dp
 
-/** Web's icons are 16 in a 14px label; the same pair here (`bodyMedium` is
- *  14sp). Section 2 does not fix either, so this follows the reference. */
-private val ROW_ICON_SIZE: Dp = 16.dp
+/** A menu row's icon box: the design system's band for settings and menu
+ *  rows (section "Icons"). */
+private val ROW_ICON_SIZE: Dp = LkIconSize.Row
 
 /**
  * Web's `--shadow-2` is `0 8px 24px` at 12 percent. Compose has no CSS
@@ -739,7 +740,7 @@ private fun menuSurfaceBorder(): BorderStroke =
 @Composable
 private fun ActionRow(
     label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     onClick: () -> Unit,
     tint: Color = Color.Unspecified,
 ) {
@@ -753,11 +754,11 @@ private fun ActionRow(
             .padding(horizontal = ROW_PADDING_HORIZONTAL, vertical = ROW_PADDING_VERTICAL),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
+        LkIcon(
+            icon = icon,
             contentDescription = null,
             tint = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else tint,
-            modifier = Modifier.size(ROW_ICON_SIZE),
+            size = ROW_ICON_SIZE,
         )
         Box(Modifier.width(ROW_ICON_GAP))
         Text(

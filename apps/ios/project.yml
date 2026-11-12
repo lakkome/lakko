@@ -384,6 +384,10 @@ targets:
           # test host instead of Apple's CDN, which caches a missing or
           # earlier file. Ignored by any other build.
           - applinks:test.lakko.me?mode=developer
+          # Passkeys: the relying party's domains (same hosts as the links).
+          - webcredentials:lakko.me
+          - webcredentials:test.lakko.me
+          - webcredentials:test.lakko.me?mode=developer
         # 1.20c — Push Notifications entitlement. `development`
         # routes APNs requests through the sandbox endpoint
         # (`api.sandbox.push.apple.com`); production builds

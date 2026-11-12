@@ -153,7 +153,7 @@ export default function Login(): JSX.Element {
           onClick={() => void onPasskeyLogin()}
           style={{ "margin-top": "-8px" }}
         >
-          <Icon name="key" size={18} />
+          <Icon name="passkey" size={20} />
           {t("auth.login.passkey")}
         </button>
       </Show>

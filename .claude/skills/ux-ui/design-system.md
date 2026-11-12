@@ -365,3 +365,82 @@ Arabic, Persian and Hebrew mirror without per-screen work. Text a person
 wrote is laid out in its own direction and isolated from surrounding UI
 text; usernames, links, the safety number and the recovery phrase are
 always LTR with Latin digits.
+
+## 8. Icons
+
+One icon set for the three clients (maintainer, 2026-11-12): Lakko's own
+drawings in the visual style of the iPhone's SF Symbols, replacing SF
+Symbols on iOS, Material Icons on Android and the old stroke set on web.
+SF Symbols themselves are never copied or traced: Apple licenses them for
+apps on Apple platforms only, and the set must ship on Android and the web
+too. Similar silhouettes for the same meaning, our own outlines.
+
+- **Source of truth**: `docs/brand/icons/svg/<name>.svg`, one file per
+  icon; what each icon means and what it replaces on each client:
+  [`docs/brand/icons/inventory.md`](../../../docs/brand/icons/inventory.md).
+- **Every in-app icon comes from this set.** No SF Symbol, no Material
+  icon, no ad-hoc inline SVG in a screen. A meaning the set lacks is
+  drawn into the set first (same rules, a row in the inventory), then
+  used. System surfaces the app does not draw (notification actions, the
+  system share and permission sheets) are outside the set. The app icon
+  and the brand mark are not in the set either (section 1).
+- **Grid**: 24 x 24, `viewBox="0 0 24 24"`. Path centrelines stay within
+  2 and 22, so with the stroke everything stays inside the box. The
+  optical centre, not the bounding box, sits at 12, 12.
+- **Stroke**: 1.75 units, `stroke-linecap="round"`,
+  `stroke-linejoin="round"`, colour `currentColor`. 1.75 on a circle of
+  radius 9.25 gives the same stroke-to-diameter ratio (about 0.085) as an
+  SF Symbol at regular weight, measured on this Mac from `circle` at 17
+  and 28 pt. The stroke never changes per call site (no thinner stroke for
+  large icons): the box size changes, the drawing does not.
+- **Outline by default; a `-fill` variant only where the iPhone shows
+  state by fill**: the selected tab, microphone and camera on or off, end
+  call, pinned / saved / muted / archived marks, the selected item in a
+  list, play / pause / stop, send. A filled variant has the same outer
+  size as its outline twin: it is one even-odd path that is filled and
+  stroked with the same 1.75 stroke, and every knocked-out detail (the
+  person in `person-square-fill`, the check in `checkmark-circle-fill`) is
+  drawn 0.875 larger than it appears. Only `currentColor` is used; a
+  detail is a hole, never a second colour.
+- **Slashed variants** (`mic-slash`, `bell-slash-fill`, ...): one slash
+  from upper left to lower right, the same on every icon; the glyph under
+  it is cut back 1 unit from each side of the slash, so the slash reads on
+  any background. No masks.
+- **Badges** (`person-plus`, `folder-minus`, `link-plus`, ...): a circle at
+  the lower right (end side) with a plus, minus or cross; the main glyph
+  is cut back around it with the same 1-unit clearance. Overlapping
+  objects (the back person in `person-2`, the back sheet in `copy`) are
+  cut back the same way.
+- **File format**: only `<path>` elements, absolute coordinates, no
+  `transform`, `mask`, `clip-path`, `<text>`, gradients or other colours,
+  so each file converts directly to an Android VectorDrawable and to an
+  iOS asset-catalog template image (render as template, "preserve vector
+  data"). Each file carries the SPDX comment header.
+- **Names**: kebab-case, describing the meaning or the object the iPhone
+  draws for it (`chat`, `person-square`, `phone-down`), `-fill` suffix for
+  the filled variant, `-slash` for the slashed one. A meaning shared by
+  several screens uses one icon; two meanings never share a name.
+- **Mirroring**: icons that point in the reading direction (`chevron-back`,
+  `chevron-forward`, `reply`, `forward`, `send`, `logout`, `arrow-up-right`)
+  are mirrored in right-to-left languages (section 7); clocks, media
+  controls, the slash, checkmarks and object drawings are not. The
+  collapsed call window's tuck chevrons follow the screen edge, not the
+  reading direction, so they are not mirrored.
+- **Optical sizes**: a 24-unit Lakko icon drawn in a box of about 1.19 x P
+  matches an SF Symbol at point size P (a 20 box ~ 17 pt, a 33 box ~ 28
+  pt). Sizes in use (pt on iOS, dp on Android, px on web):
+
+  | Use | Box |
+  |---|---|
+  | Marks inside a list row or bubble (muted, pinned, sent / read) | 14 |
+  | Settings and menu rows, composer buttons, inline buttons | 20 |
+  | Navigation and toolbar buttons, tab bar | 24 to 28 |
+  | Call control buttons | 28 |
+  | Empty states, large prompts | 40 to 48 |
+
+  Below 14 the set is not drawn for; use text instead.
+- **Colour**: always a token (section 2): `--surface-fg` or
+  `--surface-muted` for ordinary icons, `--accent` for a selected tab or
+  chosen row, `--danger` for destructive actions. An icon never carries
+  meaning by colour alone (the selected tab is also filled, the muted mark
+  is its own glyph).

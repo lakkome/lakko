@@ -240,7 +240,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
               props.onCancelEdit();
             }}
           >
-            <Icon name="close" size={16} />
+            <Icon name="xmark" size={20} />
           </button>
         </div>
       </Show>
@@ -249,7 +249,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
           <For each={files()}>
             {(f) => (
               <li class="lk-channel-file">
-                <Icon name="clip" size={14} />
+                <Icon name="doc" size={14} />
                 <span>{f.name}</span>
                 <span class="lk-meta">{formatAttachmentSize(f.size)}</span>
                 <button
@@ -259,7 +259,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
                   disabled={busy()}
                   onClick={() => setFiles(files().filter((x) => x !== f))}
                 >
-                  <Icon name="close" size={14} />
+                  <Icon name="xmark-circle-fill" size={14} />
                 </button>
               </li>
             )}
@@ -283,7 +283,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             disabled={busy()}
             onClick={() => picker?.click()}
           >
-            <Icon name="clip" size={20} />
+            <Icon name="paperclip" size={20} />
           </button>
           <input
             ref={picker}
@@ -334,7 +334,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
             disabled={busy()}
             onClick={() => setEmojiOpen((v) => !v)}
           >
-            <Icon name="smile" size={20} />
+            <Icon name="face-smiling" size={20} />
           </button>
           <Show when={emojiOpen()}>
             <EmojiPicker
@@ -369,7 +369,7 @@ export function ChannelComposer(props: ChannelComposerProps): JSX.Element {
           aria-busy={busy() ? "true" : undefined}
           disabled={busy() || empty()}
         >
-          <Icon name="send" size={20} />
+          <Icon name="send-fill" size={20} />
         </button>
         </Show>
       </form>

@@ -27,10 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -136,6 +132,9 @@ import uniffi.lakko_ffi_uniffi.CallBarStatus
 import uniffi.lakko_ffi_uniffi.TileVideoQuality
 import uniffi.lakko_ffi_uniffi.callBarStatus
 import uniffi.lakko_ffi_uniffi.callBarVisible
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * `docs/ux/calls.md` section 4.5 — the live call, put away into one small
@@ -679,16 +678,17 @@ private fun TuckedStrip(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
+        LkIcon(
             // Points back into the screen. The arrows mirror themselves in a
             // right-to-left layout, and the strip's edge is a physical one.
-            imageVector = if (atLeft != rtl) {
-                Icons.AutoMirrored.Filled.KeyboardArrowRight
+            icon = if (atLeft != rtl) {
+                R.drawable.ic_lk_chevron_forward
             } else {
-                Icons.AutoMirrored.Filled.KeyboardArrowLeft
+                R.drawable.ic_lk_chevron_back
             },
             contentDescription = null,
             tint = LakkoDark.text,
+            size = me.lakko.app.ui.components.LkIconSize.Row,
         )
     }
 }
@@ -831,11 +831,11 @@ internal fun CallMiniWindowFace(
                 maxLines = 1,
             )
             if (model.showsLock) {
-                Icon(
-                    imageVector = Icons.Filled.Lock,
+                LkIcon(
+                    icon = R.drawable.ic_lk_lock_fill,
                     contentDescription = null,
                     tint = LakkoDark.success,
-                    modifier = Modifier.size(12.dp),
+                    size = LkIconSize.Mark,
                 )
             }
         }
@@ -941,13 +941,12 @@ private fun MiniWindowMuteButton(
                 .background(control.emphasis.fill()),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = control.icon(),
+            LkIcon(
+                icon = control.icon(),
                 contentDescription = null,
                 tint = control.emphasis.foreground(),
-                modifier = Modifier
-                    .size(20.dp)
-                    .clearAndSetSemantics { },
+                modifier = Modifier.clearAndSetSemantics { },
+                size = LkIconSize.Row,
             )
         }
     }

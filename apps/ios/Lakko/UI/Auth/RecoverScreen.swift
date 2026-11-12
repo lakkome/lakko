@@ -90,7 +90,7 @@ public struct RecoverScreen: View {
             RecoveryMethodList(
                 rows: methods.map {
                     RecoveryMethodRow(
-                        id: $0.rowId, systemImage: $0.systemImage,
+                        id: $0.rowId, icon: $0.icon,
                         title: l10n.t($0.titleKey), detail: l10n.t($0.detailKey))
                 },
                 disabled: viewModel.busy
@@ -106,7 +106,7 @@ public struct RecoverScreen: View {
 /// One row of a method list: an icon, a title and a second line.
 struct RecoveryMethodRow: Identifiable, Equatable {
     let id: String
-    let systemImage: String
+    let icon: LkIcon
     let title: String
     let detail: String
 }
@@ -125,8 +125,7 @@ struct RecoveryMethodList: View {
                     onChoose(row.id)
                 } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: row.systemImage)
-                            .font(.body)
+                        LkIconView(row.icon, size: 20)
                             .frame(width: 28)
                             .foregroundStyle(Color.lakkoAccent)
                         VStack(alignment: .leading, spacing: 2) {
@@ -139,8 +138,7 @@ struct RecoveryMethodList: View {
                                 .multilineTextAlignment(.leading)
                         }
                         Spacer()
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .padding(.vertical, 12)
@@ -200,14 +198,14 @@ extension RecoverViewModel.Mode {
         }
     }
 
-    var systemImage: String {
+    var icon: LkIcon {
         switch self {
-        case .email: return "envelope"
-        case .anotherDevice: return "iphone.gen3.radiowaves.left.and.right"
-        case .passkey: return "person.badge.key"
-        case .phrase: return "key"
-        case .words: return "text.word.spacing"
-        case .totp: return "lock.rotation"
+        case .email: return .envelope
+        case .anotherDevice: return .smartphoneWaves
+        case .passkey: return .passkey
+        case .phrase: return .key
+        case .words: return .words
+        case .totp: return .lockRotation
         }
     }
 
@@ -346,7 +344,7 @@ private struct RecoverForm: View {
 
     private func cachedAccountLine(_ name: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "person.crop.circle")
+            LkIconView(.personSquare, size: 20)
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("recovery.cached_account", texts: ["username": name]))
                 .font(.body.weight(.medium))
@@ -400,7 +398,7 @@ private struct RecoverForm: View {
     private var anotherDeviceSection: some View {
         if let target = viewModel.deviceRestoreTarget {
             HStack(spacing: 8) {
-                Image(systemName: "person.crop.circle")
+                LkIconView(.personSquare, size: 20)
                     .foregroundStyle(Color.lakkoTextMuted)
                 Text("@\(target.username)")
                     .font(.body.weight(.medium))
@@ -457,7 +455,7 @@ private struct WordsRecoverSection: View {
     var body: some View {
         if let account = viewModel.threeWordsAccount {
             HStack(spacing: 8) {
-                Image(systemName: "person.crop.circle")
+                LkIconView(.personSquare, size: 20)
                     .foregroundStyle(Color.lakkoTextMuted)
                 Text(l10n.t("recovery.cached_account", texts: ["username": "@\(account.username)"]))
                     .font(.body.weight(.medium))

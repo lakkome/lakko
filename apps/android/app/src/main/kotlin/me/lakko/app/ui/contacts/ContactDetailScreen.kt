@@ -16,16 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PersonRemove
-import androidx.compose.material.icons.filled.VerifiedUser
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -49,7 +39,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -73,6 +62,9 @@ import uniffi.lakko_ffi_uniffi.personInfoSections
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /** The line under the Message button of a contact with no chat on this
  *  device. One whose account is not known cannot be messaged from here; for
@@ -299,7 +291,7 @@ public fun ContactDetailScreen(
                 title = {},
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -419,7 +411,7 @@ private fun ContactDetailBody(
                 if (InfoSection.MESSAGE in sections) {
                     ActionButton(
                         label = t("contacts.detail.message"),
-                        icon = Icons.AutoMirrored.Filled.Chat,
+                        icon = R.drawable.ic_lk_chat_fill,
                         enabled = when (messageAction) {
                             is MessageAction.Open -> true
                             MessageAction.Found -> !startingChat
@@ -442,14 +434,14 @@ private fun ContactDetailBody(
                 if (InfoSection.CALL in sections) {
                     ActionButton(
                         label = t("chat.call.voice"),
-                        icon = Icons.Filled.Call,
+                        icon = R.drawable.ic_lk_phone_fill,
                         enabled = groupIdHex != null && onStartCall != null,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, false) },
                         modifier = Modifier.weight(1f),
                     )
                     ActionButton(
                         label = t("chat.media.video"),
-                        icon = Icons.Filled.Videocam,
+                        icon = R.drawable.ic_lk_video_fill,
                         enabled = groupIdHex != null && onStartCall != null,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, true) },
                         modifier = Modifier.weight(1f),
@@ -491,7 +483,7 @@ private fun ContactDetailBody(
                 DetailRow(
                     title = t("contacts.safety.title"),
                     supporting = t("contacts.safety.row_sub"),
-                    icon = Icons.Filled.VerifiedUser,
+                    icon = R.drawable.ic_lk_shield_check,
                     onClick = { onVerifySafetyNumber(contactKey) },
                 )
             }
@@ -504,7 +496,7 @@ private fun ContactDetailBody(
                 DetailRow(
                     title = t("contacts.rename.action"),
                     supporting = t("contacts.rename.sub_local"),
-                    icon = Icons.Filled.Edit,
+                    icon = R.drawable.ic_lk_pencil,
                     onClick = onRename,
                 )
             }
@@ -518,10 +510,11 @@ private fun ContactDetailBody(
                         Text(t("contacts.add_back.sub", mapOf("name" to name.primary)))
                     },
                     leadingContent = {
-                        Icon(
-                            Icons.Filled.PersonAdd,
+                        LkIcon(
+                            R.drawable.ic_lk_person_plus,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            size = LkIconSize.Row,
                         )
                     },
                     trailingContent = {
@@ -538,7 +531,7 @@ private fun ContactDetailBody(
                 DetailRow(
                     title = t("contacts.remove.control"),
                     supporting = null,
-                    icon = Icons.Filled.PersonRemove,
+                    icon = R.drawable.ic_lk_person_minus,
                     onClick = onRemove,
                     danger = true,
                 )
@@ -550,7 +543,7 @@ private fun ContactDetailBody(
                 DetailRow(
                     title = me.lakko.app.chat.DELETE_CHAT_CONTROL.text(),
                     supporting = null,
-                    icon = Icons.Filled.Delete,
+                    icon = R.drawable.ic_lk_trash,
                     onClick = onDeleteChat,
                     danger = true,
                 )
@@ -616,7 +609,7 @@ private fun RemoveContactDialog(
 @Composable
 internal fun ActionButton(
     label: String,
-    icon: ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -638,7 +631,7 @@ internal fun ActionButton(
                 strokeWidth = 2.dp,
             )
         } else {
-            Icon(icon, contentDescription = null)
+            LkIcon(icon, contentDescription = null, size = LkIconSize.Row)
         }
         Spacer(Modifier.width(6.dp))
         Text(label, maxLines = 1, softWrap = false)
@@ -649,7 +642,7 @@ internal fun ActionButton(
 private fun DetailRow(
     title: String,
     supporting: String?,
-    icon: ImageVector,
+    @androidx.annotation.DrawableRes icon: Int,
     onClick: () -> Unit,
     danger: Boolean = false,
 ) {
@@ -659,7 +652,7 @@ private fun DetailRow(
             Text(title, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
         },
         supportingContent = supporting?.let { { Text(it) } },
-        leadingContent = { Icon(icon, contentDescription = null, tint = tint) },
+        leadingContent = { LkIcon(icon, contentDescription = null, tint = tint, size = LkIconSize.Row) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier.clickable(onClick = onClick),
     )
@@ -724,7 +717,7 @@ public fun SafetyNumberScreen(
                 title = { Text(t("contacts.safety.number")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

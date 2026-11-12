@@ -107,10 +107,10 @@ describe("callControls — the two states read the right way round (section 4.1.
   });
 
   it("slashes the icon in the off state", () => {
-    expect(control({ micOn: true }, "mic").icon).toBe("mic");
-    expect(control({ micOn: false }, "mic").icon).toBe("micOff");
-    expect(control({ cameraOn: true }, "camera").icon).toBe("video");
-    expect(control({ cameraOn: false }, "camera").icon).toBe("videoOff");
+    expect(control({ micOn: true }, "mic").icon).toBe("mic-fill");
+    expect(control({ micOn: false }, "mic").icon).toBe("mic-slash-fill");
+    expect(control({ cameraOn: true }, "camera").icon).toBe("video-fill");
+    expect(control({ cameraOn: false }, "camera").icon).toBe("video-slash-fill");
   });
 
   it("draws a sending camera as the outline and a stopped one as the solid", () => {
@@ -222,7 +222,7 @@ describe("callControls — Participants on a call that can invite (docs/ux/call-
     expect(entry.label).toBe("Participants");
     expect(entry.pressed).toBeNull();
     expect(entry.tone).toBe("outline");
-    expect(entry.icon).toBe("groups");
+    expect(entry.icon).toBe("person-2-fill");
     // Even with the list open: the pressed state belongs to the direct mode.
     expect(control({ ...group, participantsOpen: true }, "participants").pressed).toBeNull();
   });

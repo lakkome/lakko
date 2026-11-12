@@ -7286,7 +7286,14 @@ public class AuthRepository(
                                     signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
                                     return
                                 }
-                                journalRead = readDeviceGroupJournalOnce()
+                                if (journalReadStep(readDeviceGroupJournalOnce(secrets.accountId, accountIdB64)) ==
+                                    JournalReadStep.Decide
+                                ) {
+                                    journalRead = true
+                                } else {
+                                    kotlinx.coroutines.delay(waitMs)
+                                    waitMs = (waitMs * 2).coerceAtMost(SUPERSESSION_RETRY_MAX_MS)
+                                }
                             }
                             KeptResolution.Later -> {
                                 if (candidates != null) return
@@ -7295,7 +7302,18 @@ public class AuthRepository(
                             }
                         }
                     }
-                    KeptDeviceVerdict.ReadJournalOnce -> journalRead = readDeviceGroupJournalOnce()
+                    KeptDeviceVerdict.ReadJournalOnce -> {
+                        // No answer from the journal is never a wipe: wait and
+                        // read again.
+                        if (journalReadStep(readDeviceGroupJournalOnce(secrets.accountId, accountIdB64)) ==
+                            JournalReadStep.Decide
+                        ) {
+                            journalRead = true
+                        } else {
+                            kotlinx.coroutines.delay(waitMs)
+                            waitMs = (waitMs * 2).coerceAtMost(SUPERSESSION_RETRY_MAX_MS)
+                        }
+                    }
                     KeptDeviceVerdict.TreatAsReset -> {
                         signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
                         return
@@ -7340,19 +7358,42 @@ public class AuthRepository(
         }
     }
 
-    /** ADR section 3.3 "Order on a superseded device": read the DeviceGroup
-     *  journal to its head, once (the DS does not use session tokens). An
-     *  unreadable journal counts as read: the device then decides without
-     *  it, as the ADR says. */
-    private suspend fun readDeviceGroupJournalOnce(): Boolean {
-        try {
-            me.lakko.app.devices.sync.DeviceGroupSyncRepository.awaitHeadOnce(JOURNAL_HEAD_WAIT_MS)
-        } catch (cancel: kotlinx.coroutines.CancellationException) {
-            throw cancel
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "the device list's journal could not be read: ${cause.javaClass.simpleName}")
+    /**
+     * ADR section 3.3 "Order on a superseded device": read the DeviceGroup
+     * journal to its head, once (the DS does not use session tokens). A sync
+     * runtime that is polling does the read; when none is (the refusal came
+     * at launch before the session shell started it, or it could not open),
+     * this device opens its OWN persisted DeviceGroup into a throwaway handle
+     * and reads from the persisted cursor to the head, handing each
+     * key-rotation envelope to [onKeyRotationEnvelope] and persisting nothing
+     * ([readJournalStandalone]). [JournalCatchUp.Offline] is not a read: the
+     * caller waits and reads again, never wipes on it.
+     */
+    private suspend fun readDeviceGroupJournalOnce(accountIdBytes: ByteArray, accountIdB64: String): JournalCatchUp {
+        if (me.lakko.app.devices.sync.DeviceGroupSyncRepository.hasLiveRuntime()) {
+            val read = try {
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.awaitHeadOnce(JOURNAL_HEAD_WAIT_MS)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "the device list's journal could not be read: ${cause.javaClass.simpleName}")
+                false
+            }
+            if (read) return JournalCatchUp.Read
         }
-        return true
+        val accountId = accountIdBytes.copyOf()
+        val outcome = withContext(Dispatchers.IO) {
+            readJournalStandalone(
+                open = {
+                    me.lakko.app.devices.sync.DeviceGroupStandaloneJournal.open(applicationContext, accountId, accountIdB64)
+                },
+                intake = { envelope -> onKeyRotationEnvelope(envelope) },
+                classify = { me.lakko.app.devices.sync.DeviceGroupStandaloneJournal.classify(it) },
+                deadlineMs = JOURNAL_HEAD_WAIT_MS,
+            )
+        }
+        Log.i("lakko-auth", "the device list's journal, read on its own: $outcome")
+        return outcome
     }
 
     /**

@@ -7,6 +7,11 @@
       "comment": "Shown after a reset or take-back while the last steps are still owed, for an account that has no saved recovery phrase. Must not mention words or a phrase.",
       "security_critical": true
     },
+    "account.keys_changed.waiting": {
+      "text": "Your account has new keys. The change finishes in {minutes, plural, one {# minute} other {# minutes}}, by itself.",
+      "comment": "Shown after a reset while the directory refuses the new keys because the account's keys already changed less than an hour ago, for an account that has no saved recovery phrase; {minutes} is how long until it accepts them (rounded up). Must not mention words or a phrase. No Try again button: the app retries by itself.",
+      "security_critical": true
+    },
     "app.not_found.body": {
       "text": "There is nothing at this address.",
       "comment": "Line under 'Page not found' on the web page shown for an unknown address."
@@ -8678,6 +8683,11 @@
     "recovery_phrase.fresh.publish_owed": {
       "text": "Your account keys were reset, but Lakko could not finish publishing them. Until that is done, your contacts and your other devices cannot find the new keys, so the new words are not shown yet. Try again.",
       "comment": "Shown instead of the new recovery phrase when the account keys were reset but telling the directory and the account's device list about the new keys did not finish (for example the connection dropped). Try again repeats only that step (UX identity-recovery 15.4).",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.publish_waiting": {
+      "text": "Your account keys were reset less than an hour after the last change, so they can be published in {minutes, plural, one {# minute} other {# minutes}}. Lakko will finish by itself and then show the new words.",
+      "comment": "Shown instead of the new recovery phrase when the directory refused to publish the new keys because the account's keys were already changed less than an hour ago; {minutes} is how long until it accepts them (rounded up). No Try again button: the app retries by itself at that time and whenever it opens (UX identity-recovery 15.4).",
       "security_critical": true
     },
     "recovery_phrase.fresh.publish_refused": {

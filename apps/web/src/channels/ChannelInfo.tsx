@@ -256,7 +256,7 @@ export function ChannelInfo(props: {
               disabled={uploading() !== null}
               onClick={() => setMenuOpen((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
           </Show>
           <Show when={menuOpen()}>
@@ -321,7 +321,7 @@ export function ChannelInfo(props: {
                     setEditing(true);
                   }}
                 >
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                 </button>
               </Show>
             </div>
@@ -414,14 +414,14 @@ export function ChannelInfo(props: {
 
       <section class="lk-card">
         <Show when={has("invite-people")}>
-          <InfoRow icon="userPlus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
+          <InfoRow icon="person-plus" title={t("channels.info.invite_people")} onOpen={() => setScreen("invite-people")} />
         </Show>
         <Show when={has("invite-link")}>
           <InfoRow icon="link" title={t("chat.invite_link.label")} onOpen={() => setScreen("invite-link")} />
         </Show>
         <Show when={has("subscribers")}>
           <InfoRow
-            icon="groups"
+            icon="person-2"
             title={t("channels.subscribers.title")}
             value={publishes() && typeof count() === "number" ? (count() ?? 0).toLocaleString() : undefined}
             onOpen={() => setScreen("subscribers")}
@@ -429,7 +429,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("admins")}>
           <InfoRow
-            icon="user"
+            icon="person"
             title={t("channels.info.publishers")}
             value={String(channelPublishers(props.id).length)}
             onOpen={() => setScreen("publishers")}
@@ -437,7 +437,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("reactions")}>
           <InfoRow
-            icon="heart"
+            icon="face-smiling"
             title={t("group_reactions.title")}
             value={allowedSummary(channelAllowedReactions(props.id))}
             onOpen={() => setScreen("reactions")}
@@ -445,7 +445,7 @@ export function ChannelInfo(props: {
         </Show>
         <Show when={has("group-type")}>
           <InfoRow
-            icon="eye"
+            icon="person-2"
             title={t("channel_type.who_can_subscribe")}
             value={channelVisibilityOf(props.id) === "public" ? t("group_type.public") : t("group_type.private")}
             onOpen={() => setScreen("type")}
@@ -461,7 +461,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="logout" size={18} />
+              <Icon name="logout" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.unsubscribe.action")}</span>
@@ -478,7 +478,7 @@ export function ChannelInfo(props: {
         <section class="lk-card danger">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
-              <Icon name="trash" size={18} />
+              <Icon name="trash" size={20} />
             </span>
             <div class="lk-card-row-body">
               <span class="lk-card-row-title">{t("channels.delete.control")}</span>
@@ -535,13 +535,13 @@ function InfoRow(props: {
   return (
     <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpen()}>
       <span class="lk-card-row-icon">
-        <Icon name={props.icon} size={18} />
+        <Icon name={props.icon} size={20} />
       </span>
       <span class="lk-card-row-body">
         <span class="lk-card-row-title">{props.title}</span>
       </span>
       <Show when={props.value}>{(v) => <span class="lk-card-row-sub">{v()}</span>}</Show>
-      <Icon name="chevron" size={16} />
+      <Icon name="chevron-forward" size={14} />
     </button>
   );
 }

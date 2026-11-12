@@ -510,11 +510,10 @@ struct ChannelPublishersScreen: View {
                             publisher: true)
                     } label: {
                         HStack {
-                            Label(l10n.t("channels.publishers.add"), systemImage: "person.badge.plus")
+                            Label(l10n.t("channels.publishers.add"), icon: .personPlus)
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
-                            Image(systemName: "chevron.forward")
-                                .font(.footnote.weight(.semibold))
+                            LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
                         .padding(14)

@@ -1046,6 +1046,16 @@ deploy-web:
 gen-release-key:
     cargo run -q -p lakko-release-manifest-tool -- keygen
 
+# The in-app icon set (design system section 8). draw-icons regenerates the
+# SVGs in docs/brand/icons/svg from tools/brand/icon-drawing; export-icons
+# writes the client copies (Android drawables ic_lk_*, the iOS "Icons" asset
+# folder + LkIcon.generated.swift, web icon-paths.generated.ts).
+draw-icons:
+    python3 -B tools/brand/icon-drawing/build.py
+
+export-icons:
+    python3 -B tools/brand/export-icons.py
+
 # ADR-0038 S3 — mint a signed release manifest and write the raw 89-byte
 # blob to release-manifest.bin. Copy it to the server (the tool prints the
 # scp reminder; served at https://lakko.me/.well-known/lakko-release with no

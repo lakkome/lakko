@@ -7704,7 +7704,7 @@ function ChatView(props: {
           title={t("chat.header.back")}
           onClick={props.onLeave}
         >
-          <Icon name="back" size={20} />
+          <Icon name="chevron-back" size={24} />
         </button>
         {/* `docs/ux/conversation-info.md` section 1 — the avatar and the name
             open this conversation's info, and are the only way in. A real
@@ -7761,7 +7761,7 @@ function ChatView(props: {
               onClick={() => onCallButton(false)}
               disabled={busy()}
             >
-              <Icon name="phone" size={20} />
+              <Icon name="phone" size={24} />
             </button>
             <button
               type="button"
@@ -7771,7 +7771,7 @@ function ChatView(props: {
               onClick={() => onCallButton(true)}
               disabled={busy()}
             >
-              <Icon name="video" size={20} />
+              <Icon name="video" size={24} />
             </button>
           </Show>
           {/* No overflow menu: its one item, `Add member`, became the first
@@ -8206,7 +8206,7 @@ function ChatView(props: {
             if (first !== undefined) jumpToMessage(first);
           }}
         >
-          <Icon name="heart" size={18} />
+          <Icon name="heart-fill" size={20} />
           <span class="lk-unseen-reactions-count">{unseenReactions().length}</span>
         </button>
       </Show>
@@ -8477,7 +8477,7 @@ function ChatView(props: {
               disabled={!forwardEnabled(selection())}
               onClick={() => setBulkForwardOpen(true)}
             >
-              <Icon name="forward" size={18} />
+              <Icon name="forward" size={20} />
               <span>{t("chat.message.forward")}</span>
             </button>
             <button
@@ -8486,7 +8486,7 @@ function ChatView(props: {
               disabled={selection().size === 0}
               onClick={() => void saveSelection()}
             >
-              <Icon name="bookmark" size={18} />
+              <Icon name="bookmark" size={20} />
               <span>{t("chat.select.save")}</span>
             </button>
             <button
@@ -8495,7 +8495,7 @@ function ChatView(props: {
               disabled={!deleteState().enabled}
               onClick={() => void deleteSelection()}
             >
-              <Icon name="trash" size={18} />
+              <Icon name="trash" size={20} />
               <span>{t("common.delete")}</span>
             </button>
           </div>
@@ -8534,7 +8534,7 @@ function ChatView(props: {
                 composerInput?.focus();
               }}
             >
-              <Icon name="close" size={18} />
+              <Icon name="xmark" size={20} />
             </button>
           </div>
         )}
@@ -8585,7 +8585,7 @@ function ChatView(props: {
           aria-label={t("chat.composer.attach")}
           title={t("chat.composer.attach_limit", { limit: formatAttachmentSize(MAX_ATTACHMENT_BYTES) })}
         >
-          <Icon name="clip" size={20} />
+          <Icon name="paperclip" size={20} />
           <input
             type="file"
             multiple
@@ -8705,7 +8705,7 @@ function ChatView(props: {
             setComposerPickerOpen(!composerPickerOpen());
           }}
         >
-          <Icon name="smile" size={20} />
+          <Icon name="face-smiling" size={20} />
         </button>
         </Show>
         {/* UX spec §1 — Send while the field or tray has content, otherwise
@@ -8729,7 +8729,7 @@ function ChatView(props: {
             (input().length === 0 && pendingAttachments().length === 0)
           }
         >
-          <Icon name="send" size={18} />
+          <Icon name="send-fill" size={20} />
         </button>
         </Show>
       </form>
@@ -8758,7 +8758,7 @@ function ChatView(props: {
             title={t("common.back")}
             onClick={closeInfo}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <h1 id="lk-group-info-title" class="lk-info-title">
             {infoTargetHeading()}
@@ -9368,7 +9368,7 @@ function ChatView(props: {
                     onClick={() => goToInfoScreen("add-members")}
                   >
                     <span class="lk-member-add-icon" aria-hidden="true">
-                      <Icon name="userPlus" size={18} />
+                      <Icon name="person-plus" size={20} />
                     </span>
                     <span class="lk-row-title">{t("chat.members.add.action")}</span>
                   </button>
@@ -10002,7 +10002,7 @@ function ShareLinkRow(props: {
         aria-label={copied() ? t("common.copied") : t("chat.invite_link.copy")}
         onClick={() => void copy()}
       >
-        <Icon name={copied() ? "check" : "copy"} size={16} />
+        <Icon name={copied() ? "checkmark" : "copy"} size={20} />
       </button>
       <button
         type="button"

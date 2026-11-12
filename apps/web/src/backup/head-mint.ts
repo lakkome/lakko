@@ -35,6 +35,27 @@ export interface MintedBackupHead {
   readonly version: bigint;
 }
 
+/**
+ * Auth REFUSED the mint: the session itself is not good (`401`, among them
+ * `key-generation-superseded` after a reset on another device, or
+ * `device-revoked`; or `403`). Not a soft failure: storage verifies the
+ * bearer statelessly, so a legacy upload here would let a device that is
+ * no longer the account's overwrite the account's backup (base scenario
+ * 4b). The upload stops instead.
+ */
+export class BackupHeadMintRefusedError extends Error {
+  override name = "BackupHeadMintRefusedError";
+  constructor(public readonly status: number) {
+    super(`mintBackupHead: /auth/backup/head refused (${status})`);
+  }
+}
+
+/** Whether a mint failure may fall back to the unframed legacy envelope
+ *  (ADR-0037 section 6 soft-fail): any failure but a refusal of the session. */
+export function headMintFailureAllowsLegacy(err: unknown): boolean {
+  return !(err instanceof BackupHeadMintRefusedError);
+}
+
 /** `POST /auth/backup/head` response wire shape. */
 interface BackupHeadResponse {
   readonly backup_head_b64: string;
@@ -68,6 +89,9 @@ export async function mintBackupHead(
       envelope_hash_b64: base64UrlEncodeNoPad(envelopeHash),
     }),
   });
+  if (response.status === 401 || response.status === 403) {
+    throw new BackupHeadMintRefusedError(response.status);
+  }
   if (!response.ok) {
     throw new Error(`mintBackupHead: /auth/backup/head → ${response.status}`);
   }

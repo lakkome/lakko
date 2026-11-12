@@ -1764,10 +1764,15 @@ public class DiscoveryClient(
             throw DiscoveryNetworkError(endpoint, cause)
         }
         if (!response.status.isSuccess()) {
+            val body = response.safeReadBody()
             throw DiscoveryHttpError(
                 status = response.status.value,
                 endpoint = endpoint,
-                body = response.safeReadBody(),
+                body = body,
+                // The wait a `429` states: the body's `retry_after_secs`,
+                // else the `Retry-After` header (whole seconds).
+                retryAfterSecs = me.lakko.app.anon.longFieldOf(body, "retry_after_secs")
+                    ?: response.headers[io.ktor.http.HttpHeaders.RetryAfter]?.trim()?.toLongOrNull(),
             )
         }
         return response.body()

@@ -62,6 +62,10 @@ struct AuthTextField: View {
     var disabled: Bool = false
     var submitLabel: SubmitLabel = .next
     var onSubmit: () -> Void = {}
+    /// The screen's own focus of this field, when it moves the focus here
+    /// (from another field's return key) or reads it; the field's own
+    /// otherwise.
+    var isFocused: FocusState<Bool>.Binding? = nil
 
     @FocusState private var focused: Bool
 
@@ -75,9 +79,9 @@ struct AuthTextField: View {
                 .autocorrectionDisabled(!autocorrect)
                 .submitLabel(submitLabel)
                 .onSubmit(onSubmit)
-                .focused($focused)
+                .focused(isFocused ?? $focused)
                 .disabled(disabled)
-                .authFieldChrome(focused: focused)
+                .authFieldChrome(focused: isFocused?.wrappedValue ?? focused)
         }
     }
 }
@@ -119,7 +123,7 @@ struct AuthSecureField: View {
                 Button {
                     revealed.toggle()
                 } label: {
-                    Image(systemName: revealed ? "eye.slash" : "eye")
+                    LkIconView(revealed ? .eyeSlash : .eye, size: 20)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
@@ -155,8 +159,7 @@ struct AuthHint: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if isError {
-                Image(systemName: "exclamationmark.circle")
-                    .font(.footnote)
+                LkIconView(.exclamationCircle, size: 14, relativeTo: .footnote)
             }
             Text(text)
                 .font(.footnote)
@@ -229,15 +232,15 @@ struct AuthPrimaryButton: View {
 /// Elevated surface with a hairline, accent text.
 struct AuthSecondaryButton: View {
     let title: String
-    var systemImage: String? = nil
+    var icon: LkIcon? = nil
     var disabled: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                if let systemImage {
-                    Image(systemName: systemImage)
+                if let icon {
+                    LkIconView(icon, size: 20)
                 }
                 Text(title)
                     .font(.body.weight(.medium))
@@ -395,7 +398,7 @@ struct PhraseEntryGrid: View {
                         apply(PhraseWords.parsePasted(pasted), from: 0)
                     }
                 } label: {
-                    Label(l10n.t("common.paste"), systemImage: "doc.on.clipboard")
+                    Label(l10n.t("common.paste"), icon: .paste, size: 14, relativeTo: .footnote)
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(Color.lakkoAccent)
                 }
@@ -555,7 +558,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
 
         AuthSecondaryButton(
             title: l10n.t(copied ? "common.copied" : "common.copy"),
-            systemImage: copied ? "checkmark" : "doc.on.doc"
+            icon: copied ? .checkmark : .copy
         ) {
             UIPasteboard.general.string = phrase
             copied = true
@@ -566,7 +569,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         }
 
         VStack(alignment: .leading, spacing: 8) {
-            explainer("eye.slash", l10n.t("recovery_phrase.save.no_screenshot"))
+            explainer(.eyeSlash, l10n.t("recovery_phrase.save.no_screenshot"))
         }
         .padding(16)
         .background(Color.lakkoSurface)
@@ -656,10 +659,9 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         }
     }
 
-    private func explainer(_ symbol: String, _ text: String) -> some View {
+    private func explainer(_ icon: LkIcon, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
-                .font(.body)
+            LkIconView(icon, size: 20)
                 .foregroundStyle(Color.lakkoAccent)
                 .frame(width: 22)
             Text(text)
@@ -696,9 +698,9 @@ struct PasswordExplainerSheet: View {
     var body: some View {
         NavigationStack {
             AuthScreen {
-                point("iphone.and.arrow.forward", l10n.t("auth.explainer.never_leaves"))
-                point("person.fill.questionmark", l10n.t("auth.explainer.same_answer"))
-                point("lifepreserver", l10n.t("auth.explainer.ways_back"))
+                point(.smartphoneArrow, l10n.t("auth.explainer.never_leaves"))
+                point(.personQuestion, l10n.t("auth.explainer.same_answer"))
+                point(.lifepreserver, l10n.t("auth.explainer.ways_back"))
             }
             .navigationTitle(l10n.t("auth.explainer.title"))
             .navigationBarTitleDisplayMode(.inline)
@@ -710,10 +712,9 @@ struct PasswordExplainerSheet: View {
         }
     }
 
-    private func point(_ symbol: String, _ body: String) -> some View {
+    private func point(_ icon: LkIcon, _ body: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.title3)
+            LkIconView(icon, size: 24, relativeTo: .title3)
                 .foregroundStyle(Color.lakkoAccent)
                 .frame(width: 28)
             Text(body)

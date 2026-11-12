@@ -359,6 +359,32 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 /// UX 15.1 — the word typed to confirm a key reset. The same Latin letters
 /// in every language (like the slot numbers of the grid); compared after
 /// trimming, case-sensitive.
+/// The return key of the fields on the reset warning (UX 15.1, 17.2): it
+/// does what "Reset account keys" does, under the button's own guards; from
+/// the password field, while the word is not typed yet, it moves on to the
+/// word.
+enum KeyResetReturnKey {
+    enum Field: Equatable { case password, word }
+    enum Action: Equatable {
+        /// Run the reset, as the button would.
+        case submit
+        /// Put the cursor in the confirmation-word field.
+        case focusWord
+        case nothing
+    }
+
+    /// Whether "Reset account keys" is enabled.
+    static func buttonEnabled(busy: Bool, canReset: Bool, waiting: Bool) -> Bool {
+        !busy && canReset && !waiting
+    }
+
+    static func action(from field: Field, buttonEnabled: Bool, wordTyped: Bool) -> Action {
+        if buttonEnabled { return .submit }
+        if field == .password, !wordTyped { return .focusWord }
+        return .nothing
+    }
+}
+
 enum KeyResetConfirmation {
     static let word = "RESET"
 

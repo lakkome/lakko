@@ -135,21 +135,22 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    public var systemImage: String {
+    /// The row's icon (design system section 8).
+    var icon: LkIcon {
         switch self {
-        case .reply: return "arrowshape.turn.up.left"
-        case .forward: return "arrowshape.turn.up.right"
-        case .pin: return "pin"
-        case .unpin: return "pin.slash"
-        case .save: return "bookmark"
-        case .unsave: return "bookmark.slash"
-        case .copy: return "doc.on.doc"
-        case .translate: return "character.bubble"
-        case .showOriginal: return "text.bubble"
-        case .select: return "checkmark.circle"
-        case .edit: return "pencil"
-        case .delete: return "trash"
-        case .ban: return "nosign"
+        case .reply: return .reply
+        case .forward: return .forward
+        case .pin: return .pin
+        case .unpin: return .pinSlash
+        case .save: return .bookmark
+        case .unsave: return .bookmarkSlash
+        case .copy: return .copy
+        case .translate: return .translate
+        case .showOriginal: return .textBubble
+        case .select: return .checkmarkCircle
+        case .edit: return .pencil
+        case .delete: return .trash
+        case .ban: return .nosign
         }
     }
 
@@ -737,8 +738,7 @@ struct MessageReactionRow: View {
                 }
                 if model.showsExpand {
                     Button(action: onMore) {
-                        Image(systemName: "plus")
-                            .font(.system(size: side * 18 / Self.target, weight: .semibold))
+                        LkIconView(.plus, size: side * 21 / Self.target, relativeTo: nil)
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(width: side, height: side)
                             .contentShape(Rectangle())
@@ -774,7 +774,7 @@ struct MessageActionCard: View {
                 Button {
                     perform(action)
                 } label: {
-                    Label(action.title, systemImage: action.systemImage)
+                    Label(action.title, icon: action.icon)
                         .font(.body)
                         .foregroundStyle(action.isDestructive ? Color.lakkoDanger : Color.lakkoText)
                         .padding(.horizontal, 14)

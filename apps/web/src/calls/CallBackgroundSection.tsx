@@ -309,7 +309,7 @@ export const CallBackgroundSection: Component = () => {
     if (item.kind === "add") {
       return (
         <span class="lk-call-bg-thumb-face lk-call-bg-thumb-add" aria-hidden="true">
-          <Icon name="plus" size={22} />
+          <Icon name="plus" size={24} />
         </span>
       );
     }
@@ -317,10 +317,7 @@ export const CallBackgroundSection: Component = () => {
     if (c.kind === "none") {
       return (
         <span class="lk-call-bg-thumb-face lk-call-bg-thumb-none" aria-hidden="true">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-            <circle cx="12" cy="12" r="8.5" />
-            <path d="M6 18 18 6" />
-          </svg>
+          <Icon name="circle-slash" size={28} />
         </span>
       );
     }
@@ -485,7 +482,7 @@ export const CallBackgroundSection: Component = () => {
                   class="lk-call-menu-item lk-call-menu-item-danger"
                   onClick={(): void => void removePhoto(m().id)}
                 >
-                  <Icon name="trash" size={18} />
+                  <Icon name="trash" size={20} />
                   <span>{t("call.background.remove")}</span>
                 </button>
               </div>

@@ -252,7 +252,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                               class="lk-card-row-action lk-privacy-disclosure"
                               aria-label={COPY.contactsChosen()}
                             >
-                              <Icon name="chevron" size={18} />
+                              <Icon name="chevron-forward" size={14} />
                             </A>
                           </Show>
                         </div>
@@ -311,7 +311,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                               class="lk-card-row-action lk-privacy-disclosure"
                               aria-label={COPY.chosen()}
                             >
-                              <Icon name="chevron" size={18} />
+                              <Icon name="chevron-forward" size={14} />
                             </A>
                           </Show>
                         </div>
@@ -372,7 +372,7 @@ export function WhoCanFindMeList(): JSX.Element {
         class="ghost small lk-wide-only"
         style={{ "align-self": "flex-start" }}
       >
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {COPY.title()}
       </A>
       <div class="lk-page-head">
@@ -385,7 +385,7 @@ export function WhoCanFindMeList(): JSX.Element {
       >
         <Show when={showsListSearch(scopes().length)}>
           <label class="lk-search" style={{ margin: "0" }}>
-            <Icon name="search" size={16} />
+            <Icon name="search" size={20} />
             <input
               type="search"
               placeholder={COPY.listSearch()}
@@ -453,7 +453,7 @@ export function WhoCanFindMeContactsList(): JSX.Element {
         class="ghost small lk-wide-only"
         style={{ "align-self": "flex-start" }}
       >
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {COPY.title()}
       </A>
       <div class="lk-page-head">
@@ -470,7 +470,7 @@ export function WhoCanFindMeContactsList(): JSX.Element {
       <Show when={contacts().length > 0} fallback={<p class="lk-muted">{COPY.contactsListEmpty()}</p>}>
         <Show when={showsListSearch(contacts().length)}>
           <label class="lk-search" style={{ margin: "0" }}>
-            <Icon name="search" size={16} />
+            <Icon name="search" size={20} />
             <input
               type="search"
               placeholder={COPY.contactsListSearch()}
@@ -537,7 +537,7 @@ export function MembersCanFindMeRow(props: {
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="search" size={18} />
+            <Icon name="search" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{COPY.membersCanFindMe()}</span>

@@ -79,7 +79,7 @@ export function TranslateBar(props: {
             title={t("translate.bar.close")}
             onClick={() => controller?.dismissBar(props.conversation, lang())}
           >
-            <Icon name="close" size={14} />
+            <Icon name="xmark" size={14} />
           </button>
         </div>
       )}
@@ -97,7 +97,7 @@ export function AutoTranslateSwitch(props: { conversation: string }): JSX.Elemen
       <section class="lk-card">
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="globe" size={18} />
+            <Icon name="translate" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("translate.auto")}</span>

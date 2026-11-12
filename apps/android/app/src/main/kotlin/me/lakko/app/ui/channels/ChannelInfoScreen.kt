@@ -16,9 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -69,6 +66,9 @@ import me.lakko.app.profile.toFfi
 import me.lakko.app.chat.toFfiAllowed
 import me.lakko.app.ui.settings.toModel
 import uniffi.lakko_ffi_uniffi.InfoSection
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 private const val INFO_TAG = "ChannelInfo"
 
@@ -187,7 +187,7 @@ public fun ChannelInfoScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = { if (page == InfoPage.Info) onBack() else page = InfoPage.Info }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
                 title = {
@@ -523,7 +523,7 @@ private fun InfoHeader(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("@$h", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     IconButton(onClick = { copyToClipboard(context, "@$h") }) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = t("common.copy"))
+                        LkIcon(R.drawable.ic_lk_copy, contentDescription = t("common.copy"), size = LkIconSize.Row)
                     }
                 }
             }

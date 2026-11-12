@@ -494,7 +494,7 @@ public struct JoinGroupLandingScreen: View {
         VStack(alignment: .leading, spacing: 8) {
             InitialsAvatar(
                 name: channel.name, identity: channel.channelIdHex, size: 64,
-                placeholderSymbol: "megaphone.fill", photo: channel.avatar.map(AvatarPhoto.avatar),
+                placeholderIcon: .megaphoneFill, photo: channel.avatar.map(AvatarPhoto.avatar),
                 playsVideo: true)
             Text(viewModel.headline.lead)
                 .font(.title3)

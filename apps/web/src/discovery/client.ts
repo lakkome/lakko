@@ -211,8 +211,18 @@ export class DiscoveryHttpError extends Error {
     public readonly status: number,
     public readonly endpoint: string,
     public readonly body: string,
+    /** The raw `Retry-After` header, when the response carried one. */
+    public readonly retryAfterHeader: string | null = null,
   ) {
     super(`discovery ${endpoint} → ${status}: ${body}`);
+  }
+
+  /** Whole seconds the server asked the client to wait: the body's
+   *  `retry_after_secs` (the identity upload's cool-down refusal, ADR-0073
+   *  section 4.1), else a `Retry-After` header in seconds; `null` when
+   *  neither is a positive number. */
+  get retryAfterSecs(): number | null {
+    return retryAfterSecsOf(this.body, this.retryAfterHeader);
   }
 
   /** The machine-readable code of a `{"error": "<code>"}` body (ADR-0073:
@@ -222,6 +232,28 @@ export class DiscoveryHttpError extends Error {
   get errorCode(): string | null {
     return errorCodeOf(this.body);
   }
+}
+
+/** The identity upload's cool-down refusal: an attested key change within
+ *  the hour after the last one (ADR-0073 section 4.1). */
+export const CODE_IDENTITY_CHANGED_TOO_RECENTLY = "identity-changed-too-recently";
+
+/** {@link DiscoveryHttpError.retryAfterSecs}, as a pure function. */
+export function retryAfterSecsOf(body: string | null, header: string | null): number | null {
+  const positive = (n: unknown): number | null =>
+    typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.ceil(n) : null;
+  if (body !== null && body.length > 0) {
+    try {
+      const parsed = JSON.parse(body) as { retry_after_secs?: unknown };
+      const secs = positive(parsed.retry_after_secs);
+      if (secs !== null) return secs;
+    } catch {
+      // Not JSON: fall through to the header.
+    }
+  }
+  if (header === null) return null;
+  const trimmed = header.trim();
+  return /^\d+$/.test(trimmed) ? positive(Number(trimmed)) : null;
 }
 
 /** Network-level failure (DNS, TLS, no route, …). */
@@ -1698,7 +1730,7 @@ export class DiscoveryClient {
 
     if (!response.ok) {
       const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(response.status, endpoint, text);
+      throw new DiscoveryHttpError(response.status, endpoint, text, response.headers.get("retry-after"));
     }
     return (await response.json()) as Res;
   }

@@ -144,7 +144,7 @@ export default function FeedImport(): JSX.Element {
         {(d) => (
           <>
             <h2 class="lk-feed-import-title">
-              <Icon name={feedIconName(d().icon)} size={22} />
+              <Icon name={feedIconName(d().icon)} size={24} />
               <span>{d().name}</span>
             </h2>
             <ul class="lk-feed-import-rules">

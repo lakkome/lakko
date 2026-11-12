@@ -187,7 +187,7 @@ export function GroupInfoExtras(props: {
               disabled={uploading() !== null}
               onClick={() => setMenuOpen((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
           </Show>
           <Show when={menuOpen()}>
@@ -275,7 +275,7 @@ export function GroupInfoExtras(props: {
         <Show when={props.sections.includes("group-type")}>
           <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-type")}>
             <span class="lk-card-row-icon">
-              <Icon name="eye" size={18} />
+              <Icon name="person-2" size={20} />
             </span>
             <span class="lk-card-row-body">
               <span class="lk-card-row-title">{t("group_type.who_can_join")}</span>
@@ -312,7 +312,7 @@ export function GroupInfoExtras(props: {
         <Show when={props.sections.includes("reactions")}>
           <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-reactions")}>
             <span class="lk-card-row-icon">
-              <Icon name="heart" size={18} />
+              <Icon name="face-smiling" size={20} />
             </span>
             <span class="lk-card-row-body">
               <span class="lk-card-row-title">{t("group_reactions.title")}</span>

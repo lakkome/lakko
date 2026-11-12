@@ -24,8 +24,7 @@ private struct MediaFailedLabel: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Image(systemName: "arrow.clockwise")
-                .font(.body.weight(.semibold))
+            LkIconView(.arrowClockwise, size: 20)
             Text(text)
                 .font(.caption)
         }
@@ -249,8 +248,7 @@ struct VideoBubble: View {
                     if downloading {
                         ProgressView().tint(Color.white)
                     } else {
-                        Image(systemName: "play.fill")
-                            .font(.title2)
+                        LkIconView(.playFill, size: 26, relativeTo: .title2)
                             .foregroundStyle(Color.white)
                             .offset(x: 2)
                     }
@@ -396,8 +394,7 @@ private struct ViewerBar: View {
     var body: some View {
         HStack {
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.semibold))
+                LkIconView(.xmark, size: 20)
                     .frame(width: 44, height: 44)
             }
             .accessibilityLabel(Localization.text("common.close"))
@@ -406,7 +403,7 @@ private struct ViewerBar: View {
                 Button {
                     exporting = ExportedFile(url: shareURL)
                 } label: {
-                    Label(Localization.text("common.save"), systemImage: "square.and.arrow.down")
+                    Label(Localization.text("common.save"), icon: .download)
                         .font(.body.weight(.medium))
                         .frame(minHeight: 44)
                 }

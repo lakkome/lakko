@@ -82,15 +82,15 @@ export type CallControlTone = "outline" | "solid" | "end";
 
 /** Icon names, matching `ui/icons.tsx`. */
 export type CallControlIcon =
-  | "mic"
-  | "micOff"
-  | "video"
-  | "videoOff"
-  | "monitor"
-  | "groups"
-  | "chat"
-  | "settings"
-  | "phoneEnd";
+  | "mic-fill"
+  | "mic-slash-fill"
+  | "video-fill"
+  | "video-slash-fill"
+  | "display"
+  | "person-2-fill"
+  | "bubbles-fill"
+  | "gear-fill"
+  | "phone-down-fill";
 
 /** One circle in the row. */
 export interface CallControlSpec {
@@ -174,7 +174,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "mic",
     label: t("call.control.mute"),
     accessibleName: input.micOn ? t("call.control.mute_a11y") : t("call.control.unmute_a11y"),
-    icon: input.micOn ? "mic" : "micOff",
+    icon: input.micOn ? "mic-fill" : "mic-slash-fill",
     tone: input.micOn ? "outline" : "solid",
     pressed: !input.micOn,
     disabled: inactive,
@@ -187,7 +187,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     // into a video one. So the name is what the press does, not what the call
     // was placed as.
     accessibleName: input.cameraOn ? t("call.control.camera_stop_a11y") : t("call.control.camera_start_a11y"),
-    icon: input.cameraOn ? "video" : "videoOff",
+    icon: input.cameraOn ? "video-fill" : "video-slash-fill",
     tone: input.cameraOn ? "outline" : "solid",
     pressed: !input.cameraOn,
     disabled: inactive || input.cameraBusy,
@@ -201,7 +201,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       id: "screen",
       label: t("call.screen_share.button"),
       accessibleName: share.sharing ? t("call.screen_share.button_stop") : t("call.screen_share.button"),
-      icon: "monitor",
+      icon: "display",
       tone: share.sharing ? "solid" : "outline",
       pressed: share.sharing,
       disabled: share.busy,
@@ -222,7 +222,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
         : input.participantsOpen === true
           ? t("call.control.participants_hide_a11y")
           : t("call.control.participants_show_a11y"),
-      icon: "groups",
+      icon: "person-2-fill",
       tone: "outline",
       // A toggle only where it opens the list directly; where it opens a menu
       // a pressed state would be a false claim.
@@ -242,7 +242,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       label: t("call.control.chat"),
       accessibleName:
         spoken.count === undefined ? t(spoken.key) : t(spoken.key, { count: spoken.count }),
-      icon: "chat",
+      icon: "bubbles-fill",
       tone: "outline",
       pressed: chat.open,
       disabled: dead,
@@ -256,7 +256,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "settings",
     label: t("call.control.settings"),
     accessibleName: t("call.settings.title"),
-    icon: "settings",
+    icon: "gear-fill",
     tone: "outline",
     pressed: null,
     disabled: dead,
@@ -266,7 +266,7 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     id: "end",
     label: t("call.control.end"),
     accessibleName: t("call.control.end_a11y"),
-    icon: "phoneEnd",
+    icon: "phone-down-fill",
     tone: "end",
     pressed: null,
     disabled: dead,

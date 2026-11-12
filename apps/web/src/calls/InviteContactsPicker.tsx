@@ -86,7 +86,7 @@ export function InviteContactsPicker(props: {
     <ModalLayer open={props.open} title={t("call.invite.picker_title")} onClose={props.onClose}>
       <Show when={rows().length > 0}>
         <label class="lk-search lk-forward-search">
-          <Icon name="search" size={16} />
+          <Icon name="search" size={20} />
           <input
             type="search"
             placeholder={t("chats.search.placeholder")}
@@ -134,7 +134,7 @@ export function InviteContactsPicker(props: {
                       <div class="lk-row-line">
                         <span class="lk-row-sub">{sub()}</span>
                         <Show when={outcome() === "invited"}>
-                          <Icon name="check" size={16} />
+                          <Icon name="checkmark" size={20} />
                         </Show>
                       </div>
                     </div>

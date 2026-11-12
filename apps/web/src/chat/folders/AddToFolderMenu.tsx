@@ -68,10 +68,10 @@ export function AddToFolderItems(props: {
           else setOpen((o) => !o);
         }}
       >
-        <Icon name="folder" size={18} />
+        <Icon name="folder-plus" size={20} />
         {t("folders.add_to_folder")}
         <Show when={props.folders.length > 0}>
-          <Icon name="chevron" size={14} class="lk-menu-sub-chevron" />
+          <Icon name="chevron-forward" size={14} class="lk-menu-sub-chevron" />
         </Show>
       </button>
       <Show when={open() && props.folders.length > 0}>
@@ -96,7 +96,7 @@ export function AddToFolderItems(props: {
                 >
                   <span class="lk-menu-check" aria-hidden="true">
                     <Show when={checked()}>
-                      <Icon name="check" size={16} />
+                      <Icon name="checkmark" size={20} />
                     </Show>
                   </span>
                   <span class="lk-ellipsis">{f.name}</span>
@@ -111,7 +111,7 @@ export function AddToFolderItems(props: {
             disabled={!canCreateFolder(props.folders)}
             onClick={newFolder}
           >
-            <Icon name="plus" size={16} />
+            <Icon name="folder-plus" size={20} />
             {t("folders.new_ellipsis")}
           </button>
           <Show when={!canCreateFolder(props.folders)}>

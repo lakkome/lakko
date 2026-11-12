@@ -90,8 +90,7 @@ struct SavedScreen: View {
         Group {
             if rows.isEmpty {
                 VStack(spacing: 12) {
-                    Image(systemName: "bookmark")
-                        .font(.system(size: 36))
+                    LkIconView(.bookmark, size: 48, relativeTo: nil)
                         .foregroundStyle(Color.lakkoTextMuted)
                     Text(l10n.t("saved.empty"))
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -112,7 +111,7 @@ struct SavedScreen: View {
                             .accessibilityAddTraits(.isButton)
                             // Lakko's own long-press menu, not the system one.
                             .lakkoLongPressMenu {
-                                [.action(l10n.t("chat.message.unsave"), systemImage: "bookmark.slash", destructive: true) {
+                                [.action(l10n.t("chat.message.unsave"), icon: .bookmarkSlash, destructive: true) {
                                     remove(row)
                                 }]
                             }

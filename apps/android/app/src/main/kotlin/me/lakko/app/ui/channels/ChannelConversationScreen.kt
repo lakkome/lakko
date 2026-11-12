@@ -28,9 +28,6 @@ import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -101,6 +98,9 @@ import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
 import uniffi.lakko_ffi_uniffi.AttachmentRef
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 private const val TAG = "ChannelConversation"
 
@@ -204,7 +204,7 @@ public fun ChannelConversationScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("chat.header.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("chat.header.back"))
                     }
                 },
                 title = {
@@ -1217,7 +1217,14 @@ private fun CommentsBlock(
                             }
                         }
                     },
-                ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = t("chat.composer.send")) }
+                ) {
+                    LkIcon(
+                        R.drawable.ic_lk_arrow_up_circle_fill,
+                        contentDescription = t("chat.composer.send"),
+                        tint = if (field.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = 31.dp,
+                    )
+                }
             }
             if (sendFailed) Text(t("channels.publish.error.generic"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { open = false }) { Text(t("channels.comments.hide")) }

@@ -51,7 +51,7 @@ struct ChannelInvitePeopleScreen: View {
                                 size: 40, photo: .person(entry.request.fromPubkey))
                             Text(resolved.listLabel).foregroundStyle(Color.lakkoText)
                             Spacer()
-                            Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                            LkIconView(isOn ? .checkmarkCircleFill : .circle, size: 20)
                                 .foregroundStyle(isOn ? Color.lakkoAccent : Color.lakkoTextMuted)
                                 .accessibilityHidden(true)
                         }

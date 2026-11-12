@@ -204,7 +204,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
                   title={t("common.remove")}
                   onClick={() => removeRef(p.field, ref)}
                 >
-                  <Icon name="close" size={16} />
+                  <Icon name="minus-circle-fill" size={20} />
                 </button>
               </div>
             )}
@@ -269,7 +269,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
           </For>
           <HandList field="included" />
           <button type="button" class="ghost small lk-folder-add" onClick={() => setPicker("include")}>
-            <Icon name="plus" size={16} />
+            <Icon name="plus" size={20} />
             {t("folders.editor.add_chats")}
           </button>
         </section>
@@ -290,7 +290,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
           </For>
           <HandList field="excluded" />
           <button type="button" class="ghost small lk-folder-add" onClick={() => setPicker("exclude")}>
-            <Icon name="plus" size={16} />
+            <Icon name="plus" size={20} />
             {t("folders.editor.exclude_chats")}
           </button>
         </section>
@@ -404,7 +404,7 @@ function ChatPicker(props: {
           </p>
         </Show>
         <label class="lk-search">
-          <Icon name="search" size={16} />
+          <Icon name="search" size={20} />
           <input
             type="search"
             placeholder={t("chats.search.placeholder")}

@@ -818,7 +818,7 @@ function ChatBubbleBody(
       {/* ADR-0065 section 2 — the saved mark, seen only by this account. */}
       <Show when={props.messageId !== undefined && props.isSavedOf?.(props.messageId) === true}>
         <span class="lk-bubble-saved" role="img" aria-label={t("chat.message.saved_mark")} title={t("chat.message.saved_mark")}>
-          <Icon name="bookmark" size={12} />
+          <Icon name="bookmark-fill" size={14} />
         </span>
       </Show>
       {/* A failed row offers Retry where the message is. The media
@@ -857,7 +857,7 @@ function ChatBubbleBody(
               }
               aria-label={read() ? t("chat.message.read") : t("chat.message.sent")}
             >
-              <Icon name={read() ? "dcheck" : "check"} size={14} />
+              <Icon name={read() ? "checkmark-double" : "checkmark"} size={14} />
             </span>
           );
         })()}
@@ -917,9 +917,7 @@ function ChatBubbleBody(
               toggleRow();
             }}
           >
-            <Show when={rowSelected()}>
-              <Icon name="check" size={14} strokeWidth={2.4} />
-            </Show>
+            <Icon name={rowSelected() ? "checkmark-circle-fill" : "circle"} size={26} />
           </button>
         </Show>
       </Show>
@@ -1064,7 +1062,7 @@ function ChatBubbleBody(
                   {(invite) => (
                     <div class="lk-bubble-call-invite">
                       <span class="lk-bubble-call-invite-icon" aria-hidden="true">
-                        <Icon name="phone" size={20} />
+                        <Icon name="phone-fill" size={20} />
                       </span>
                       <span class="lk-bubble-call-invite-title">
                         {t("chat.call_invite.title")}

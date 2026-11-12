@@ -51,7 +51,7 @@ export function PhraseGrid(props: {
       <Show when={props.copy !== false}>
         <div class="lk-actions">
           <button type="button" class="small" onClick={() => void onCopy()}>
-            <Icon name="copy" size={16} />
+            <Icon name="copy" size={20} />
             {copied() === "done" ? t("common.copied") : t("common.copy")}
           </button>
           <Show when={copied() === "failed"}>

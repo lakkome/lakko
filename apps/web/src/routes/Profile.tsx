@@ -537,7 +537,7 @@ export default function Profile(): JSX.Element {
             disabled={busy()}
             onClick={() => setMenuOpen((v) => !v)}
           >
-            <Icon name="pencil" size={16} />
+            <Icon name="pencil" size={20} />
           </button>
           <Show when={menuOpen()}>
             <AvatarMenu
@@ -586,7 +586,7 @@ export default function Profile(): JSX.Element {
                   disabled={busy()}
                   onClick={openName}
                 >
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                 </button>
               </>
             }
@@ -648,7 +648,7 @@ export default function Profile(): JSX.Element {
                       disabled={busy()}
                       onClick={openUser}
                     >
-                      <Icon name="pencil" size={16} />
+                      <Icon name="pencil" size={20} />
                     </button>
                   </>
                 )}

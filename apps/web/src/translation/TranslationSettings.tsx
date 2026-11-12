@@ -118,7 +118,7 @@ export function TranslationSettingsSection(): JSX.Element {
                   updateTranslationSettings((x) => ({ ...x, extraReading: x.extraReading.filter((l) => l !== code) }))
                 }
               >
-                <Icon name="close" size={14} />
+                <Icon name="minus-circle" size={20} />
               </button>
             </div>
           )}

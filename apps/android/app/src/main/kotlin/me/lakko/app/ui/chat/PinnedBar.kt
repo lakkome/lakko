@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +42,9 @@ import me.lakko.app.chat.pinActionLabel
 import me.lakko.app.chat.pinActionSubline
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /*
  * ADR-0052 decision 3 + `docs/ux/message-actions.md` section 4.1 — the pinned
@@ -104,10 +105,11 @@ internal fun PinnedBar(
                     )
                 }
                 IconButton(onClick = onOpenList) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.List,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_list,
                         contentDescription = PIN_LIST_LABEL.text(),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = LkIconSize.Row,
                     )
                 }
             }
@@ -175,25 +177,37 @@ internal fun PinListSheet(
         )
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             items(items = entries, key = { it.messageId }) { entry ->
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onPick(entry) }
                         .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = authorOf(entry),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    // A personal pin is the outline, a shared one the filled
+                    // pin, as on iOS and web.
+                    LkIcon(
+                        if (entry.scope == me.lakko.app.chat.PinScope.PERSONAL) R.drawable.ic_lk_pin else R.drawable.ic_lk_pin_fill,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = LkIconSize.Mark,
                     )
-                    Text(
-                        text = excerptOf(entry),
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = authorOf(entry),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = excerptOf(entry),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }

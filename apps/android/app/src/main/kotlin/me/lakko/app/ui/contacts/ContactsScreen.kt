@@ -26,18 +26,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -85,6 +73,9 @@ import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
 import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
@@ -257,18 +248,18 @@ public fun ContactsScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.add"))
+                            LkIcon(R.drawable.ic_lk_person_plus, contentDescription = t("contacts.list.add"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text(t("contacts.add.share_invite")) },
-                                leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
+                                leadingIcon = { LkIcon(R.drawable.ic_lk_link, contentDescription = null, size = LkIconSize.Row) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
                             )
                             if (onScannedLink != null) {
                                 DropdownMenuItem(
                                     text = { Text(t("contacts.scan_qr")) },
-                                    leadingIcon = { Icon(Icons.Filled.QrCodeScanner, contentDescription = null) },
+                                    leadingIcon = { LkIcon(R.drawable.ic_lk_qrcode_scan, contentDescription = null, size = LkIconSize.Row) },
                                     onClick = { menuOpen = false; scanSheetOpen = true },
                                 )
                             }
@@ -432,10 +423,11 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        Icon(
-            Icons.Filled.Search,
+        LkIcon(
+            R.drawable.ic_lk_search,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Row,
         )
         Spacer(Modifier.width(8.dp))
         androidx.compose.foundation.text.BasicTextField(
@@ -460,10 +452,11 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
         )
         if (query.isNotEmpty()) {
             IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.Close,
+                LkIcon(
+                    R.drawable.ic_lk_xmark_circle_fill,
                     contentDescription = t("chats.search.clear"),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = LkIconSize.Row,
                 )
             }
         }
@@ -620,10 +613,11 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
         )
-        Icon(
-            imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+        LkIcon(
+            icon = if (expanded) R.drawable.ic_lk_chevron_up else R.drawable.ic_lk_chevron_down,
             contentDescription = if (expanded) t("common.collapse") else t("common.expand"),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Row,
         )
     }
 }
@@ -678,6 +672,13 @@ private fun EmptyState(onAdd: () -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 48.dp),
     ) {
+        LkIcon(
+            R.drawable.ic_lk_person_circle_plus,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = LkIconSize.Empty,
+        )
+        Spacer(Modifier.height(12.dp))
         Text(t("contacts.list.empty.title"), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(4.dp))
         Text(
@@ -893,7 +894,7 @@ private fun InviteLinksSheet(
                                     },
                                     enabled = idle,
                                 ) {
-                                    Icon(Icons.Filled.Edit, contentDescription = t("invite.links.edit"))
+                                    LkIcon(R.drawable.ic_lk_pencil, contentDescription = t("invite.links.edit"), size = LkIconSize.Row)
                                 }
                             }
                             if (state.revokingActiveInviteSlug == row.slug) {
@@ -907,10 +908,11 @@ private fun InviteLinksSheet(
                                     },
                                     enabled = idle,
                                 ) {
-                                    Icon(
-                                        Icons.Filled.Delete,
+                                    LkIcon(
+                                        R.drawable.ic_lk_trash,
                                         contentDescription = t("invite.links.delete"),
                                         tint = if (idle) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        size = LkIconSize.Row,
                                     )
                                 }
                             }
@@ -988,12 +990,12 @@ private fun LinkRow(
         }
         if (onShowQr != null) {
             IconButton(onClick = onShowQr) {
-                Icon(Icons.Filled.QrCode, contentDescription = t("invite.links.show_qr"))
+                LkIcon(R.drawable.ic_lk_qrcode, contentDescription = t("invite.links.show_qr"), size = LkIconSize.Row)
             }
         }
         if (onCopy != null) {
             IconButton(onClick = onCopy) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
+                LkIcon(R.drawable.ic_lk_copy, contentDescription = t("chat.invite_link.copy"), size = LkIconSize.Row)
             }
         }
         trailing()

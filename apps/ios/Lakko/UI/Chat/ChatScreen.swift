@@ -614,7 +614,7 @@ public struct ChatScreen: View {
             isPresented: $attachActionSheetPresented,
             title: l10n.t("chat.composer.attach")
         ) {[
-            .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
+            .action(l10n.t("chat.composer.photo_library"), icon: .photoStack) {
                 // Trigger the PhotosPicker by giving it a fresh
                 // empty selection — the PhotosPicker `Button`
                 // below opens immediately when bound to a
@@ -624,7 +624,7 @@ public struct ChatScreen: View {
                 // overlay (`photoPickerTrigger` below).
                 photoPickerOpenRequested = true
             },
-            .action(l10n.t("chat.media.file"), systemImage: "doc") {
+            .action(l10n.t("chat.media.file"), icon: .doc) {
                 fileImporterPresented = true
             },
         ]}
@@ -816,8 +816,7 @@ public struct ChatScreen: View {
                 viewModel.repositoryMarkSeen(oldest)
             } label: {
                 ZStack(alignment: .topTrailing) {
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 17, weight: .semibold))
+                    LkIconView(.heartFill, size: 20, relativeTo: nil)
                         .foregroundStyle(Color.lakkoAccent)
                         .frame(width: 44, height: 44)
                         .background(Circle().fill(Color.lakkoSurface))
@@ -1176,7 +1175,7 @@ public struct ChatScreen: View {
             // + SFrame) and a 1×1 chat stays P2P.
             viewModel.onCallButton(video: video)
         } label: {
-            Image(systemName: video ? "video" : "phone")
+            LkIconView(video ? .video : .phone, size: 24)
         }
         .accessibilityLabel(callButtonLabel(video: video))
         .disabled(viewModel.chatCallAction == .unavailable)
@@ -1203,7 +1202,7 @@ public struct ChatScreen: View {
             if case .joinable(_, let joinedCount, _) = affordance {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
-                        Image(systemName: "phone.connection.fill")
+                        LkIconView(.phoneConnectionFill, size: 20)
                             .foregroundStyle(.white)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
@@ -1321,7 +1320,7 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     bulkForwardOpen = true
                 } label: {
-                    Label(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right")
+                    Label(l10n.t("chat.message.forward"), icon: .forward)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1336,7 +1335,7 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     runBulkSave()
                 } label: {
-                    Label(l10n.t("chat.select.save"), systemImage: "bookmark")
+                    Label(l10n.t("chat.select.save"), icon: .bookmark)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1350,7 +1349,7 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     confirmBulkDelete = true
                 } label: {
-                    Label(l10n.t("common.delete"), systemImage: "trash")
+                    Label(l10n.t("common.delete"), icon: .trash)
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1591,7 +1590,7 @@ public struct ChatScreen: View {
                             ProgressView().controlSize(.small)
                                 .frame(width: 40, height: 40)
                         } else {
-                            composerIcon("paperclip")
+                            composerIcon(.paperclip)
                         }
                     }
                     .buttonStyle(.plain)
@@ -1608,7 +1607,7 @@ public struct ChatScreen: View {
                     Button {
                         picker = PickerRequest(mode: .compose, message: nil)
                     } label: {
-                        composerIcon("face.smiling")
+                        composerIcon(.faceSmiling)
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.sending)
@@ -1624,9 +1623,8 @@ public struct ChatScreen: View {
     }
 
     /// A composer icon button's face: 40 pt square, muted.
-    private func composerIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22))
+    private func composerIcon(_ icon: LkIcon) -> some View {
+        LkIconView(icon, size: 20, relativeTo: nil)
             .foregroundStyle(Color.lakkoTextMuted)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
@@ -1665,7 +1663,7 @@ public struct ChatScreen: View {
             Button { media.stopLocked() } label: {
                 ZStack {
                     Circle().fill(Color.lakkoDanger)
-                    Image(systemName: "stop.fill")
+                    LkIconView(.stopFill, size: 20)
                         .foregroundStyle(Color.white)
                 }
                 .frame(width: 40, height: 40)
@@ -1678,7 +1676,7 @@ public struct ChatScreen: View {
                 .frame(width: 44, height: 44)
         case .preview:
             Button { media.sendPreview() } label: {
-                sendFace { Image(systemName: "paperplane.fill") }
+                sendFace { LkIconView(.sendFill, size: 20) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(l10n.t("chat.record.send"))
@@ -1693,7 +1691,7 @@ public struct ChatScreen: View {
                             ProgressView().controlSize(.small)
                                 .tint(Color.lakkoAccentForeground)
                         } else {
-                            Image(systemName: "paperplane.fill")
+                            LkIconView(.sendFill, size: 20)
                         }
                     }
                 }
@@ -1726,7 +1724,7 @@ public struct ChatScreen: View {
                         }), let image = UIImage(data: thumb) {
                             TrayThumbnail(image: image)
                         } else {
-                            Image(systemName: pendingChipIcon(ref))
+                            LkIconView(pendingChipIcon(ref), size: 20)
                                 .foregroundStyle(.secondary)
                         }
                         VStack(alignment: .leading, spacing: 0) {
@@ -1740,7 +1738,7 @@ public struct ChatScreen: View {
                         Button {
                             viewModel.onRemovePendingAttachment(at: idx)
                         } label: {
-                            Image(systemName: "xmark.circle.fill")
+                            LkIconView(.xmarkCircleFill, size: 20)
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
@@ -1777,11 +1775,11 @@ public struct ChatScreen: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func pendingChipIcon(_ ref: AttachmentRef) -> String {
+    private func pendingChipIcon(_ ref: AttachmentRef) -> LkIcon {
         switch InlineMedia.decision(for: ref).bubble {
-        case .video: return "video"
-        case .photo: return "photo"
-        default: return AttachmentBridge.isInlinePreviewable(ref) ? "photo" : "doc"
+        case .video: return .video
+        case .photo: return .photo
+        default: return AttachmentBridge.isInlinePreviewable(ref) ? .photo : .doc
         }
     }
 
@@ -1989,8 +1987,7 @@ struct SelectableMessageRow<Row: View>: View {
         case .unselected, .selected:
             let selected = state == .selected
             HStack(alignment: .center, spacing: 0) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                LkIconView(selected ? .checkmarkCircleFill : .circle, size: 26, relativeTo: nil)
                     .foregroundStyle(selected ? Color.lakkoAccent : Color.lakkoTextMuted)
                     .frame(width: SelectionRowState.markColumnWidth)
                     .accessibilityHidden(true)
@@ -2350,8 +2347,7 @@ struct MessageRow: View {
     private func callRow(_ call: CallTranscriptRow) -> some View {
         Button(action: { onCallBack(call.video) }) {
             HStack(spacing: 6) {
-                Image(systemName: glyph(for: call))
-                    .font(.caption2)
+                LkIconView(glyph(for: call), size: 14, relativeTo: .caption2)
                 Text(call.text)
                     .font(.caption)
                 if let timeLabel {
@@ -2372,13 +2368,13 @@ struct MessageRow: View {
         .accessibilityLabel(call.accessibilityLabel)
     }
 
-    private func glyph(for call: CallTranscriptRow) -> String {
+    private func glyph(for call: CallTranscriptRow) -> LkIcon {
         switch call.outcome {
         case .answered:
-            if call.video { return "video" }
-            return call.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
+            if call.video { return .video }
+            return call.direction == .outgoing ? .phoneOutgoing : .phoneIncoming
         case .missed, .declined, .failed:
-            return call.video ? "video.slash" : "phone.down"
+            return call.video ? .videoSlash : .phoneDown
         }
     }
 
@@ -2630,13 +2626,13 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
-                    Label(l10n.t("chat.message.deleted"), systemImage: "trash")
+                    Label(l10n.t("chat.message.deleted"), icon: .trash)
                         .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else if message.unsupportedVersion != nil {
                     // ADR-0061 section 6 — a message from a newer version of
                     // Lakko. The core hands no text; the sentence is ours.
-                    Label(l10n.t("chat.message.unsupported"), systemImage: "arrow.down.app")
+                    Label(l10n.t("chat.message.unsupported"), icon: .arrowDownSquare)
                         .chatFont(.body, italic: true)
                         .opacity(0.7)
                 } else {
@@ -2746,9 +2742,8 @@ struct MessageRow: View {
         HStack(spacing: 3) {
             // ADR-0065 / UX section 2 — the saved mark, seen by this person only.
             if saveState == .unsave {
-                Image(systemName: "bookmark.fill")
-                    .chatFont(.caption2)
-                    .accessibilityLabel(l10n.t("chat.message.saved_mark"))
+                LkIconView(.bookmarkFill, size: 14, relativeTo: .caption2,
+                           label: l10n.t("chat.message.saved_mark"))
             }
             if message.edited, !message.deleted {
                 Text(l10n.t("chat.message.edited"))
@@ -2938,18 +2933,9 @@ struct MessageRow: View {
         case .none:
             EmptyView()
         case .sent:
-            Image(systemName: "checkmark")
-                .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
-                .accessibilityLabel(l10n.t("chat.message.sent"))
+            LkIconView(.checkmark, size: 14, relativeTo: .caption2, label: l10n.t("chat.message.sent"))
         case .read:
-            ZStack(alignment: .leading) {
-                Image(systemName: "checkmark")
-                Image(systemName: "checkmark")
-                    .offset(x: 4)
-            }
-            .chatFont(size: 10, relativeTo: .caption2, weight: .semibold)
-            .padding(.trailing, 4)
-            .accessibilityLabel(l10n.t("chat.message.read"))
+            LkIconView(.checkmarkDouble, size: 14, relativeTo: .caption2, label: l10n.t("chat.message.read"))
         }
     }
 }
@@ -3084,7 +3070,7 @@ private struct AttachmentChip: View {
 
     private var chipRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: chipIcon).font(.caption)
+            LkIconView(chipIcon, size: 14, relativeTo: .caption)
             VStack(alignment: .leading, spacing: 0) {
                 Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
                     .font(.caption)
@@ -3144,11 +3130,11 @@ private struct AttachmentChip: View {
         }
     }
 
-    private var chipIcon: String {
+    private var chipIcon: LkIcon {
         if AttachmentBridge.isInlinePreviewable(ref) {
-            return "photo"
+            return .photo
         }
-        return "doc"
+        return .doc
     }
 
     private var chipBackground: Color {
@@ -3431,8 +3417,7 @@ struct GroupInfoScreen: View {
                                 Text(l10n.t(viewModel.groupHandle?.isPublic == true
                                             ? "group_type.public" : "group_type.private"))
                                     .foregroundStyle(Color.lakkoTextMuted)
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3450,7 +3435,7 @@ struct GroupInfoScreen: View {
                             Button {
                                 MessageClipboard.copy("@" + handle.handle)
                             } label: {
-                                Image(systemName: "doc.on.doc")
+                                LkIconView(.copy, size: 20)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.lakkoAccent)
@@ -3516,13 +3501,12 @@ struct GroupInfoScreen: View {
                     Section {
                         Button { onOpenSubscreen(.reactions) } label: {
                             HStack {
-                                Label(l10n.t("group_reactions.title"), systemImage: "face.smiling")
+                                Label(l10n.t("group_reactions.title"), icon: .faceSmiling)
                                     .foregroundStyle(Color.lakkoText)
                                 Spacer()
                                 Text(viewModel.allowedReactionsSummary)
                                     .foregroundStyle(Color.lakkoTextMuted)
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3570,11 +3554,10 @@ struct GroupInfoScreen: View {
                     Section {
                         Button { onOpenSubscreen(.inviteLinks) } label: {
                             HStack {
-                                Label(l10n.t("chat.invite_link.label"), systemImage: "link")
+                                Label(l10n.t("chat.invite_link.label"), icon: .link)
                                     .foregroundStyle(Color.lakkoText)
                                 Spacer()
-                                Image(systemName: "chevron.forward")
-                                    .font(.footnote.weight(.semibold))
+                                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                         }
@@ -3611,7 +3594,7 @@ struct GroupInfoScreen: View {
                             HStack {
                                 InitialsAvatar(
                                     name: viewModel.pendingJoinLabel(ref), identity: base64Encode(ref),
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: .person(viewModel.pendingJoinPhotoKey(ref)))
                                 VStack(alignment: .leading, spacing: 2) {
                                     // ADR-0048 — the one resolver: a contact's
@@ -3709,7 +3692,7 @@ struct GroupInfoScreen: View {
                                 InitialsAvatar(
                                     name: Self.initialsName(keyB64: request.addSignatureKeyB64),
                                     identity: request.addSignatureKeyB64 ?? "",
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: request.addSignatureKeyB64
                                         .flatMap(base64Decode).map(AvatarPhoto.person))
                                 Text(Self.pendingAddLabel(request))
@@ -3748,7 +3731,7 @@ struct GroupInfoScreen: View {
                             HStack {
                                 InitialsAvatar(
                                     name: Self.initialsName(keyB64: item.addSignatureKeyB64), identity: item.addSignatureKeyB64,
-                                    size: 32, placeholderSymbol: "person.fill",
+                                    size: 32, placeholderIcon: .personFill,
                                     photo: base64Decode(item.addSignatureKeyB64).map(AvatarPhoto.person))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(Self.unappliedLabel(item))
@@ -3807,7 +3790,7 @@ struct GroupInfoScreen: View {
                                     Text(l10n.t("chat.members.add.action"))
                                         .foregroundStyle(Color.lakkoAccent)
                                 } icon: {
-                                    Image(systemName: "person.badge.plus")
+                                    LkIconView(.personPlus, size: 20)
                                         .foregroundStyle(Color.lakkoAccent)
                                 }
                             }
@@ -4124,7 +4107,7 @@ struct GroupInfoScreen: View {
             InitialsAvatar(
                 name: viewModel.memberInitialsName(member),
                 identity: base64Encode(member.signaturePublicKey),
-                size: 32, placeholderSymbol: "person.fill",
+                size: 32, placeholderIcon: .personFill,
                 photo: viewModel.memberPhoto(member))
             VStack(alignment: .leading, spacing: 2) {
                 Text(viewModel.memberLabel(member))
@@ -4242,7 +4225,7 @@ struct TransferOwnershipStep: View {
                             }
                             Spacer()
                             if viewModel.transferPick == row.signatureKeyB64 {
-                                Image(systemName: "checkmark")
+                                LkIconView(.checkmark, size: 20)
                             }
                         }
                     }
@@ -4280,7 +4263,7 @@ struct TransferOwnershipStep: View {
                             }
                             Spacer()
                             if viewModel.transferOutgoing == option.value {
-                                Image(systemName: "checkmark")
+                                LkIconView(.checkmark, size: 20)
                             }
                         }
                     }

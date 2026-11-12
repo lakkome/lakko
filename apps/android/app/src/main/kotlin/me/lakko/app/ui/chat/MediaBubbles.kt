@@ -25,10 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +74,9 @@ import me.lakko.app.media.voiceClockReservation
 import me.lakko.app.media.widestRateLabel
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 internal const val COULD_NOT_PLAY = "chat.media.play_failed"
 internal const val NOT_SENT_RETRY = "chat.media.not_sent_retry"
@@ -429,13 +428,13 @@ private fun VoicePlayDisc(
                         strokeWidth = 2.dp,
                     )
                 } else {
-                    Icon(
-                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    LkIcon(
+                        icon = if (playing) R.drawable.ic_lk_pause_fill else R.drawable.ic_lk_play_fill,
                         // The disc carries the label; a second one here would
                         // make TalkBack read the button twice.
                         contentDescription = null,
                         tint = glyphColor,
-                        modifier = Modifier.size(20.dp),
+                        size = LkIconSize.Row,
                     )
                 }
             }
@@ -685,8 +684,8 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
             }
             when {
                 loading -> CircularProgressIndicator(Modifier.size(40.dp), strokeWidth = 3.dp)
-                !playingWithSound -> Icon(
-                    imageVector = if (showVideo) Icons.AutoMirrored.Filled.VolumeOff else Icons.Filled.PlayArrow,
+                !playingWithSound -> LkIcon(
+                    icon = if (showVideo) R.drawable.ic_lk_speaker_slash_fill else R.drawable.ic_lk_play_fill,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier

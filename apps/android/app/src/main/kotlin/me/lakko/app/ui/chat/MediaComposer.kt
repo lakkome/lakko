@@ -38,15 +38,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -132,6 +123,9 @@ import me.lakko.app.media.observeLevel
 import me.lakko.app.media.reduce
 import me.lakko.app.media.spokenDuration
 import java.util.UUID
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 private const val TAG = "LakkoRecordController"
 private const val TICK_MS = 100L
@@ -880,11 +874,12 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
     if (holding) {
         // §2.5 — the lock target the finger slides up onto. A sibling of the
         // clipped button, so it is drawn above it rather than clipped away.
-        Icon(
-            imageVector = Icons.Filled.Lock,
+        LkIcon(
+            icon = R.drawable.ic_lk_lock_fill,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.offset { IntOffset(0, (-64 * density).toInt()) },
+            size = LkIconSize.Row,
         )
     }
     Box(
@@ -949,10 +944,11 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
                 }
             },
     ) {
-        Icon(
-            imageVector = if (kind == CaptureKind.VOICE) Icons.Filled.Mic else Icons.Filled.Videocam,
+        LkIcon(
+            icon = if (kind == CaptureKind.VOICE) R.drawable.ic_lk_mic_fill else R.drawable.ic_lk_video_fill,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onPrimary,
+            size = LkIconSize.Row,
         )
     }
     }
@@ -998,7 +994,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             modifier = modifier.fillMaxWidth().padding(horizontal = 4.dp),
         ) {
             IconButton(onClick = controller::delete) {
-                Icon(Icons.Filled.Delete, contentDescription = t("chat.record.delete"))
+                LkIcon(R.drawable.ic_lk_trash, contentDescription = t("chat.record.delete"), size = LkIconSize.Row)
             }
             PulsingDot()
             Spacer(Modifier.width(8.dp))
@@ -1017,11 +1013,11 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             }
             if (s.kind == CaptureKind.VIDEO_NOTE && controller.canFlip) {
                 IconButton(onClick = controller::flipCamera) {
-                    Icon(Icons.Filled.Cameraswitch, contentDescription = t("chat.record.flip_camera"))
+                    LkIcon(R.drawable.ic_lk_camera_flip, contentDescription = t("chat.record.flip_camera"), size = LkIconSize.Row)
                 }
             }
             IconButton(onClick = controller::stop) {
-                Icon(Icons.Filled.Stop, contentDescription = t("chat.record.stop"))
+                LkIcon(R.drawable.ic_lk_stop_fill, contentDescription = t("chat.record.stop"), size = LkIconSize.Row)
             }
         }
 
@@ -1037,7 +1033,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             modifier = modifier.fillMaxWidth().padding(horizontal = 4.dp),
         ) {
             IconButton(onClick = controller::delete) {
-                Icon(Icons.Filled.Delete, contentDescription = t("chat.record.delete"))
+                LkIcon(R.drawable.ic_lk_trash, contentDescription = t("chat.record.delete"), size = LkIconSize.Row)
             }
             val take = controller.preview
             if (s.kind == CaptureKind.VOICE && take != null) {
@@ -1126,13 +1122,14 @@ private fun VoiceTakePreview(take: RecordedTake, modifier: Modifier) {
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
         IconButton(onClick = { playing = !playing }) {
-            Icon(
-                if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+            LkIcon(
+                if (playing) R.drawable.ic_lk_pause_fill else R.drawable.ic_lk_play_fill,
                 contentDescription = if (playing) {
                     t("chat.record.pause")
                 } else {
                     t("chat.record.play", mapOf("duration" to spokenDuration(take.durationMs)))
                 },
+                size = LkIconSize.Row,
             )
         }
         WaveformSeekBar(

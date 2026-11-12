@@ -103,7 +103,7 @@ struct PeopleSearchSection: View {
             if let channel {
                 Button { onOpenChannel(channel.idHex, channel.handle) } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "megaphone")
+                        LkIconView(.megaphone, size: 20)
                             .frame(width: 40, height: 40)
                             .foregroundStyle(Color.lakkoAccent)
                         VStack(alignment: .leading, spacing: 2) {

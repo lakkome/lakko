@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +37,8 @@ import me.lakko.app.contacts.InvitePreviewResult
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * The invite page (ADR-0079, `docs/ux/contact-invite-link.md` section 3): the
@@ -79,7 +79,7 @@ public fun InviteLandingScreen(
                 title = { Text(t("invite.contact.page_title")) },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

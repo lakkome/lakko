@@ -1878,6 +1878,33 @@ a.ghost.small.lk-wide-only {
   height: 40px;
   border-radius: 10px;
 }
+/* A compact composer's send (pending chat, comments): the bare
+   arrow-in-circle glyph, accent when sendable and muted when not, as on iOS
+   and Android. */
+.lk-send-glyph {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.lk-send-glyph:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
+.lk-send-glyph:disabled {
+  color: var(--surface-muted);
+  opacity: 1;
+  cursor: default;
+}
 .lk-composer .lk-send {
   border-radius: 10px;
   background: var(--accent);
@@ -2036,29 +2063,32 @@ a.ghost.small.lk-wide-only {
    stay in one column. */
 .lk-select-mark,
 .lk-select-mark-slot {
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
   margin-right: auto;
   align-self: center;
 }
+/* The mark is the set's `circle` / `checkmark-circle-fill`, as on iOS and
+   Android: muted when unselected, accent when selected. */
 .lk-select-mark {
   min-height: 0;
   padding: 0;
   border-radius: var(--radius-pill);
-  border: 2px solid var(--surface-faint);
+  border: none;
   background: transparent;
-  color: var(--accent-fg);
+  color: var(--surface-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 .lk-select-mark:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: transparent;
+  color: var(--surface-fg);
 }
-.lk-select-mark[aria-checked="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
+.lk-select-mark[aria-checked="true"],
+.lk-select-mark[aria-checked="true"]:hover:not(:disabled) {
+  color: var(--accent);
 }
 .lk-select-mark:focus-visible {
   outline: 2px solid var(--accent);
@@ -2812,9 +2842,6 @@ html[data-open-in-app] .lk-feed-import {
   border-color: transparent;
   color: var(--accent-fg);
   transform: translateX(-50%) scale(1.1);
-}
-.lakko-lock-target .lakko-lock-up {
-  transform: rotate(-90deg);
 }
 @media (prefers-reduced-motion: reduce) {
   .lakko-lock-target { transition: none; }
@@ -4911,6 +4938,11 @@ button.lk-call-chip:focus-visible {
   gap: 12px;
   text-align: center;
 }
+.lk-encryption-sheet-lock {
+  display: inline-flex;
+  justify-content: center;
+  color: var(--success);
+}
 .lk-encryption-sheet h2 {
   margin: 0;
   font-size: 17px;
@@ -5732,8 +5764,8 @@ button.lk-call-chip:focus-visible {
   position: absolute;
   right: 6px;
   bottom: 6px;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   min-height: 0;
   padding: 0;
   display: inline-flex;
@@ -6229,10 +6261,6 @@ button.lk-call-chip:focus-visible {
 .lk-call-chat-close:hover {
   background: var(--surface-hover);
 }
-/* The shared chevron points to the end side; down closes the sheet. */
-.lk-call-chat-close.down svg {
-  transform: rotate(90deg);
-}
 .lk-call-chat-body {
   position: relative;
   flex: 1 1 auto;
@@ -6406,8 +6434,8 @@ button.lk-call-chip:focus-visible {
 }
 .lk-call-chat-send {
   flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   min-height: 0;
   padding: 0;
   border: none;
@@ -6415,12 +6443,19 @@ button.lk-call-chip:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent);
-  color: var(--accent-fg);
+  /* The bare arrow-in-circle glyph is the button face, as on iOS and
+     Android: accent when sendable, muted when not. */
+  background: transparent;
+  color: var(--accent);
   cursor: pointer;
 }
+.lk-call-chat-send:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent-strong);
+}
 .lk-call-chat-send:disabled {
-  opacity: 0.4;
+  color: var(--surface-muted);
+  opacity: 1;
   cursor: default;
 }
 .lk-call-chat-too-long {
@@ -7050,8 +7085,11 @@ html.lk-call-window-doc body {
   outline: 2px solid var(--call-ctl-on-fg);
   outline-offset: 2px;
 }
-.lk-call-collapse > svg {
-  transform: rotate(90deg);
+/* The page arrows sit at the physical left and right edges and follow the
+   screen edge, not the reading direction (design system section 8): undo
+   the right-to-left mirroring the set applies to chevrons. */
+[dir="rtl"] .lk-call-page-arrow .lk-icon-flip-rtl {
+  transform: none;
 }
 
 /* Feed (docs/ux/feed.md): one centred column of items, a chip switcher,
@@ -7793,8 +7831,10 @@ html.lk-call-window-doc body {
 
 /* ------------------------------------------------ language (ADR-0061) */
 
-/* A back arrow points the way back, which is the other way in a
-   right-to-left layout (`docs/ux/localization.md` section 6). */
+/* An icon that points in the reading direction (back, forward, send, reply,
+   ...) points the other way in a right-to-left layout
+   (`docs/ux/localization.md` section 6); `ui/icons.tsx` adds the class to
+   the icons the set lists as mirrored. */
 [dir="rtl"] .lk-icon-flip-rtl {
   transform: scaleX(-1);
 }
@@ -8458,11 +8498,6 @@ button.lk-folder-new {
 .lk-picker-chevron {
   display: inline-flex;
   color: var(--surface-muted);
-  transform: rotate(90deg);
-  transition: transform 120ms ease;
-}
-.lk-picker-btn[aria-expanded="true"] .lk-picker-chevron {
-  transform: rotate(-90deg);
 }
 .lk-picker-scrim {
   display: none;

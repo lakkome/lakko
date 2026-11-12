@@ -149,8 +149,7 @@ struct CallsScreen: View {
                     .foregroundStyle(Color.lakkoText)
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    Image(systemName: CallHistory.directionGlyph(entry))
-                        .font(.caption2)
+                    LkIconView(CallHistory.directionGlyph(entry), size: 14, relativeTo: .caption2)
                     Text(
                         CallHistory.rowSubtitle(
                             entry, calendar: calendar, locale: locale))
@@ -203,8 +202,7 @@ struct CallsScreen: View {
             Button {
                 onCallBack(groupIdHex, kind, entry.video)
             } label: {
-                Image(systemName: entry.video ? "video.fill" : "phone.fill")
-                    .font(.body)
+                LkIconView(entry.video ? .videoFill : .phoneFill, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -219,7 +217,7 @@ struct CallsScreen: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label(l10n.t("call.history.empty"), systemImage: "phone")
+            Label(l10n.t("call.history.empty"), icon: .phone, size: 48, relativeTo: nil)
         } description: {
             Text(l10n.t("call.history.empty_body"))
         } actions: {

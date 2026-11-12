@@ -8,8 +8,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.Bookmark
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,10 +34,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import me.lakko.app.ui.components.submitOnHardwareEnter
@@ -54,7 +50,6 @@ import me.lakko.app.chat.ForwardRef
 import me.lakko.app.chat.ForwardRequest
 import me.lakko.app.chat.PendingMessageJump
 import me.lakko.app.chat.forwardLineLabel
-import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,15 +57,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Mood
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.FilterChip
@@ -145,8 +131,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.selected
@@ -179,6 +163,9 @@ import uniffi.lakko_ffi_uniffi.conversationInfoSections
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
 import me.lakko.app.ui.components.LakkoDialogTone
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -1514,7 +1501,7 @@ private fun Header(
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onNavigateBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("chat.header.back"))
+                LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("chat.header.back"))
             }
         },
         title = {
@@ -1561,10 +1548,10 @@ private fun Header(
             // (the overlay carries the Accept / Decline / Hang up affordances).
             if (!callActive) {
                 IconButton(onClick = onStartCall) {
-                    Icon(Icons.Filled.Call, contentDescription = t("chat.call.voice"))
+                    LkIcon(R.drawable.ic_lk_phone, contentDescription = t("chat.call.voice"))
                 }
                 IconButton(onClick = onStartVideoCall) {
-                    Icon(Icons.Filled.Videocam, contentDescription = t("chat.call.video"))
+                    LkIcon(R.drawable.ic_lk_video, contentDescription = t("chat.call.video"))
                 }
             }
             // The overflow menu held one item, `Members` / `Details`, and it
@@ -1894,11 +1881,11 @@ private fun CallHistoryRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Icon(
-                    imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
+                LkIcon(
+                    icon = if (entry.video) R.drawable.ic_lk_video else R.drawable.ic_lk_phone,
                     contentDescription = null,
                     tint = tint,
-                    modifier = Modifier.size(16.dp),
+                    size = LkIconSize.Mark,
                 )
                 Text(
                     text = me.lakko.app.calls.callRowText(entry, strings),
@@ -1985,11 +1972,11 @@ private fun CallInviteCard(
                 .background(contentColor.copy(alpha = 0.14f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                Icons.Filled.Call,
+            LkIcon(
+                R.drawable.ic_lk_phone_fill,
                 contentDescription = null,
                 tint = contentColor,
-                modifier = Modifier.size(20.dp),
+                size = LkIconSize.Row,
             )
         }
         Text(
@@ -2657,10 +2644,11 @@ internal fun ReplyStrip(
             modifier = Modifier.weight(1f),
         )
         IconButton(onClick = onClose) {
-            Icon(
-                imageVector = Icons.Filled.Close,
+            LkIcon(
+                icon = R.drawable.ic_lk_xmark,
                 contentDescription = t(CANCEL_REPLY_LABEL),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Row,
             )
         }
     }
@@ -2695,11 +2683,11 @@ internal fun ForwardLine(
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Forward,
+        LkIcon(
+            icon = R.drawable.ic_lk_forward,
             contentDescription = null,
             tint = contentColor.copy(alpha = 0.7f),
-            modifier = Modifier.size(14.dp),
+            size = LkIconSize.Mark,
         )
         Spacer(Modifier.width(4.dp))
         Text(
@@ -2813,11 +2801,11 @@ private fun BubbleMeta(
         }
         if (saved) {
             // Saved section 2 — a small mark, only the person sees it.
-            Icon(
-                imageVector = Icons.Filled.Bookmark,
+            LkIcon(
+                icon = R.drawable.ic_lk_bookmark_fill,
                 contentDescription = t("chat.message.saved_mark"),
                 tint = contentColor.copy(alpha = 0.7f),
-                modifier = Modifier.size(12.dp),
+                size = LkIconSize.Mark,
             )
         }
         if (time != null) {
@@ -2841,11 +2829,11 @@ private fun BubbleMeta(
         }
         if (readState != OwnReadState.None) {
             val read = readState == OwnReadState.Read
-            Icon(
-                imageVector = if (read) Icons.Filled.DoneAll else Icons.Filled.Check,
+            LkIcon(
+                icon = if (read) R.drawable.ic_lk_checkmark_double else R.drawable.ic_lk_checkmark,
                 contentDescription = t(if (read) "chat.message.read" else "chat.message.sent"),
                 tint = if (read) contentColor else contentColor.copy(alpha = 0.7f),
-                modifier = Modifier.height(14.dp),
+                size = LkIconSize.Mark,
             )
         }
     }
@@ -3549,7 +3537,7 @@ internal fun Composer(
                         onClick = { attachMenu = true },
                         enabled = !sending && !uploading,
                     ) {
-                        Icon(Icons.Filled.AttachFile, contentDescription = t("chat.composer.attach"))
+                        LkIcon(R.drawable.ic_lk_paperclip, contentDescription = t("chat.composer.attach"), size = LkIconSize.Row)
                     }
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
                         DropdownMenuItem(
@@ -3625,7 +3613,7 @@ internal fun Composer(
                     onClick = onOpenPicker,
                     enabled = !sending,
                 ) {
-                    Icon(Icons.Filled.Mood, contentDescription = t("chat.composer.emoji_gifs"))
+                    LkIcon(R.drawable.ic_lk_face_smiling, contentDescription = t("chat.composer.emoji_gifs"), size = LkIconSize.Row)
                 }
             }
             Spacer(Modifier.width(4.dp))
@@ -3662,7 +3650,7 @@ internal fun Composer(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                     } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        LkIcon(R.drawable.ic_lk_send_fill, contentDescription = null, size = LkIconSize.Row)
                     }
                 }
             } else if (recState !is me.lakko.app.media.RecState.Preview) {
@@ -4473,7 +4461,7 @@ private fun MembersSheet(
                     title = { Text(t("chat.transfer.action")) },
                     navigationIcon = {
                         IconButton(onClick = viewModel::cancelTransferStep) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                            LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                         }
                     },
                 )
@@ -4524,7 +4512,7 @@ private fun MembersSheet(
                 },
                 navigationIcon = {
                     IconButton(onClick = viewModel::toggleMembersPanel) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -4956,8 +4944,8 @@ private fun MembersSheet(
                                 .clickable(enabled = !busy, onClick = viewModel::openAddMembers)
                                 .padding(vertical = 8.dp),
                         ) {
-                            Icon(
-                                Icons.Filled.PersonAdd,
+                            LkIcon(
+                                R.drawable.ic_lk_person_plus,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(32.dp).padding(4.dp),
@@ -5257,7 +5245,7 @@ private fun selectionRowLabel(msg: ChatMessage): String =
 
 /** Diameter of the selection mark; also its tap-friendly footprint inside the
  *  row (the whole row is the target, so the mark itself needs no 40dp). */
-private val SELECTION_MARK_SIZE: Dp = 22.dp
+private val SELECTION_MARK_SIZE: Dp = 26.dp
 
 /** Gap between the mark and the row it belongs to. */
 private val SELECTION_MARK_GAP: Dp = 8.dp
@@ -5341,21 +5329,18 @@ private fun SelectableTimelineRow(
 @Composable
 private fun SelectionMark(selected: Boolean) {
     if (selected) {
-        Icon(
-            imageVector = Icons.Filled.CheckCircle,
+        LkIcon(
+            icon = R.drawable.ic_lk_checkmark_circle_fill,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(SELECTION_MARK_SIZE),
+            size = SELECTION_MARK_SIZE,
         )
     } else {
-        Box(
-            modifier = Modifier
-                .size(SELECTION_MARK_SIZE)
-                .border(
-                    width = 1.5.dp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    shape = CircleShape,
-                ),
+        LkIcon(
+            icon = R.drawable.ic_lk_circle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            size = SELECTION_MARK_SIZE,
         )
     }
 }
@@ -5422,10 +5407,10 @@ private fun SelectionActionBar(
                     enabled = selection.forwardEnabled && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Forward,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_forward,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("chat.message.forward"))
@@ -5435,10 +5420,10 @@ private fun SelectionActionBar(
                     enabled = selection.forwardEnabled && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.BookmarkBorder,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_bookmark,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("chat.select.save"))
@@ -5453,10 +5438,10 @@ private fun SelectionActionBar(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Delete,
+                    LkIcon(
+                        icon = R.drawable.ic_lk_trash,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("common.delete"))

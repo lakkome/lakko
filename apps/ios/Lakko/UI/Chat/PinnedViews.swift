@@ -57,8 +57,7 @@ struct PinnedBarView: View {
                         + (author.isEmpty ? [] : [author]) + [excerpt]))
             .accessibilityHint(l10n.t("chat.pinned_bar.hint"))
             Button(action: onList) {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 15, weight: .semibold))
+                LkIconView(.list, size: 20, relativeTo: nil)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
@@ -186,8 +185,7 @@ struct PinnedListSheet: View {
                     onPick(entry)
                 } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: entry.scope == .personal ? "pin" : "pin.fill")
-                            .font(.caption)
+                        LkIconView(entry.scope == .personal ? .pin : .pinFill, size: 14, relativeTo: .caption)
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {

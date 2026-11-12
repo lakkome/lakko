@@ -3,7 +3,6 @@
 
 package me.lakko.app.ui.chat
 
-import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,22 +26,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.FolderOff
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Groups
-import androidx.compose.material.icons.filled.NotificationsOff
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -73,7 +56,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -120,6 +102,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.FolderView
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * Every conversation in one list: one-to-one chats, groups and channels.
@@ -375,7 +360,7 @@ public fun ChatListScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { createMenuOpen = true }) {
-                            Icon(Icons.Filled.Edit, contentDescription = t("chats.compose"))
+                            LkIcon(R.drawable.ic_lk_compose, contentDescription = t("chats.compose"))
                         }
                         CreateMenu(
                             expanded = createMenuOpen,
@@ -930,23 +915,23 @@ private fun CreateMenu(
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
             text = { Text(t("chats.create.chat")) },
-            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_chat, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onNewChat() },
         )
         DropdownMenuItem(
             text = { Text(t("chats.create.group")) },
-            leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_person_3, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onCreateGroup() },
         )
         DropdownMenuItem(
             text = { Text(t("chats.create.channel")) },
-            leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
+            leadingIcon = { LkIcon(R.drawable.ic_lk_megaphone, contentDescription = null, size = LkIconSize.Row) },
             onClick = { onDismiss(); onCreateChannel() },
         )
         if (onOpenSaved != null) {
             DropdownMenuItem(
                 text = { Text(t("saved.title")) },
-                leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                leadingIcon = { LkIcon(R.drawable.ic_lk_bookmark, contentDescription = null, size = LkIconSize.Row) },
                 onClick = { onDismiss(); onOpenSaved() },
             )
         }
@@ -1194,11 +1179,11 @@ internal fun SearchField(query: String, onQueryChange: (String) -> Unit) {
         onValueChange = onQueryChange,
         placeholder = { Text(t("chats.search.placeholder")) },
         singleLine = true,
-        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        leadingIcon = { LkIcon(R.drawable.ic_lk_search, contentDescription = null, size = LkIconSize.Row) },
         trailingIcon = if (query.isNotEmpty()) {
             {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Clear, contentDescription = t("chats.search.clear"))
+                    LkIcon(R.drawable.ic_lk_xmark_circle_fill, contentDescription = t("chats.search.clear"), size = LkIconSize.Row)
                 }
             }
         } else {
@@ -1249,11 +1234,11 @@ private fun SwipeableThreadRow(
         backgroundContent = {
             val towardsEnd = dismissState.dismissDirection == SwipeToDismissBoxValue.StartToEnd
             val icon = if (towardsEnd) {
-                Icons.Filled.PushPin
+                if (row.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin
             } else if (row.archived) {
-                Icons.Filled.Unarchive
+                R.drawable.ic_lk_unarchive
             } else {
-                Icons.Filled.Archive
+                R.drawable.ic_lk_archive
             }
             val label = if (towardsEnd) {
                 t(if (row.pinned) "chats.action.unpin" else "chats.action.pin")
@@ -1268,10 +1253,11 @@ private fun SwipeableThreadRow(
                 contentAlignment = if (towardsEnd) Alignment.CenterStart else Alignment.CenterEnd,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
+                    LkIcon(
                         icon,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        size = LkIconSize.Row,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
@@ -1402,7 +1388,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showPin) {
                 DropdownMenuItem(
                     text = { Text(t(if (model.pinned) "chats.action.unpin" else "chats.action.pin")) },
-                    leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
+                    leadingIcon = { LkIcon(if (model.pinned) R.drawable.ic_lk_pin_slash else R.drawable.ic_lk_pin, contentDescription = null, size = LkIconSize.Row) },
                     enabled = model.pinEnabled,
                     onClick = { close(); model.onPin() },
                 )
@@ -1413,15 +1399,16 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showFlags) {
                 DropdownMenuItem(
                     text = { Text(t(if (model.row.muted) "chats.action.unmute" else "chats.action.mute")) },
-                    leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
+                    leadingIcon = { LkIcon(if (model.row.muted) R.drawable.ic_lk_bell else R.drawable.ic_lk_bell_slash, contentDescription = null, size = LkIconSize.Row) },
                     onClick = { close(); model.onFlag(FlagField.Mute) },
                 )
                 DropdownMenuItem(
                     text = { Text(t(if (model.row.archived) "chats.action.unarchive" else "chats.action.archive")) },
                     leadingIcon = {
-                        Icon(
-                            if (model.row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                        LkIcon(
+                            if (model.row.archived) R.drawable.ic_lk_unarchive else R.drawable.ic_lk_archive,
                             contentDescription = null,
+                            size = LkIconSize.Row,
                         )
                     },
                     onClick = { close(); model.onFlag(FlagField.Archive) },
@@ -1430,7 +1417,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             if (model.showFolderItems) {
                 DropdownMenuItem(
                     text = { Text(t("folders.add_to_folder")) },
-                    leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                    leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
                     // With no folders yet it goes straight to the editor, as
                     // "New folder..." would.
                     enabled = model.folders.isNotEmpty() || model.canCreateFolder,
@@ -1447,7 +1434,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                 if (tab != null) {
                     DropdownMenuItem(
                         text = { Text(t("folders.remove_from_folder")) },
-                        leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
+                        leadingIcon = { LkIcon(R.drawable.ic_lk_folder_minus, contentDescription = null, size = LkIconSize.Row) },
                         onClick = { close(); model.toggle(tab) },
                     )
                 }
@@ -1460,9 +1447,9 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                     text = { Text(f.name) },
                     leadingIcon = {
                         if (checked) {
-                            Icon(Icons.Filled.Check, contentDescription = t("folders.in_folder_a11y"))
+                            LkIcon(R.drawable.ic_lk_checkmark, contentDescription = t("folders.in_folder_a11y"), size = LkIconSize.Row)
                         } else {
-                            Spacer(Modifier.size(24.dp))
+                            Spacer(Modifier.size(LkIconSize.Row))
                         }
                     },
                     enabled = !blocked,
@@ -1471,7 +1458,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             }
             DropdownMenuItem(
                 text = { Text(t("folders.new_ellipsis")) },
-                leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
+                leadingIcon = { LkIcon(R.drawable.ic_lk_folder_plus, contentDescription = null, size = LkIconSize.Row) },
                 enabled = model.canCreateFolder,
                 onClick = { close(); model.newFolder() },
             )
@@ -1561,20 +1548,29 @@ internal fun ConversationRowBody(
                 )
                 if (row.muted) {
                     Spacer(Modifier.width(6.dp))
-                    Icon(
-                        Icons.Filled.NotificationsOff,
+                    LkIcon(
+                        R.drawable.ic_lk_bell_slash_fill,
                         contentDescription = t("chats.row.muted"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
+                        size = LkIconSize.Mark,
                     )
                 }
                 if (row.pinned) {
                     Spacer(Modifier.width(6.dp))
-                    Icon(
-                        Icons.Filled.PushPin,
+                    LkIcon(
+                        R.drawable.ic_lk_pin_fill,
                         contentDescription = t("chats.row.pinned"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
+                        size = LkIconSize.Mark,
+                    )
+                }
+                if (row.archived) {
+                    Spacer(Modifier.width(6.dp))
+                    LkIcon(
+                        R.drawable.ic_lk_archive_fill,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        size = LkIconSize.Mark,
                     )
                 }
                 // reactions-and-emoji section 12 — a small heart beside the
@@ -1585,11 +1581,11 @@ internal fun ConversationRowBody(
                 }
                 if (unseen) {
                     Spacer(Modifier.width(6.dp))
-                    val heartLabel = t("chats.row.unseen_reactions")
-                    Text(
-                        text = "\u2764\uFE0F",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.semanticsLabel(heartLabel),
+                    LkIcon(
+                        R.drawable.ic_lk_heart_fill,
+                        contentDescription = t("chats.row.unseen_reactions"),
+                        tint = MaterialTheme.colorScheme.primary,
+                        size = LkIconSize.Mark,
                     )
                 }
                 if (row.unread > 0) {
@@ -1638,6 +1634,13 @@ private fun EmptyPanel(onStart: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            LkIcon(
+                R.drawable.ic_lk_bubbles,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = LkIconSize.Empty,
+            )
+            Spacer(Modifier.height(12.dp))
             Text(
                 text = t("chats.empty.title"),
                 style = MaterialTheme.typography.titleMedium,
@@ -1686,10 +1689,6 @@ private fun NoMatchPanel() {
         )
     }
 }
-
-/** A plain spoken label on a decorative glyph. */
-private fun Modifier.semanticsLabel(label: String): Modifier =
-    this.semantics { contentDescription = label }
 
 /** The newest post of a channel's log that has text to show, as one line;
  *  `null` when the device holds none (docs/ux/navigation.md section 2). */

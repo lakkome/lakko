@@ -12,9 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +47,9 @@ import me.lakko.app.search.searchEndLine
 import me.lakko.app.search.searchShowsNothingFound
 import me.lakko.app.search.withCurrentContacts
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * People under a search field (`docs/ux/who-can-find-me.md` section 6.1,
@@ -200,7 +200,7 @@ private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Campaign, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
+        LkIcon(R.drawable.ic_lk_megaphone, contentDescription = null, modifier = Modifier.size(40.dp).padding(8.dp))
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyLarge)
@@ -211,7 +211,7 @@ private fun ChannelRow(label: String, handle: String, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Icon(Icons.Filled.ChevronRight, contentDescription = null)
+        LkIcon(R.drawable.ic_lk_chevron_forward, contentDescription = null, size = LkIconSize.Mark)
     }
 }
 

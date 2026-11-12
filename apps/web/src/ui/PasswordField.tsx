@@ -47,7 +47,7 @@ export function PasswordField(props: {
           disabled={props.disabled?.() === true}
           onClick={() => setShown((v) => !v)}
         >
-          <Icon name={shown() ? "eyeOff" : "eye"} size={18} />
+          <Icon name={shown() ? "eye-slash" : "eye"} size={20} />
         </button>
       </div>
     </label>

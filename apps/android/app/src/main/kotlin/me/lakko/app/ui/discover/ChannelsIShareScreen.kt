@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +38,8 @@ import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.chat.conversationTitle
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * Settings -> Security -> Channels I share (docs/ux/feed.md 6.3): every group
@@ -68,7 +68,7 @@ public fun ChannelsIShareScreen(chatRepository: ChatRepository, onBack: () -> Un
                 title = { Text(t("discover.shared.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

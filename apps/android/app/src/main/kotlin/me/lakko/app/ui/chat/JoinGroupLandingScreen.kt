@@ -10,8 +10,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,6 +46,8 @@ import me.lakko.app.chat.groupInvitePageLines
 import me.lakko.app.chat.invitedByLine
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * ADR-0028 (G-3) — drives the `/g/<slug>` group join-ticket landing. Decodes +
@@ -333,7 +333,7 @@ public fun JoinGroupLandingScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

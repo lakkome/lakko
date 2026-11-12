@@ -1880,7 +1880,12 @@ export function DeviceGroupSyncProvider(props: {
     }
   }
   function catchUp(): Promise<JournalCatchUp> {
-    if (group === null || pollAbort === null || deviceRemoved()) return Promise.resolve("offline");
+    // No handle (no session in this page): there is nothing to read with, and
+    // nothing will load one until a session lands. Never "offline", which a
+    // superseded device would wait out forever (base scenario 4b).
+    if (group === null || pollAbort === null) return Promise.resolve("not-loaded");
+    // Removed from the DeviceGroup: the journal does not answer this device.
+    if (deviceRemoved()) return Promise.resolve("unreadable");
     return new Promise((resolve) => {
       const waiter = {
         after: passCounter,
@@ -1946,6 +1951,7 @@ export function DeviceGroupSyncProvider(props: {
       epoch: () => (group === null || identity === null ? null : deviceGroupEpoch(group, identity)),
       post: postKeyRotation,
       catchUp,
+      loaded: () => group !== null && pollAbort !== null,
     }),
   );
 

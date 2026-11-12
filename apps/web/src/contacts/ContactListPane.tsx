@@ -155,7 +155,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             aria-expanded={menuOpen()}
             onClick={() => setMenuOpen(!menuOpen())}
           >
-            <Icon name="plus" size={18} />
+            <Icon name="person-plus" size={24} />
           </button>
           <Show when={menuOpen()}>
             <MenuBackdrop onClose={() => setMenuOpen(false)} />
@@ -170,7 +170,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                       props.onAdd(item.mode);
                     }}
                   >
-                    <Icon name={item.icon} size={18} />
+                    <Icon name={item.icon} size={20} />
                     {t(item.labelKey)}
                   </button>
                 )}
@@ -180,7 +180,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         </div>
       </div>
       <div class="lk-search">
-        <Icon name="search" size={18} />
+        <Icon name="search" size={20} />
         <input
           ref={searchInput}
           type="search"
@@ -253,7 +253,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               aria-expanded={sentOpen()}
               onClick={() => setSentOpen(!sentOpen())}
             >
-              <Icon name="chevron" size={14} class={sentOpen() ? "open" : ""} />
+              <Icon name="chevron-forward" size={14} class={sentOpen() ? "open" : ""} />
               {t("contacts.list.sent", { count: props.sent().length })}
             </button>
             <Show when={sentOpen()}>
@@ -292,7 +292,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           when={!nothingAtAll() || searching()}
           fallback={
             <div class="lk-empty">
-              <Icon name="contacts" size={40} strokeWidth={1.4} />
+              <Icon name="person-circle-plus" size={48} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
               {/* Finding someone is the search field above (UX who-can-find-me

@@ -197,7 +197,7 @@ export default function Devices(): JSX.Element {
     <article>
       <div class="lk-page lk-stack">
         <A href={paths.settingsSection("security")} class="ghost small" style={{ "align-self": "flex-start" }}>
-          <Icon name="back" size={16} />
+          <Icon name="chevron-back" size={20} />
           {t("settings.section.security")}
         </A>
         <div class="lk-page-head">
@@ -257,7 +257,7 @@ export default function Devices(): JSX.Element {
                   setAdd(add() === "closed" ? "pick" : "closed");
                 }}
               >
-                <Icon name="plus" size={18} />
+                <Icon name="plus" size={20} />
                 {t("devices.add.title")}
               </button>
             </div>
@@ -273,12 +273,12 @@ export default function Devices(): JSX.Element {
                   <p class="lk-card-desc">{t("settings.devices.add.lede")}</p>
                   <div class="lk-device-add">
                     <button type="button" class="lk-option-card" onClick={() => setAdd("scan")}>
-                      <Icon name="qr" size={22} />
+                      <Icon name="qrcode-scan" size={24} />
                       <strong>{t("devices.add.side.scan")}</strong>
                       <span>{t("devices.add.side.scan_detail")}</span>
                     </button>
                     <button type="button" class="lk-option-card" onClick={() => setAdd("show")}>
-                      <Icon name="devices" size={22} />
+                      <Icon name="qrcode" size={24} />
                       <strong>{t("devices.add.side.show")}</strong>
                       <span>{t("devices.add.side.show_detail")}</span>
                     </button>
@@ -336,7 +336,7 @@ export function deviceIconName(kind: DeviceIconKind): IconName {
     case "tablet":
       return "tablet";
     case "computer":
-      return "monitor";
+      return "laptop";
     case "browser":
       return "globe";
     default:
@@ -879,7 +879,7 @@ function DevicesListView(props: {
                   }}
                 >
                   <span class="lk-card-row-icon">
-                    <Icon name={deviceIconName(view().icon)} size={18} />
+                    <Icon name={deviceIconName(view().icon)} size={20} />
                   </span>
                   <div class="lk-card-row-body">
                     <span class="lk-card-row-title">
@@ -1252,7 +1252,7 @@ function PairView(props: {
   return (
     <div class="lk-stack" style={{ gap: "10px" }}>
       <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {t("devices.add.title")}
       </button>
       <h2>{t("devices.add.side.show")}</h2>
@@ -1557,7 +1557,7 @@ function ScanView(props: {
   return (
     <div class="lk-stack" style={{ gap: "10px" }}>
       <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {t("devices.add.title")}
       </button>
       <h2>{t("devices.add.side.scan")}</h2>

@@ -136,7 +136,7 @@ struct TranslationBar: View {
     var body: some View {
         if let language = center.bars[conversation] {
             HStack(spacing: 10) {
-                Image(systemName: "character.bubble")
+                LkIconView(.translate, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 Text(l10n.t("translate.bar.body", texts: ["language": LanguageNames.inInterface(language)]))
@@ -152,7 +152,7 @@ struct TranslationBar: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.lakkoTextMuted)
                 Button { center.dismissBar(conversation: conversation) } label: {
-                    Image(systemName: "xmark").font(.caption.weight(.semibold))
+                    LkIconView(.xmark, size: 14, relativeTo: .caption)
                 }
                 .foregroundStyle(Color.lakkoTextMuted)
                 .accessibilityLabel(l10n.t("translate.bar.close"))
@@ -182,7 +182,7 @@ struct AutoTranslateToggle: View {
                 get: { center.autoTranslate(conversation: conversation) },
                 set: { center.setAutoTranslate(conversation: conversation, on: $0) }
             )) {
-                Label(l10n.t("translate.auto"), systemImage: "character.bubble")
+                Label(l10n.t("translate.auto"), icon: .translate)
                     .foregroundStyle(Color.lakkoText)
             }
             .tint(Color.lakkoAccent)

@@ -170,30 +170,29 @@ struct ProtectAccountScreen: View {
         switch item.row {
         case .email:
             option(
-                systemImage: "envelope", title: l10n.t("protect.email.title"),
+                icon: .envelope, title: l10n.t("protect.email.title"),
                 badge: l10n.t("protect.email.badge"), detail: l10n.t("protect.email.body"),
                 done: item.done, action: onAddEmail)
         case .passkey:
             option(
-                systemImage: "person.badge.key", title: l10n.t("protect.passkey.title"),
+                icon: .passkey, title: l10n.t("protect.passkey.title"),
                 badge: nil, detail: l10n.t("protect.passkey.body"),
                 done: item.done, action: onAddPasskey)
         case .phrase:
             option(
-                systemImage: "key", title: l10n.t("protect.phrase.title"),
+                icon: .key, title: l10n.t("protect.phrase.title"),
                 badge: nil, detail: l10n.t("protect.phrase.body"),
                 done: item.done, action: onSavePhrase)
         }
     }
 
     private func option(
-        systemImage: String, title: String, badge: String?, detail: String, done: Bool,
+        icon: LkIcon, title: String, badge: String?, detail: String, done: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.body)
+                LkIconView(icon, size: 20)
                     .frame(width: 28)
                     .foregroundStyle(Color.lakkoAccent)
                 VStack(alignment: .leading, spacing: 4) {
@@ -214,12 +213,11 @@ struct ProtectAccountScreen: View {
                 }
                 Spacer()
                 if done {
-                    Label(l10n.t("protect.done"), systemImage: "checkmark.circle.fill")
+                    Label(l10n.t("protect.done"), icon: .checkmarkCircleFill, size: 14, relativeTo: .footnote)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(Color.lakkoSuccess)
                 } else {
-                    Image(systemName: "chevron.forward")
-                        .font(.footnote.weight(.semibold))
+                    LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
             }
@@ -931,7 +929,7 @@ struct AccountProtectionSection: View {
     var body: some View {
         if let rows = center.rows {
             HStack {
-                Label(l10n.t(rows.statusKey), systemImage: "lock.shield")
+                Label(l10n.t(rows.statusKey), icon: .lockShield)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
             }
@@ -968,18 +966,18 @@ struct AccountProtectionSection: View {
                 EmptyView()
             case .addAgain:
                 valueRow(
-                    title: l10n.t("recovery_email.title"), systemImage: "envelope",
+                    title: l10n.t("recovery_email.title"), icon: .envelope,
                     value: l10n.t("recovery_email.add_again.title")
                 ) { onOpen(.recoveryEmail(remove: false)) }
             case .off:
                 valueRow(
-                    title: l10n.t("recovery_email.title"), systemImage: "envelope",
+                    title: l10n.t("recovery_email.title"), icon: .envelope,
                     value: l10n.t("recovery_email.status.off")
                 ) { onOpen(.recoveryEmail(remove: false)) }
             case .on:
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Label(l10n.t("recovery_email.title"), systemImage: "envelope")
+                        Label(l10n.t("recovery_email.title"), icon: .envelope)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(l10n.t("recovery_email.status.on"))
@@ -1008,29 +1006,28 @@ struct AccountProtectionSection: View {
             switch rows.phrase {
             case .save:
                 valueRow(
-                    title: l10n.t("protect.phrase.title"), systemImage: "key", value: nil
+                    title: l10n.t("protect.phrase.title"), icon: .key, value: nil
                 ) { onOpen(.savePhrase) }
             case .show:
                 valueRow(
-                    title: l10n.t("recovery_phrase.label"), systemImage: "key", value: nil
+                    title: l10n.t("recovery_phrase.label"), icon: .key, value: nil
                 ) { onOpen(.recoveryFactors) }
             }
         }
     }
 
     private func valueRow(
-        title: String, systemImage: String, value: String?, action: @escaping () -> Void
+        title: String, icon: LkIcon, value: String?, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack {
-                Label(title, systemImage: systemImage)
+                Label(title, icon: icon)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
                 if let value {
                     Text(value).foregroundStyle(Color.lakkoTextMuted)
                 }
-                Image(systemName: "chevron.forward")
-                    .font(.footnote.weight(.semibold))
+                LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
         }
@@ -1051,8 +1048,7 @@ struct AccountNoticeBanner: View {
             let copy = AccountNoticeCopy.of(kind)
             let date = RecallCopy.date(ms: notice.atMs, locale: l10n.locale)
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "exclamationmark.shield")
-                    .font(.subheadline)
+                LkIconView(.shieldExclamation, size: 20, relativeTo: .subheadline)
                     .foregroundStyle(Color.lakkoAccent)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
@@ -1117,12 +1113,12 @@ struct SecureAccountScreen: View {
                 }
             }
             if actions.contains(.removeEmail) {
-                AuthSecondaryButton(title: l10n.t("recovery_email.remove"), systemImage: "envelope") {
+                AuthSecondaryButton(title: l10n.t("recovery_email.remove"), icon: .envelope) {
                     onOpen(.recoveryEmail(remove: true))
                 }
             }
             if actions.contains(.savePhrase) {
-                AuthSecondaryButton(title: l10n.t("protect.phrase.title"), systemImage: "key") {
+                AuthSecondaryButton(title: l10n.t("protect.phrase.title"), icon: .key) {
                     onOpen(.savePhrase)
                 }
                 AuthHint(text: l10n.t("notice.secure.new_keys"))

@@ -188,11 +188,6 @@ compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 compose-ui-tooling  = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-material3   = { group = "androidx.compose.material3", name = "material3" }
-# Extended icon set — the base Compose Material3 ships only a
-# small core glyph table; Mic / Videocam / CallEnd / ScreenShare
-# / PanTool / PushPin / Group / FlipCameraAndroid all live in
-# the extended bundle. Used by the in-call UI (3c6-android).
-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 # Google Material XML library — provides the
 # `Theme.Material3.DayNight.NoActionBar` style the AndroidManifest
 # inherits via `res/values/themes.xml`. Distinct from

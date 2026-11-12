@@ -208,10 +208,10 @@ struct ChannelConversationScreen: View {
                 isPresented: $anonymousNote, title: l10n.t("channels.reactions.anonymous")
             ) { [.primary(l10n.t("common.ok")) {}] }
             .lakkoActionSheet(isPresented: $attachSheet, title: l10n.t("chat.composer.attach")) {[
-                .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
+                .action(l10n.t("chat.composer.photo_library"), icon: .photoStack) {
                     photoPickerOpen = true
                 },
-                .action(l10n.t("chat.media.file"), systemImage: "doc") { fileImporterOpen = true },
+                .action(l10n.t("chat.media.file"), icon: .doc) { fileImporterOpen = true },
             ]}
             .photosPicker(
                 isPresented: $photoPickerOpen, selection: $photoItems, maxSelectionCount: 10,
@@ -459,7 +459,7 @@ struct ChannelConversationScreen: View {
                                     .font(.footnote)
                                     .lineLimit(1)
                                 Button { model.removePendingAttachment(at: index) } label: {
-                                    Image(systemName: "xmark.circle.fill")
+                                    LkIconView(.xmarkCircleFill, size: 20)
                                         .foregroundStyle(Color.lakkoTextMuted)
                                 }
                                 .buttonStyle(.plain)
@@ -480,7 +480,7 @@ struct ChannelConversationScreen: View {
                 if showsRecordingBar {
                     RecordingBar(media: media).frame(maxWidth: .infinity, minHeight: 44)
                 } else {
-                    Button { attachSheet = true } label: { composerIcon("paperclip") }
+                    Button { attachSheet = true } label: { composerIcon(.paperclip) }
                         .buttonStyle(.plain)
                         .disabled(model.uploading || model.sending)
                         .accessibilityLabel(l10n.t("chat.composer.attach"))
@@ -489,7 +489,7 @@ struct ChannelConversationScreen: View {
                         onReturn: { Task { await model.sendDraft() } },
                         focus: $composerFocused)
                     Button { picker = PickerRequest(mode: .compose, item: nil) } label: {
-                        composerIcon("face.smiling")
+                        composerIcon(.faceSmiling)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(l10n.t("chat.composer.emoji_gifs"))
@@ -520,7 +520,7 @@ struct ChannelConversationScreen: View {
             Button { media.stopLocked() } label: {
                 ZStack {
                     Circle().fill(Color.lakkoDanger)
-                    Image(systemName: "stop.fill").foregroundStyle(Color.white)
+                    LkIconView(.stopFill, size: 20).foregroundStyle(Color.white)
                 }
                 .frame(width: 40, height: 40)
                 .padding(2)
@@ -551,16 +551,15 @@ struct ChannelConversationScreen: View {
             if model.sending {
                 ProgressView().controlSize(.small).tint(Color.lakkoAccentForeground)
             } else {
-                Image(systemName: "paperplane.fill").foregroundStyle(Color.lakkoAccentForeground)
+                LkIconView(.sendFill, size: 20).foregroundStyle(Color.lakkoAccentForeground)
             }
         }
         .frame(width: 40, height: 40)
         .padding(2)
     }
 
-    private func composerIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22))
+    private func composerIcon(_ icon: LkIcon) -> some View {
+        LkIconView(icon, size: 20, relativeTo: nil)
             .foregroundStyle(Color.lakkoTextMuted)
             .frame(width: 40, height: 40)
             .contentShape(Rectangle())
@@ -642,7 +641,7 @@ struct ChannelTitleView: View {
         HStack(spacing: 8) {
             InitialsAvatar(
                 name: title, identity: channelId, size: 32,
-                placeholderSymbol: "megaphone.fill", photo: .group(channelId),
+                placeholderIcon: .megaphoneFill, photo: .group(channelId),
                 // UX profile-screen section 7: the chat header plays the
                 // video always on a touch platform.
                 playsVideo: true)
@@ -699,7 +698,7 @@ struct ChannelOrphanedView: View {
                 HStack(spacing: 12) {
                     InitialsAvatar(
                         name: state.channels.first(where: { $0.id == channelId })?.title ?? "",
-                        identity: channelId, size: 48, placeholderSymbol: "megaphone.fill",
+                        identity: channelId, size: 48, placeholderIcon: .megaphoneFill,
                         photo: .group(channelId))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(state.channels.first(where: { $0.id == channelId })?.title ?? "")
@@ -711,7 +710,7 @@ struct ChannelOrphanedView: View {
                     }
                 }
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.shield")
+                    LkIconView(.shieldExclamation, size: 20)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .accessibilityHidden(true)
                     Text(l10n.t("channels.keys_reset.notice"))

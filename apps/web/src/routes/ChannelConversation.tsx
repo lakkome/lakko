@@ -417,7 +417,7 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
             aria-label={t("chat.header.back")}
             onClick={() => navigate(paths.home)}
           >
-            <Icon name="back" size={20} />
+            <Icon name="chevron-back" size={24} />
           </button>
           <button
             type="button"
@@ -471,7 +471,6 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           when={role() !== null}
           fallback={
             <div class="lk-empty">
-              <Icon name="channels" size={40} strokeWidth={1.4} />
               <strong>{t("channels.subscribe.prompt_title")}</strong>
               <Show when={location.state?.access !== undefined}>
                 <button type="button" class="primary" disabled={subscribing()} onClick={() => void subscribe()}>

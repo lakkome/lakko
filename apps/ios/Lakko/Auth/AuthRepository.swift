@@ -154,6 +154,14 @@ public final class AuthRepository: ObservableObject {
     /// (ADR-0073 section 4.2, UX 15.4).
     @Published public private(set) var freshPublishNeedsSignIn: Bool = false
 
+    /// The directory's cool-down on the owed publish (`429
+    /// identity-changed-too-recently` with a retry time, UX 15.4 "Waiting
+    /// for the directory"): the publish-owed screens show the minutes left
+    /// and no Try again, and retry when it is over. `nil` when the last
+    /// attempt failed otherwise, or nothing is owed. In memory only: a
+    /// relaunch retries and learns the time again.
+    @Published public private(set) var keyResetPublishWait: KeyResetPublishWait?
+
     /// ADR-0075 — whether the fresh identity parked on the phrase screen
     /// shows its words: `false` for an account that is not phrase-protected,
     /// whose only screen there is the "finishing" one while a publish is
@@ -539,10 +547,10 @@ public final class AuthRepository: ObservableObject {
     private let sessionUpgradeOperation: SessionUpgradeOperation
 
     /// ADR-0074 section 3.3 — read this account's DeviceGroup journal to its
-    /// head once (``DeviceGroupSyncRepository/waitForJournalHead(timeoutMs:)``);
-    /// `false` when it could not be read. Wired by the composition root; the
-    /// default reads nothing.
-    var readDeviceGroupJournalToHead: @MainActor (_ accountIdB64: String) async -> Bool = { _ in false }
+    /// head once: the sync runtime's read when it is running, else a one-shot
+    /// read of the persisted state (``DeviceGroupJournalOneShot``). Wired by
+    /// the composition root; the default reads nothing (``JournalHeadRead/noState``).
+    var readDeviceGroupJournalToHead: @MainActor (_ accountIdB64: String) async -> JournalHeadRead = { _ in .noState }
 
     /// The account's keys were rotated and this device holds the new ones
     /// (it rotated them, or it adopted them): what derives from the account
@@ -881,6 +889,13 @@ public final class AuthRepository: ObservableObject {
                 seed: secrets.accountIdentitySeed,
                 session: secrets.session
             ) {
+                // ADR-0073 section 3.3 — the silent restore refreshes here
+                // too: the keys of this device's own reset may have been
+                // reset again on another device (base scenario 4b), and then
+                // the words parked here are no longer the account's. A
+                // `key-generation-superseded` answer runs the signed-out
+                // screen and the staged wipe (``onSuperseded``).
+                Task { [weak self] in _ = await self?.tokenProvider.refresh() }
                 return
             }
             identitySecrets = secrets
@@ -3088,6 +3103,7 @@ public final class AuthRepository: ObservableObject {
         newPasswordOwed = false
         freshPublishPending = false
         freshPublishNeedsSignIn = false
+        keyResetPublishWait = nil
         keysResetThisSession = false
         accountRecalledThisSession = false
         keysUpdating = false
@@ -3162,6 +3178,7 @@ public final class AuthRepository: ObservableObject {
         newPasswordOwed = false
         freshPublishPending = false
         freshPublishNeedsSignIn = false
+        keyResetPublishWait = nil
         keysResetThisSession = false
         accountRecalledThisSession = false
         keysUpdating = false
@@ -3303,7 +3320,8 @@ public final class AuthRepository: ObservableObject {
         exportKey: Data,
         session: SessionPair,
         username: String,
-        retryMarkedBackupRestore: Bool = true
+        retryMarkedBackupRestore: Bool = true,
+        refreshFirst: Bool = false
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
         // The keys are on this device now; nothing is left to explain.
@@ -3355,7 +3373,19 @@ public final class AuthRepository: ObservableObject {
         // sign-in. Both run in this one task, in that order, so the
         // observation never sees this device's own upload.
         Task { [weak self] in
-            await self?.checkPublishedIdentity(
+            guard let self else { return }
+            // `refreshFirst`: the pair is the one a reset or a recall issued
+            // before its phrase screen, which may have stood open while the
+            // keys were reset again elsewhere (base scenario 4b). Auth is
+            // asked first; a `key-generation-superseded` answer signs this
+            // device out (``onSuperseded``) and nothing is uploaded.
+            if refreshFirst {
+                switch await self.tokenProvider.refresh() {
+                case .superseded, .revoked: return
+                case .refreshed, .invalid, .noCredential, .failed: break
+                }
+            }
+            await self.checkPublishedIdentity(
                 accountIdBytes: accountIdBytes,
                 accountIdentitySeed: accountIdentitySeed,
                 uploads: true
@@ -4465,15 +4495,29 @@ public final class AuthRepository: ObservableObject {
         let bound = binding.capture()
         Task { [weak self] in
             guard let self, bound.isCurrent else { return }
+            // The pair these routes land with was issued before a screen
+            // that may have stood open (the new phrase, the restore prompt)
+            // while the keys were reset on another device (base scenario
+            // 4b). Storage checks the token without auth, so the baseline
+            // goes up only once auth has answered for this pair: nothing at
+            // all after a superseded / revoked / invalid answer, only the
+            // phrase cache when auth could not be asked (the scheduled
+            // backup uploads later, through the same head-mint gate).
+            let gate = BaselineBackupGate.decide(await self.tokenProvider.refresh())
+            guard gate != .skip, bound.isCurrent, self.signedInAccountIdB64 == accountIdB64 else {
+                NSLog("backup baseline (\(context)) skipped: this session was signed out")
+                return
+            }
             await self.bootstrapBackupBestEffort(
                 accountId: accountId,
                 accountIdB64: accountIdB64,
                 accountIdentitySeed: accountIdentitySeed,
-                sessionToken: sessionToken,
+                sessionToken: self.tokenProvider.current?.sessionToken ?? sessionToken,
                 phrase: phrase,
                 context: context,
                 writes: writes,
-                uploadBaseline: restoreOutcome != .fetchFailed
+                uploadBaseline: gate == .upload
+                    && restoreOutcome != .fetchFailed
                     && !BackupRestoreRetryStore.isPending(
                         accountIdB64: accountIdB64, defaults: self.backupDefaults)
             )
@@ -5309,6 +5353,7 @@ public final class AuthRepository: ObservableObject {
         )
         freshPublishPending = true
         freshPublishNeedsSignIn = false
+        keyResetPublishWait = nil
         pendingRecovery = nil
         restoreNotice = nil
         state = .saveFreshPhrase(
@@ -5763,9 +5808,18 @@ public final class AuthRepository: ObservableObject {
             } catch {
                 if KeyResetVerifyFailure.isStale(error) {
                     freshPublishNeedsSignIn = true
+                    keyResetPublishWait = nil
                     throw KeyResetSignInRequired()
                 }
-                NSLog("[auth] key-reset publish step %@ failed: %@", step.rawValue, String(describing: error))
+                // UX 15.4 — the directory's cool-down names how long is
+                // left; any other failure keeps "could not finish".
+                keyResetPublishWait = KeyResetPublishWait.after(
+                    error, accountIdB64: accountIdB64, nowMs: SessionRestore.nowMs())
+                if keyResetPublishWait != nil {
+                    NSLog("[auth] the directory accepts the new keys only after its cool-down; waiting")
+                } else {
+                    NSLog("[auth] key-reset publish step %@ failed: %@", step.rawValue, String(describing: error))
+                }
                 throw KeyResetPublishFailed(step: step.rawValue, underlying: error)
             }
             record = KeyResetPublish.marking(record, done: step)
@@ -5779,6 +5833,7 @@ public final class AuthRepository: ObservableObject {
 
     /// Nothing is owed any more: the phrase screen may show the words.
     private func finishOwedPublish(accountIdB64: String) {
+        if keyResetPublishWait?.accountIdB64 == accountIdB64 { keyResetPublishWait = nil }
         if pendingFreshPhrase?.accountIdB64 == accountIdB64 {
             pendingFreshPhrase?.publishOwed = false
             freshPublishPending = false
@@ -5818,7 +5873,8 @@ public final class AuthRepository: ObservableObject {
             accountIdBytes: pending.accountIdBytes,
             exportKey: Data(),
             session: landed,
-            username: pending.username
+            username: pending.username,
+            refreshFirst: true
         )
         // A key reset (and a recall, which is one) ends with the new keys on
         // this device: the backup on the server is sealed under the phrase
@@ -6919,7 +6975,13 @@ extension AuthRepository {
                 held: held, publishedSignaturePubkey: publishedSignaturePubkey, journalRead: journalRead) {
             case .readJournalFirst:
                 NSLog("[auth] no pending key rotation on this device; reading the device journal once")
-                _ = await readDeviceGroupJournalToHead(accountIdB64)
+                // No answer decides nothing: the line stays and the read is
+                // tried again; never a wipe. Read to the head, refused, or no
+                // DeviceGroup state: the verdict follows from what is held.
+                if await readDeviceGroupJournalToHead(accountIdB64) == .noAnswer {
+                    NSLog("[auth] the device journal did not answer; deciding later")
+                    return .retryLater
+                }
                 journalRead = true
                 continue
             case .treatAsReset:

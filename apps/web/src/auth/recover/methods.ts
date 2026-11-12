@@ -77,10 +77,10 @@ function method(id: RecoverMethodId, icon: IconName, titleKey: string, subKey: s
   };
 }
 
-const DEVICE = method("device", "devices", "recovery.method.device.title", "recovery.method.device.sub");
+const DEVICE = method("device", "smartphone-waves", "recovery.method.device.title", "recovery.method.device.sub");
 
-const WORDS = method("words", "lines", "recovery.method.words.title", "recovery.method.words.sub");
-const TOTP = method("totp", "shield", "recovery.method.totp.title", "recovery.method.totp.sub");
+const WORDS = method("words", "words", "recovery.method.words.title", "recovery.method.words.sub");
+const TOTP = method("totp", "lock-rotation", "recovery.method.totp.title", "recovery.method.totp.sub");
 
 // ADR-0075 (UX 19.3): first in the list, above both groups, since what it
 // brings depends on the account (the keys while no phrase is saved, a new
@@ -89,7 +89,7 @@ const TOTP = method("totp", "shield", "recovery.method.totp.title", "recovery.me
 const EMAIL_GROUP: RecoverMethodGroup = {
   id: "email",
   label: "",
-  methods: [method("email", "mail", "recovery.email.row.title", "recovery.email.row.body")],
+  methods: [method("email", "envelope", "recovery.email.row.title", "recovery.email.row.body")],
 };
 
 const KEYS_GROUP: RecoverMethodGroup = {
@@ -99,7 +99,7 @@ const KEYS_GROUP: RecoverMethodGroup = {
   },
   methods: [
     DEVICE,
-    method("passkey", "lock", "recovery.method.passkey.title", "recovery.method.passkey.sub"),
+    method("passkey", "passkey", "recovery.method.passkey.title", "recovery.method.passkey.sub"),
     method("phrase", "key", "recovery.method.phrase.title", "recovery.method.phrase.sub"),
   ],
 };

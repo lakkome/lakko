@@ -591,7 +591,7 @@ export function PostComments(props: {
                   aria-label={t("chat.reply.cancel")}
                   onClick={() => setReplyTo(null)}
                 >
-                  <Icon name="close" size={16} />
+                  <Icon name="xmark" size={20} />
                 </button>
               </div>
             )}
@@ -612,8 +612,14 @@ export function PostComments(props: {
               value={draft()}
               onInput={(e) => setDraft(e.currentTarget.value)}
             />
-            <button type="submit" class="primary small" disabled={draft().trim().length === 0}>
-              {t("chat.composer.send")}
+            <button
+              type="submit"
+              class="lk-send-glyph"
+              aria-label={t("chat.composer.send")}
+              title={t("chat.composer.send")}
+              disabled={draft().trim().length === 0}
+            >
+              <Icon name="arrow-up-circle-fill" size={31} />
             </button>
           </form>
           <Show when={error()}>
@@ -682,7 +688,7 @@ export function PostComments(props: {
                 onDelete={() => void onDelete(m.c)}
                 extraDestructive={
                   props.canModerate && !own
-                    ? [{ label: t("channels.ban.action"), icon: "shieldAlert", onClick: () => void onBan(m.c) }]
+                    ? [{ label: t("channels.ban.action"), icon: "nosign", onClick: () => void onBan(m.c) }]
                     : []
                 }
                 onClose={() => setMenu(null)}

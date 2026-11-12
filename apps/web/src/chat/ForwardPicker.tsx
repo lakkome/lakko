@@ -198,7 +198,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
     >
       <Show when={rows().length > 0}>
         <label class="lk-search lk-forward-search">
-          <Icon name="search" size={16} />
+          <Icon name="search" size={20} />
           <input
             type="search"
             placeholder={t("chats.search.placeholder")}
@@ -240,7 +240,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                           <span class="lk-ellipsis">{row.title}</span>
                         </span>
                         <Show when={row.pinned}>
-                          <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+                          <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
                         </Show>
                       </div>
                       <div class="lk-row-line">

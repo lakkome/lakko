@@ -3550,6 +3550,10 @@ public class DeviceGroupSyncRepository(
          * The runtime may not be up yet right after a launch: waits for it
          * within the same [timeoutMs]. `false` when the head was not seen.
          */
+        /** Whether a sync runtime is polling a DeviceGroup right now. */
+        public fun hasLiveRuntime(): Boolean =
+            active?.let { it.group.get() != null && it.pollJob?.isActive == true } == true
+
         public suspend fun awaitHeadOnce(timeoutMs: Long): Boolean {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {

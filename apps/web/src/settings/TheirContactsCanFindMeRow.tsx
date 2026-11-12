@@ -62,7 +62,7 @@ export function TheirContactsCanFindMeRow(props: {
     <section class="lk-card">
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="search" size={18} />
+          <Icon name="search" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{COPY.theirContactsCanFindMe()}</span>

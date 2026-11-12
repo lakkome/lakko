@@ -27,7 +27,6 @@ import {
 } from "../backup/restored-marker";
 import { t } from "../l10n";
 import { paths } from "../routes/paths";
-import { Icon } from "../ui/icons";
 
 /** The restored state of the list. The marker goes the moment a conversation
  *  is there, and never comes back. */
@@ -64,7 +63,6 @@ export function RestoredNotice(): JSX.Element {
   const navigate = useNavigate();
   return (
     <div class="lk-empty">
-      <Icon name="key" size={40} strokeWidth={1.4} />
       <span>{t("chats.restored.card")}</span>
       <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
         {t("nav.contacts")}

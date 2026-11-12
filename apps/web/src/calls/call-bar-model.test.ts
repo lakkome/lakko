@@ -282,13 +282,13 @@ describe("callBarMuteControl — drawn as the call screen draws it", () => {
     const live = callBarMuteControl("connected", true);
     expect(live).not.toBeNull();
     expect(live?.id).toBe("mic");
-    expect(live?.icon).toBe("mic");
+    expect(live?.icon).toBe("mic-fill");
     expect(live?.tone).toBe("outline");
     expect(live?.pressed).toBe(false);
     expect(live?.disabled).toBe(false);
 
     const muted = callBarMuteControl("connected", false);
-    expect(muted?.icon).toBe("micOff");
+    expect(muted?.icon).toBe("mic-slash-fill");
     expect(muted?.tone).toBe("solid");
     expect(muted?.pressed).toBe(true);
     expect(muted?.accessibleName).toBe("Unmute microphone");

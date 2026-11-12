@@ -232,7 +232,7 @@ struct ChannelCommentsView: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                             .lineLimit(1)
                         Spacer()
-                        Button { self.replyTo = nil } label: { Image(systemName: "xmark") }
+                        Button { self.replyTo = nil } label: { LkIconView(.xmark, size: 20) }
                             .buttonStyle(.plain)
                             .accessibilityLabel(l10n.t("common.cancel"))
                     }
@@ -257,8 +257,7 @@ struct ChannelCommentsView: View {
                             sending = false
                         }
                     } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 26))
+                        LkIconView(.arrowUpCircleFill, size: 31, relativeTo: nil)
                             .foregroundStyle(
                                 draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                     ? Color.lakkoTextMuted : Color.lakkoAccent)

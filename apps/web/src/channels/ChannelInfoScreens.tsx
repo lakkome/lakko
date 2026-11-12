@@ -606,7 +606,7 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
         </Show>
         <Show when={isOwner()}>
           <button type="button" class="secondary" onClick={() => setPicking((v) => !v)}>
-            <Icon name="userPlus" size={16} />
+            <Icon name="person-plus" size={20} />
             {t("channels.publishers.add")}
           </button>
         </Show>
@@ -874,7 +874,7 @@ export function ChannelInviteLinksScreen(props: { readonly id: string }): JSX.El
         />
         <div class="lk-actions">
           <button type="button" class="primary" disabled={busy()} onClick={() => void create()}>
-            <Icon name="link" size={16} />
+            <Icon name="link" size={20} />
             {t("chat.invite_link.create")}
           </button>
         </div>

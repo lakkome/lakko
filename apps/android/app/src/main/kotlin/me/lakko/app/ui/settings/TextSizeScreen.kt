@@ -14,10 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -45,6 +41,9 @@ import me.lakko.app.ui.theme.ChatTextScale
 import me.lakko.app.ui.theme.LocalChatTextFactor
 import me.lakko.app.ui.theme.TextSize
 import me.lakko.app.ui.theme.TextSizePreference
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /*
  * docs/ux/text-size.md — Settings > Appearance > Text size: a preview of one
@@ -60,7 +59,7 @@ internal fun TextSizeSettingsRow(onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(t("settings.text_size.title")) },
         leadingContent = {
-            Icon(Icons.Filled.FormatSize, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            LkIcon(R.drawable.ic_lk_text_size, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
         },
         trailingContent = { Text(t(size.labelKey), color = MaterialTheme.colorScheme.onSurfaceVariant) },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
@@ -79,7 +78,7 @@ public fun TextSizeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 title = { Text(t("settings.text_size.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -93,7 +92,7 @@ public fun TextSizeScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 ListItem(
                     headlineContent = { Text(t(step.labelKey)) },
                     trailingContent = {
-                        if (chosen) Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        if (chosen) LkIcon(R.drawable.ic_lk_checkmark, contentDescription = null, tint = MaterialTheme.colorScheme.primary, size = LkIconSize.Row)
                     },
                     colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
                     modifier = Modifier

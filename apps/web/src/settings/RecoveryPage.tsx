@@ -27,7 +27,8 @@ import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { showPhraseOffered, threeWordsShown } from "../auth/protect/account-protection";
 import { phraseProtectedHere } from "../auth/protect/protection-state";
-import { phraseRevealStep } from "../auth/key-reset-owed";
+import { phraseRevealStep, publishOwedView } from "../auth/key-reset-owed";
+import { createPublishWaitClock, directoryCooldownOf } from "../auth/publish-wait-clock";
 import { AuthClient } from "../auth/client";
 import { authLimitMessage, isOffline, screenText } from "../auth/auth-error-copy";
 import { phraseWords } from "../auth/phrase-confirm";
@@ -70,7 +71,7 @@ export function RecoveryPage(): JSX.Element {
         class="ghost small lk-wide-only"
         style={{ "align-self": "flex-start" }}
       >
-        <Icon name="back" size={16} />
+        <Icon name="chevron-back" size={20} />
         {t("settings.section.security")}
       </A>
       <div class="lk-page-head">
@@ -88,7 +89,7 @@ export function RecoveryPage(): JSX.Element {
         <PasskeysRow />
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="devices" size={18} />
+            <Icon name="devices" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">
@@ -114,7 +115,7 @@ export function RecoveryPage(): JSX.Element {
         <h2>{t("settings.recovery.group.signin")}</h2>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
-            <Icon name="lines" size={18} />
+            <Icon name="words" size={20} />
           </span>
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("recovery.method.words.title")}</span>
@@ -169,7 +170,7 @@ function PasskeysRow(): JSX.Element {
   return (
     <div class="lk-card-row">
       <span class="lk-card-row-icon">
-        <Icon name="lock" size={18} />
+        <Icon name="passkey" size={20} />
       </span>
       <div class="lk-card-row-body">
         <span class="lk-card-row-title">{t("settings.passkeys.title")}</span>
@@ -233,6 +234,8 @@ function PhraseRow(props: {
       // Nothing is owed any more: on to the re-authentication step.
       setStep("asking");
     } catch (err) {
+      // UX 15.4: the directory's cool-down is said by the waiting copy.
+      if (directoryCooldownOf(err) !== null) return;
       const secs = attemptsRetryAfterSecs(err);
       if (secs !== null) wait.startFor(secs);
       else {
@@ -246,6 +249,19 @@ function PhraseRow(props: {
       setBusy(false);
     }
   }
+
+  // UX 15.4 "Waiting for the directory", while the pending explanation is
+  // open: the minutes count down and the publish is retried by itself.
+  const pendingWait = (): number | null => (step() === "pending" ? auth.owedPublishWaitUntilMs() : null);
+  const clock = createPublishWaitClock({ waitUntilMs: pendingWait, busy, retry: onRetryCredential });
+  const owedView = () =>
+    publishOwedView({
+      waitUntilMs: pendingWait(),
+      nowMs: clock.nowMs(),
+      retrying: busy(),
+      wordsShown: true,
+      signInNeeded: false,
+    });
 
   async function reveal(): Promise<void> {
     const phrase = await auth.devicePhrase();
@@ -300,7 +316,7 @@ function PhraseRow(props: {
     <>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
-          <Icon name="key" size={18} />
+          <Icon name="key" size={20} />
         </span>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">{t("recovery.method.phrase.title")}</span>
@@ -322,8 +338,11 @@ function PhraseRow(props: {
         </Show>
       </div>
       <Show when={step() === "pending"}>
-        <div class="lk-alert danger" role="alert">
-          {t("recovery_phrase.fresh.publish_owed")}
+        <div class={owedView().waiting ? "lk-alert" : "lk-alert danger"} role="alert">
+          {(() => {
+            const view = owedView();
+            return view.minutes === null ? t(view.textKey) : t(view.textKey, { minutes: view.minutes });
+          })()}
         </div>
         <Show when={error() !== null}>
           <div class="form-error" role="alert">
@@ -332,14 +351,16 @@ function PhraseRow(props: {
         </Show>
         <WaitNotice remainingMs={wait.remainingMs} />
         <div class="lk-actions">
-          <button
-            class="primary"
-            type="button"
-            disabled={busy() || wait.waiting()}
-            onClick={() => void onRetryCredential()}
-          >
-            {busy() ? t("common.checking") : t("common.try_again")}
-          </button>
+          <Show when={owedView().tryAgain}>
+            <button
+              class="primary"
+              type="button"
+              disabled={busy() || wait.waiting()}
+              onClick={() => void onRetryCredential()}
+            >
+              {busy() ? t("common.checking") : t("common.try_again")}
+            </button>
+          </Show>
           <button type="button" class="ghost" disabled={busy()} onClick={hide}>
             {t("common.cancel")}
           </button>

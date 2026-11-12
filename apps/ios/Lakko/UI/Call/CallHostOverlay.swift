@@ -489,7 +489,7 @@ private struct LinkCallNoticeBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "link")
+                LkIconView(.link, size: 20)
                     .foregroundStyle(Color.lakkoAccent)
                     .padding(.top, 2)
                 Text(notice.text)

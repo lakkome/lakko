@@ -244,19 +244,18 @@ export const CallChatPanel: Component<{
                 disabled={spec().disabled}
                 onClick={(): void => callActions.setMic(local() !== true)}
               >
-                <Icon name={spec().icon} size={18} />
+                <Icon name={spec().icon} size={20} />
               </button>
             )}
           </Show>
           <button
             type="button"
             class="lk-call-chat-close"
-            classList={{ down: props.shape === "sheet" }}
             aria-label={t("call.chat.close_a11y")}
             title={t("call.chat.close_a11y")}
             onClick={(): void => props.onClose()}
           >
-            <Icon name={props.shape === "sheet" ? "chevron" : "close"} size={20} />
+            <Icon name={props.shape === "sheet" ? "chevron-down" : "xmark"} size={20} />
           </button>
         </div>
       </header>
@@ -339,7 +338,7 @@ export const CallChatPanel: Component<{
             disabled={!composer().sendable}
             onClick={send}
           >
-            <Icon name="send" size={20} />
+            <Icon name="arrow-up-circle-fill" size={36} />
           </button>
         </div>
         <Show when={composer().tooLong}>

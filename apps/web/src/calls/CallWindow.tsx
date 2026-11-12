@@ -687,7 +687,7 @@ function CallWindowBody(
         <span class="lk-call-window-state">{status().text}</span>
         <Show when={encrypted()}>
           <span class="lk-call-window-mark">
-            <Icon name="lock" size={12} />
+            <Icon name="lock-fill" size={14} />
           </span>
         </Show>
       </div>
@@ -728,7 +728,7 @@ function CallWindowBody(
               callActions.setMic(local()?.micOn !== true);
             }}
           >
-            <Icon name={spec().icon} size={16} />
+            <Icon name={spec().icon} size={20} />
           </button>
         )}
       </Show>
@@ -777,7 +777,7 @@ function PersonPicture(props: {
         when={stream() !== undefined}
         fallback={
           <div class="lk-call-tile-blank" aria-hidden="true">
-            <Icon name="video" size={22} strokeWidth={1.4} />
+            <Icon name="video" size={24} />
           </div>
         }
       >

@@ -284,7 +284,7 @@ export default function NewGroup(): JSX.Element {
           // it read "Groups", a section the app no longer has).
           onClick={() => navigate(paths.home)}
         >
-          <Icon name="back" size={16} />
+          <Icon name="chevron-back" size={20} />
           {t("nav.chats")}
         </button>
         <div class="lk-page-head">
@@ -310,7 +310,7 @@ export default function NewGroup(): JSX.Element {
               disabled={busy()}
               onClick={() => setPhotoMenu((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
             <Show when={photoMenu()}>
               <AvatarMenu

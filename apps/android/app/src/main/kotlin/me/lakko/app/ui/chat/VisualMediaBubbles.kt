@@ -23,9 +23,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +68,9 @@ import me.lakko.app.media.decodeOrientedBitmap
 import me.lakko.app.media.mediaBubbleBox
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 internal const val COULD_NOT_LOAD_PHOTO = "chat.photo.load_failed"
 internal const val COULD_NOT_LOAD_VIDEO = "chat.video.load_failed"
@@ -348,11 +348,11 @@ internal fun VideoBubble(
             if (loading) {
                 CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp, color = Color.White)
             } else {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
+                LkIcon(
+                    icon = R.drawable.ic_lk_play_fill,
                     contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(32.dp),
+                    size = LkIconSize.Call,
                 )
             }
         }
@@ -408,7 +408,7 @@ private fun ViewerTopBar(onClose: () -> Unit, onSave: () -> Unit, modifier: Modi
             .padding(horizontal = 4.dp),
     ) {
         IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, contentDescription = t("common.close"), tint = Color.White)
+            LkIcon(R.drawable.ic_lk_xmark, contentDescription = t("common.close"), tint = Color.White)
         }
         Box(Modifier.weight(1f))
         TextButton(onClick = onSave) { Text(t("common.save"), color = Color.White) }

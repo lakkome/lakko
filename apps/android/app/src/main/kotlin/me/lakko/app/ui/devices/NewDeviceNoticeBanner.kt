@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +30,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.devices.NewDeviceNotices
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /**
  * "A device was added to your account" (`docs/ux/identity-recovery.md`
@@ -66,7 +67,7 @@ public fun NewDeviceExplanationBlock(modifier: Modifier = Modifier) {
                 .padding(12.dp)
                 .semantics(mergeDescendants = true) { contentDescription = spoken },
         ) {
-            Icon(Icons.Filled.Devices, contentDescription = null, modifier = Modifier.size(24.dp))
+            LkIcon(R.drawable.ic_lk_devices, contentDescription = null, size = LkIconSize.Toolbar)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall)
                 Text(whenLine, style = MaterialTheme.typography.bodySmall)

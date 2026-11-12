@@ -257,7 +257,7 @@ public struct ChatListScreen: View {
             createMenuWithSaved = true
             createMenuOpen = true
         } label: {
-            Image(systemName: "square.and.pencil")
+            LkIconView(.compose, size: 24)
         }
         .accessibilityLabel(l10n.t("chats.create.menu"))
     }
@@ -265,12 +265,12 @@ public struct ChatListScreen: View {
     /// The create menu's rows (Lakko's own action sheet, never a system menu).
     private func createMenuItems(includeSaved: Bool) -> [LakkoMenuItem] {
         var items: [LakkoMenuItem] = [
-            .action(l10n.t("chats.create.chat"), systemImage: "bubble.left") { onCreate(.chat) },
-            .action(l10n.t("chats.create.group"), systemImage: "person.3") { onCreate(.group) },
-            .action(l10n.t("chats.create.channel"), systemImage: "megaphone") { onCreate(.channel) },
+            .action(l10n.t("chats.create.chat"), icon: .chat) { onCreate(.chat) },
+            .action(l10n.t("chats.create.group"), icon: .person3) { onCreate(.group) },
+            .action(l10n.t("chats.create.channel"), icon: .megaphone) { onCreate(.channel) },
         ]
         if includeSaved {
-            items.append(.action(l10n.t("saved.title"), systemImage: "bookmark") { onCreate(.saved) })
+            items.append(.action(l10n.t("saved.title"), icon: .bookmark) { onCreate(.saved) })
         }
         return items
     }
@@ -467,13 +467,12 @@ public struct ChatListScreen: View {
             if !requests.isEmpty {
                 Button { requestsSentOpen = true } label: {
                     HStack {
-                        Label(l10n.t("requests_sent.title"), systemImage: "paperplane")
+                        Label(l10n.t("requests_sent.title"), icon: .send)
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Text(requests.count.formatted(.number.locale(l10n.locale)))
                             .foregroundStyle(Color.lakkoTextMuted)
-                        Image(systemName: "chevron.forward")
-                            .font(.footnote.weight(.semibold))
+                        LkIconView(.chevronForward, size: 14, relativeTo: .footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .padding(.horizontal, 16)
@@ -708,23 +707,23 @@ public struct ChatListScreen: View {
             let atLimit = !pinned && folder.pinned.count >= ChatFolders.maxPins
             items.append(.action(
                 l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"),
-                systemImage: pinned ? "pin.slash" : "pin", enabled: !atLimit
+                icon: pinned ? .pinSlash : .pin, enabled: !atLimit
             ) { Task { await toggleFolderPin(folder: folder, row: row) } })
             if atLimit { items.append(.text(ChatFolders.pinLimitLine, secondary: true)) }
         } else if row.kind != .channel {
             items.append(.action(
                 l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"),
-                systemImage: row.pinned ? "pin.slash" : "pin"
+                icon: row.pinned ? .pinSlash : .pin
             ) { Task { await toggleFlag(groupIdHex: row.id, field: .pin) } })
         }
         if row.kind != .channel {
             items.append(.action(
                 l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
-                systemImage: row.muted ? "bell" : "bell.slash"
+                icon: row.muted ? .bell : .bellSlash
             ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
             items.append(.action(
                 l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                systemImage: row.archived ? "tray.and.arrow.up" : "archivebox"
+                icon: row.archived ? .unarchive : .archive
             ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
         }
         let folders = deviceGroupSync.folders
@@ -732,24 +731,24 @@ public struct ChatListScreen: View {
             editor = FolderEditorRequest(folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
         }
         if folders.isEmpty {
-            items.append(.action(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", perform: openEditor))
+            items.append(.action(l10n.t("folders.add_to_folder"), icon: .folderPlus, perform: openEditor))
         } else {
             var sub: [LakkoMenuItem] = folders.map { f in
                 let isIn = ChatFolders.matches(f, row)
                 return .action(
-                    f.meta.name, systemImage: isIn ? "checkmark" : nil,
+                    f.meta.name, icon: isIn ? .checkmark : nil,
                     enabled: isIn || ChatFolders.handState(f, rowId: row.id) == .excluded
                         || !ChatFolders.handAddLimitReached(f)
                 ) { Task { await toggleMembership(folder: f, row: row) } }
             }
             sub.append(.action(
-                l10n.t("folders.new_ellipsis"), systemImage: "folder.badge.plus",
+                l10n.t("folders.new_ellipsis"), icon: .folderPlus,
                 enabled: folders.count < ChatFolders.maxFolders, perform: openEditor))
             if folders.count >= ChatFolders.maxFolders { sub.append(.text(ChatFolders.folderLimitLine, secondary: true)) }
-            items.append(.submenu(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", items: sub))
+            items.append(.submenu(l10n.t("folders.add_to_folder"), icon: .folderPlus, items: sub))
         }
         if let folder {
-            items.append(.action(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus") {
+            items.append(.action(l10n.t("folders.remove_from_folder"), icon: .folderMinus) {
                 Task { await toggleMembership(folder: folder, row: row) }
             })
         }
@@ -950,7 +949,7 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFolderPin(folder: folder, row: row) }
             } label: {
-                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: pinned ? "pin.slash" : "pin")
+                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), icon: pinned ? .pinSlash : .pin)
             }
             .tint(Color.lakkoAccent)
             .disabled(atLimit)
@@ -961,7 +960,7 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
-                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: row.pinned ? "pin.slash" : "pin")
+                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), icon: row.pinned ? .pinSlash : .pin)
             }
             .tint(Color.lakkoAccent)
         }
@@ -969,7 +968,7 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
             } label: {
-                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), systemImage: row.muted ? "bell" : "bell.slash")
+                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), icon: row.muted ? .bell : .bellSlash)
             }
             .tint(.gray)
             Button {
@@ -977,7 +976,7 @@ public struct ChatListScreen: View {
             } label: {
                 Label(
                     l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                    systemImage: row.archived ? "tray.and.arrow.up" : "archivebox")
+                    icon: row.archived ? .unarchive : .archive)
             }
             .tint(Color.lakkoTextMuted)
         }
@@ -1033,8 +1032,7 @@ public struct ChatListScreen: View {
     @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 40))
+            LkIconView(.bubbles, size: 48, relativeTo: nil)
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("chats.empty.title"))
                 .font(.headline)
@@ -1123,25 +1121,21 @@ struct ConversationRowView: View {
     private var trailingMarks: some View {
         HStack(spacing: 6) {
             if row.muted {
-                Image(systemName: "bell.slash.fill")
-                    .font(.caption2)
+                LkIconView(.bellSlashFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.pinned {
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
+                LkIconView(.pinFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.archived {
-                Image(systemName: "archivebox.fill")
-                    .font(.caption2)
+                LkIconView(.archiveFill, size: 14, relativeTo: .caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if row.hasUnseenReactions {
-                Image(systemName: "heart.fill")
-                    .font(.caption2)
+                LkIconView(.heartFill, size: 14, relativeTo: .caption2,
+                           label: Localization.text("chats.row.unseen_reactions"))
                     .foregroundStyle(Color.lakkoAccent)
-                    .accessibilityLabel(Localization.text("chats.row.unseen_reactions"))
             }
             if row.showsUnread {
                 // Accent capsule; a muted conversation renders it grey so a

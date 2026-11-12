@@ -346,7 +346,7 @@ export default function PasskeysSection(): JSX.Element {
                 {(cred) => (
                   <div class="lk-card-row">
                     <span class="lk-card-row-icon">
-                      <Icon name="key" size={18} />
+                      <Icon name="passkey" size={20} />
                     </span>
                     <div class="lk-card-row-body">
                       <span class="lk-card-row-title">{cred.nickname || t("settings.passkeys.unnamed")}</span>

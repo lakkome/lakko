@@ -11,9 +11,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -51,12 +48,18 @@ import me.lakko.app.ui.components.LakkoPicker
 import kotlinx.coroutines.launch
 import uniffi.lakko_ffi_uniffi.canonicalLanguageTag
 import uniffi.lakko_ffi_uniffi.sameLanguage
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
+import me.lakko.app.ui.components.LkIconSize
 
 /** The row on Settings > Language that opens [TranslationSettingsScreen]. */
 @Composable
 public fun TranslationSettingsRow(onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(t("settings.translation.title")) },
+        leadingContent = {
+            LkIcon(R.drawable.ic_lk_translate, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = LkIconSize.Row)
+        },
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier.clickable(onClick = onClick),
     )
@@ -91,7 +94,7 @@ public fun TranslationSettingsScreen(onBack: () -> Unit, modifier: Modifier = Mo
                 title = { Text(t("settings.translation.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -121,9 +124,11 @@ public fun TranslationSettingsScreen(onBack: () -> Unit, modifier: Modifier = Mo
                             IconButton(onClick = {
                                 TranslationCenter.updateSettings { s -> s.copy(extraReading = s.extraReading.filterNot { it == tag }) }
                             }) {
-                                Icon(
-                                    Icons.Filled.Close,
+                                LkIcon(
+                                    R.drawable.ic_lk_minus_circle,
                                     contentDescription = t("settings.translation.reading.remove", mapOf("language" to languageName(tag, ui))),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    size = LkIconSize.Row,
                                 )
                             }
                         },

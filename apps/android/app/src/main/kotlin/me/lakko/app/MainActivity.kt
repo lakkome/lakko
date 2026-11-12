@@ -22,22 +22,10 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.DynamicFeed
-import androidx.compose.material.icons.filled.People
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.DynamicFeed
-import androidx.compose.material.icons.outlined.People
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -2225,8 +2213,8 @@ private fun SessionRoot(
                                         contentDescription = name
                                     },
                                 ) {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.icon,
+                                    me.lakko.app.ui.components.LkIcon(
+                                        icon = if (selected) tab.selectedIcon else tab.icon,
                                         contentDescription = null,
                                     )
                                 }
@@ -3447,8 +3435,9 @@ private data class TabSpec(
     val route: String,
     /** Catalog key of the tab label (ADR-0061). */
     val labelKey: String,
-    val icon: ImageVector,
-    val selectedIcon: ImageVector,
+    @androidx.annotation.DrawableRes val icon: Int,
+    /** The `-fill` variant shown while the tab is selected (design system, section "Icons"). */
+    @androidx.annotation.DrawableRes val selectedIcon: Int,
 )
 
 /**
@@ -3466,12 +3455,12 @@ private data class TabSpec(
  * argument that call history should not exist.
  */
 private val Tabs: List<TabSpec> = listOf(
-    TabSpec(Routes.CHATS, "nav.chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    TabSpec(Routes.CHATS, "nav.chats", R.drawable.ic_lk_chat, R.drawable.ic_lk_chat_fill),
     // `docs/ux/feed.md` section 2 — second, one tap from the home.
-    TabSpec(Routes.FEED, "nav.feed", Icons.Outlined.DynamicFeed, Icons.Filled.DynamicFeed),
-    TabSpec(Routes.CONTACTS, "nav.contacts", Icons.Outlined.People, Icons.Filled.People),
-    TabSpec(Routes.CALLS, "nav.calls", Icons.Outlined.Call, Icons.Filled.Call),
-    TabSpec(Routes.SETTINGS, "nav.settings", Icons.Outlined.Settings, Icons.Filled.Settings),
+    TabSpec(Routes.FEED, "nav.feed", R.drawable.ic_lk_feed, R.drawable.ic_lk_feed_fill),
+    TabSpec(Routes.CONTACTS, "nav.contacts", R.drawable.ic_lk_person_square, R.drawable.ic_lk_person_square_fill),
+    TabSpec(Routes.CALLS, "nav.calls", R.drawable.ic_lk_phone, R.drawable.ic_lk_phone_fill),
+    TabSpec(Routes.SETTINGS, "nav.settings", R.drawable.ic_lk_gear, R.drawable.ic_lk_gear_fill),
 )
 
 /** Standard tab switch: one back-stack per tab, state saved and restored. */

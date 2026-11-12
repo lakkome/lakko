@@ -146,21 +146,21 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
       <MenuBackdrop onClose={() => props.onClose()} />
       <div class="lk-menu" role="menu" aria-label={t("chats.create.menu")}>
         <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
-          <Icon name="compose" size={16} />
+          <Icon name="chat" size={20} />
           {t("chats.create.chat")}
         </button>
         <button type="button" role="menuitem" onClick={() => go(paths.newGroup)}>
-          <Icon name="groups" size={16} />
+          <Icon name="person-3" size={20} />
           {t("chats.create.group")}
         </button>
         <button type="button" role="menuitem" onClick={() => go(paths.channelNew)}>
-          <Icon name="channels" size={16} />
+          <Icon name="megaphone" size={20} />
           {t("chats.create.channel")}
         </button>
         {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
         <div class="lk-menu-sep" />
         <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
-          <Icon name="bookmark" size={16} />
+          <Icon name="bookmark" size={20} />
           {t("saved.title")}
         </button>
       </div>
@@ -218,7 +218,7 @@ function ChannelRow(props: {
           <span class="lk-row-sub">{props.row.preview}</span>
           <span class="lk-row-trail">
             <Show when={props.pinned}>
-              <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+              <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
             </Show>
             <Show when={props.row.unread > 0}>
               <span class="lk-badge" title={t("channels.row.new_posts_a11y", { count: props.row.unread })}>
@@ -569,7 +569,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             aria-expanded={createOpen()}
             onClick={() => setCreateOpen((open) => !open)}
           >
-            <Icon name="compose" size={18} />
+            <Icon name="compose" size={24} />
           </button>
           <Show when={createOpen()}>
             <CreateMenu onClose={() => setCreateOpen(false)} />
@@ -580,7 +580,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           empty list too: finding the first person to talk to is what a new
           account needs it for. */}
       <label class="lk-search lk-pane-search">
-        <Icon name="search" size={16} />
+        <Icon name="search" size={20} />
         <input
           ref={searchInput}
           type="search"
@@ -611,7 +611,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         fallback={
           <Show when={restoredList() !== "card"} fallback={<RestoredNotice />}>
             <div class="lk-empty">
-              <Icon name="chat" size={40} strokeWidth={1.4} />
+              <Icon name="bubbles" size={48} />
               <strong>{copy().emptyTitle()}</strong>
               {/* The SAME menu the compose button opens, not a different set
                   of choices in a different place. */}
@@ -633,7 +633,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           <Show when={currentFolder() === null && !searching() && requestsSent().length > 0}>
             <button type="button" class="lk-row" onClick={() => setRequestsOpen(true)}>
               <span class="lk-avatar" aria-hidden="true">
-                <Icon name="groups" size={18} />
+                <Icon name="send" size={20} />
               </span>
               <div class="lk-row-body">
                 <div class="lk-row-line">
@@ -774,17 +774,20 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       </span>
                       <span class="lk-row-trail">
                         <Show when={flags().muted}>
-                          <Icon name="bellOff" size={14} title={t("chats.row.muted")} />
+                          <Icon name="bell-slash-fill" size={14} title={t("chats.row.muted")} />
                         </Show>
                         <Show when={pinnedHere(row)}>
-                          <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+                          <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
+                        </Show>
+                        <Show when={flags().archived}>
+                          <Icon name="archive-fill" size={14} />
                         </Show>
                         {/* Reactions section 12 — a small heart beside the
                             badge while others' reactions to the person's
                             own messages here are unseen. */}
                         <Show when={unseenReactionIds(accountId(), g.groupIdB64).length > 0}>
                           <span class="lk-list-unseen-reactions" title={t("chats.row.unseen_reactions")}>
-                            <Icon name="heart" size={14} />
+                            <Icon name="heart-fill" size={14} />
                           </span>
                         </Show>
                         <Show when={unread() > 0}>
@@ -809,7 +812,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             void toggleFlag(g, "pinned");
                           }}
                         >
-                          <Icon name="pin" size={16} />
+                          <Icon name={pinnedHere(row) ? "pin-slash" : "pin"} size={20} />
                         </button>
                         <button
                           type="button"
@@ -821,7 +824,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             void toggleFlag(g, "muted");
                           }}
                         >
-                          <Icon name="bellOff" size={16} />
+                          <Icon name={flags().muted ? "bell" : "bell-slash"} size={20} />
                         </button>
                         <button
                           type="button"
@@ -833,7 +836,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             void toggleFlag(g, "archived");
                           }}
                         >
-                          <Icon name="archive" size={16} />
+                          <Icon name={flags().archived ? "unarchive" : "archive"} size={20} />
                         </button>
                       </span>
                     </div>
@@ -987,7 +990,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       else act("pinned");
                     }}
                   >
-                    <Icon name="pin" size={18} />
+                    <Icon name={pinnedHere(m().row) ? "pin-slash" : "pin"} size={20} />
                     {pinnedHere(m().row) ? t("chats.action.unpin") : t("chats.action.pin")}
                   </button>
                   <Show when={pinBlocked(m().row)}>
@@ -996,11 +999,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 </Show>
                 <Show when={g() !== null}>
                   <button type="button" role="menuitem" onClick={() => act("muted")}>
-                    <Icon name="bellOff" size={18} />
+                    <Icon name={f().muted ? "bell" : "bell-slash"} size={20} />
                     {f().muted ? t("chats.action.unmute") : t("chats.action.mute")}
                   </button>
                   <button type="button" role="menuitem" onClick={() => act("archived")}>
-                    <Icon name="archive" size={18} />
+                    <Icon name={f().archived ? "unarchive" : "archive"} size={20} />
                     {f().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
                   </button>
                 </Show>
@@ -1016,7 +1019,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 </Show>
                 <Show when={currentFolder() !== null && ref() !== null}>
                   <button type="button" role="menuitem" onClick={removeFromFolder}>
-                    <Icon name="close" size={18} />
+                    <Icon name="folder-minus" size={20} />
                     {t("folders.remove_from_folder")}
                   </button>
                 </Show>
@@ -1056,7 +1059,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             void markAllRead(ALL_CHATS);
                           }}
                         >
-                          <Icon name="dcheck" size={18} />
+                          <Icon name="checkmark-message" size={20} />
                           {t("folders.mark_all_read")}
                         </button>
                       </Show>
@@ -1068,7 +1071,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           navigate(paths.settingsSection("folders"));
                         }}
                       >
-                        <Icon name="folder" size={18} />
+                        <Icon name="folder" size={20} />
                         {t("folders.edit_all")}
                       </button>
                     </>
@@ -1085,7 +1088,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           openFolderEditor({ mode: "edit", folderIdHex: id });
                         }}
                       >
-                        <Icon name="pencil" size={18} />
+                        <Icon name="pencil" size={20} />
                         {t("folders.edit")}
                       </button>
                       <Show when={count() > 0}>
@@ -1098,7 +1101,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                             void markAllRead(id);
                           }}
                         >
-                          <Icon name="dcheck" size={18} />
+                          <Icon name="checkmark-message" size={20} />
                           {t("folders.mark_all_read")}
                         </button>
                       </Show>
@@ -1110,7 +1113,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           navigate(paths.settingsSection("folders"));
                         }}
                       >
-                        <Icon name="lines" size={18} />
+                        <Icon name="arrow-up-down" size={20} />
                         {t("folders.reorder")}
                       </button>
                       <button
@@ -1123,7 +1126,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           void deleteFolder(sync, target);
                         }}
                       >
-                        <Icon name="trash" size={18} />
+                        <Icon name="trash" size={20} />
                         {t("folders.delete")}
                       </button>
                     </>

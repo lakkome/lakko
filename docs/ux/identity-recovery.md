@@ -953,6 +953,26 @@ The Ready state's second sentence is unchanged ("Your contacts will see
 that your safety number changed ..."); a third is added: "Your other
 devices were signed out. Add them again from Settings > Devices."
 
+**Waiting for the directory (amended 2026-11-12, seen on an iPhone).** The
+directory accepts a reset's new keys only once an hour after the
+account's keys last changed (the cool-down of ADR-0073 section 4.1); a
+second reset inside that hour was answered "Try again", which could not
+succeed for up to an hour and did not say so. The refusal now carries how
+long is left, and the screen says it instead of the "could not finish"
+copy:
+
+> Your account keys were reset less than an hour after the last change,
+> so they can be published in 40 minutes. Lakko will finish by itself and
+> then show the new words.
+
+For an account with no saved phrase (ADR-0075) the line names no words:
+"Your account has new keys. The change finishes in 40 minutes, by
+itself." There is no Try again button in this state. The app retries by itself
+when the time is up (while the screen is open) and whenever it opens
+signed in; the minutes count down while the screen is open. Any other
+refusal or a network failure keeps the "could not finish" copy and Try
+again.
+
 ### 15.5 Data the UI needs
 
 From the server (all in ADR-0073):

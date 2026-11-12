@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,6 +48,8 @@ import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.contactRouteKey
+import me.lakko.app.R
+import me.lakko.app.ui.components.LkIcon
 
 /**
  * New group — docs/ux/new-group.md, the Android shape.
@@ -135,7 +135,7 @@ public fun NewGroupScreen(
                 title = { Text(t("chats.new_group.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !creating) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
+                        LkIcon(R.drawable.ic_lk_chevron_back, contentDescription = t("common.back"))
                     }
                 },
             )

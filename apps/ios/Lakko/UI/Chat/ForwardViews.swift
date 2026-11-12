@@ -28,8 +28,7 @@ struct ForwardedLine: View {
         let line = ForwardPayload.attributionLine(forward)
         Button(action: onTap) {
             HStack(spacing: 5) {
-                Image(systemName: "arrowshape.turn.up.right")
-                    .chatFont(.caption2)
+                LkIconView(.forward, size: 14, relativeTo: .caption2)
                 Text(line)
                     .chatFont(.caption1)
                     .lineLimit(1)
@@ -114,7 +113,7 @@ struct ForwardPickerScreen: View {
                                 HStack(spacing: 8) {
                                     ConversationRowView(row: row, timeLabel: timeLabel(row))
                                     if done {
-                                        Label(doneLabel ?? "", systemImage: "checkmark")
+                                        Label(doneLabel ?? "", icon: .checkmark, size: 14, relativeTo: .footnote)
                                             .font(.footnote.weight(.medium))
                                             .foregroundStyle(Color.lakkoTextMuted)
                                             .fixedSize()

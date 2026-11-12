@@ -352,7 +352,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 title={t("chat.message.more_reactions")}
                 onClick={() => run(() => props.onMoreReactions())}
               >
-                <Icon name="plus" size={16} />
+                <Icon name="plus" size={20} />
               </button>
             </Show>
           </div>
@@ -384,13 +384,13 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               role="menuitem"
               onClick={() => run(() => props.onReply())}
             >
-              <Icon name="reply" size={16} />
+              <Icon name="reply" size={20} />
               <span>{t("chat.message.reply")}</span>
             </button>
             </Show>
             <Show when={props.pinOnly !== true && props.canForward}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
-                <Icon name="forward" size={16} />
+                <Icon name="forward" size={20} />
                 <span>{t("chat.message.forward")}</span>
               </button>
             </Show>
@@ -401,7 +401,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   role="menuitem"
                   onClick={() => run(() => props.onCopy(text()))}
                 >
-                  <Icon name="copy" size={16} />
+                  <Icon name="copy" size={20} />
                   <span>{t("common.copy")}</span>
                 </button>
               )}
@@ -409,7 +409,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             <Show when={props.pinOnly === true ? null : (props.translateLabel ?? null)}>
               {(label) => (
                 <button type="button" role="menuitem" onClick={() => run(() => props.onTranslate?.())}>
-                  <Icon name="globe" size={16} />
+                  <Icon name={label() === "show-original" ? "text-bubble" : "translate"} size={20} />
                   <span>
                     {label() === "show-original"
                       ? t("chat.message.show_original")
@@ -420,7 +420,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             </Show>
             <Show when={props.pinOnly !== true && props.canSelect}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onSelect())}>
-                <Icon name="select" size={16} />
+                <Icon name="checkmark-circle" size={20} />
                 <span>{t("chat.message.select")}</span>
               </button>
             </Show>
@@ -434,7 +434,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   role="menuitem"
                   onClick={() => run(() => props.onPin())}
                 >
-                  <Icon name="pin" size={16} />
+                  <Icon name={label() === "Pin" ? "pin" : "pin-slash"} size={20} />
                   <span>{label() === "Pin" ? t("chat.message.pin") : t("chat.message.unpin")}</span>
                 </button>
               )}
@@ -450,7 +450,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   role="menuitem"
                   onClick={() => run(() => props.onSave?.())}
                 >
-                  <Icon name="bookmark" size={16} />
+                  <Icon name={label() === "save" ? "bookmark" : "bookmark-slash"} size={20} />
                   <span>{label() === "save" ? t("chat.message.save") : t("chat.message.unsave")}</span>
                 </button>
               )}
@@ -458,7 +458,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             <Show when={props.pinOnly !== true && props.canEditDelete}>
               <Show when={props.canEdit !== false}>
                 <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
-                  <Icon name="pencil" size={16} />
+                  <Icon name="pencil" size={20} />
                   <span>{t("chat.message.edit")}</span>
                 </button>
               </Show>
@@ -469,7 +469,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   class="danger"
                   onClick={() => run(() => props.onDelete())}
                 >
-                  <Icon name="trash" size={16} />
+                  <Icon name="trash" size={20} />
                   <span>{t("common.delete")}</span>
                 </button>
               </div>
@@ -479,7 +479,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 <For each={props.extraDestructive ?? []}>
                   {(a) => (
                     <button type="button" role="menuitem" class="danger" onClick={() => run(() => a.onClick())}>
-                      <Icon name={a.icon} size={16} />
+                      <Icon name={a.icon} size={20} />
                       <span>{a.label}</span>
                     </button>
                   )}

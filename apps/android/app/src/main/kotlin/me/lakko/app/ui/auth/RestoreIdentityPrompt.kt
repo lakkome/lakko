@@ -7,11 +7,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.automirrored.filled.Notes
-import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -31,6 +26,7 @@ import me.lakko.app.auth.base64Decode
 import me.lakko.app.webauthn.restoreOffersPasskey
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.R
 
 /** The ways to bring the keys onto this phone, in the order the prompt
  *  lists them. Never a route that only signs in. */
@@ -126,14 +122,14 @@ public fun RestoreIdentityPrompt(
             Lead(t("restore_identity.lede", mapOf("username" to "@$username")))
             Spacer(Modifier.height(16.dp))
             MethodRow(
-                icon = Icons.Filled.Devices,
+                icon = R.drawable.ic_lk_smartphone_waves,
                 title = t("recovery.method.device.title"),
                 subtitle = t("recovery.method.device.sub"),
                 onClick = { way = RestoreWay.AnotherDevice },
             )
             if (restoreOffersPasskey(state.passkeysWithKeys)) {
                 MethodRow(
-                    icon = Icons.Filled.Key,
+                    icon = R.drawable.ic_lk_passkey,
                     title = t("recovery.method.passkey.title"),
                     subtitle = t("restore_identity.method.passkey.sub"),
                     onClick = { way = RestoreWay.Passkey },
@@ -141,7 +137,7 @@ public fun RestoreIdentityPrompt(
             }
             if (accountRows.emailCode) {
                 MethodRow(
-                    icon = Icons.Filled.Key,
+                    icon = R.drawable.ic_lk_envelope,
                     title = t("recovery.email.row.title"),
                     subtitle = t("recovery.email.row.body"),
                     onClick = {
@@ -152,7 +148,7 @@ public fun RestoreIdentityPrompt(
             }
             if (accountRows.phrase) {
                 MethodRow(
-                    icon = Icons.AutoMirrored.Filled.Notes,
+                    icon = R.drawable.ic_lk_key,
                     title = t("recovery.method.phrase.title"),
                     subtitle = t("recovery.method.phrase.restore_sub"),
                     onClick = { way = RestoreWay.Phrase },
@@ -160,7 +156,7 @@ public fun RestoreIdentityPrompt(
             }
             FormError(emailState.listLine)
             MethodRow(
-                icon = Icons.Outlined.ErrorOutline,
+                icon = R.drawable.ic_lk_exclamation_circle,
                 title = t("restore_identity.lost.summary"),
                 subtitle = t("restore_identity.lost.sub"),
                 onClick = { way = RestoreWay.Neither },

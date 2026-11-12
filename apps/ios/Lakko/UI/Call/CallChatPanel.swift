@@ -20,7 +20,7 @@ struct CallChatControlButton: View {
     var body: some View {
         CallControlButton(
             control: .chat,
-            systemImage: "bubble.left.and.bubble.right.fill",
+            icon: .bubblesFill,
             on: chat.panelOpen,
             enabled: enabled,
             spokenLabel: CallChatModel.spokenCircleLabel(open: chat.panelOpen, unread: chat.unread),
@@ -144,8 +144,7 @@ struct CallChatPanel: View {
             Button {
                 chat.closePanel()
             } label: {
-                Image(systemName: column ? "xmark" : "chevron.down")
-                    .font(.system(size: 17, weight: .semibold))
+                LkIconView(column ? .xmark : .chevronDown, size: 20, relativeTo: nil)
                     .foregroundStyle(Color.lakkoText)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
@@ -168,8 +167,7 @@ struct CallChatPanel: View {
                 if face == .outline {
                     Circle().strokeBorder(Color.lakkoBorder, lineWidth: 1)
                 }
-                Image(systemName: micOn ? "mic.fill" : "mic.slash.fill")
-                    .font(.system(size: 14, weight: .regular))
+                LkIconView(micOn ? .micFill : .micSlashFill, size: 14, relativeTo: nil)
                     .foregroundStyle(face == .solid ? Color.lakkoSurface : Color.lakkoText)
             }
             .frame(width: 32, height: 32)
@@ -232,7 +230,7 @@ struct CallChatPanel: View {
                                 }
                             } label: {
                                 HStack(spacing: 4) {
-                                    Image(systemName: "arrow.down")
+                                    LkIconView(.arrowDown, size: 20)
                                     Text(l10n.t("call.chat.new_messages"))
                                 }
                                 .font(.system(size: 13, weight: .semibold))
@@ -285,7 +283,7 @@ struct CallChatPanel: View {
                 bubble(message)
                     .opacity(message.delivery == .notSent ? 0.6 : 1)
                     .lakkoLongPressMenu {
-                        [.action(l10n.t("common.copy"), systemImage: "doc.on.doc") {
+                        [.action(l10n.t("common.copy"), icon: .copy) {
                             UIPasteboard.general.string = message.text
                         }]
                     }
@@ -366,8 +364,7 @@ struct CallChatPanel: View {
                 // line. The on-screen keyboard's return keeps breaking it.
                 .submitOnHardwareReturn(send)
                 Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30))
+                    LkIconView(.arrowUpCircleFill, size: 36, relativeTo: nil)
                         .foregroundStyle(sendable ? Color.lakkoAccent : Color.lakkoTextMuted)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())

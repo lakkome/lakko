@@ -155,7 +155,7 @@ public struct PasskeysView: View {
                     Button {
                         exportingData = ExportedFile(url: url)
                     } label: {
-                        Label(l10n.t("settings.data.share"), systemImage: "square.and.arrow.down")
+                        Label(l10n.t("settings.data.share"), icon: .download)
                     }
                 }
 
@@ -250,11 +250,11 @@ public struct PasskeysView: View {
     private func statusBanner(for message: PasskeysViewModel.StatusMessage) -> some View {
         switch message {
         case .ok(let text):
-            Label(text.text, systemImage: "checkmark.circle.fill")
+            Label(text.text, icon: .checkmarkCircleFill)
                 .foregroundStyle(.green)
                 .font(.footnote)
         case .error(let text):
-            Label(text.text, systemImage: "exclamationmark.triangle.fill")
+            Label(text.text, icon: .warningFill)
                 .foregroundStyle(.red)
                 .font(.footnote)
         }

@@ -694,8 +694,9 @@ async fn apply_identity_upload_gated(
     ))
 }
 
-/// `(signature_pubkey, key_generation, within_cooldown, previous_signature_pubkey)`
-/// of the row an upload meets.
+/// `(signature_pubkey, key_generation, cooldown_remaining_secs, previous_signature_pubkey)`
+/// of the row an upload meets; `cooldown_remaining_secs` is `0` outside the
+/// cool-down window.
 type ExistingRow = (Vec<u8>, u64, i64, Option<Vec<u8>>);
 
 /// A single attempt of the gated upsert. Read-compare-conditional-write under
@@ -757,19 +758,22 @@ async fn try_apply_identity_once(
     let mut tx = db.begin().await?;
 
     // Row lock + the facts we need: the current key, the stored generation,
-    // and whether the last attested change is still within the cool-down
-    // window (computed server-side to avoid any Rust/DB clock skew; a
-    // `0`-second window never matches, since the elapsed seconds are always
-    // `>= 0`).
+    // and how many whole seconds of the cool-down window are left after the
+    // last attested change (computed server-side to avoid any Rust/DB clock
+    // skew; `0` outside the window, and a `0`-second window never yields
+    // more, since the elapsed seconds are always `>= 0`).
     let existing: Option<ExistingRow> = sqlx::query_as(
         "SELECT signature_pubkey, key_generation, \
-            CAST( \
+            CAST(IF( \
                 last_unproven_key_change_at IS NOT NULL \
-                AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ? \
-            AS SIGNED), \
+                AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ?, \
+                ? - TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)), \
+                0 \
+            ) AS SIGNED), \
             previous_signature_pubkey \
          FROM identity_bundles WHERE account_id = ? FOR UPDATE",
     )
+    .bind(cooldown_secs)
     .bind(cooldown_secs)
     .bind(account_id)
     .fetch_optional(&mut *tx)
@@ -818,7 +822,7 @@ async fn try_apply_identity_once(
             // (decision D).
             LogAppendDecision::Append { is_reset: false }
         },
-        Some((current, stored_generation, within_cooldown, previous)) => {
+        Some((current, stored_generation, cooldown_remaining, previous)) => {
             // ADR-0073: the generation floor, before any change is judged.
             if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
                 tx.rollback().await?;
@@ -853,7 +857,7 @@ async fn try_apply_identity_once(
                 signature_pubkey,
                 evidence.kind(),
                 stored_generation,
-                within_cooldown != 0,
+                cooldown_remaining > 0,
             );
 
             let (key_changed, attested_generation, proven) = match outcome {
@@ -868,9 +872,17 @@ async fn try_apply_identity_once(
                     tx.rollback().await?;
                     let (status, code) = outcome.refusal();
                     tracing::warn!(code, "identity key change refused",);
-                    return Err(AttemptError::Refused(crate::key_reset::json_error(
-                        status, code,
-                    )));
+                    let refusal = if matches!(outcome, ChangeOutcome::CoolingDown) {
+                        // `cooldown_remaining > 0` here (the outcome needs it).
+                        RouteError::RetryAfter(
+                            status,
+                            code,
+                            u64::try_from(cooldown_remaining).unwrap_or(1).max(1),
+                        )
+                    } else {
+                        crate::key_reset::json_error(status, code)
+                    };
+                    return Err(AttemptError::Refused(refusal));
                 },
             };
 

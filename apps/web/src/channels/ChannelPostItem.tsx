@@ -174,7 +174,7 @@ export function ChannelPostItem(props: ChannelPostItemProps): JSX.Element {
                 {(ref) => (
                   <li class="lk-channel-file">
                     <button type="button" class="ghost small" onClick={() => void download(ref)}>
-                      <Icon name="clip" size={14} />
+                      <Icon name="doc" size={14} />
                       <span>{ref.name ?? t("chat.attachment.unnamed")}</span>
                       <span class="lk-meta">{formatAttachmentSize(ref.size)}</span>
                     </button>

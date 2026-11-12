@@ -247,10 +247,12 @@ import {
 import {
   attestationGate,
   clearKeyResetOwed,
+  directoryCooldownSecs,
   directoryResetOutcome,
   isKeyResetOwed,
   readKeyResetOwed,
   remainingKeyResetSteps,
+  withDirectoryWait,
   withKeyResetStepDone,
   writeKeyResetOwed,
   keyResetAttestationSignedAtMs,
@@ -284,7 +286,6 @@ import {
   rotatedNoticeOwed,
   rotationIntake,
   rotationWithholdsPhrase,
-  supersededStep,
   upgradeVerdict,
   withPendingRotation,
   type CommitProbe,
@@ -292,7 +293,10 @@ import {
   type PendingRotation,
   type UpgradeVerdict,
 } from "../devices/key-rotation";
-import { awaitKeyRotationPort } from "../devices/sync/key-rotation-port";
+import { keyRotationPort, readJournalOnce } from "../devices/sync/key-rotation-port";
+import { readJournalStandalone } from "../devices/sync/standalone-journal-read";
+import { classifyStandaloneFetchError, openStandaloneDeviceGroupJournal } from "../devices/sync/standalone-journal";
+import { settleSuperseded } from "../devices/superseded-adoption";
 import { deviceGroupIdOf } from "../devices/lifecycle";
 import { transferRoot } from "../ds/ownership";
 import { DsClient } from "../ds/client";
@@ -678,6 +682,9 @@ export interface AuthApi {
    *  has not seen an explicit sign-in: the phrase screen asks for one
    *  ("Sign in again to finish publishing your new keys."). */
   readonly freshPublishSignInNeeded: Accessor<boolean>;
+  /** Unix milliseconds until which the directory refuses the reset's new
+   *  keys (its cool-down; UX 15.4 "Waiting for the directory"), or `null`. */
+  readonly freshPublishWaitUntilMs: Accessor<number | null>;
   /** Retry the owed publishing steps for the identity `mintFreshIdentity`
    *  reset. Never resets again. Throws what the step threw (offline, `429`,
    *  `503`, a refusal). */
@@ -1006,6 +1013,8 @@ export interface AuthApi {
    *  succeeded; ADR-0074: a key rotation with a publishing step owed). While
    *  it does, the phrase is not shown anywhere. */
   publishOwed(): boolean;
+  /** For the signed-in account, as `freshPublishWaitUntilMs`. */
+  owedPublishWaitUntilMs(): number | null;
   /** Retry the owed publishing steps for the signed-in account with the
    *  seed this session holds. Resolves when nothing is owed (any more).
    *  Throws what the step threw (offline, `429`, `503`, a refusal). */
@@ -2564,16 +2573,38 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const persist = (next: KeyResetOwed): void => {
         record = next;
         writeKeyResetOwed(storage, ctx.accountIdB64, next);
+        // The phrase screen and Settings read the record again.
+        setOwedVersion((v) => v + 1);
+        setRotationVersion((v) => v + 1);
       };
       for (const step of remainingKeyResetSteps(record.done)) {
-        if (step === "directory") {
-          await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
-        } else {
-          await refoundDeviceGroupAfterReset(ctx);
+        try {
+          if (step === "directory") {
+            await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
+          } else {
+            await refoundDeviceGroupAfterReset(ctx);
+          }
+        } catch (err) {
+          // UX 15.4 "Waiting for the directory": the directory's cool-down
+          // names how long is left; the screen says so and retries by itself
+          // then. Any other failure ends a wait recorded earlier.
+          const cooldown =
+            step === "directory" && err instanceof DiscoveryHttpError
+              ? directoryCooldownSecs({
+                  status: err.status,
+                  errorCode: err.errorCode,
+                  retryAfterSecs: err.retryAfterSecs,
+                })
+              : null;
+          if (cooldown !== null) persist(withDirectoryWait(record, Date.now() + cooldown * 1000));
+          else if (record.waitUntilMs !== undefined) persist(withDirectoryWait(record, null));
+          throw err;
         }
         persist(withKeyResetStepDone(record, step satisfies KeyResetStep));
       }
       clearKeyResetOwed(storage, ctx.accountIdB64);
+      setOwedVersion((v) => v + 1);
+      setRotationVersion((v) => v + 1);
     } finally {
       canonical.free();
     }
@@ -5010,33 +5041,47 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     const wasm = await loadWasm();
     const accountIdBytes = base64Decode(accountIdB64);
     const heldKeyB64 = base64Encode(publicKeyOfSeed(wasm, heldSeed));
-    const tried: string[] = [];
-    let journal: "not-read" | "read" | "unreadable" = "not-read";
-    for (;;) {
-      let state: KeyRotationState;
-      try {
-        state = await getKeyRotationState(accountIdB64, deviceKey);
-      } catch {
-        state = EMPTY_KEY_ROTATION_STATE;
-      }
-      const pending = withPendingRotation(state.pending, null, Date.now(), (preparedAtMs, nowMs) =>
-        wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(nowMs)),
-      );
-      const step = supersededStep({ heldKeyB64, pending, tried, journal });
-      if (step.kind === "reset") return "reset";
-      if (step.kind === "read-journal") {
-        const port = await awaitKeyRotationPort(KEY_ROTATION_PORT_WAIT_MS);
-        if (port === null) {
-          // No DeviceGroup handle in this page. Inside a session that is a
-          // loading order, not a verdict; outside one nothing will load it.
-          return state_isSessionFor(accountIdB64) ? "later" : "reset";
+    const activeDeviceKey = deviceKey;
+    const activePair = pair;
+    return settleSuperseded({
+      heldKeyB64,
+      pending: async () => {
+        let stored: KeyRotationState;
+        try {
+          stored = await getKeyRotationState(accountIdB64, activeDeviceKey);
+        } catch {
+          stored = EMPTY_KEY_ROTATION_STATE;
         }
-        const read = await port.catchUp();
-        if (read === "offline") return "later";
-        journal = read;
-        continue;
-      }
-      for (const keyB64 of step.keysB64) {
+        return withPendingRotation(stored.pending, null, Date.now(), (preparedAtMs, nowMs) =>
+          wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(nowMs)),
+        );
+      },
+      inSession: () => state_isSessionFor(accountIdB64),
+      readJournal: async () => {
+        // Inside a session the page's own handle reads (it may still be
+        // loading: a loading order, not a verdict). Outside one (a page load
+        // whose refresh was refused, the new-phrase screen) this device's
+        // own persisted DeviceGroup is opened for one read with the DS proof
+        // of its epoch (ADR-0074 section 3.3: the DS needs no session);
+        // `not-loaded` then means the device holds no DeviceGroup state.
+        if (state_isSessionFor(accountIdB64)) {
+          return readJournalOnce({ port: keyRotationPort(), inSession: true, waitMs: KEY_ROTATION_PORT_WAIT_MS });
+        }
+        return readJournalStandalone({
+          open: () =>
+            openStandaloneDeviceGroupJournal({
+              accountIdB64,
+              accountIdBytes,
+              deviceKey: activeDeviceKey,
+              accountIdentitySeed: heldSeed,
+            }),
+          intake: async (envelope) => {
+            await storeKeyRotationEnvelope(wasm, accountIdB64, activeDeviceKey, heldSeed, envelope);
+          },
+          classify: classifyStandaloneFetchError,
+        });
+      },
+      tryKey: async (keyB64, pending) => {
         let seed: Uint8Array;
         let entropy: Uint8Array | null = null;
         if (keyB64 === heldKeyB64) {
@@ -5044,18 +5089,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } else {
           const found = pendingFor(pending, keyB64);
           const carried = found === null ? null : await seedOfPending(found);
-          if (carried === null) {
-            tried.push(keyB64);
-            continue;
-          }
+          if (carried === null) return "not-accepted";
           seed = carried.seed;
           entropy = carried.entropy;
         }
-        const upgraded = await upgradeSessionWith(accountIdBytes, pair.refreshToken, seed);
-        if (upgraded.verdict === "not-accepted") {
-          tried.push(keyB64);
-          continue;
-        }
+        const upgraded = await upgradeSessionWith(accountIdBytes, activePair.refreshToken, seed);
+        if (upgraded.verdict === "not-accepted") return "not-accepted";
         if (upgraded.verdict === "device-revoked") return "device-revoked";
         if (upgraded.verdict === "sign-in") return "sign-in";
         if (upgraded.verdict !== "accepted" || upgraded.pair === null) return "later";
@@ -5063,7 +5102,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (entropy !== null) {
           await adoptRotatedKeys({
             accountIdB64,
-            deviceKey,
+            deviceKey: activeDeviceKey,
             oldSeed: heldSeed,
             newEntropy: entropy,
             newPubkeyB64: keyB64,
@@ -5087,8 +5126,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           if (typeof window !== "undefined") window.location.reload();
         }
         return "adopted";
-      }
-    }
+      },
+    });
   }
 
   function state_isSessionFor(accountIdB64: string): boolean {
@@ -5125,51 +5164,69 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey === null) return true;
-      const heldKey = publicKeyOfSeed(wasm, secrets.accountIdentitySeed);
-      const nowMs = Date.now();
-      const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
-      const candidates = [heldKey, ...stateNow.pending.map((p) => base64Decode(p.newSignaturePubkeyB64))];
-      let verified: { newKeyB64: string; preparedAtMs: number } | null = null;
-      for (const key of candidates) {
-        try {
-          const v = wasm.verifyKeyRotationEnvelope(envelope, key, BigInt(Math.floor(nowMs / 1000)));
-          try {
-            verified = {
-              newKeyB64: base64Encode(v.newSignaturePubkey),
-              preparedAtMs: Number(v.preparedAtMs),
-            };
-          } finally {
-            v.free();
-          }
-          break;
-        } catch {
-          // Not by this key; the next candidate.
-        }
+      if (await storeKeyRotationEnvelope(wasm, accountIdB64, deviceKey, secrets.accountIdentitySeed, envelope)) {
+        // The commit may already have landed: ask the directory once. If it
+        // has not, this device learns it at its next refresh.
+        void adoptIfDirectoryShowsPending(accountIdB64);
       }
-      const intake = rotationIntake({
-        fromOwnDeviceGroup: true,
-        verified: verified !== null,
-        newKeyIsHeldKey: verified !== null && verified.newKeyB64 === base64Encode(heldKey),
-      });
-      if (intake === "drop" || verified === null) return true;
-      const row: PendingRotation = {
-        newSignaturePubkeyB64: verified.newKeyB64,
-        envelopeB64: base64Encode(envelope),
-        preparedAtMs: verified.preparedAtMs,
-      };
-      await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({
-        ...st,
-        pending: withPendingRotation(st.pending, row, nowMs, (preparedAtMs, now) =>
-          wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(now)),
-        ),
-      }));
-      // The commit may already have landed: ask the directory once. If it
-      // has not, this device learns it at its next refresh.
-      void adoptIfDirectoryShowsPending(accountIdB64);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("key rotation: the envelope could not be stored", err instanceof Error ? err.name : "unknown");
     }
+    return true;
+  }
+
+  /**
+   * Verify a `key-rotation` envelope against the key this device holds (or a
+   * key a pending envelope already names) and store it as PENDING. Nothing
+   * else changes. Resolves whether it was stored. Needs no session: a
+   * superseded device reading its journal outside one calls it too.
+   */
+  async function storeKeyRotationEnvelope(
+    wasm: Wasm,
+    accountIdB64: string,
+    deviceKey: DeviceCipher,
+    heldSeed: Uint8Array,
+    envelope: Uint8Array,
+  ): Promise<boolean> {
+    const heldKey = publicKeyOfSeed(wasm, heldSeed);
+    const nowMs = Date.now();
+    const stateNow = await getKeyRotationState(accountIdB64, deviceKey);
+    const candidates = [heldKey, ...stateNow.pending.map((p) => base64Decode(p.newSignaturePubkeyB64))];
+    let verified: { newKeyB64: string; preparedAtMs: number } | null = null;
+    for (const key of candidates) {
+      try {
+        const v = wasm.verifyKeyRotationEnvelope(envelope, key, BigInt(Math.floor(nowMs / 1000)));
+        try {
+          verified = {
+            newKeyB64: base64Encode(v.newSignaturePubkey),
+            preparedAtMs: Number(v.preparedAtMs),
+          };
+        } finally {
+          v.free();
+        }
+        break;
+      } catch {
+        // Not by this key; the next candidate.
+      }
+    }
+    const intake = rotationIntake({
+      fromOwnDeviceGroup: true,
+      verified: verified !== null,
+      newKeyIsHeldKey: verified !== null && verified.newKeyB64 === base64Encode(heldKey),
+    });
+    if (intake === "drop" || verified === null) return false;
+    const row: PendingRotation = {
+      newSignaturePubkeyB64: verified.newKeyB64,
+      envelopeB64: base64Encode(envelope),
+      preparedAtMs: verified.preparedAtMs,
+    };
+    await updateKeyRotationState(accountIdB64, deviceKey, (st) => ({
+      ...st,
+      pending: withPendingRotation(st.pending, row, nowMs, (preparedAtMs, now) =>
+        wasm.keyRotationPendingExpired(BigInt(Math.max(0, preparedAtMs)), BigInt(now)),
+      ),
+    }));
     return true;
   }
 
@@ -5517,6 +5574,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
     freshPublishOwed: () => freshOwedRecord() !== null,
+    freshPublishWaitUntilMs: () => freshOwedRecord()?.waitUntilMs ?? null,
     freshPublishSignInNeeded: () => {
       const record = freshOwedRecord();
       return (
@@ -7673,6 +7731,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         (isKeyResetOwed(plainStorage(), st.account.accountId) ||
           rotationWithholdsPhrase(readRotation(plainStorage(), st.account.accountId)))
       );
+    },
+    owedPublishWaitUntilMs() {
+      const st = state();
+      rotationVersion();
+      if (st.kind !== "session") return null;
+      const record = readKeyResetOwed(plainStorage(), st.account.accountId);
+      return record !== null && remainingKeyResetSteps(record.done).length > 0
+        ? (record.waitUntilMs ?? null)
+        : null;
     },
     async retryOwedPublish() {
       const st = state();

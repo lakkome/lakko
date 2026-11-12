@@ -185,7 +185,7 @@ export default function NewChannel(): JSX.Element {
           style={{ "align-self": "flex-start" }}
           onClick={() => navigate(paths.home)}
         >
-          <Icon name="back" size={16} />
+          <Icon name="chevron-back" size={20} />
           {t("nav.chats")}
         </button>
         <div class="lk-page-head">
@@ -211,7 +211,7 @@ export default function NewChannel(): JSX.Element {
               disabled={busy()}
               onClick={() => setPhotoMenu((v) => !v)}
             >
-              <Icon name="pencil" size={16} />
+              <Icon name="pencil" size={20} />
             </button>
             <Show when={photoMenu()}>
               <AvatarMenu

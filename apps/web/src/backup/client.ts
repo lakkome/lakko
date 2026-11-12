@@ -67,7 +67,7 @@ import {
   type CarriedOwnPredecessor,
 } from "../devices/state-bundle";
 import { getPhrase } from "./phrase-store";
-import { mintBackupHead } from "./head-mint";
+import { headMintFailureAllowsLegacy, mintBackupHead } from "./head-mint";
 import { evaluateRestoreBlob } from "./head-restore";
 import { ownProfileForBackup, visibilityForBackup } from "./own-state";
 import {
@@ -320,6 +320,9 @@ export class BackupClient {
       const blob = wasm.frameBackupBlob(head, envelope);
       return { blob, floor: { version, envelopeHash: hash } };
     } catch (err) {
+      // A refused session (a reset on another device, a removed device) is
+      // not a soft failure: nothing is uploaded under it.
+      if (!headMintFailureAllowsLegacy(err)) throw err;
       // eslint-disable-next-line no-console
       console.warn(
         "BackupClient: backup-head mint failed, writing legacy envelope",

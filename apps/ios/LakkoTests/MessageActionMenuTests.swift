@@ -134,7 +134,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// Forward has its own title and its own glyph, the mirror of Reply's.
     func testForwardHasItsOwnTitleAndGlyph() {
         XCTAssertEqual(MessageMenuAction.forward.title, "Forward")
-        XCTAssertEqual(MessageMenuAction.forward.systemImage, "arrowshape.turn.up.right")
+        XCTAssertEqual(MessageMenuAction.forward.icon, .forward)
         XCTAssertFalse(MessageMenuAction.forward.isDestructive)
     }
 

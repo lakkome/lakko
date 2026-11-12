@@ -67,7 +67,7 @@ export function AvatarMenu(props: {
       <div class="lk-menu-backdrop" onClick={() => props.onClose()} />
       <div class="lk-menu lk-avatar-menu" role="menu" aria-label={t("profile.avatar.change")}>
         <button type="button" role="menuitem" onClick={() => input?.click()}>
-          <Icon name="clip" size={16} />
+          <Icon name="photo-stack" size={20} />
           {t("profile.avatar.menu.library")}
         </button>
         <Show when={camera()}>
@@ -78,13 +78,13 @@ export function AvatarMenu(props: {
               props.onCamera();
             }}
           >
-            <Icon name="camera" size={16} />
+            <Icon name="camera" size={20} />
             {t("profile.avatar.menu.camera")}
           </button>
         </Show>
         <Show when={props.canRemove}>
           <button type="button" role="menuitem" class="danger-item" onClick={() => props.onRemove()}>
-            <Icon name="trash" size={16} />
+            <Icon name="trash" size={20} />
             {t("profile.avatar.menu.remove")}
           </button>
         </Show>
@@ -539,7 +539,7 @@ export function AvatarCamera(props: {
                 void open(next);
               }}
             >
-              <Icon name="cameraFlip" size={22} />
+              <Icon name="camera-flip" size={24} />
             </button>
           </div>
         </div>
