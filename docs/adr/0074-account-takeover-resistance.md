@@ -2143,6 +2143,37 @@ at first sight. Closing it needs the predecessor anchored in the KT log at first
 key's signature over the old binding. Decided 2026-10-12: the refusal stays for now and is
 revisited after it has been tried in use.
 
+## 3.3 as built (2026-11-12): reading the journal without a session
+
+Found walking base scenario 4b: section 3.3 says a superseded device with no
+pending envelope reads its DeviceGroup journal once before deciding, but no
+client could do that without a session. Web treated a missing DeviceGroup
+handle as "offline" and retried every 20 s forever; Android waited up to
+40 s for a live sync runtime and then treated the change as a reset whether
+or not anything was read; iOS read it only through a running runtime.
+
+Now all three open the device's own persisted DeviceGroup state into a
+throwaway handle, fetch from the persisted cursor to the head with the
+DeviceGroup's own epoch-key proofs (no session token), apply the rows,
+pass every `key-rotation` envelope found to the ordinary intake, and
+persist nothing (web `devices/sync/standalone-journal*.ts` and
+`devices/superseded-adoption.ts`, Android `auth/SupersededJournalRead.kt`
+and `devices/sync/DeviceGroupStandaloneJournal.kt`, iOS the one-shot read
+beside `DeviceGroupJournalCursor`). The outcome decides the next step:
+
+- read to the head: an envelope found is adopted; none means a reset;
+- no DeviceGroup state on the device, or a 401 / 403 / 404 from the DS:
+  a reset;
+- no answer (network failure, 5xx, a clock-skewed refusal, the 40 s
+  deadline): try later, never a wipe. This narrows the original text,
+  which treated "cannot be read" as a reset.
+
+Residual (Android, from the code): if the device-attestation key can be had
+neither pinned nor from the JWKS, the read cannot open and the device keeps
+retrying instead of deciding. Tested against fakes on all three
+(`superseded-adoption.test.ts`, `SupersededJournalReadTest`, iOS
+`RecoveryFlowTests`); the read against a real DS has not been run.
+
 ## Not verified
 
 - Outside sprint T1 nothing here was built or run; every line number is

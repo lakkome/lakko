@@ -2341,6 +2341,39 @@ passkey-minted grant and a malformed one, and with an action grant bound to
 another action, then deletes with the right action grant and a malformed
 header. `deleting_an_account_needs_a_fresh_grant` (no passkey) is unchanged.
 
+## Amended 2026-11-12: waiting for the directory's cool-down (base scenario 4b)
+
+Seen on the test stack: a second reset within the cool-down
+(`LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS`, default 3600) is accepted
+by auth, but discovery answers the attested upload
+`429 identity-changed-too-recently`, so the publish stays owed for up to an
+hour. The client showed "could not finish" with a Try again that could not
+succeed.
+
+- `services/discovery`: the refusal carries `retry_after_secs` (whole
+  seconds until the window ends) and a `Retry-After` header.
+- Clients (web, iOS, Android; UX `identity-recovery.md` 15.4): on that
+  refusal with a readable wait, the publish-owed screen and the Settings
+  row say the keys can be published in N minutes (catalog
+  `recovery_phrase.fresh.publish_waiting`, or `account.keys_changed.waiting`
+  for an account with no saved phrase), show no Try again, count down, and
+  retry by themselves when the time is up; the app also retries whenever
+  it opens signed in. The body's value wins over the header. Any other
+  refusal, a network failure, or a 429 with no readable wait keeps the old
+  copy and Try again.
+- A device whose keys were reset again elsewhere now ends on the signed-out
+  screen. Web retried the rotation adoption every 20 s forever, because its
+  DeviceGroup port exists without a session and answered "offline"; it now
+  decides through the journal read of ADR-0074 3.3. iOS showed a parked
+  phrase of keys the account no longer had and, after Done, re-uploaded its
+  old key; it now refreshes before both and uploads nothing when superseded.
+- A `401` / `403` from the backup-head mint (ADR-0037) stops the backup
+  upload; it no longer falls back to an unframed upload.
+
+Seen live: on the iPhone, the waiting state ended by itself and the new
+words appeared. Not seen: the countdown on Android or web, the web
+superseded state after the fix.
+
 ## What the build changed / found (phase 1, 2026-10-03)
 
 Every item below was read in the code on 2026-10-03 (the files named in
