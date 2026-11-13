@@ -817,6 +817,9 @@ inviter in their one-to-one, started if there was none:
 It uses the channel's name and description as the inviter's device holds them. `Subscribe`
 becomes `Open` once subscribed. On a private channel each card is a one-use invitation.
 
+A message carrying an invitation card cannot be forwarded, whatever the channel or the
+invitation (maintainer, 2026-11-13; [`message-actions.md`](message-actions.md) section 5.1).
+
 | State | What it shows |
 |---|---|
 | A send failed | In the info: "Could not invite {names}. Try again." The others go. |

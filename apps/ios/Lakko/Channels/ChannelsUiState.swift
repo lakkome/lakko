@@ -444,6 +444,7 @@ public final class ChannelsUiState: ObservableObject {
         persistChannelLog()
         updateExtras(channelId) {
             $0.handle = meta.handle.map(StoredConversationHandle.init)
+            $0.recordPublic = meta.listed
             $0.avatar = ProfileAvatar(meta.avatar)
             $0.reactions = meta.reactions.map(StoredAllowedReactions.init)
         }

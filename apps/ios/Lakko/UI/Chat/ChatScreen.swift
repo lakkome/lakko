@@ -1306,6 +1306,14 @@ public struct ChatScreen: View {
         selectedMessagesOldestFirst.allSatisfy { $0.direction == .outgoing }
     }
 
+    /// The selection holds a message carrying a channel invitation card,
+    /// which is never forwarded (maintainer, 2026-11-13).
+    private var selectionHoldsInvitation: Bool {
+        selectedMessagesOldestFirst.contains {
+            $0.invitationLine(conversationIdHex: viewModel.groupIdHex) != nil
+        }
+    }
+
     /// Section 8 — the bar that takes the composer's slot: `Forward` and
     /// `Delete`, each with its icon and label, and the helper line under it
     /// when Delete is disabled for someone else's message (or the progress
@@ -1313,6 +1321,7 @@ public struct ChatScreen: View {
     @ViewBuilder
     private func selectionActionBar(_ selection: MessageSelection) -> some View {
         let allOwn = selectionIsAllOwn
+        let forwardEnabled = selection.forwardEnabled(holdsInvitation: selectionHoldsInvitation)
         let helper = bulkNotice ?? selection.deleteHelper(allOwn: allOwn)
         VStack(spacing: 6) {
             HStack(spacing: 0) {
@@ -1327,8 +1336,8 @@ public struct ChatScreen: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.lakkoAccent)
-                .disabled(!selection.forwardEnabled || bulkRunning)
-                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .disabled(!forwardEnabled || bulkRunning)
+                .opacity(forwardEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-forward")
                 // ADR-0065 / UX section 2 — Save acts on the whole set.
                 Button {
@@ -1342,8 +1351,8 @@ public struct ChatScreen: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.lakkoAccent)
-                .disabled(!selection.forwardEnabled || bulkRunning)
-                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .disabled(!selection.saveEnabled || bulkRunning)
+                .opacity(selection.saveEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-save")
                 Button {
                     bulkNotice = nil
@@ -1410,6 +1419,10 @@ public struct ChatScreen: View {
     /// bubbles in their original order; on a failure stay here with the unsent
     /// ones still selected.
     private func runBulkForward(to targetGroupIdHex: String) {
+        // A channel invitation card is never forwarded (maintainer,
+        // 2026-11-13): Forward is disabled for such a selection; this is the
+        // floor.
+        guard !selectionHoldsInvitation else { return }
         let messages = selectedMessagesOldestFirst
         guard !messages.isEmpty, !bulkRunning else { return }
         bulkRunning = true
@@ -2243,8 +2256,16 @@ struct MessageRow: View {
     ///
     /// ADR-0061 section 6 — not on a message from a newer version: this build
     /// holds none of its content, so a forward would carry nothing.
-    private var canForward: Bool {
+    /// Landed, readable and not a tombstone: the gate Forward and Pin share
+    /// (section 4.1).
+    private var sendLanded: Bool {
         canReact && message.ack == .sent && message.unsupportedVersion == nil
+    }
+
+    private var canForward: Bool {
+        // Maintainer, 2026-11-13 — a message carrying a channel invitation
+        // card is never forwarded (Pin still is offered on it).
+        sendLanded && message.invitationLine(conversationIdHex: conversationIdHex) == nil
     }
 
     /// Section 8 — Select is offered on the rows the mode can select, which is
@@ -2421,7 +2442,7 @@ struct MessageRow: View {
         actionsAvailable
             && message.direction != .system
             && !message.deleted
-            && (!message.text.isEmpty || copyText != nil)
+            && copyText != nil
             // ADR-0073 R.5 — a row of an older group of the conversation is
             // read-only: its menu offers nothing but Unpin (below).
             && !isHistoryRow
@@ -2430,10 +2451,15 @@ struct MessageRow: View {
     /// ADR-0082 / UX 3.2 — Copy is "the text I see": a translation while it
     /// is shown, a transcript on a voice message with one.
     private var copyText: String? {
+        // ADR-0087 section 14 — a bubble drawn as a channel invitation card
+        // shows no text; its text is the `/g/` link with its secret.
+        let cardDrawn = message.invitationLine(conversationIdHex: conversationIdHex) != nil
         guard let conversation = translationConversation else {
-            return message.text.isEmpty ? nil : message.text
+            return InvitationCopy.copyText(message.text, cardDrawn: cardDrawn)
         }
-        return MessageTranslationCenter.shared.copyText(conversation: conversation, message: message)
+        return InvitationCopy.copyText(
+            MessageTranslationCenter.shared.copyText(conversation: conversation, message: message),
+            cardDrawn: cardDrawn)
     }
 
     /// ADR-0082 / UX 3.1 — the `Translate` row, from the shared rule.
@@ -2458,12 +2484,13 @@ struct MessageRow: View {
             // is not deleted, which is the set Forward is offered on.
             // ADR-0073 R.5 — ...and on a pinned row of an older segment,
             // which offers Unpin alone (the view model decides).
-            pin: (canForward || isHistoryRow) ? pinState : .unavailable,
+            pin: (sendLanded || isHistoryRow) ? pinState : .unavailable,
             canSelect: canSelect,
             // UX section 2 — on any message that is not deleted.
             // An older segment's row may be saved too (round-6 rule).
             save: saveState,
-            translate: translateState)
+            translate: translateState,
+            canEdit: message.invitationLine(conversationIdHex: conversationIdHex) == nil)
     }
 
     /// Make a bubble the thing the menu opens on.

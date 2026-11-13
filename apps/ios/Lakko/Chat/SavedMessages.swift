@@ -96,12 +96,14 @@ public enum SavedMessages {
     }
 
     /// The snapshot saved with a message: author, excerpt (the text; a file
-    /// with no text names the file), the kind token.
+    /// with no text names the file), the kind token. `invitationLine`
+    /// stands for the text of a channel invitation (its `/g/` link with its
+    /// secret is never saved, ADR-0087 section 14).
     public static func snapshot(
-        text: String, attachments: [AttachmentRef], author: String
+        text: String, attachments: [AttachmentRef], author: String, invitationLine: String? = nil
     ) -> (author: String, excerpt: String, kind: String) {
         let kind = kindToken(attachments)
-        var excerpt = text
+        var excerpt = (invitationLine?.isEmpty == false ? invitationLine : nil) ?? text
         if excerpt.isEmpty, kind == "file" { excerpt = attachments.first?.name ?? "" }
         return (author, excerpt, kind)
     }
@@ -194,7 +196,8 @@ public final class SavedMessagesCenter: ObservableObject {
             }
             let ref = FolderConversationRef(kind: kind, id: segmentId)
             let snap = SavedMessages.snapshot(
-                text: item.message.text, attachments: item.message.attachments, author: item.author)
+                text: item.message.text, attachments: item.message.attachments, author: item.author,
+                invitationLine: item.message.invitationLine(conversationIdHex: item.ref.segmentIdHex))
             registers.append(try composeSavedMessage(
                 hlc: sync.mintHlc(), conversation: ref, messageId: UInt64(item.ref.dsId),
                 savedAtMs: nowMs, sentAtMs: SavedMessages.sentAtMs(item.message), author: snap.author, excerpt: snap.excerpt, attachmentKind: snap.kind,

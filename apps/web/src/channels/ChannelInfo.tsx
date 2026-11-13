@@ -25,6 +25,7 @@ import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { InfoRowButton } from "../ui/LabelledRows";
 import { PushedScreen } from "../ui/PushedScreen";
 import { channelAvatarKey } from "./channel-avatar";
 import {
@@ -524,27 +525,8 @@ export function ChannelInfo(props: {
   );
 }
 
-/** One row of the info's actions: icon, title, the value at the end, opens a
- *  pushed screen. */
-function InfoRow(props: {
-  readonly icon: Parameters<typeof Icon>[0]["name"];
-  readonly title: string;
-  readonly value?: string | undefined;
-  readonly onOpen: () => void;
-}): JSX.Element {
-  return (
-    <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpen()}>
-      <span class="lk-card-row-icon">
-        <Icon name={props.icon} size={20} />
-      </span>
-      <span class="lk-card-row-body">
-        <span class="lk-card-row-title">{props.title}</span>
-      </span>
-      <Show when={props.value}>{(v) => <span class="lk-card-row-sub">{v()}</span>}</Show>
-      <Icon name="chevron-forward" size={14} />
-    </button>
-  );
-}
+/** One row of the info's actions, named by its title and value. */
+const InfoRow = InfoRowButton;
 
 /** The screen a channel's info pushed, drawn by the conversation view over
  *  the whole pane (UX 12.1). */

@@ -160,6 +160,49 @@ internal fun invitationAwarePreviewText(
     return summarize(card)?.let { channelInvitePreviewText(it, strings) } ?: strings["notification.message.new"]
 }
 
+/**
+ * The line that stands for a message carrying a channel invitation card
+ * wherever its text would otherwise appear (a reply's quote, the chat-list
+ * row): "Invitation to {channel}" / "Invitation to publish in {channel}".
+ * `null` when the message carries no card, or one that does not open, so the
+ * caller keeps the message's own text. The text of a card message is the
+ * `/g/` link with its secret, which no surface shows (ADR-0087 section 14).
+ */
+internal fun channelInviteLine(
+    card: ByteArray?,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+    summarize: (ByteArray) -> ChannelInviteSummary? = ::channelInviteSummary,
+): String? {
+    if (card == null || card.isEmpty()) return null
+    return summarize(card)?.let { channelInvitePreviewText(it, strings) }
+}
+
+/**
+ * Whether a bubble draws the message's text. A bubble whose channel
+ * invitation card is drawn shows the card alone, never the link the text is:
+ * the card it carries opens ([cardOpens]), or the text's own link resolved to
+ * a channel's ([linkCardResolved]). [cardDrawn] is `false` where the bubble
+ * draws no invitation card at all (a channel post), and the text stays.
+ */
+internal fun bubbleDrawsMessageText(cardDrawn: Boolean, cardOpens: Boolean, linkCardResolved: Boolean): Boolean =
+    !cardDrawn || (!cardOpens && !linkCardResolved)
+
+/** The fill and the label colour of a card's main action inside a bubble
+ *  (design system, Button `primary`: accent fill, white label). On an
+ *  outgoing bubble, whose own fill is the accent, the two swap so the pill
+ *  still reads, as on iOS. */
+internal data class CardActionColors(
+    val container: androidx.compose.ui.graphics.Color,
+    val label: androidx.compose.ui.graphics.Color,
+)
+
+internal fun cardActionColors(
+    outgoing: Boolean,
+    accent: androidx.compose.ui.graphics.Color,
+    onAccent: androidx.compose.ui.graphics.Color,
+): CardActionColors =
+    if (outgoing) CardActionColors(container = onAccent, label = accent) else CardActionColors(container = accent, label = onAccent)
+
 /** The link a publisher invitation's `Accept` hands to the co-publisher
  *  join (`CoPublisher.requestToCoPublish`, which reads what follows `/g/`):
  *  the card's own slug and secret. */
@@ -190,6 +233,11 @@ internal fun ChannelInviteBubbleCard(
      *  as its label (as the call invitation does). `null` outside a bubble. */
     bubbleColor: androidx.compose.ui.graphics.Color? = null,
     contentColor: androidx.compose.ui.graphics.Color? = null,
+    /** The bubble is this account's own (its fill is the accent). */
+    outgoing: Boolean = false,
+    /** Told whether the card is drawn, once that is known, so the bubble can
+     *  leave out the link text the card stands for. */
+    onResolved: (Boolean) -> Unit = {},
 ) {
     val actions = ChannelInviteActionsHolder.actions ?: return
     val conversation = me.lakko.app.ui.translation.LocalTranslationConversation.current
@@ -218,6 +266,7 @@ internal fun ChannelInviteBubbleCard(
             facts = f
         }
     }
+    LaunchedEffect(key, facts != null) { onResolved(facts != null) }
     val f = facts ?: return
     val link = fromCard?.link ?: textLink ?: return
     val scope = rememberCoroutineScope()
@@ -287,21 +336,21 @@ internal fun ChannelInviteBubbleCard(
             }
             when (publisherControl) {
                 PublisherInviteControl.OPEN ->
-                    CardButton(t("search.conversation.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
+                    CardButton(t("search.conversation.open"), true, bubbleColor, contentColor, outgoing) { actions.openChannel(f.channelIdHex) }
                 PublisherInviteControl.SENDING ->
-                    CardButton(t("channels.join.waiting"), false, bubbleColor, contentColor) {}
+                    CardButton(t("channels.join.waiting"), false, bubbleColor, contentColor, outgoing) {}
                 // Sent and waiting for the owner's device; it lands by itself
                 // (no deadline), so there is nothing to press.
                 PublisherInviteControl.WAITING ->
                     Text(t("channels.join.waiting"), style = MaterialTheme.typography.bodySmall, color = lineColor)
                 PublisherInviteControl.ASK_AGAIN -> {
                     Text(t("requests_sent.no_answer"), style = MaterialTheme.typography.bodySmall, color = lineColor)
-                    CardButton(t("requests_sent.ask_again"), true, bubbleColor, contentColor, sendRequest)
+                    CardButton(t("requests_sent.ask_again"), true, bubbleColor, contentColor, outgoing, sendRequest)
                 }
                 PublisherInviteControl.LINK_INVALID ->
                     Text(t("invite.link.invalid"), style = MaterialTheme.typography.bodySmall, color = lineColor)
                 PublisherInviteControl.ACCEPT ->
-                    CardButton(t("channels.publishers.accept"), true, bubbleColor, contentColor, sendRequest)
+                    CardButton(t("channels.publishers.accept"), true, bubbleColor, contentColor, outgoing, sendRequest)
                 null -> Unit
             }
             if (publisherControl != null) {
@@ -312,12 +361,13 @@ internal fun ChannelInviteBubbleCard(
             when {
                 publisherControl != null -> Unit
                 actions.isFollowed(f.channelIdHex) ->
-                    CardButton(t("common.open"), true, bubbleColor, contentColor) { actions.openChannel(f.channelIdHex) }
+                    CardButton(t("common.open"), true, bubbleColor, contentColor, outgoing) { actions.openChannel(f.channelIdHex) }
                 else -> CardButton(
                     label = if (busy) t("channels.subscribe.status.subscribing") else t("channels.subscribe.action"),
                     enabled = !busy,
                     bubbleColor = bubbleColor,
                     contentColor = contentColor,
+                    outgoing = outgoing,
                     onClick = {
                         busy = true
                         scope.launch {
@@ -338,27 +388,33 @@ internal fun ChannelInviteBubbleCard(
     }
 }
 
-/** The card's one action: inside a bubble a pill in the bubble's text colour
- *  with the bubble's colour as its label, readable on both bubbles; outside
- *  one, a plain button. */
+/** The card's one action: inside a bubble a pill in the primary style
+ *  ([cardActionColors]: accent fill and white label on an incoming bubble,
+ *  swapped on an outgoing one); outside one, a plain button. */
 @Composable
 private fun CardButton(
     label: String,
     enabled: Boolean,
     bubbleColor: androidx.compose.ui.graphics.Color?,
     contentColor: androidx.compose.ui.graphics.Color?,
+    outgoing: Boolean,
     onClick: () -> Unit,
 ) {
     if (bubbleColor == null || contentColor == null) {
         Button(enabled = enabled, onClick = onClick) { Text(label) }
         return
     }
+    val colors = cardActionColors(
+        outgoing = outgoing,
+        accent = MaterialTheme.colorScheme.primary,
+        onAccent = MaterialTheme.colorScheme.onPrimary,
+    )
     androidx.compose.material3.Surface(
         onClick = onClick,
         enabled = enabled,
         shape = androidx.compose.foundation.shape.RoundedCornerShape(percent = 50),
-        color = contentColor.copy(alpha = if (enabled) 1f else 0.6f),
-        contentColor = bubbleColor,
+        color = colors.container.copy(alpha = if (enabled) 1f else 0.6f),
+        contentColor = colors.label,
     ) {
         Text(
             label,

@@ -45,7 +45,9 @@ struct SavedRow: Equatable, Identifiable {
             let message = rowId.flatMap { id in thread?.messages.first { $0.messageId == id } }
             let line: String
             if let message, !message.deleted {
-                let snap = SavedMessages.snapshot(text: message.text, attachments: message.attachments, author: "")
+                let snap = SavedMessages.snapshot(
+                    text: message.text, attachments: message.attachments, author: "",
+                    invitationLine: message.invitationLine(conversationIdHex: ref.segmentIdHex))
                 line = SavedMessages.rowLine(excerpt: snap.excerpt, kind: snap.kind)
             } else {
                 line = SavedMessages.rowLine(excerpt: entry.excerpt, kind: entry.attachmentKind)

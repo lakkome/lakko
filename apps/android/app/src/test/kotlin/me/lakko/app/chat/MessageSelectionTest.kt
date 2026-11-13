@@ -118,6 +118,29 @@ class MessageSelectionTest {
 
     // ----- gates -----------------------------------------------------------
 
+    // Maintainer, 2026-11-13: a message carrying a channel invitation card is
+    // never forwarded; a selection holding one does not offer Forward, and
+    // Save and Delete are unaffected.
+    @Test
+    fun `forward is disabled while the selection holds an invitation card`() {
+        val card = MessageSelection.starting(1L, isOwn = true, isInvitation = true)
+        assertFalse(card.forwardEnabled)
+        assertTrue(card.saveEnabled)
+        assertTrue(card.deleteEnabled)
+        val withPlain = card.toggle(2L, isOwn = false)
+        assertFalse(withPlain.forwardEnabled)
+        // Taking the card back out re-enables Forward.
+        assertTrue(withPlain.toggle(1L, isOwn = true).forwardEnabled)
+        assertTrue(withPlain.retain(listOf(2L)).forwardEnabled)
+        val msg = ChatMessage(
+            messageId = 3L, direction = Direction.Incoming, text = "x", attachments = emptyList(),
+            createdAt = "2026-11-13T09:00:00Z", channelInvite = byteArrayOf(1),
+        )
+        assertTrue(carriesInvitationCard(msg))
+        assertFalse(carriesInvitationCard(msg.copy(channelInvite = null)))
+        assertFalse(carriesInvitationCard(msg.copy(deleted = true)))
+    }
+
     @Test
     fun `delete is enabled only for a non-empty selection of own messages`() {
         val empty = MessageSelection()

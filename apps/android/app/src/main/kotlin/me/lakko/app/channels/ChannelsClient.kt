@@ -752,22 +752,32 @@ public class ChannelsClient(
 
     /** `PUT /v1/channels/:id/public-seed/:epoch` — file a public channel's
      *  seed envelope for [epoch] (section 6), publisher-signed. Immutable: the
-     *  identical envelope again is a success. */
+     *  identical envelope again is a `204`, any other is `409
+     *  public-seed-exists`. Every seal draws a fresh nonce, so filing the same
+     *  epoch's seed again (after a restart, from another publisher's device)
+     *  always sends other bytes; the epoch's seed is the same MLS-derived
+     *  value for every publisher, so `public-seed-exists` means the epoch is
+     *  already filed and is a success here. */
     public suspend fun putPublicSeed(
         channelIdHex: String,
         epoch: UInt,
         envelope: ByteArray,
         proofs: ChannelPublisherProofs,
     ) {
-        sendAsPublisher(
-            proofs,
-            HttpMethod.Put,
-            "/v1/channels/$channelIdHex/public-seed/$epoch",
-            "",
-            envelope,
-            ContentType.Application.OctetStream,
-            "put public seed",
-        )
+        try {
+            sendAsPublisher(
+                proofs,
+                HttpMethod.Put,
+                "/v1/channels/$channelIdHex/public-seed/$epoch",
+                "",
+                envelope,
+                ContentType.Application.OctetStream,
+                "put public seed",
+            )
+        } catch (e: ChannelsApiException) {
+            if (isPublicSeedFiled(e)) return
+            throw e
+        }
     }
 
     /** `GET /v1/channels/:id/public-seed/:epoch` — the envelope, or `null`
@@ -1450,6 +1460,12 @@ public class MemberCardPage(
     /** The `after` for the next page, `null` when this page was the last. */
     public val nextAfter: String?,
 )
+
+/** `PUT .../public-seed/:epoch` refused because the epoch is already filed
+ *  (`409 public-seed-exists`): a success for the caller, see
+ *  [ChannelsClient.putPublicSeed]. */
+internal fun isPublicSeedFiled(e: ChannelsApiException): Boolean =
+    e.status == 409 && e.code == "public-seed-exists"
 
 /** Server-supplied error envelope — stable across releases. */
 public class ChannelsApiException(

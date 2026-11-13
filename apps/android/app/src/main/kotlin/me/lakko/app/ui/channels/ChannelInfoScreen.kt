@@ -51,12 +51,15 @@ import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.channelHeaderLineKey
 import me.lakko.app.channels.fullRecord
+import me.lakko.app.channels.loadChannelMembers
 import me.lakko.app.channels.sharedMeta
 import me.lakko.app.channels.subscriberBand
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.reach.ReachManager
+import me.lakko.app.reach.reachHex
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.components.LakkoDialog
 import me.lakko.app.ui.components.LakkoDialogAction
@@ -346,8 +349,32 @@ public fun ChannelInfoScreen(
         ChannelMembersSheet(channelId = channelId, state = state, client = client, onDismiss = { membersOpen = false })
     }
     val picking = inviting
+    // Sections 14.1 and 15.2 — the people known to be in the channel are not
+    // offered: the owner and the publishers, and for `Invite people` the
+    // subscribers whose card this device could open.
+    var cardKeysHex by remember(channelId) { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(channelId, picking) {
+        if (picking != false) return@LaunchedEffect
+        cardKeysHex = try {
+            loadChannelMembers(
+                channelIdHex = channelId,
+                seedForEpoch = { epoch -> me.lakko.app.channels.ChannelMemberCards.seedForEpoch(state, channelId, epoch) },
+                ownSubscriberPkHex = state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(::reachHex),
+                ports = me.lakko.app.channels.ChannelMemberCards.ports(ReachManager.get(context), client),
+            ).rows.map { it.key.lowercase() }.filter { it.length == 64 && it.all { c -> c in "0123456789abcdef" } }.toSet()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            emptySet()
+        }
+    }
+    val inChannelHex = channelInviteExclusions(
+        publisherKeys = publisherSets[channelId].orEmpty().map { it.accountKey },
+        cardKeysHex = if (picking == false) cardKeysHex else emptySet(),
+    )
     if (picking != null && chatRepository != null && contactsRepository != null) {
         ChannelInviteContactsDialog(
+            inChannelHex = inChannelHex,
             chatRepository = chatRepository,
             contactsRepository = contactsRepository,
             linkFor = { _ ->
@@ -411,6 +438,12 @@ public fun ChannelInfoScreen(
         )
     }
 }
+
+/** Sections 14.1 and 15.2 — the account keys (lower-case hex) known to be
+ *  in the channel: the publishers (the owner and this account among them)
+ *  and subscribers known by their card. Pure. */
+internal fun channelInviteExclusions(publisherKeys: List<ByteArray>, cardKeysHex: Set<String>): Set<String> =
+    publisherKeys.map { reachHex(it).lowercase() }.toSet() + cardKeysHex
 
 @Composable
 private fun InfoRow(label: String, trailing: String? = null, onClick: () -> Unit) {

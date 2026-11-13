@@ -99,6 +99,35 @@ extension ChatMessage {
     }
 }
 
+extension ChatMessage {
+    /// ADR-0087 sections 14 and 15.2 — the line that stands for a message
+    /// carrying a channel invitation card wherever its text would appear
+    /// (the Chats row, a reply's quote, a pin, a saved snapshot): "Invitation
+    /// to {channel}" / "Invitation to publish in {channel}". `nil` for any
+    /// other message. The text of a card message is the `/g/` link with its
+    /// secret, which no surface shows.
+    func invitationLine(conversationIdHex: String?) -> String? {
+        if let channel = channelInvite(conversationIdHex: conversationIdHex) {
+            return ChatListFormatting.channelInvitePreview(channelName: channel.name, publisher: false)
+        }
+        if let publisher = coPublisherInvite(conversationIdHex: conversationIdHex) {
+            return ChatListFormatting.channelInvitePreview(channelName: publisher.channelName, publisher: true)
+        }
+        return nil
+    }
+}
+
+/// What Copy takes from a message's bubble: "the text I see"
+/// (`docs/ux/message-actions.md` section 3.2). A bubble drawn as a channel
+/// invitation card shows no text, so there is nothing to copy (its text is
+/// the `/g/` link with its secret).
+enum InvitationCopy {
+    static func copyText(_ text: String?, cardDrawn: Bool) -> String? {
+        guard !cardDrawn, let text, !text.isEmpty else { return nil }
+        return text
+    }
+}
+
 /// What a co-publisher invitation card says: the channel, who invites, and
 /// the link that answers it.
 struct CoPublisherCardFacts: Equatable {

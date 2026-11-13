@@ -32,6 +32,7 @@ import { callActions, callState, type Participant } from "../state/call-state";
 import { all, initWasm, one, pointer, present, renderUi, settle } from "../test/ui";
 import type { CallWindowSources } from "./CallWindow";
 import { resetRememberedCorner } from "./call-window-model";
+import { reserveBannerStrip } from "../sw/SwUpdateBanner";
 
 type CallWindowComponent = typeof import("./CallWindow")["CallWindow"];
 let CallWindow: CallWindowComponent;
@@ -358,6 +359,32 @@ describe("the gestures", () => {
     expect(one(WINDOW).getAttribute("data-corner")).toBe("bottom-left");
     expect(one(WINDOW).classList.contains("dragging")).toBe(false);
     expect(expanded()).toBe(0);
+  });
+
+  it("stays above the update banner in a bottom corner, and moves up when it appears", () => {
+    // Base walk 2026-11-13: the banner (z-index 1000) is drawn over anything
+    // at the bottom of the viewport, and this window (z-index 900) places
+    // itself from script, not from the page's layout.
+    connectedFor(0);
+    mountWindow();
+    const open = one<HTMLButtonElement>(".lk-call-window-open");
+    pointer(open, "pointerdown", { clientX: 900, clientY: 100 });
+    pointer(open, "pointermove", { clientX: 100, clientY: 700 });
+    pointer(open, "pointerup", { clientX: 100, clientY: 700 });
+    expect(one(WINDOW).getAttribute("data-corner")).toBe("bottom-left");
+    const yOf = (): number => {
+      const m = /translate\((-?\d+)px, (-?\d+)px\)/.exec(one(WINDOW).style.transform);
+      expect(m).not.toBeNull();
+      return Number(m?.[2]);
+    };
+    const before = yOf();
+    try {
+      reserveBannerStrip(document.documentElement, 60);
+      expect(yOf()).toBe(before - 60);
+    } finally {
+      reserveBannerStrip(document.documentElement, null);
+    }
+    expect(yOf()).toBe(before);
   });
 
   it("opens the next collapsed call in the corner the last one landed in", () => {

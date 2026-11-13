@@ -27,6 +27,7 @@
  * Also here: the chat-list summary (unread count + last-message preview) read
  * from a slot, and the conversion from a received event to a persisted row.
  */
+import { base64Encode } from "../auth/account-id";
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
 import { attachmentsPreviewLabel } from "./list-preview";
@@ -273,6 +274,9 @@ export interface ChatListSummary {
   /** The newest message's author key (base64) when it is someone else's and
    *  the log recorded one, for the sender prefix in a group row; else `null`. */
   readonly lastAuthorKeyB64: string | null;
+  /** ADR-0087 section 14 — the newest message's channel invitation card
+   *  (base64), when it carried one; the row reads the invitation from it. */
+  readonly previewChannelInviteB64?: string;
 }
 
 /**
@@ -344,6 +348,9 @@ export function summarizeGroupSlot(
       last !== undefined && !fromSelf(last) && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
         ? last.authorKeyB64
         : null,
+    ...(last !== undefined && last.deleted !== true && typeof last.channelInviteB64 === "string"
+      ? { previewChannelInviteB64: last.channelInviteB64 }
+      : {}),
   };
 }
 
@@ -404,6 +411,8 @@ export function eventToPersistedMessage(
       // ADR-0061 section 6 — kept so the bubble and the preview still say the
       // message needs a newer Lakko after a reload.
       ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
+      // ADR-0087 section 14 — the invitation card, opened offline when drawn.
+      ...(e.channelInvite === undefined ? {} : { channelInviteB64: base64Encode(e.channelInvite) }),
     };
   }
   const membership = persistedFromMembership(e.membership);

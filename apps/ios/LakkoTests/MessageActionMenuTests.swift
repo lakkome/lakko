@@ -617,4 +617,22 @@ final class HardwareReturnTests: XCTestCase {
         XCTAssertFalse(HardwareReturn.submits(.option))
         XCTAssertFalse(HardwareReturn.submits([.shift, .option]))
     }
+
+    /// Follow-up to base scenario 26: a message drawn as a channel
+    /// invitation card offers no Edit (it would put the `/g/` link with its
+    /// secret in the composer); Delete stays.
+    func testAnInvitationCardOffersDeleteButNeverEdit() {
+        let actions = MessageMenuAction.offered(
+            canReply: false, canForward: false, canEditOrDelete: true, hasText: false, canEdit: false)
+        XCTAssertEqual(actions, [.delete])
+    }
+
+    /// Maintainer, 2026-11-13 — no Forward on an invitation card: the screen
+    /// hands `canForward: false`, and Pin is still offered.
+    func testAnInvitationCardOffersPinButNotForward() {
+        let actions = MessageMenuAction.offered(
+            canReply: true, canForward: false, canEditOrDelete: true, hasText: false, pin: .pin, canEdit: false)
+        XCTAssertFalse(actions.contains(.forward))
+        XCTAssertTrue(actions.contains(.pin))
+    }
 }

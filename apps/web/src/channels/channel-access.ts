@@ -76,6 +76,7 @@ import {
   type ChannelVisibility,
 } from "./channel-access-record";
 import { publishChannelMeta } from "./channel-meta";
+import { settleOwedRecord } from "./owed-record";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { rememberSubscriberCount } from "./ui-cache";
 import { loadRotationState, saveRotationState } from "./rotation-state-store";
@@ -255,7 +256,9 @@ export function channelVisibilityOf(idHex: string): ChannelVisibility | null {
   const meta = channelsState.metaByChannel().get(idHex);
   return foldVisibility({
     ownerSetting: isOwnerHere(idHex) ? a.visibility : null,
-    metaListed: meta?.listed,
+    // The record's signed `@name` states the flag first, then the record's
+    // own flag (the core keeps the two equal); as Android and iOS.
+    metaListed: meta?.handle?.isPublic ?? meta?.listed,
     cameBy: a.visibility,
   });
 }
@@ -547,8 +550,12 @@ export async function createChannelFull(
     readKeyB64: isPublic ? bytesToB64(wasm.channelReadKey(lineage, channelIdFromHex(id))) : null,
     admissionSeeds,
     admittedThroughSeq: 0,
+    // Owed until it lands: a failed first post is re-issued by the publisher
+    // pass (`settleOwedRecord`), composed from this access record.
+    recordOwed: true,
   }));
-  try {
+  // A failure is logged by `settleOwedRecord` and stays owed.
+  await settleOwedRecord(id, async () => {
     await publishChannelMeta(
       id,
       {
@@ -562,10 +569,8 @@ export async function createChannelFull(
       },
       lineage,
     );
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("[channels] the first metadata record was not posted; the loops re-issue it", err instanceof Error ? err.name : "");
-  }
+    return true;
+  });
   if (isPublic) {
     try {
       await filePublicSeed(lineage, id, 0, keys.seed);

@@ -78,11 +78,30 @@ describe("a found person's row after Add contact (UX 6.1)", () => {
 });
 
 describe("asking again (D2)", () => {
-  it("a row in the Sent list reads Request sent and offers Ask again", () => {
-    const outgoing = outgoingOf([record("11")]);
-    const v = rowView(rowSendState(person(), "idle", outgoing), true, mayAskAgain(person(), outgoing));
+  const DAY = 24 * 60 * 60 * 1000;
+  const sentAt = (recipientAccountIdHex: string, sentAtMs: number) => ({ ...record(recipientAccountIdHex), sentAtMs });
+
+  it("right after Add contact the row reads Request sent and the button goes away (UX 6.1)", () => {
+    const now = 10 * DAY;
+    const outgoing = outgoingOf([sentAt("11", now)]);
+    const v = rowView(rowSendState(person(), "idle", outgoing), true, mayAskAgain(person(), outgoing, now));
+    expect(v.sent).toBe(true);
+    expect(v.askAgain).toBe(false);
+    expect(mayAskAgain(person(), outgoing, now + DAY - 1)).toBe(false);
+  });
+
+  it("a request unanswered for a day reads Request sent and offers Ask again", () => {
+    const now = 10 * DAY;
+    const outgoing = outgoingOf([sentAt("11", now - DAY)]);
+    const v = rowView(rowSendState(person(), "idle", outgoing), true, mayAskAgain(person(), outgoing, now));
     expect(v.sent).toBe(true);
     expect(v.askAgain).toBe(true);
+  });
+
+  it("the newest request to the person decides", () => {
+    const now = 10 * DAY;
+    const outgoing = outgoingOf([sentAt("11", now - 2 * DAY), sentAt("11", now - 1000)]);
+    expect(mayAskAgain(person(), outgoing, now)).toBe(false);
   });
 
   it("needs a way to reach the person", () => {
@@ -91,7 +110,7 @@ describe("asking again (D2)", () => {
 
   it("is not offered for a person added through their link", () => {
     const outgoing = outgoingOf([record("33")], [{ accountIdHex: "33", signaturePubkeyB64: "KEY" }]);
-    expect(mayAskAgain(person({ accountIdHex: "33" }), outgoing)).toBe(false);
+    expect(mayAskAgain(person({ accountIdHex: "33" }), outgoing, 10 * DAY)).toBe(false);
   });
 
   it("the repeat on its way, and one that failed, speak over the Sent list", () => {

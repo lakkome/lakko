@@ -250,7 +250,7 @@ export function createConversationRows() {
     // never as the `/g/` link the message's text is.
     let invitation: string | null = null;
     try {
-      invitation = channelInviteRowPreview(s.preview, publicOrigin());
+      invitation = channelInviteRowPreview(s.preview, publicOrigin(), s.previewChannelInviteB64);
     } catch {
       invitation = null;
     }

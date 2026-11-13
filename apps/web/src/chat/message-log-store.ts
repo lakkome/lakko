@@ -208,6 +208,15 @@ export interface PersistedMessage {
    */
   readonly unsupportedVersion?: number;
   /**
+   * ADR-0087 section 14 — the channel invitation card the message's envelope
+   * carried (standard base64), as received / as sent. The bubble and the
+   * Chats row open it on this device, so a used-up, revoked or expired link
+   * still reads as the invitation it was and never as the `/g/` link with
+   * its secret. Optional without a version bump: a row without it is drawn
+   * from its text, whose secret is never shown.
+   */
+  readonly channelInviteB64?: string;
+  /**
    * `docs/ux/second-device.md` section 4 — on a system (commit) row only: the
    * person keys a received batch added to and removed from a group, recorded
    * on the batch's last commit row. Names are never stored; the row resolves

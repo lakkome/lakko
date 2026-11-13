@@ -2857,7 +2857,8 @@ public final class ChatViewModel: ObservableObject {
         replyingTo = ReplyArmed(
             messageId: message.messageId,
             snapshot: ReplySnapshot.replySnapshot(
-                for: message, authorLabel: replyAuthorLabel(for: message)),
+                for: message, authorLabel: replyAuthorLabel(for: message),
+                invitationLine: message.invitationLine(conversationIdHex: groupIdHex)),
             quotesOwn: message.direction == .outgoing)
         composerFocusRequest += 1
     }
@@ -3105,7 +3106,8 @@ public final class ChatViewModel: ObservableObject {
             return (author: "", excerpt: ReplySnapshot.missingExcerpt)
         }
         let taken = ReplySnapshot.replySnapshot(
-            for: message, authorLabel: replyAuthorLabel(for: message))
+            for: message, authorLabel: replyAuthorLabel(for: message),
+            invitationLine: message.invitationLine(conversationIdHex: groupIdHex))
         let snapshot = message.direction == .outgoing ? ReplySnapshot.shownAsOwn(taken) : taken
         let lines = ReplySnapshot.replyQuoteLines(snapshot)
         switch entry.scope {

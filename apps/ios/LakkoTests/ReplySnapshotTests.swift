@@ -47,6 +47,25 @@ final class ReplySnapshotTests: XCTestCase {
         XCTAssertEqual(snap.excerpt, "first line second line")
     }
 
+    /// Base scenario 26 (2026-11-13): a channel invitation's text is the
+    /// `/g/` link with its secret; a quote, a pin and a saved snapshot name
+    /// the invitation instead, and Copy takes nothing from the card.
+    func testAChannelInvitationIsQuotedByItsLineNeverByItsLink() {
+        let link = "https://test.lakko.me/g/AAAAAAAA#fakesecretxyz1"
+        let snap = ReplySnapshot.replySnapshot(
+            for: message(link), authorLabel: "Anna", invitationLine: "Invitation to Walk 26 private")
+        XCTAssertEqual(snap.excerpt, "Invitation to Walk 26 private")
+        XCTAssertEqual(
+            ReplySnapshot.replySnapshot(for: message("hi"), authorLabel: "Anna", invitationLine: nil).excerpt, "hi")
+        let saved = SavedMessages.snapshot(
+            text: link, attachments: [], author: "Ann", invitationLine: "Invitation to Walk 26 private")
+        XCTAssertEqual(saved.excerpt, "Invitation to Walk 26 private")
+        XCTAssertNil(InvitationCopy.copyText(link, cardDrawn: true))
+        XCTAssertEqual(InvitationCopy.copyText("hello", cardDrawn: false), "hello")
+        XCTAssertNil(InvitationCopy.copyText("", cardDrawn: false))
+        XCTAssertNil(message(link).invitationLine(conversationIdHex: "00"), "no card, no line")
+    }
+
     /// Section 3.1 — "a message with no text shows the kind of its first
     /// attachment instead", decided the way the timeline decides the bubble.
     func testAMessageWithNoTextIsDescribedByItsFirstAttachmentsKind() {

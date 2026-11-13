@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import initWasm, * as realWasm from "../../wasm/lakko_ffi_wasm";
 // @ts-expect-error — plain JS ESM in public/, no .d.ts; typed via JSDoc.
-import { decryptPushPreview } from "../../public/sw-push-decrypt.js";
+import { decryptPushPreview, withoutGroupLinkSecret } from "../../public/sw-push-decrypt.js";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -95,5 +95,25 @@ describe("a channel invitation's notification", () => {
   it("names a channel with no name by the generic word", async () => {
     const preview = await decryptPushPreview(wake, deps(publisherCardMessage(undefined)));
     expect(preview?.body).toContain("Invitation to publish in Channel");
+  });
+});
+
+describe("a `/g/` link sent with no card", () => {
+  // An older message, or a link pasted as text: there is no card to read, and
+  // the notification is the link WITHOUT what follows `#` (the secret opens
+  // the invitation).
+  it("is notified without its secret", async () => {
+    const payload = realWasm.composeEnvelopeText(`${LINK}#secretsecret1234`);
+    const preview = await decryptPushPreview(wake, deps(payload));
+    expect(preview?.body).toContain(LINK);
+    expect(preview?.body).not.toContain("#");
+    expect(preview?.body).not.toContain("secret");
+  });
+
+  it("leaves every other text as it is", () => {
+    expect(withoutGroupLinkSecret("see https://x.example/g/AbCd#zz")).toBe("see https://x.example/g/AbCd#zz");
+    expect(withoutGroupLinkSecret("https://x.example/i/AbCd#zz")).toBe("https://x.example/i/AbCd#zz");
+    expect(withoutGroupLinkSecret("hello")).toBe("hello");
+    expect(withoutGroupLinkSecret(" https://x.example/g/AbCd#zz ")).toBe("https://x.example/g/AbCd");
   });
 });

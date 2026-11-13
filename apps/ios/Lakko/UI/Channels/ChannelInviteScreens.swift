@@ -24,11 +24,51 @@ struct ChannelInvitePeopleScreen: View {
     @ObservedObject private var l10n = Localization.shared
     @State private var selected: Set<Data> = []
     @State private var sending = false
+    /// The account keys known to be in the channel (this account, the owner,
+    /// the publishers and, for `Invite people`, subscribers by their card).
+    @State private var inChannel: Set<Data> = []
 
-    /// Every contact (section 14.1): the invitation is a message in their
-    /// one-to-one, started if there is none, in the order Message uses.
+    /// The contacts not known to be in the channel (sections 14.1, 15.2): the
+    /// invitation is a message in their one-to-one, started if there is none,
+    /// in the order Message uses.
     private var candidates: [AcceptedContact] {
-        contacts.repositoryState.accepted
+        Self.candidates(contacts.repositoryState.accepted, inChannel: inChannel)
+    }
+
+    /// Sections 14.1 and 15.2 — `accepted` less every contact whose account
+    /// key, current or earlier, is in `inChannel`. Pure.
+    static func candidates(_ accepted: [AcceptedContact], inChannel: Set<Data>) -> [AcceptedContact] {
+        guard !inChannel.isEmpty else { return accepted }
+        return accepted.filter { entry in
+            if inChannel.contains(entry.request.fromPubkey) { return false }
+            return !(entry.previousKeysB64 ?? []).contains { Data(base64Encoded: $0).map(inChannel.contains) ?? false }
+        }
+    }
+
+    /// The owner and the publishers, from the PublisherGroup's members, and
+    /// this account; for `Invite people`, the subscribers whose card this
+    /// device could open too.
+    private func loadInChannel() async {
+        var keys: Set<Data> = []
+        if let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed) {
+            keys.insert(identity.signaturePublicKey())
+            if let group = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil,
+               let members = try? group.members() {
+                for member in members {
+                    keys.insert(member.accountKey.isEmpty ? member.signaturePublicKey : member.accountKey)
+                }
+            }
+        }
+        if let own = try? Identity.fromSeed(seed: accountIdentitySeed) { keys.insert(own.signaturePublicKey()) }
+        inChannel = keys
+        guard !publisher else { return }
+        let cards = await ChannelMemberCards.refreshMembers(
+            state: state, channelId: channelId,
+            resolveKey: { accountId in
+                try? await ContactsClient().resolveVerifiedBundle(accountId: accountId).signaturePubkey
+            })
+        for card in cards where !card.accountKey.isEmpty { keys.insert(card.accountKey) }
+        inChannel = keys
     }
 
     var body: some View {
@@ -64,6 +104,7 @@ struct ChannelInvitePeopleScreen: View {
         .disabled(sending)
         .navigationTitle(l10n.t(publisher ? "channels.publishers.add" : "channels.info.invite_people"))
         .navigationBarTitleDisplayMode(.inline)
+        .task { await loadInChannel() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(selected.isEmpty || publisher

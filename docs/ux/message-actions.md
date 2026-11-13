@@ -317,6 +317,11 @@ ORIGINAL author's name and origin, never the forwarder's. Reactions are not
 carried. A message that cannot be forwarded yet (its attachments still
 uploading, or a failed send) does not offer Forward.
 
+**A channel invitation is never forwarded** (maintainer, 2026-11-13): a message
+that carries a channel invitation card, public or private, to subscribe or to
+publish, offers no Forward, and a selection that holds one has `Forward`
+disabled (section 8).
+
 **The bubble.** A forwarded message draws one line above its content, inside
 the bubble, in the muted text colour with a small forward arrow:
 "Forwarded from <name>", or "Forwarded" when no name was carried. The name is
@@ -431,7 +436,8 @@ each locally as the single delete does (the pin records go with it, section
 4.1). On a failure it stops, keeps the unsent messages selected, and says
 "Deleted 5 of 12." Full success leaves selection mode.
 
-**Forward.** `Forward` is enabled when the selection is not empty. It opens the
+**Forward.** `Forward` is enabled when the selection is not empty and holds no
+channel invitation card (section 5.1, 2026-11-13). It opens the
 picker of section 5.1, titled "Forward to", one target. Picking a row sends one
 forwarded message per selected message, oldest first, each composed exactly as
 section 5.1 composes a single forward (the edited text, the attachments

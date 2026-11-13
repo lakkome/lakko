@@ -170,7 +170,7 @@ internal fun PeopleSearchSection(
             PersonRow(
                 person = person,
                 send = rowSendState(person, sends[person.keyHex], outgoing),
-                canAskAgain = outgoing.canAskAgain(person),
+                canAskAgain = outgoing.canAskAgain(person, System.currentTimeMillis()),
                 onAdd = { session.add(person) },
                 onAskAgain = { session.askAgain(person) },
                 onOpenContact = onOpenContact,

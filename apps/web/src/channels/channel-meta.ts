@@ -28,7 +28,9 @@ import { KeyedError } from "../l10n/keyed-error";
 import type { PostDecode } from "./post-decode";
 import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
+import { composerSeedFor } from "./publisher-seed";
 import type { ChannelSharedMeta } from "./channel-log-codec";
+import type { ChannelAccessRecord } from "./channel-access-record";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { notePublicRecordChangedHere } from "../chat/handle-owed";
 import { loadWasm, type Wasm } from "../wasm";
@@ -258,16 +260,42 @@ export async function publishChannelMeta(
   // rename; a channel never listed is topic "Other", language unset, not
   // listed.
   const held = channelsState.metaByChannel().get(channelIdHex);
-  const topic = input.topic ?? held?.topic ?? 0;
-  const language = input.language ?? held?.language ?? "";
-  const listed = input.listed ?? held?.listed ?? false;
-  const handle = input.handle === undefined ? held?.handle : (input.handle ?? undefined);
-  const avatar = input.avatar === undefined ? held?.avatar : (input.avatar ?? undefined);
+  // No record held yet (the first one never landed): the owner's device
+  // states its channel from its own access record, never "not public" by
+  // default.
+  const own =
+    held === undefined && channelsActions.coPublisherGroupIdOf(channelIdHex) === undefined
+      ? planRecordReissue({
+          held: undefined,
+          access: channelsActions.accessOf(channelIdHex),
+          localName: name,
+          localDescription: description,
+          isOwner: true,
+          nowMs: 0,
+        })
+      : undefined;
+  const fallback = own?.kind === "fresh" ? own.input : undefined;
+  const topic = input.topic ?? held?.topic ?? fallback?.topic ?? 0;
+  const language = input.language ?? held?.language ?? fallback?.language ?? "";
+  const listed = input.listed ?? held?.listed ?? fallback?.listed ?? false;
+  const handle =
+    input.handle === undefined ? (held?.handle ?? fallback?.handle ?? undefined) : (input.handle ?? undefined);
+  const avatar =
+    input.avatar === undefined ? (held?.avatar ?? fallback?.avatar ?? undefined) : (input.avatar ?? undefined);
   const reactions = input.reactions ?? held?.reactions;
-  const plaintext = composeMetaV3(wasm, { name, description, stampMs, topic, language, listed, handle, avatar, reactions });
-  const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
+  const composed = composeChannelMetaRecord(wasm, { name, description, stampMs, topic, language, listed, handle, avatar, reactions });
+  const plaintext = composed.plaintext;
+  // Sealed as every post is (`publishChannelPost`): the composer's seed under
+  // the epoch it serves, never the composer's seed under the channel's
+  // current epoch number. After a commit the two differ, and a record sealed
+  // with the new seed under the old epoch opens for nobody (seen live
+  // 2026-11-13: "This post isn't available." on the owner and a subscriber).
+  const sealing = composerSeedFor(keys, channelsState.epochByChannel().get(channelIdHex), (e) =>
+    channelsActions.currentSeed(channelIdHex, e),
+  );
+  if (sealing === null) throw new KeyedError("channels.publish.error.generic");
   const counter = channelsActions.nextCounter(channelIdHex);
-  const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
+  const wire = await composePost({ ...keys, seed: sealing.seed }, channelIdHex, sealing.epoch, counter, plaintext);
   const meta: ChannelSharedMeta = {
     name,
     description,
@@ -275,7 +303,7 @@ export async function publishChannelMeta(
     topic,
     language,
     listed,
-    ...(handle === undefined ? {} : { handle }),
+    ...(handle === undefined || !composed.handleKept ? {} : { handle }),
     ...(avatar === undefined ? {} : { avatar }),
     ...(reactions === undefined ? {} : { reactions }),
   };
@@ -286,9 +314,23 @@ export async function publishChannelMeta(
   return meta;
 }
 
-/** Compose a v3 record, freeing every wasm handle it builds. */
-function composeMetaV3(
-  wasm: Awaited<ReturnType<typeof loadWasm>>,
+/**
+ * Compose a v3 record, freeing every wasm handle it builds and does not hand
+ * to the core.
+ *
+ * `composeChannelMeta` takes its handle, photo and reactions BY VALUE: the
+ * call moves each object into Rust and leaves its JS wrapper empty, and a
+ * `free()` on an emptied wrapper throws "null pointer passed to rust". Each
+ * reference is therefore cleared before the call and only what was not handed
+ * over is freed (seen live 2026-11-13: every record carrying a signed `@name`
+ * threw after composing, so a public channel's first record never posted).
+ *
+ * A handle envelope that does not decode, or whose signed flag is not
+ * `listed`, is left out (the core refuses the pair), so a stale envelope
+ * never blocks the record; `handleKept` says whether it went in.
+ */
+export function composeChannelMetaRecord(
+  wasm: Wasm,
   m: {
     readonly name: string;
     readonly description: string;
@@ -300,7 +342,7 @@ function composeMetaV3(
     readonly avatar: AvatarData | undefined;
     readonly reactions: ChannelSharedMeta["reactions"] | undefined;
   },
-): Uint8Array {
+): { readonly plaintext: Uint8Array; readonly handleKept: boolean } {
   let h: Wasm["ConversationHandle"]["prototype"] | undefined;
   let a: Wasm["ProfileAvatar"]["prototype"] | undefined;
   let r: Wasm["AllowedReactions"]["prototype"] | undefined;
@@ -309,6 +351,10 @@ function composeMetaV3(
       try {
         h = wasm.decodeConversationHandleEnvelope(b64ToBytes(m.handle.envelopeB64));
       } catch {
+        h = undefined;
+      }
+      if (h !== undefined && h.public !== m.listed) {
+        h.free();
         h = undefined;
       }
     }
@@ -321,7 +367,25 @@ function composeMetaV3(
             ? wasm.AllowedReactions.only([...m.reactions.emoji])
             : wasm.AllowedReactions.all();
     }
-    return wasm.composeChannelMeta(m.name, m.description, m.stampMs, m.topic, m.language, m.listed, h, a, r);
+    // Moved into the core by the call, whether it succeeds or throws.
+    const handle = h;
+    const avatar = a;
+    const reactions = r;
+    h = undefined;
+    a = undefined;
+    r = undefined;
+    const plaintext = wasm.composeChannelMeta(
+      m.name,
+      m.description,
+      m.stampMs,
+      m.topic,
+      m.language,
+      m.listed,
+      handle,
+      avatar,
+      reactions,
+    );
+    return { plaintext, handleKept: handle !== undefined };
   } finally {
     h?.free();
     a?.free();
@@ -329,29 +393,142 @@ function composeMetaV3(
   }
 }
 
+/** What a record re-issue is built from: the held record, the owner's own
+ *  access record (visibility, signed `@name`, topic, language, photo), and
+ *  the channel's local name. */
+export interface RecordReissueSources {
+  readonly held: ChannelSharedMeta | undefined;
+  readonly access: Pick<
+    ChannelAccessRecord,
+    "visibility" | "handle" | "handleEnvelopeB64" | "topic" | "language" | "avatar"
+  >;
+  readonly localName: string | undefined;
+  readonly localDescription: string | undefined;
+  /** This device owns the channel: its own access record states the flag. */
+  readonly isOwner: boolean;
+  readonly nowMs: number;
+}
+
+/** The fields {@link publishChannelMeta} takes. */
+export type RecordInput = Parameters<typeof publishChannelMeta>[1];
+
+export type RecordReissuePlan =
+  | { readonly kind: "none" }
+  | { readonly kind: "verbatim"; readonly input: RecordInput; readonly stampMs: bigint }
+  | { readonly kind: "fresh"; readonly input: RecordInput; readonly stampMs: bigint };
+
 /**
- * Re-issue the record this device holds for `channelIdHex` with its
- * ORIGINAL stamp (after a rotation, so the new epoch carries one). A
- * channel created before records existed has no copy; its local name is
- * posted as a first record with a fresh stamp instead. A channel with
- * neither posts nothing (`false`). Throws what {@link publishChannelMeta}
- * throws; the rotation caller logs and moves on.
+ * Which record a re-issue posts (ADR-0051 section 4, ADR-0087 sections 11
+ * and 16). Pure.
+ *
+ * - The held record, verbatim with its ORIGINAL stamp, when it agrees with
+ *   what the owner's device holds (or this device is not the owner).
+ * - The owner's device holding a record that disagrees with its own setting
+ *   (a public channel recorded as not public, or missing the signed `@name`
+ *   the access record holds): a corrected record under a fresh stamp, so it
+ *   replaces the wrong one at every reader that already holds it (newest
+ *   stamp wins).
+ * - No held record (the first record never landed): the record composed
+ *   from the access record and the local name, under a fresh stamp.
+ *
+ * Never a record whose flag this device does not know: with no held record
+ * and no known visibility nothing is posted (`none`), so a public channel is
+ * never published as not public.
+ */
+export function planRecordReissue(src: RecordReissueSources): RecordReissuePlan {
+  const { held, access } = src;
+  const visibility = access.visibility;
+  const listed = visibility === null ? undefined : visibility === "public";
+  const accessHandle =
+    access.handle !== null && access.handleEnvelopeB64 !== null && listed !== undefined
+      ? { handle: access.handle, isPublic: listed, envelopeB64: access.handleEnvelopeB64 }
+      : undefined;
+  const fresh = (base: bigint | undefined): bigint => {
+    const now = BigInt(Math.max(0, Math.floor(src.nowMs)));
+    return base !== undefined && now <= base ? base + 1n : now;
+  };
+  if (held !== undefined) {
+    const agrees =
+      !src.isOwner ||
+      listed === undefined ||
+      ((held.listed ?? false) === listed && (accessHandle === undefined || held.handle?.isPublic === listed));
+    if (agrees) return { kind: "verbatim", input: held, stampMs: held.updatedAtMs };
+    return {
+      kind: "fresh",
+      stampMs: fresh(held.updatedAtMs),
+      input: {
+        name: held.name,
+        description: held.description,
+        topic: access.topic ?? held.topic ?? 0,
+        language: access.language ?? held.language ?? "",
+        listed,
+        handle: accessHandle ?? (held.handle?.isPublic === listed ? held.handle : null),
+        avatar: held.avatar ?? access.avatar ?? null,
+        ...(held.reactions === undefined ? {} : { reactions: held.reactions }),
+      },
+    };
+  }
+  const name = (src.localName ?? "").trim();
+  if (name.length === 0 || listed === undefined) return { kind: "none" };
+  return {
+    kind: "fresh",
+    stampMs: fresh(undefined),
+    input: {
+      name,
+      description: (src.localDescription ?? "").trim(),
+      topic: access.topic ?? 0,
+      language: access.language ?? "",
+      listed,
+      handle: accessHandle ?? null,
+      avatar: access.avatar,
+    },
+  };
+}
+
+/**
+ * Owner's device: when the record it holds contradicts its own flag (a
+ * public channel recorded as not public), mark the record owed, so the publisher pass posts the corrected
+ * one under a fresh stamp and every reader holding the wrong record replaces
+ * it. Returns whether it marked one.
+ */
+export function oweRecordIfContradicted(channelIdHex: string): boolean {
+  const held = channelsState.metaByChannel().get(channelIdHex);
+  if (held === undefined) return false;
+  const access = channelsActions.accessOf(channelIdHex);
+  if (access.recordOwed === true) return false;
+  const isOwner =
+    channelsState.keysByChannel().has(channelIdHex) && channelsActions.coPublisherGroupIdOf(channelIdHex) === undefined;
+  if (!isOwner) return false;
+  // The flag only: a corrected record always carries the owner's flag, so
+  // this converges after one post. (A missing signed name is not checked
+  // here: an envelope the core leaves out would be owed again every pass.)
+  if (access.visibility === null || (held.listed ?? false) === (access.visibility === "public")) return false;
+  channelsActions.updateAccess(channelIdHex, (r) => ({ ...r, recordOwed: true }));
+  return true;
+}
+
+/**
+ * Re-issue the record this device holds for `channelIdHex` (after a
+ * rotation, so the new epoch carries one), as {@link planRecordReissue}
+ * decides: verbatim with its original stamp, or corrected / composed from
+ * what the owner's device holds under a fresh stamp. Resolves `false` when
+ * there is nothing to post. Throws what {@link publishChannelMeta} throws;
+ * the caller keeps it owed.
  */
 export async function republishChannelMeta(
   channelIdHex: string,
   identity: WasmIdentity,
 ): Promise<boolean> {
-  const held = channelsState.metaByChannel().get(channelIdHex);
-  if (held !== undefined) {
-    await publishChannelMeta(channelIdHex, held, identity, held.updatedAtMs);
-    return true;
-  }
   const local = channelsState.channels().find((c) => c.id === channelIdHex);
-  if (local === undefined || local.localName.trim().length === 0) return false;
-  await publishChannelMeta(
-    channelIdHex,
-    { name: local.localName, description: local.localDescription },
-    identity,
-  );
+  const plan = planRecordReissue({
+    held: channelsState.metaByChannel().get(channelIdHex),
+    access: channelsActions.accessOf(channelIdHex),
+    localName: local?.localName,
+    localDescription: local?.localDescription,
+    isOwner: channelsState.keysByChannel().has(channelIdHex) && channelsActions.coPublisherGroupIdOf(channelIdHex) === undefined,
+    nowMs: Date.now(),
+  });
+  if (plan.kind === "none") return false;
+  await publishChannelMeta(channelIdHex, plan.input, identity, plan.stampMs);
   return true;
 }

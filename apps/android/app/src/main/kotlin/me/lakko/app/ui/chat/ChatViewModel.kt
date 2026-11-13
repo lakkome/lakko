@@ -152,6 +152,7 @@ public class ChatViewModel(
         mutableSelection.value = me.lakko.app.chat.MessageSelection.starting(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 
@@ -164,6 +165,7 @@ public class ChatViewModel(
         mutableSelection.value = current.toggle(
             messageId = message.messageId,
             isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+            isInvitation = me.lakko.app.chat.carriesInvitationCard(message),
         )
     }
 

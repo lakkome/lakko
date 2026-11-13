@@ -70,16 +70,70 @@ enum ChannelAdmissionSeedShare {
     private static func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 
     /// A request the owner's poll retained, with the account id its profile
-    /// carried. Kept by the joiner key it came with.
+    /// carried. Kept by the joiner key it came with. A request carries the id
+    /// only in a profile, and a person with no display name has none
+    /// (ADR-0048): such a request is kept too, with the id this account's
+    /// contact row names, or `""` until ``fillPublisherAccountIds(channelId:)``
+    /// finds one.
     static func rememberRequests(_ requests: [CoPublisher.JoinRequest], channelId: String) {
         guard let account = AcceptedContactsStore.boundAccountIdB64, !requests.isEmpty else { return }
         var record = load(account, channelId)
+        let contacts = AcceptedContactsStore.load()
         for request in requests {
-            guard let accountId = request.accountId, accountId.count == 16 else { continue }
-            record.requests[hex(request.joinerKey)] = Request(
-                accountKeyHex: hex(request.accountKey), accountIdHex: hex(accountId))
+            let carried = request.accountId.flatMap { $0.count == 16 ? hex($0) : nil } ?? ""
+            let joinerHex = hex(request.joinerKey)
+            let resolved = Self.resolveAccountIdHex(
+                recordedHex: carried, accountKey: request.accountKey, contacts: contacts)
+            // A later sighting of the same request never forgets an id held.
+            if resolved.isEmpty, let held = record.requests[joinerHex], !held.accountIdHex.isEmpty { continue }
+            record.requests[joinerHex] = Request(
+                accountKeyHex: hex(request.accountKey), accountIdHex: resolved)
         }
         save(record, account, channelId)
+    }
+
+    /// ADR-0087 section 7 — the 16-byte account id (lower-case hex) the
+    /// owner fetches a publisher's identity bundle by: the one the request
+    /// carried, else the one this account's contact row for `accountKey`
+    /// names (the person added through "Add publisher" is a contact). The id
+    /// only picks the bundle; nothing is sealed unless the bundle proves the
+    /// same person (``provesSamePerson(requestKeyHex:bundle:)``). `""` when
+    /// neither names one.
+    nonisolated static func resolveAccountIdHex(
+        recordedHex: String, accountKey: Data, contacts: [AcceptedContact]
+    ) -> String {
+        func lowerHex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
+        if recordedHex.count == 32, let carried = Data(channelHex: recordedHex), carried.count == 16 {
+            return recordedHex.lowercased()
+        }
+        let keyB64 = base64Encode(accountKey)
+        for contact in contacts
+        where contact.request.fromPubkey == accountKey || (contact.previousKeysB64 ?? []).contains(keyB64) {
+            if let id = contact.request.fromAccountId, id.count == 16 { return lowerHex(id) }
+        }
+        return ""
+    }
+
+    /// Fill in the account id of every publisher recorded without one, from
+    /// this account's contact store, and keep it. Returns the publishers the
+    /// owner can reach now: joiner key (hex) to account id (hex).
+    @discardableResult
+    static func fillPublisherAccountIds(channelId: String) -> [String: String] {
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return [:] }
+        var record = load(account, channelId)
+        var contacts: [AcceptedContact]?
+        var changed = false
+        for (joinerHex, publisher) in record.publishers where publisher.accountIdHex.count != 32 {
+            guard let key = Data(channelHex: publisher.accountKeyHex) else { continue }
+            if contacts == nil { contacts = AcceptedContactsStore.load() }
+            let resolved = Self.resolveAccountIdHex(
+                recordedHex: publisher.accountIdHex, accountKey: key, contacts: contacts ?? [])
+            guard !resolved.isEmpty else { continue }
+            record.publishers[joinerHex] = Request(accountKeyHex: publisher.accountKeyHex, accountIdHex: resolved)
+            changed = true
+        }
+        if changed { save(record, account, channelId) }
+        return record.publishers.compactMapValues { $0.accountIdHex.count == 32 ? $0.accountIdHex : nil }
     }
 
     /// After an approve: the joiner is a publisher to send seeds to. A
@@ -149,6 +203,7 @@ enum ChannelAdmissionSeedShare {
         guard let account = AcceptedContactsStore.boundAccountIdB64 else { return }
         let seeds = ChannelInvites.admissionSeeds(channelIdHex: channelId)
         guard !seeds.isEmpty || readKey != nil || !epochSeeds.isEmpty else { return }
+        let reachable = fillPublisherAccountIds(channelId: channelId)
         var record = load(account, channelId)
         guard !record.publishers.isEmpty, let channelBytes = try? group.channelId(),
               let groupId = try? group.groupId() else { return }
@@ -159,7 +214,8 @@ enum ChannelAdmissionSeedShare {
             let epochSeedsOwed = Self.epochSeedsToSend(
                 held: epochSeeds, sent: Set(record.epochSeedsSent?[joinerHex] ?? []), max: maxEpochSeeds)
             guard !owed.isEmpty || readKeyOwed || !epochSeedsOwed.isEmpty,
-                  let accountId = Data(channelHex: publisher.accountIdHex) else { continue }
+                  let accountIdHex = reachable[joinerHex],
+                  let accountId = Data(channelHex: accountIdHex), accountId.count == 16 else { continue }
             let discovery = DiscoveryClient(sessionToken: AmbientSessionToken.shared.current)
             guard let bundle = try? await discovery.identityFetch(accountId: accountId),
                   let accountKey = Data(base64Encoded: bundle.signaturePubkey),

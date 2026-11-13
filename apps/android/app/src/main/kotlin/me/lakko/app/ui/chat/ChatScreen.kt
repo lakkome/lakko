@@ -1318,7 +1318,11 @@ public fun ChatScreen(
                 selection = liveSelection,
                 busy = bulkBusy,
                 status = bulkStatus,
-                onForward = {
+                onForward = onForward@{
+                    // A channel invitation card is never forwarded
+                    // (maintainer, 2026-11-13): Forward is disabled for such
+                    // a selection; this is the floor.
+                    if (!liveSelection.forwardEnabled) return@onForward
                     val requests = viewModel.selectedMessagesInOrder().map { msg ->
                         ForwardRequest(
                             sourceGroupIdHex = state.groupIdHex,
@@ -2092,6 +2096,18 @@ internal fun Bubble(
     // ADR-0082 — translation of this message, and the transcript of its voice
     // or video message, on this device. A row of an older segment takes none.
     val tr = rememberBubbleTranslation(msg, isOwn)
+    // ADR-0087 section 14 — a message carrying a channel invitation card that
+    // opens is the card, not its text (the `/g/` link with its secret): the
+    // bubble leaves the text out, and Copy and Translate have nothing to take.
+    // A link sent as text alone that resolves to a channel's is the same once
+    // the card says so.
+    val cardReplacesText = remember(msg.channelInvite, msg.deleted) {
+        !msg.deleted && channelPost == null &&
+            me.lakko.app.ui.channels.ChannelInviteActionsHolder.actions != null &&
+            me.lakko.app.ui.channels.channelInviteLine(msg.channelInvite) != null
+    }
+    var linkCardResolved by remember(msg.messageId, msg.text) { mutableStateOf(false) }
+    val textHidden = cardReplacesText || (channelPost == null && linkCardResolved)
 
     // docs/ux/text-size.md — the message's text, its meta line, the quote,
     // the forwarded line, link previews and the reaction chips follow the
@@ -2299,17 +2315,27 @@ internal fun Bubble(
                                 lineHeight = largeEmojiSize(emojiOnly) * 1.15f,
                             )
                         } else if (msg.text.isNotEmpty()) {
-                            // docs/ux/message-links.md section 1 — the accent on
-                            // an incoming bubble; on an outgoing one the accent
-                            // is the background, so the bubble's own text colour.
-                            me.lakko.app.ui.components.MessageLinkText(
-                                // Translation UX 3.2 — the translation takes the
-                                // place of the text inside the same bubble.
-                                text = tr.shownText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
-                                onLongPress = openMenu,
-                            )
+                            // ADR-0087 section 14.1 — a bubble whose channel
+                            // invitation card is drawn shows the card alone:
+                            // the text is the `/g/` link with its secret.
+                            if (me.lakko.app.ui.channels.bubbleDrawsMessageText(
+                                    cardDrawn = channelPost == null,
+                                    cardOpens = cardReplacesText,
+                                    linkCardResolved = linkCardResolved,
+                                )
+                            ) {
+                                // docs/ux/message-links.md section 1 — the accent on
+                                // an incoming bubble; on an outgoing one the accent
+                                // is the background, so the bubble's own text colour.
+                                me.lakko.app.ui.components.MessageLinkText(
+                                    // Translation UX 3.2 — the translation takes the
+                                    // place of the text inside the same bubble.
+                                    text = tr.shownText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    linkColor = if (isOwn) contentColor else MaterialTheme.colorScheme.primary,
+                                    onLongPress = openMenu,
+                                )
+                            }
                             // ADR-0087 section 14.1 — a channel invitation:
                             // the link drawn as a card with Subscribe / Open.
                             if (channelPost == null) {
@@ -2319,6 +2345,8 @@ internal fun Bubble(
                                     msg.messageId,
                                     bubbleColor = background,
                                     contentColor = contentColor,
+                                    outgoing = isOwn,
+                                    onResolved = { drawn -> linkCardResolved = drawn },
                                 )
                             }
                             tr.captionLine?.let { line ->
@@ -2441,8 +2469,9 @@ internal fun Bubble(
                         messageActionsFor(
                             isOwn = isOwn,
                             deleted = msg.deleted,
-                            // Translation UX 3.2 — Copy copies the text shown.
-                            text = tr.copyText,
+                            // Translation UX 3.2 — Copy copies the text shown;
+                            // an invitation card shows none.
+                            text = if (textHidden) "" else tr.copyText,
                             menuAvailable = menuAvailable,
                             // UX 5.1 — no Forward on a row still sending or
                             // one that failed.
@@ -2450,8 +2479,9 @@ internal fun Bubble(
                             // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
                             pinLabel = pinLabel,
                             saved = savedMessage,
+                            invitationCard = textHidden || me.lakko.app.chat.carriesInvitationCard(msg),
                         ).copy(
-                            canTranslate = menuAvailable && tr.menuOffered,
+                            canTranslate = menuAvailable && tr.menuOffered && !textHidden,
                             translateLabel = tr.menuLabel,
                         ).let { base ->
                             if (channelPost == null) {
@@ -5417,7 +5447,7 @@ private fun SelectionActionBar(
                 }
                 TextButton(
                     onClick = onSave,
-                    enabled = selection.forwardEnabled && !busy,
+                    enabled = selection.saveEnabled && !busy,
                     modifier = Modifier.weight(1f),
                 ) {
                     LkIcon(

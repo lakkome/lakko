@@ -72,8 +72,10 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CollapsedMore
 import me.lakko.app.channels.channelHeaderLineKey
 import me.lakko.app.channels.channelIsOrphaned
+import me.lakko.app.channels.collapsedMore
 import me.lakko.app.channels.fullRecord
 import me.lakko.app.channels.sharedMeta
 import me.lakko.app.channels.subscriberBand
@@ -1049,6 +1051,10 @@ private fun CommentsBlock(
     var loaded by remember(post.cursor) { mutableStateOf<List<ChannelFeedback.Comment>>(emptyList()) }
     var nextAfter by remember(post.cursor) { mutableStateOf(0L) }
     var more by remember(post.cursor) { mutableStateOf(false) }
+    // Rows the service returned, opened or not, and whether the first page
+    // was read: what the collapsed count is judged by (section 13.2).
+    var rowsRead by remember(post.cursor) { mutableIntStateOf(0) }
+    var firstRead by remember(post.cursor) { mutableStateOf(false) }
     var open by remember(post.cursor) { mutableStateOf(false) }
     var loading by remember(post.cursor) { mutableStateOf(false) }
     var failed by remember(post.cursor) { mutableStateOf(false) }
@@ -1096,7 +1102,9 @@ private fun CommentsBlock(
                 arrived = (page.comments.size - loaded.size).coerceAtLeast(0)
             } else {
                 loaded = page.comments
+                rowsRead = page.rowsRead
             }
+            firstRead = true
             nextAfter = page.nextAfter
             more = page.more
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1180,15 +1188,17 @@ private fun CommentsBlock(
                 }
             }
         }
-        // Section 13a (phase B) — the count the service keeps, when read.
-        val total = count?.toInt()?.coerceAtLeast(loaded.size) ?: loaded.size
-        val hidden = (if (open) loaded.size else total) - shown.size
-        when {
-            !open && (hidden > 0 || more) -> TextButton(onClick = { open = true }) {
-                Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to hidden.coerceAtLeast(1).toULong())))
+        // Section 13.2 — never a count of comments this reader hides: the
+        // service's count (13a, phase B) stands only for rows not read yet.
+        if (!open) {
+            when (val m = collapsedMore(loaded.size, rowsRead, firstRead, more, count)) {
+                is CollapsedMore.Count -> TextButton(onClick = { open = true }) {
+                    Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to m.n.toULong())))
+                }
+                CollapsedMore.Unknown -> TextButton(onClick = { open = true }) { Text(t("channels.comments.show_more_unknown")) }
+                CollapsedMore.Comment -> TextButton(onClick = { open = true }) { Text(t("channels.comments.comment")) }
+                CollapsedMore.None -> TextButton(onClick = { open = true }) { Text(t("channels.comments.write")) }
             }
-            !open && loaded.isEmpty() && (count ?: 0L) == 0L -> TextButton(onClick = { open = true }) { Text(t("channels.comments.comment")) }
-            !open -> TextButton(onClick = { open = true }) { Text(t("channels.comments.write")) }
         }
         if (open) {
             if (more) {
@@ -1197,6 +1207,7 @@ private fun CommentsBlock(
                         try {
                             val page = feedback.comments(post.cursor, nextAfter)
                             loaded = loaded + page.comments
+                            rowsRead += page.rowsRead
                             loadChips(page.comments)
                             nextAfter = page.nextAfter
                             more = page.more
@@ -1206,7 +1217,7 @@ private fun CommentsBlock(
                             failed = true
                         }
                     }
-                }) { Text(strings.format("channels.comments.show_more", emptyMap(), mapOf("count" to 20uL))) }
+                }) { Text(t("channels.comments.more")) }
             }
             if (arrived > 0) {
                 TextButton(onClick = {

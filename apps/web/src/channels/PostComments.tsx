@@ -28,6 +28,7 @@ import { base64Encode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { MessageText } from "../chat/MessageText";
+import { uiRules } from "../chat/ui-rules";
 import { copyMessageText } from "../chat/copy-message";
 import { b64ToBytes, bytesToB64, type AvatarData } from "../profile/avatar-model";
 import { rememberCardAvatar } from "../profile/avatar-runtime";
@@ -241,7 +242,7 @@ export function PostComments(props: {
     if (needsFirstRead(n)) {
       // A count above what was read (someone commented since): read on.
       if (!started) start();
-      else if (status() === "ready" && !thread().expanded && thread().done && n > thread().rows.length) {
+      else if (status() === "ready" && !thread().expanded && thread().done && n > thread().rowsRead) {
         void read(thread().nextAfter, "page").catch(() => undefined);
       }
       return;
@@ -331,6 +332,7 @@ export function PostComments(props: {
     let sealed: Uint8Array;
     const writerKey = wk.publicKey;
     let avatarRef: InstanceType<Wasm["AvatarRef"]> | undefined;
+    let avatarHandedOver = false;
     try {
       const still = own.avatar?.still;
       if (still !== undefined) {
@@ -347,6 +349,7 @@ export function PostComments(props: {
         }
       }
       const target = replyTo();
+      avatarHandedOver = true;
       sealed = w.sealChannelComment(
         id,
         s,
@@ -363,8 +366,10 @@ export function PostComments(props: {
       setError(() => t("channels.comments.invalid"));
       return;
     } finally {
+      // `avatarRef` is not freed once handed over: `sealChannelComment` takes
+      // it by value, and a free on the emptied wrapper throws.
       wk.free();
-      avatarRef?.free();
+      if (!avatarHandedOver) avatarRef?.free();
     }
     // Recorded before it is posted, so any device of the account can delete
     // it whatever happens next.
@@ -427,7 +432,7 @@ export function PostComments(props: {
     }
   }
 
-  const collapsed = createMemo(() => collapsedView(thread(), banned, serverCount()));
+  const collapsed = createMemo(() => collapsedView(thread(), banned, serverCount(), uiRules()));
   const opened = createMemo(() => openView(thread(), banned));
   const shown = (): readonly CommentView[] => (thread().expanded ? opened().shown : collapsed().shown);
 

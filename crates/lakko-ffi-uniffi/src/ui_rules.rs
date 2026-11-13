@@ -279,6 +279,52 @@ pub fn avatar_initials(name: String) -> String {
     lakko_ui_rules::initials::avatar_initials(&name)
 }
 
+/// What follows the first comments under a collapsed channel post
+/// (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of comments
+/// this reader hides. See [`lakko_ui_rules::comments`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CollapsedComments {
+    /// Nothing about the count (first page not read, or all shown).
+    Nothing,
+    /// `Show {n} more comments`.
+    Count {
+        /// How many more, at least 1.
+        n: u32,
+    },
+    /// `Show more comments`: rows remain and the service gave no count.
+    Unknown,
+    /// The quiet `Comment` link: there are none.
+    Comment,
+}
+
+/// The collapsed comment line. `visible`: the comments read that this reader
+/// shows; `rows_read`: every row the service returned; `first_page_read`;
+/// `more_rows`: the last page was full; `server_count`: the service's count,
+/// `None` before it answered.
+#[uniffi::export]
+#[must_use]
+pub fn collapsed_comments(
+    visible: u32,
+    rows_read: u32,
+    first_page_read: bool,
+    more_rows: bool,
+    server_count: Option<u64>,
+) -> CollapsedComments {
+    use lakko_ui_rules::comments::CollapsedComments as Rust;
+    match lakko_ui_rules::comments::collapsed_comments(
+        visible,
+        rows_read,
+        first_page_read,
+        more_rows,
+        server_count,
+    ) {
+        Rust::Nothing => CollapsedComments::Nothing,
+        Rust::Count(n) => CollapsedComments::Count { n },
+        Rust::Unknown => CollapsedComments::Unknown,
+        Rust::Comment => CollapsedComments::Comment,
+    }
+}
+
 /// One run of a message's text: `docs/ux/message-links.md`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MessageTextPiece {
@@ -2290,6 +2336,26 @@ mod tests {
     #[test]
     fn the_guest_name_crosses_the_boundary_intact() {
         assert_eq!(guest_name(0), "Calm Dog");
+    }
+
+    #[test]
+    fn the_collapsed_comment_line_crosses_the_boundary_intact() {
+        assert_eq!(
+            collapsed_comments(0, 2, true, false, Some(2)),
+            CollapsedComments::Comment
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, Some(30)),
+            CollapsedComments::Count { n: 13 }
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, None),
+            CollapsedComments::Unknown
+        );
+        assert_eq!(
+            collapsed_comments(0, 0, false, false, Some(2)),
+            CollapsedComments::Nothing
+        );
     }
 
     #[test]

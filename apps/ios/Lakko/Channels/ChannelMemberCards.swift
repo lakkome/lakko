@@ -161,6 +161,8 @@ enum ChannelMemberCards {
     struct Member {
         let subscriberPk: Data
         let claim: ProfileClaim
+        /// The account key the card is bound to (verified when it opened).
+        var accountKey = Data()
     }
 
     /// ``refresh(state:channelId:resolveKey:)``, with the subscriber key of
@@ -229,7 +231,7 @@ enum ChannelMemberCards {
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate,
                     avatar: ProfileAvatar(profile.avatar))
-                names.append(Member(subscriberPk: member.subscriberPk, claim: claim))
+                names.append(Member(subscriberPk: member.subscriberPk, claim: claim, accountKey: key))
                 if channelGrant != nil {
                     ProfileDirectory.shared.acceptReceived(
                         claim, signatureKeyB64: keyB64, accountIdB64: readForAccountIdB64)

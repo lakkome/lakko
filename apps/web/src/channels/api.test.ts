@@ -62,6 +62,7 @@ import {
   forgetPublisherRoles,
   listSubscribers,
   publishPost,
+  putPublicSeed,
   rememberPublisherRole,
   rotateChannel,
   stageRotation,
@@ -451,5 +452,21 @@ describe("publisher role", () => {
   it("is kept per account: another account on the same channel learns its own", async () => {
     await rememberPublisherRole(CH, ALICE, "copublisher");
     expect(await cachedPublisherRole(CH, BOB)).toBeUndefined();
+  });
+});
+
+describe("putPublicSeed", () => {
+  it("treats 409 public-seed-exists as filed: a re-seal draws a new nonce", async () => {
+    installFetch(() =>
+      json({ code: "public-seed-exists", detail: "another public seed is stored for this epoch" }, 409),
+    );
+    await expect(putPublicSeed(CH, 0, new Uint8Array(64), ALICE)).resolves.toBeUndefined();
+  });
+
+  it("still throws any other refusal", async () => {
+    installFetch(() => json({ code: "public-seed-epoch-in-future", detail: "x" }, 409));
+    const err = await putPublicSeed(CH, 5, new Uint8Array(64), ALICE).catch((e: unknown) => e);
+    expect(apiError.is(err)).toBe(true);
+    expect((err as { code: string }).code).toBe("public-seed-epoch-in-future");
   });
 });

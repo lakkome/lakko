@@ -375,6 +375,7 @@ public fun NewChannelScreen(
                             createChannel(
                                 state = state,
                                 client = client,
+                                recordOwed = me.lakko.app.channels.PrefsOwedRecordMarks(context) { state.boundAccount },
                                 id = id,
                                 name = name.trim(),
                                 description = description.trim(),
@@ -433,9 +434,10 @@ private fun suggestedChannelHandle(name: String, private: Boolean, random: ULong
 }
 
 /** The New channel steps, in the order of [NewChannelScreen]. */
-private suspend fun createChannel(
+internal suspend fun createChannel(
     state: ChannelsUiState,
     client: ChannelsClient,
+    recordOwed: me.lakko.app.channels.OwedRecordMarks,
     id: String,
     name: String,
     description: String,
@@ -491,9 +493,11 @@ private suspend fun createChannel(
     )
     state.setKeys(id, keys)
     // ADR-0051 §4 / ADR-0087 section 18.2 — the v3 record is the first post:
-    // subscribers title the channel from it and read its @name and flag. A
-    // failed post leaves the channel created; the publisher loop re-issues it.
-    try {
+    // subscribers title the channel from it and read its @name and flag. It
+    // is kept here before it is sent and owed until it lands, so a failed
+    // post leaves the channel created and the publisher loop re-issues THIS
+    // record (never one composed without the flag).
+    me.lakko.app.channels.postFirstChannelRecord(recordOwed, id) {
         ChannelMetaPublisher.post(
             state = state,
             client = client,
@@ -505,11 +509,8 @@ private suspend fun createChannel(
             language = language,
             listed = !private,
             handle = ChannelDiscovery.conversationHandleOf(signed),
+            keepBeforeSend = true,
         )
-    } catch (e: kotlinx.coroutines.CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        Log.w(TAG, "channel record not posted at creation", e)
     }
     // ADR-0087 section 16 — public means listed in Discover.
     if (!private) {

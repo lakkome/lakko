@@ -120,6 +120,7 @@ export function useChannelInviteSender(): (
           entry,
           text: invitation.url,
           ...(envelope === undefined ? {} : { envelope }),
+          ...(invitation.kind === "card" ? { channelInvite: invitation.card } : {}),
         }),
       sendInGroup: async (groupIdB64) => {
         const shared = chats.get(groupIdB64);

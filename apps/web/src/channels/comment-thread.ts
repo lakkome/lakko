@@ -11,7 +11,7 @@
  * - open: 20 at a time, oldest first, `Show more` at the end of a page;
  * - comments that arrive while a thread is open do not move it: they wait
  *   behind a `{n} new comments` line until it is pressed;
- * - a banned author's comments are not shown.
+ * - a banned author's comments are not shown, and never counted.
  */
 
 /** One opened comment. */
@@ -43,6 +43,11 @@ export interface ThreadState {
   readonly shownCount: number;
   /** Arrived while the thread was open, not shown yet. */
   readonly arrived: readonly CommentView[];
+  /** How many rows the service returned so far, opened or not (a row that
+   *  did not open, and a banned author's row, are still rows read). */
+  readonly rowsRead: number;
+  /** The first page was read (or there was nothing to read). */
+  readonly firstRead: boolean;
 }
 
 export const EMPTY_THREAD: ThreadState = {
@@ -52,6 +57,8 @@ export const EMPTY_THREAD: ThreadState = {
   expanded: false,
   shownCount: COMMENT_PAGE,
   arrived: [],
+  rowsRead: 0,
+  firstRead: false,
 };
 
 /** `existing` with `incoming` added, by cursor, no repeats. Pure. */
@@ -73,6 +80,7 @@ export function withPage(
   pageLen: number = page.length,
 ): ThreadState {
   const done = pageLen < COMMENT_PAGE;
+  const rowsRead = state.rowsRead + pageLen;
   if (mode === "poll" && state.expanded) {
     const known = new Set(state.rows.map((c) => c.cursor));
     const fresh = page.filter((c) => !known.has(c.cursor));
@@ -81,6 +89,8 @@ export function withPage(
       arrived: mergeComments(state.arrived, fresh),
       nextAfter: Math.max(state.nextAfter, nextAfter),
       done,
+      rowsRead,
+      firstRead: true,
     };
   }
   return {
@@ -88,6 +98,8 @@ export function withPage(
     rows: mergeComments(state.rows, page),
     nextAfter: Math.max(state.nextAfter, nextAfter),
     done,
+    rowsRead,
+    firstRead: true,
   };
 }
 
@@ -119,29 +131,54 @@ export function visibleComments(rows: readonly CommentView[], isBanned: (authorH
   return rows.filter((c) => !isBanned(c.authorHex));
 }
 
+/** The shared rule `crates/lakko-ui-rules` `comments` (over wasm): what
+ *  follows the first comments of a collapsed thread. */
+export interface CollapsedCommentsRule {
+  collapsedComments(
+    visible: number,
+    rowsRead: number,
+    firstPageRead: boolean,
+    moreRows: boolean,
+    serverCount?: number,
+  ): { readonly kind: string; readonly count: number | undefined };
+}
+
 /**
  * What the collapsed thread shows. `serverCount` is the post's comment count
  * as the channels service maintains it (ADR-0087 phase B), `undefined` before
- * it answered: with it, `Show {n} more comments` is known before the rows are
- * read, and a post with none shows `Comment` without reading a page. Once
- * every row is read the rows decide (they apply the ban list and are newer
- * than a cached count). Pure.
+ * it answered. The service counts every stored comment, including those this
+ * reader hides (a banned author's, one that does not open), so the count
+ * never stands alone; the rule that says what follows is the shared one
+ * (`lakko_ui_rules::comments`), so the three clients cannot disagree. `rules`
+ * is `null` until wasm has loaded, and then nothing is said. Pure.
  */
 export function collapsedView(
   state: ThreadState,
   isBanned: (authorHex: string) => boolean,
-  serverCount?: number,
+  serverCount: number | undefined,
+  rules: CollapsedCommentsRule | null,
 ): CollapsedView {
   const visible = visibleComments(state.rows, isBanned);
   const shown = visible.slice(0, COLLAPSED_SHOWN);
-  let unread: number | null;
-  if (state.done) unread = 0;
-  else if (serverCount !== undefined) unread = Math.max(0, serverCount - state.rows.length);
-  else unread = null;
-  if (unread === null) return { shown, more: { kind: "unknown" } };
-  const rest = visible.length - shown.length + unread;
-  if (visible.length === 0 && rest === 0) return { shown, more: { kind: "comment" } };
-  return { shown, more: rest > 0 ? { kind: "count", n: rest } : null };
+  if (rules === null) return { shown, more: null };
+  // A post the service says has none is marked done without a read.
+  const answer = rules.collapsedComments(
+    visible.length,
+    state.rowsRead,
+    state.firstRead || state.done,
+    !state.done,
+    serverCount,
+  );
+  switch (answer.kind) {
+    case "count":
+      return { shown, more: { kind: "count", n: answer.count ?? 1 } };
+    case "unknown":
+      return { shown, more: { kind: "unknown" } };
+    case "comment":
+      return { shown, more: { kind: "comment" } };
+    default:
+      return { shown, more: null };
+  }
 }
 
 /** Whether the first page needs reading at all: not when the service says

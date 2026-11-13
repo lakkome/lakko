@@ -41,7 +41,7 @@ import { channelsActions, channelsState } from "../state/channels-state";
 import { admitNewSubscribers } from "./subscriber-admission";
 import { runPublisherRemoval, runRotationOnce, type RotationContext } from "./rotation-cron";
 import { loadRotationState, saveRotationState, type ChannelRotationState } from "./rotation-state-store";
-import { republishChannelMeta } from "./channel-meta";
+import { oweRecordIfContradicted, republishChannelMeta } from "./channel-meta";
 import { settleOwedRecord } from "./owed-record";
 import { epochSeedsToAdd, epochSeedsToSend, keepsEpochSeeds, takesRotateRequest } from "./publisher-handover";
 import {
@@ -93,9 +93,13 @@ import {
   bindingVerdict,
   matchPublisherLink,
   persistThenPublish,
+  readKeyRecipients,
   removedPublisherFallback,
+  resolvePublisherAccountIdHex,
   withAppointedKey,
+  withResolvedAccountIds,
 } from "./publisher-app-messages";
+import { accountIdB64OfKey } from "../contacts/local-store";
 import { DiscoveryClient } from "../discovery/client";
 import { sessionTokens } from "../auth/session-token-provider";
 import { useProfiles } from "../profile/ProfileContext";
@@ -330,7 +334,13 @@ async function approveAndRecord(
           {
             accountKeyB64,
             copublisherKeyB64: bound === undefined ? "" : bytesToB64(bound),
-            accountIdHex: accountId === undefined ? "" : hexOf(accountId),
+            // A request carries the id only in a profile; a person with no
+            // name sends none, and the owner's contact row names them.
+            accountIdHex: resolvePublisherAccountIdHex(
+              accountId === undefined ? "" : hexOf(accountId),
+              accountKeyB64,
+              (k) => accountIdB64OfKey(k),
+            ),
             sentVersions: [],
           },
         ],
@@ -455,6 +465,22 @@ async function sendAdmissionSeeds(wasm: Wasm, identity: WasmIdentity, idHex: str
 }
 
 /**
+ * ADR-0087 section 7 — a publisher recorded with no account id (its request
+ * carried no profile: a person with no display name; or an entry a binding
+ * created) gets the id from this account's contact store, so the read key,
+ * the earlier seeds and the admission seeds reach it. Written once found.
+ */
+async function fillPublisherAccountIds(idHex: string): Promise<void> {
+  const resolve = (k: string): string | null => accountIdB64OfKey(k);
+  const current = channelsActions.accessOf(idHex).publisherKeys;
+  if (withResolvedAccountIds(current, resolve) === current) return;
+  await channelsActions.updateAccessDurable(idHex, (r) => ({
+    ...r,
+    publisherKeys: withResolvedAccountIds(r.publisherKeys, resolve),
+  }));
+}
+
+/**
  * ADR-0087 phase B — the owner sends each publisher the channel's read key
  * (it never changes, so once), sealed to the person's ACCOUNT X25519 key
  * the same way as the admission seeds: the key from the person's identity
@@ -463,7 +489,7 @@ async function sendAdmissionSeeds(wasm: Wasm, identity: WasmIdentity, idHex: str
  * Recorded durably; a failure is retried next pass.
  */
 async function sendReadKeys(wasm: Wasm, identity: WasmIdentity, idHex: string): Promise<void> {
-  const pending = channelsActions.accessOf(idHex).publisherKeys.filter((p) => p.readKeySent !== true && p.accountIdHex !== "");
+  const pending = readKeyRecipients(channelsActions.accessOf(idHex).publisherKeys);
   if (pending.length === 0) return;
   const discovery = new DiscoveryClient(undefined, { sessionToken: () => sessionTokens.peek() });
   for (const p of pending) {
@@ -918,12 +944,22 @@ export const ChannelPublisherLoops: Component = () => {
           await rotateChannel(lineage, idHex, false);
         }
         // A channel record owed after a commit (a re-post that failed, or a
-        // reload before it): retried every pass until it lands.
+        // reload before it): retried every pass until it lands. A held record
+        // that contradicts the owner's own setting is owed too (seen live
+        // 2026-11-13: a public channel recorded as not public).
+        if (owner) oweRecordIfContradicted(idHex);
         await settleOwedRecord(idHex, () => republishChannelMeta(idHex, lineage));
         const epoch = channelsState.epochByChannel().get(idHex);
         if (epoch !== undefined && publicSeedFiled.get(idHex) !== epoch) {
-          await ensurePublicSeed(lineage, idHex);
-          publicSeedFiled.set(idHex, epoch);
+          // Tried again next pass on a failure; the steps below (letting
+          // subscribers in, the owner's approvals) do not wait on it.
+          try {
+            await ensurePublicSeed(lineage, idHex);
+            publicSeedFiled.set(idHex, epoch);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("[channels] a public seed was not written; tried again next pass", err instanceof Error ? err.name : "");
+          }
         }
         await admitNewSubscribers(idHex, lineage);
         // The owner's account key: the PublisherGroup's lowest leaf.
@@ -948,6 +984,7 @@ export const ChannelPublisherLoops: Component = () => {
             await rotateChannel(lineage, idHex, true);
             lastRotationCheck.set(idHex, Date.now());
           }
+          await fillPublisherAccountIds(idHex);
           await sendReadKeys(wasm, lineage, idHex);
           await sendEpochSeeds(wasm, lineage, idHex);
           await sendAdmissionSeeds(wasm, lineage, idHex);

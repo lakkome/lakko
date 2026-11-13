@@ -851,6 +851,55 @@ final class ChannelConversationModel: ObservableObject {
         /// Comments that arrived while the thread was open (section 13.2).
         var newSinceOpen = 0
         var failedSends: [Comment] = []
+        /// Rows the service returned so far, opened or not: a row that did
+        /// not open and a banned author's row are still rows read.
+        var rowsRead = 0
+        /// The first page was read.
+        var firstRead = false
+    }
+
+    /// Section 13.2 — what follows the first two comments of a collapsed
+    /// thread.
+    enum CollapsedMore: Equatable {
+        /// Nothing (yet): the first page is not read, or every comment shows.
+        case none
+        /// `Show {n} more comments`.
+        case count(Int)
+        /// `Show more comments`: rows remain and the service gave no count.
+        case unknown
+        /// The quiet `Comment`: there are none.
+        case comment
+    }
+
+    /// The rule behind ``CollapsedMore``: the shared one in
+    /// `crates/lakko-ui-rules` (`comments`), so the three clients cannot
+    /// disagree. The service's count (ADR-0087 phase B) counts every stored
+    /// comment, including those this reader hides (a banned author's, one
+    /// that does not open), so it never stands alone: nothing is said before
+    /// the first page is read, the rows read are judged by themselves, and
+    /// only the rows not read yet are taken from the service.
+    nonisolated static func collapsedMore(
+        visible: Int, rowsRead: Int, firstRead: Bool, mayHaveMore: Bool, serverCount: UInt64?
+    ) -> CollapsedMore {
+        switch collapsedComments(
+            visible: UInt32(clamping: visible), rowsRead: UInt32(clamping: rowsRead),
+            firstPageRead: firstRead, moreRows: mayHaveMore, serverCount: serverCount)
+        {
+        case .nothing: return .none
+        case .count(let n): return .count(Int(n))
+        case .unknown: return .unknown
+        case .comment: return .comment
+        }
+    }
+
+    /// ``collapsedMore(visible:rowsRead:firstRead:mayHaveMore:serverCount:)``
+    /// for the post at `cursor`.
+    func collapsedMore(_ cursor: UInt64) -> CollapsedMore {
+        let thread = threads[cursor]
+        return Self.collapsedMore(
+            visible: visibleComments(cursor).count, rowsRead: thread?.rowsRead ?? 0,
+            firstRead: thread?.firstRead ?? false, mayHaveMore: thread?.mayHaveMore ?? false,
+            serverCount: commentCountByPost[cursor])
     }
 
     /// The comments of a post, the banned authors' hidden.
@@ -875,6 +924,8 @@ final class ChannelConversationModel: ObservableObject {
                 if let comment = open(row, item: item) { opened.append(comment) }
             }
             thread.comments = opened
+            thread.rowsRead = (more ? thread.rowsRead : 0) + page.rows.count
+            thread.firstRead = true
             thread.nextAfter = page.nextAfter
             thread.mayHaveMore = page.rows.count >= 20
             if more { thread.expanded = true }

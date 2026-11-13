@@ -776,10 +776,28 @@ class PeopleSearchSessionTest {
     }
 
     @Test
+    fun `right after add contact the row reads request sent with no ask again`() {
+        // docs/ux/who-can-find-me.md section 6.1: the row reads Request sent
+        // and the button goes away; Ask again comes after a day unanswered.
+        val anna = granted("Anna", 1)
+        val now = 1_794_312_000_000L
+        val list = OutgoingRequests.of(listOf(sentTo(anna).copy(sentAtMs = now)))
+        assertEquals(RowSendState.SENT, rowSendState(anna, null, list))
+        assertFalse(list.canAskAgain(anna, now))
+        assertFalse(list.canAskAgain(anna, now + me.lakko.app.chat.ASK_AGAIN_AFTER_MS - 1))
+        assertTrue(list.canAskAgain(anna, now + me.lakko.app.chat.ASK_AGAIN_AFTER_MS))
+        // The newest request decides.
+        val twice = OutgoingRequests.of(
+            listOf(sentTo(anna).copy(sentAtMs = now - 2 * me.lakko.app.chat.ASK_AGAIN_AFTER_MS), sentTo(anna).copy(messageId = 2L, sentAtMs = now)),
+        )
+        assertFalse(twice.canAskAgain(anna, now))
+    }
+
+    @Test
     fun `a row with a standing request reads sent and offers ask again`() {
         val anna = person("Anna", PersonReach.OPEN, 1).copy(username = "anna")
-        val sent = OutgoingRequests(setOf(anna.keyHex), emptySet())
-        assertTrue(sent.canAskAgain(anna))
+        val sent = OutgoingRequests(setOf(anna.keyHex), emptySet(), sentAtMsByIdHex = mapOf(anna.keyHex to 0L))
+        assertTrue(sent.canAskAgain(anna, me.lakko.app.chat.ASK_AGAIN_AFTER_MS))
         assertEquals(
             PersonRowView(RowAction.ASK_AGAIN, REQUEST_SENT),
             personRowView(anna, RowSendState.SENT, canAskAgain = true),
@@ -793,7 +811,7 @@ class PeopleSearchSessionTest {
         val id = anna.accountIdHex!!
         val invited = OutgoingRequests(setOf(anna.keyHex), setOf(id), invitedAccountIdsHex = setOf(id))
         assertTrue(invited.holds(anna))
-        assertFalse(invited.canAskAgain(anna))
+        assertFalse(invited.canAskAgain(anna, Long.MAX_VALUE))
     }
 
     @Test

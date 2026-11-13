@@ -74,8 +74,17 @@ public struct MessageSelection: Equatable {
             : Localization.text("chat.select.count", counts: ["count": UInt64(count)])
     }
 
-    /// Section 8 — `Forward` is enabled when the selection is not empty.
-    public var forwardEnabled: Bool { !isEmpty }
+    /// Section 8 — `Save` acts on the whole set: enabled when the selection
+    /// is not empty.
+    public var saveEnabled: Bool { !isEmpty }
+
+    /// Section 8 — `Forward` is enabled when the selection is not empty and
+    /// holds no message carrying a channel invitation card, which is never
+    /// forwarded (maintainer, 2026-11-13). `holdsInvitation` is the caller's
+    /// read over the selected messages, as `allOwn` is for Delete.
+    public func forwardEnabled(holdsInvitation: Bool) -> Bool {
+        !isEmpty && !holdsInvitation
+    }
 
     /// Section 8 — `Delete` is enabled when the selection is not empty and
     /// every selected message is the person's own: Lakko has no "delete for

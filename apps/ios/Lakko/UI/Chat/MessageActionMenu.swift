@@ -176,7 +176,11 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         pin: PinMenuState = .unavailable,
         canSelect: Bool = false,
         save: SaveMenuState = .unavailable,
-        translate: MessageTranslateMenuState = .unavailable
+        translate: MessageTranslateMenuState = .unavailable,
+        // ADR-0087 section 14 — `false` for a message drawn as a channel
+        // invitation card: its text is the `/g/` link with its secret, so it
+        // is never edited. Delete stays.
+        canEdit: Bool = true
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -212,7 +216,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .unavailable: break
         }
         if canEditOrDelete {
-            actions.append(.edit)
+            if canEdit { actions.append(.edit) }
             actions.append(.delete)
         }
         return actions

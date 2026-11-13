@@ -365,6 +365,72 @@ pub fn avatar_initials(name: &str) -> String {
     lakko_ui_rules::initials::avatar_initials(name)
 }
 
+/// What follows the first comments under a collapsed channel post
+/// (`docs/ux/group-and-channel-privacy.md` 13.2): never a count of comments
+/// this reader hides. `kind` is `nothing`, `count`, `unknown` or `comment`;
+/// `count` is set on `count` only.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct CollapsedComments {
+    inner: lakko_ui_rules::comments::CollapsedComments,
+}
+
+#[wasm_bindgen]
+impl CollapsedComments {
+    /// `nothing`, `count`, `unknown` or `comment`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        use lakko_ui_rules::comments::CollapsedComments as Rust;
+        match self.inner {
+            Rust::Nothing => "nothing",
+            Rust::Count(_) => "count",
+            Rust::Unknown => "unknown",
+            Rust::Comment => "comment",
+        }
+        .to_owned()
+    }
+
+    /// How many more, on `count`; `undefined` otherwise.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn count(&self) -> Option<u32> {
+        match self.inner {
+            lakko_ui_rules::comments::CollapsedComments::Count(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+/// The collapsed comment line. `visible`: the comments read that this reader
+/// shows; `rowsRead`: every row the service returned; `firstPageRead`;
+/// `moreRows`: the last page was full; `serverCount`: the service's count,
+/// `undefined` before it answered.
+#[wasm_bindgen(js_name = collapsedComments)]
+#[must_use]
+pub fn collapsed_comments(
+    visible: u32,
+    rows_read: u32,
+    first_page_read: bool,
+    more_rows: bool,
+    server_count: Option<f64>,
+) -> CollapsedComments {
+    // A JS number; a negative or non-finite count reads as none answered.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let server = server_count
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| c as u64);
+    CollapsedComments {
+        inner: lakko_ui_rules::comments::collapsed_comments(
+            visible,
+            rows_read,
+            first_page_read,
+            more_rows,
+            server,
+        ),
+    }
+}
+
 /// One run of a message's text: `docs/ux/message-links.md`.
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
@@ -2099,6 +2165,27 @@ pub fn speaking_floor_onset_ms() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_collapsed_comment_line_crosses_the_boundary_intact() {
+        let c = collapsed_comments(0, 2, true, false, Some(2.0));
+        assert_eq!(c.kind(), "comment");
+        assert_eq!(c.count(), None);
+        let c = collapsed_comments(5, 20, true, true, Some(30.0));
+        assert_eq!((c.kind().as_str(), c.count()), ("count", Some(13)));
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, None).kind(),
+            "unknown"
+        );
+        assert_eq!(
+            collapsed_comments(5, 20, true, true, Some(-1.0)).kind(),
+            "unknown"
+        );
+        assert_eq!(
+            collapsed_comments(0, 0, false, false, Some(2.0)).kind(),
+            "nothing"
+        );
+    }
 
     #[test]
     fn the_avatar_initials_cross_the_boundary_intact() {

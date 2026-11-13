@@ -690,6 +690,12 @@ export type ParsedBodyResult =
        *  one-to-one: where it was originally sent. Never drawn
        *  (`resend-marker.ts`). */
       resendOrigin?: ForwardOrigin;
+      /** ADR-0087 section 14 — the channel invitation card the envelope
+       *  carries beside its text (the `/g/` link): opened on this device
+       *  (`openChannelInviteCard`) and kept with the message, so the bubble
+       *  and the Chats row read the invitation even once the link is used
+       *  up. Never drawn as bytes. */
+      channelInvite?: Uint8Array;
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
@@ -843,6 +849,8 @@ export function parseBodyEnvelopeWith(
       resendGroup === undefined || resendMessage === undefined
         ? undefined
         : { groupIdB64: resendGroup, messageId: Number(resendMessage) };
+    // ADR-0087 section 14 — the invitation card, when the envelope has one.
+    const card = parsed.channelInvite;
     return {
       kind: "chat",
       text: parsed.text,
@@ -850,6 +858,7 @@ export function parseBodyEnvelopeWith(
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
       ...(resendOrigin === undefined ? {} : { resendOrigin }),
+      ...(card === undefined || card.length === 0 ? {} : { channelInvite: card }),
     };
   } finally {
     parsed.free();

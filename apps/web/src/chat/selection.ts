@@ -116,9 +116,12 @@ export function deleteDecision(selected: ReadonlyArray<{ readonly own: boolean }
   return { enabled: allOwn, helper: allOwn ? null : DELETE_HELPER() };
 }
 
-/** Section 8 "Forward" — enabled when the selection is not empty. */
-export function forwardEnabled(selection: Selection): boolean {
-  return selection.size > 0;
+/** Section 8 "Forward" — enabled when the selection is not empty and holds
+ *  no message carrying a channel invitation card, which is never forwarded
+ *  (maintainer, 2026-11-13; section 5.1). `holdsInvitation` is the caller's
+ *  read over the selected messages. */
+export function forwardEnabled(selection: Selection, holdsInvitation = false): boolean {
+  return selection.size > 0 && !holdsInvitation;
 }
 
 /** Section 8 "Delete" — the question: "Delete 12 messages?", "Delete 1 message?". */

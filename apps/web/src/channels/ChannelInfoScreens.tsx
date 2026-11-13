@@ -26,6 +26,7 @@ import { currentLanguage, joinList, t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { PickRow } from "../ui/LabelledRows";
 import { LakkoPicker } from "../ui/LakkoPicker";
 import { loadWasm } from "../wasm";
 import { BannedList } from "./BannedList";
@@ -61,6 +62,7 @@ import {
   stepDownAsPublisher,
 } from "./channel-publishers";
 import { bytesToHex } from "./composer";
+import { channelInviteCandidates, inChannelKeys } from "./invite-candidates";
 import { useChannelInviteSender } from "./invite-contacts";
 import { loadChannelMembers, type ChannelMembersResult } from "./member-cards";
 
@@ -635,6 +637,9 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
         <ContactPicker
           single
           title={t("channels.publishers.add")}
+          inChannel={() =>
+            inChannelKeys({ ownKeyB64: ownKeyB64(), publisherKeysB64: channelPublishers(props.id).map((p) => p.accountKeyB64) })
+          }
           onPick={(contacts) => {
             const c = contacts[0];
             if (c !== undefined) void invite(c);
@@ -655,6 +660,33 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
   const sendInvite = useChannelInviteSender();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+
+  // UX 14.1: people known to subscribe, by their card, are not offered; nor
+  // are the owner and the publishers, who are in the channel already.
+  const [members] = createResource(
+    () => props.id,
+    async (id): Promise<ChannelMembersResult | null> => {
+      const keys = channelsState.subscriberKeysByChannel().get(id);
+      try {
+        return await loadChannelMembers({
+          channelIdHex: id,
+          seedForEpoch: (e) => channelSeedFor(id, e),
+          ownSubscriberPkHex: keys === undefined ? null : bytesToHex(keys.public),
+        });
+      } catch {
+        // The cards could not be read: the list keeps every contact.
+        return null;
+      }
+    },
+  );
+  const inChannel = (): Set<string> => {
+    const identity = chats.conversationAccountIdentity();
+    return inChannelKeys({
+      ownKeyB64: identity === null ? null : base64Encode(identity.signaturePublicKey),
+      publisherKeysB64: channelPublishers(props.id).map((p) => p.accountKeyB64),
+      memberKeysB64: (members() ?? null)?.rows.map((r) => r.personKeyB64) ?? [],
+    });
+  };
 
   async function invite(contacts: readonly AcceptedContact[]): Promise<void> {
     const identity = chats.conversationAccountIdentity();
@@ -681,7 +713,12 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
 
   return (
     <div class="lk-stack" style={{ padding: "16px" }}>
-      <ContactPicker title={t("channels.info.invite_people")} busy={busy()} onPick={(c) => void invite(c)} />
+      <ContactPicker
+        title={t("channels.info.invite_people")}
+        busy={busy()}
+        inChannel={inChannel}
+        onPick={(c) => void invite(c)}
+      />
       <Show when={error()}>
         {(m) => (
           <p class="form-error" role="alert">
@@ -696,20 +733,24 @@ export function ChannelInvitePeopleScreen(props: { readonly id: string; readonly
 /** The contacts list with check boxes and the trailing `Invite (n)` button;
  *  `single` picks one and acts at once. Contacts only: an invitation is a
  *  message in a one-to-one, and a stranger has none (UX 14.1). Every contact
- *  is offered: a contact can always be messaged, and the invitation founds the
- *  one-to-one when none is held. */
+ *  not known to be in the channel (`inChannel`) is offered: a contact can
+ *  always be messaged, and the invitation founds the one-to-one when none is
+ *  held. */
 function ContactPicker(props: {
   readonly title: string;
   readonly single?: boolean;
   readonly busy?: boolean;
+  /** Account keys known to be in the channel already: not offered. */
+  readonly inChannel?: () => ReadonlySet<string>;
   readonly onPick: (contacts: readonly AcceptedContact[]) => void;
 }): JSX.Element {
   const profiles = useProfiles();
-  const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
+  const [all, setAll] = createSignal<AcceptedContact[]>(loadAccepted());
   onMount(() => {
-    const off = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
+    const off = subscribeAcceptedChanged(() => setAll(loadAccepted()));
     return off;
   });
+  const accepted = (): AcceptedContact[] => channelInviteCandidates(all(), props.inChannel?.() ?? new Set());
   const [picked, setPicked] = createSignal<ReadonlySet<string>>(new Set());
   const labelOf = (c: AcceptedContact): string => memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the channel contact picker");
   const toggle = (key: string): void => {
@@ -734,18 +775,14 @@ function ContactPicker(props: {
                 </button>
               }
             >
-              <label class="lk-row pick">
-                <input
-                  type="checkbox"
-                  checked={picked().has(c.signaturePubkeyB64)}
-                  disabled={props.busy === true}
-                  onChange={() => toggle(c.signaturePubkeyB64)}
-                />
+              <PickRow
+                label={labelOf(c)}
+                checked={picked().has(c.signaturePubkeyB64)}
+                disabled={props.busy === true}
+                onToggle={() => toggle(c.signaturePubkeyB64)}
+              >
                 <Avatar label={labelOf(c)} id={c.signaturePubkeyB64} personKey={c.signaturePubkeyB64} />
-                <div class="lk-row-body">
-                  <span class="lk-row-title">{labelOf(c)}</span>
-                </div>
-              </label>
+              </PickRow>
             </Show>
           )}
         </For>

@@ -107,6 +107,7 @@ import {
   type ReplySnapshot,
 } from "../chat/reply-snapshot";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
+import { channelInviteRowPreview } from "../chat/channel-invite-preview";
 import { screenAnchor } from "../ui/screen-anchor";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
@@ -1021,7 +1022,11 @@ function ChatView(props: {
     // The snapshot carries the author's REAL name, the account's own for an
     // own message (decided 2026-11-04): it goes on the wire, and "You" is the
     // viewer's word, drawn locally by the author's own devices.
-    const snapshot = replySnapshotFor({ text, attachments }, forwardAuthorLabelOf(row), (a) => hub.decision(a).bubble);
+    const snapshot = replySnapshotFor(
+      { text, attachments, invitationLine: rowInvitationLine(row, text) },
+      forwardAuthorLabelOf(row),
+      (a) => hub.decision(a).bubble,
+    );
     setEditingId(null);
     setReplyingTo({ target: messageId, ...snapshot });
     composerInput?.focus();
@@ -1090,6 +1095,16 @@ function ChatView(props: {
       own: rows().find((r) => rowMessageId(r) === id)?.kind === "outgoing",
     }));
   const deleteState = createMemo(() => deleteDecision(selectedItems()));
+  /** The selection holds a message carrying a channel invitation card, which
+   *  is never forwarded (maintainer, 2026-11-13). */
+  const selectionHoldsInvitation = createMemo(() =>
+    oldestFirst(selection()).some((id) => {
+      const row = rows().find((r) => rowMessageId(r) === id);
+      if (row === undefined) return false;
+      if (row.kind === "outgoing") return row.channelInviteB64 !== undefined;
+      return row.event.kind === "application" && row.event.channelInvite !== undefined && row.event.channelInvite.length > 0;
+    }),
+  );
   // Section 8 "Leaving" — Escape on web. On the capture phase, so it is
   // decided before whatever is stacked on top of the mode (the confirmation,
   // the picker) handles the same key: while one of those is open, Escape is
@@ -1209,6 +1224,12 @@ function ChatView(props: {
   async function forwardSelectionTo(target: ForwardPickerRow): Promise<void> {
     const entry = chats.get(target.id);
     if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
+    // A channel invitation card is never forwarded (maintainer, 2026-11-13);
+    // the bar's Forward is disabled for such a selection, this is the floor.
+    if (selectionHoldsInvitation()) {
+      setBulkForwardOpen(false);
+      return;
+    }
     const ids = oldestFirst(selection());
     const done: number[] = [];
     setError(null);
@@ -5053,6 +5074,7 @@ function ChatView(props: {
         messageId,
         author: profiles.ownProfile().displayName ?? profiles.ownUsername() ?? t("chat.author.you"),
         text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? row.plaintext,
+        invitationLine: rowInvitationLine(row, row.plaintext),
         attachments: row.attachments,
         sentAtMs: row.createdAt === undefined ? 0 : new Date(row.createdAt).getTime(),
       };
@@ -5066,6 +5088,7 @@ function ChatView(props: {
         // the account (ADR-0065), so a placeholder would stay there for good.
         author: (ev.senderKey === undefined ? null : realNameOf(ev.senderKey)) ?? "",
         text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? ev.text,
+        invitationLine: rowInvitationLine(row, ev.text),
         attachments: ev.attachments,
         sentAtMs: new Date(ev.createdAt).getTime(),
       };
@@ -7591,7 +7614,7 @@ function ChatView(props: {
       const text =
         (msgOps().get(item.messageId) ?? historyOps().get(item.messageId))?.editedText ?? original;
       const snapshot = replySnapshotFor(
-        { text, attachments },
+        { text, attachments, invitationLine: rowInvitationLine(row, text) },
         authorLabelOf(row),
         (a) => hub.decision(a).bubble,
       );
@@ -8474,7 +8497,7 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-select-action"
-              disabled={!forwardEnabled(selection())}
+              disabled={!forwardEnabled(selection(), selectionHoldsInvitation())}
               onClick={() => setBulkForwardOpen(true)}
             >
               <Icon name="forward" size={20} />
@@ -10255,6 +10278,8 @@ function timelineRowToPersisted(
       ...(row.reply === undefined ? {} : { reply: persistedFromReplyRef(row.reply) }),
       // ADR-0052 decision 2 — the forward attribution, verbatim.
       ...(row.forward === undefined ? {} : { forward: persistedFromForwardRef(row.forward) }),
+      // ADR-0087 section 14 — the invitation card, verbatim.
+      ...(row.channelInviteB64 === undefined ? {} : { channelInviteB64: row.channelInviteB64 }),
     };
   }
   // Incoming: split application vs system.
@@ -10392,6 +10417,33 @@ function timelineRowToPersisted(
  */
 let restoredTempId = -1;
 
+/** ADR-0087 section 14 — what stands for a row's `text` when the row is a
+ *  channel invitation (its card, or a `/g/` link sent as text): the line its
+ *  Chats row reads, never the link's secret. `null` for any other row. */
+function rowInvitationLine(row: TimelineRow, text: string): string | null {
+  const cardB64 =
+    row.kind === "outgoing"
+      ? row.channelInviteB64
+      : row.event.kind === "application" && row.event.channelInvite !== undefined
+        ? base64Encode(row.event.channelInvite)
+        : undefined;
+  try {
+    return channelInviteRowPreview(text, publicOrigin(), cardB64);
+  } catch {
+    return null;
+  }
+}
+
+/** A stored invitation card back as bytes; an unreadable one is left out. */
+function cardBytesOf(b64: string | undefined): { channelInvite?: Uint8Array } {
+  if (typeof b64 !== "string" || b64.length === 0) return {};
+  try {
+    return { channelInvite: base64Decode(b64) };
+  } catch {
+    return {};
+  }
+}
+
 function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   const attachments = m.attachments.map((a) => attachmentRefFromPersisted(a).ref);
   // ADR-0052 — absent on a plain message and on a row written before v4.
@@ -10410,6 +10462,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       createdAt: m.createdAt,
       ...(reply === undefined ? {} : { reply }),
       ...(forward === undefined ? {} : { forward }),
+      ...(typeof m.channelInviteB64 === "string" ? { channelInviteB64: m.channelInviteB64 } : {}),
       // Absent on a row written before this field existed, and
       // `null` when it could not be resolved — both restore as
       // `undefined`, which fails the edit/delete gate closed rather
@@ -10444,6 +10497,8 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         ...(forward === undefined ? {} : { forward }),
         // ADR-0061 section 6 — a message from a newer Lakko stays one.
         ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
+        // ADR-0087 section 14 — the invitation card, opened offline when drawn.
+        ...(cardBytesOf(m.channelInviteB64)),
       },
     };
   }

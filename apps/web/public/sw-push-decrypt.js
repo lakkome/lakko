@@ -2443,7 +2443,7 @@ function previewFromProcessed(wasm, processed, words) {
       const card = parsed.channelInvite;
       if (card instanceof Uint8Array && card.length > 0) return channelInvitePreview(wasm, card, words);
       const text = typeof parsed.text === "string" ? parsed.text : "";
-      if (text.length > 0) return truncate(text);
+      if (text.length > 0) return truncate(withoutGroupLinkSecret(text));
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
       if (count > 0) return attachmentsLine(words, count);
       return null;
@@ -2497,6 +2497,30 @@ export function channelInvitePreview(wasm, card, words) {
   } finally {
     freeQuietly(opened);
   }
+}
+
+/**
+ * A message that is one `/g/` link and carries no card (an older message, a
+ * link pasted as text) is notified as the link WITHOUT its secret: what
+ * follows `#` opens the invitation and never reaches a notification, as on
+ * the Chats row (`chat/channel-invite-preview.ts`). Any other text is
+ * returned unchanged.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function withoutGroupLinkSecret(text) {
+  const trimmed = text.trim();
+  if (trimmed === "" || /\s/.test(trimmed)) return text;
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return text;
+  }
+  if (!url.pathname.startsWith("/g/") || url.hash === "") return text;
+  const at = trimmed.indexOf("#");
+  return at < 0 ? text : trimmed.slice(0, at);
 }
 
 /** Truncate a preview body to a sane notification length. */

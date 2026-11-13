@@ -210,6 +210,10 @@ export type IncomingChatEvent =
        *  version. `text` is empty and there are no attachments; every screen
        *  draws `chat.message.unsupported` in its place. */
       unsupportedVersion?: number;
+      /** ADR-0087 section 14 — the channel invitation card the envelope
+       *  carried beside its `/g/` link text. Kept with the message so the
+       *  bubble and the Chats row open it offline. */
+      channelInvite?: Uint8Array;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -2064,6 +2068,8 @@ export async function toEvent(
         ...(body.forward === undefined ? {} : { forward: body.forward }),
         // ADR-0073 R.7 case 1 — the re-send marker, for the receive rule.
         ...(body.resendOrigin === undefined ? {} : { resendOrigin: body.resendOrigin }),
+        // ADR-0087 section 14 — the invitation card, kept with the message.
+        ...(body.channelInvite === undefined ? {} : { channelInvite: body.channelInvite }),
       };
     }
     return {

@@ -273,11 +273,18 @@ struct NewChannelScreen: View {
                 name: channelName, description: channelDescription, updatedAtMs: now,
                 topic: isPublic ? topic : 0, language: isPublic ? language : "", listed: isPublic,
                 handle: value, avatar: avatar?.ffi, reactions: nil)
+            // Kept as this device's record and owed BEFORE it is sent: a
+            // failed post leaves the owner's device holding the record it
+            // meant to send, and every publisher pass re-issues THAT record
+            // (``ChannelPublisherLoops/reissueOwedRecord``), flag and signed
+            // name included, until it lands.
+            ChannelMetaRecord.keepFirst(state: state, channelId: id, meta: meta)
             do {
                 try await ChannelMetaRecord.post(
                     state: state, client: client, channelId: id, meta: meta, accountIdentity: owner)
+                state.updateExtras(id) { $0.recordOwed = nil }
             } catch {
-                NSLog("[channels] the first metadata record did not post")
+                NSLog("[channels] the first metadata record did not post; the publisher pass re-issues it")
             }
             if isPublic {
                 try? await ChannelListing.list(

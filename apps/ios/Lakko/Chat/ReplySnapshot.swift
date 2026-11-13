@@ -34,10 +34,20 @@ public enum ReplySnapshot {
     ///
     /// Nothing is length-bounded here: the core truncates an over-long
     /// snapshot on a character boundary when the envelope is composed.
-    public static func replySnapshot(for message: ChatMessage, authorLabel: String) -> ReplyRef {
+    ///
+    /// `invitationLine` is what stands for the text of a channel invitation
+    /// (``ChatMessage/invitationLine(conversationIdHex:)``, ADR-0087 section
+    /// 14): the text itself is the `/g/` link with its secret, which a quote
+    /// never carries.
+    public static func replySnapshot(
+        for message: ChatMessage, authorLabel: String, invitationLine: String? = nil
+    ) -> ReplyRef {
         let line = oneLine(message.text)
+        let invitation = oneLine(invitationLine ?? "")
         let excerpt: String?
-        if !line.isEmpty {
+        if !invitation.isEmpty {
+            excerpt = invitation
+        } else if !line.isEmpty {
             excerpt = line
         } else if let first = message.attachments.first {
             excerpt = ChatListFormatting.mediaLabel(kind: first.kind, mime: first.mime)

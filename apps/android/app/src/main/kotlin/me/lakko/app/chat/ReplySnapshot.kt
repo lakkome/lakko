@@ -41,15 +41,27 @@ public const val REPLY_FALLBACK_EXCERPT_KEY: String = "chat.reply.fallback_excer
  *
  * The name is [authorLabel] — whatever the timeline already calls that person
  * ("You" for an own message), decided by the caller because the timeline is
- * where that resolution lives. The excerpt is the text trimmed to one line; a
- * message with no text names the kind of its first attachment, through the
+ * where that resolution lives. The excerpt is the text trimmed to one line (a
+ * channel invitation, its card's line instead); a message with no text names
+ * the kind of its first attachment, through the
  * same word the conversation row uses for it ([mediaPreviewLabel]) so the two
  * cannot disagree. A message with neither carries no excerpt, and the receiver
  * then draws [REPLY_FALLBACK_EXCERPT_KEY].
  */
-public fun replySnapshotFor(message: ChatMessage, authorLabel: String): ReplyRef {
+public fun replySnapshotFor(
+    message: ChatMessage,
+    authorLabel: String,
+    /** ADR-0087 section 14 — the line a channel invitation card stands for
+     *  ([me.lakko.app.ui.channels.channelInviteLine]); injected for tests,
+     *  which have no native core to open a card with. */
+    inviteLine: (ByteArray?) -> String? = { me.lakko.app.ui.channels.channelInviteLine(it) },
+): ReplyRef {
     val oneLine = message.text.trim().replace(Regex("\\s+"), " ")
+    // A message carrying a channel invitation card is quoted as its card's
+    // line, never as its text: the text is the `/g/` link with its secret.
+    val cardLine = if (message.deleted) null else inviteLine(message.channelInvite)
     val excerpt = when {
+        cardLine != null -> cardLine
         oneLine.isNotEmpty() -> oneLine
         message.attachments.isNotEmpty() -> {
             val first = message.attachments.first()

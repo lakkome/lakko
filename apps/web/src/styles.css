@@ -105,6 +105,42 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The "new version" banner (`sw/SwUpdateBanner.tsx`) owns a strip at the
+   bottom of the viewport while it shows, and the page ends above it, so it
+   never sits on a form's button, a composer or a list row. The fixed
+   elements that sit near the bottom move up with it. */
+.lk-update-banner {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  border-top: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-1);
+  padding: 0.6rem 1rem calc(0.6rem + env(safe-area-inset-bottom));
+}
+.lk-update-banner-inner {
+  max-width: 32rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.lk-update-banner-text {
+  flex: 1;
+  font-size: 0.9rem;
+}
+html[data-update-banner] #root {
+  height: calc(100% - var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] .lk-toast {
+  bottom: calc(20px + var(--lk-update-banner-h, 0px));
+}
+html[data-update-banner] body .lk-open-in-app {
+  inset-block-end: calc(32px + var(--lk-update-banner-h, 0px));
+}
+
 /* User-supplied strings (message text, names, ids, links) never widen a
    pane: they break anywhere. Rows that ellipsise keep `nowrap` on top of it. */
 .lk-chat-scroll,

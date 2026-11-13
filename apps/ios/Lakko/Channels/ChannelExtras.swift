@@ -47,11 +47,18 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
 
     public init() {}
 
-    /// Whether the channel is public, as far as this device knows: the
-    /// record's flag, else a read key held (only a public channel has one),
-    /// else `nil` (unknown, a v2 record).
+    /// The newest metadata record's own flag (`listed`, the PUBLIC flag
+    /// since v3), `nil` until a record was read. Optional so a row written
+    /// before it decodes.
+    public var recordPublic: Bool?
+
+    /// Whether the channel is public, as far as this device knows (UX
+    /// section 12, the same order on web and Android): the signed `@name`'s
+    /// flag in the newest record, else that record's own flag, else a read
+    /// key held (only a public channel has one), else `nil` (unknown).
     public var isPublic: Bool? {
         if let handle { return handle.isPublic }
+        if let recordPublic { return recordPublic }
         return readKey != nil ? true : nil
     }
 

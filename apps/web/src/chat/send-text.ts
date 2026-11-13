@@ -15,6 +15,7 @@
  * The publish goes through the target group's own send path, so it takes
  * that group's lock like every other send.
  */
+import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { groupIdHex } from "../devices/sync/state";
 import { composeEnvelope, type AttachmentRefBytes, type ForwardRef } from "./attachments";
@@ -37,6 +38,10 @@ export async function sendTextToConversation(deps: {
    *  invitation: ADR-0087 section 14). `text` is still what the sent row
    *  shows. */
   readonly envelope?: Uint8Array;
+  /** The channel invitation card `envelope` carries (ADR-0087 section 14),
+   *  kept with the sent row so this device reads the invitation from it,
+   *  never the link, even once the link is used up. */
+  readonly channelInvite?: Uint8Array;
   /** What the envelope carries besides its text, for the sent row: the
    *  attachments (already uploaded) and a forward's attribution (a post
    *  forwarded out of a channel, ADR-0087 section 12). */
@@ -67,6 +72,7 @@ export async function sendTextToConversation(deps: {
     text: deps.text,
     attachments: (deps.attachments ?? []).map((a) => persistedFromAttachmentRef(a)),
     ...(deps.forward === undefined ? {} : { forward: persistedFromForwardRef(deps.forward) }),
+    ...(deps.channelInvite === undefined ? {} : { channelInviteB64: base64Encode(deps.channelInvite) }),
     createdAt: result.createdAt,
     authorKeyB64: authorIdentityToPersisted(author),
   };

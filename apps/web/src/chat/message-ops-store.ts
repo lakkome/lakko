@@ -68,8 +68,10 @@ export function persistedWithOps(
   const reactions = reactionsToPersisted(state.held);
   const opId = state.lastOpId === undefined ? {} : { lastOpId: String(state.lastOpId) };
   if (state.deleted === true) {
+    // The invitation card goes with the text: it holds the link's secret.
+    const { channelInviteB64: _card, ...rest } = m;
     return {
-      ...m,
+      ...rest,
       text: "",
       attachments: [],
       deleted: true,

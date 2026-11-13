@@ -55,8 +55,15 @@ public class ChannelFeedback(
         val avatar: uniffi.lakko_ffi_uniffi.FfiAvatarRef? = null,
     )
 
-    /** One page of a thread. */
-    public data class CommentPage(val comments: List<Comment>, val nextAfter: Long, val more: Boolean)
+    /** One page of a thread. [rowsRead] is how many rows the service
+     *  returned, opened or not: a row that did not open and a banned
+     *  author's row are left out of [comments] but were read. */
+    public data class CommentPage(
+        val comments: List<Comment>,
+        val nextAfter: Long,
+        val more: Boolean,
+        val rowsRead: Int = comments.size,
+    )
 
     private fun account(): String = state.boundAccount ?: throw IllegalStateException("no account bound")
 
@@ -251,7 +258,7 @@ public class ChannelFeedback(
                 avatar = opened.comment.avatar,
             )
         }
-        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN)
+        return CommentPage(out, page.nextAfter, page.rows.size >= COMMENT_PAGE_LEN, rowsRead = page.rows.size)
     }
 
     /** Write a comment under the post at [cursor]. Returns its cursor. */

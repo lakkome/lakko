@@ -30,6 +30,7 @@ pub mod av_align;
 pub mod call_bar;
 pub mod call_group;
 pub mod capture;
+pub mod comments;
 pub mod conversation;
 pub mod emoji;
 pub mod folder;

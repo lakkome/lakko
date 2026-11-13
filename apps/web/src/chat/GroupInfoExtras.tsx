@@ -17,13 +17,14 @@
  * Everything sent goes through `GroupNameContext` (the role gate on every
  * peer is the boundary; the role read here only decides what is offered).
  */
-import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, Show, type JSX } from "solid-js";
 
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { useGroupNames } from "./GroupNameContext";
 import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { InfoRowButton } from "../ui/LabelledRows";
 import { LakkoPicker } from "../ui/LakkoPicker";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { AvatarCamera, AvatarCrop, AvatarMenu, UnsavedChangesDialog, type CropSource } from "../profile/AvatarEditor";
@@ -99,6 +100,8 @@ export function GroupInfoExtras(props: {
    *  conversation view routes it like Add members. */
   readonly onOpenScreen: (screen: "group-type" | "group-reactions") => void;
 }): JSX.Element {
+  const typeTitleId = createUniqueId();
+  const typeValueId = createUniqueId();
   const groupNames = useGroupNames();
   /** A change of who can join still owed (`handle-owed.ts`). */
   const owedChange = () => {
@@ -273,14 +276,21 @@ export function GroupInfoExtras(props: {
           </div>
         </Show>
         <Show when={props.sections.includes("group-type")}>
-          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-type")}>
+          <button
+            type="button"
+            class="lk-card-row lk-card-row-button"
+            aria-labelledby={`${typeTitleId} ${typeValueId}`}
+            onClick={() => props.onOpenScreen("group-type")}
+          >
             <span class="lk-card-row-icon">
               <Icon name="person-2" size={20} />
             </span>
             <span class="lk-card-row-body">
-              <span class="lk-card-row-title">{t("group_type.who_can_join")}</span>
+              <span class="lk-card-row-title" id={typeTitleId}>
+                {t("group_type.who_can_join")}
+              </span>
             </span>
-            <span class="lk-card-row-sub">
+            <span class="lk-card-row-sub" id={typeValueId}>
               <Show
                 when={owedChange()}
                 fallback={handle()?.isPublic === true ? t("group_type.public") : t("group_type.private")}
@@ -310,15 +320,12 @@ export function GroupInfoExtras(props: {
         </Show>
         {/* reactions-and-emoji.md section 9 — from the shared info rule. */}
         <Show when={props.sections.includes("reactions")}>
-          <button type="button" class="lk-card-row lk-card-row-button" onClick={() => props.onOpenScreen("group-reactions")}>
-            <span class="lk-card-row-icon">
-              <Icon name="face-smiling" size={20} />
-            </span>
-            <span class="lk-card-row-body">
-              <span class="lk-card-row-title">{t("group_reactions.title")}</span>
-            </span>
-            <span class="lk-card-row-sub">{allowedSummary(groupNames.reactionsOf(props.entry.groupIdB64))}</span>
-          </button>
+          <InfoRowButton
+            icon="face-smiling"
+            title={t("group_reactions.title")}
+            value={allowedSummary(groupNames.reactionsOf(props.entry.groupIdB64))}
+            onOpen={() => props.onOpenScreen("group-reactions")}
+          />
         </Show>
       </section>
 
