@@ -145,9 +145,13 @@ public class ChannelPostSync(
     private suspend fun syncAll(account: String): SourceCheck {
         val readable = readableChannels()
         var answered = 0
-        val before = FeedSealedStore.loadChannelPostLog(context, account)
+        val (before, dropped) = FeedSealedStore.loadChannelPostLogForSync(context, account)
         var log = retainChannels(before, channels.channels.value.map { it.id }.toSet())
-        var changed = log.channels.size != before.channels.size
+        // A stored log of an older version is fetched again from the start;
+        // what it had already looked at is not new (as web, markers survive,
+        // and none falls below that log's cursor).
+        if (dropped != null) FeedReadingStore.update(context, account) { readFloorAfterDrop(it, dropped) }
+        var changed = dropped != null || log.channels.size != before.channels.size
 
         for (channel in readable) {
             val deps = object : ChannelSyncDeps {
@@ -222,8 +226,16 @@ public class ChannelPostSync(
                 if (body == null) {
                     // Without the core (a host test) the text is the post.
                     PostOutcome.Text(c.text)
-                } else if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT && body.text.isNotEmpty()) {
-                    PostOutcome.Text(body.text)
+                } else if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT &&
+                    (body.text.isNotEmpty() || body.attachments.isNotEmpty())
+                ) {
+                    // The attachments' kinds go with the text, so a photo,
+                    // file or GIF posted without a caption still names itself
+                    // on the channel's row (as a group's row does).
+                    PostOutcome.Text(
+                        body.text,
+                        body.attachments.map { PersistedChannelPostMedia(mime = it.mime, kind = it.kind) },
+                    )
                 } else {
                     PostOutcome.Skip
                 }

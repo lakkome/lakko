@@ -43,9 +43,10 @@ export function openOnce(url: string): Promise<OpenedChannelInvite | null> {
  * The Chats row's second line for a message that is a channel invitation
  * (UX `docs/ux/group-and-channel-privacy.md` 14.1 and 15.2): "Invitation to
  * {channel}" or "Invitation to publish in {channel}", never the link. `null`
- * when the text is not one `/g/` link of this deployment, when the link is
- * not a channel's, and while it is being opened (the first call opens it).
- * Reactive.
+ * when the text is not one `/g/` link of this deployment and when the link is
+ * not a channel's. While it is being opened (the first call opens it) the
+ * line is the link WITHOUT its secret: the row, and a desktop notification
+ * taken from it at that moment, never carry what follows `#`. Reactive.
  */
 export function channelInviteRowPreview(text: string | null, ownOrigin: string): string | null {
   if (text === null) return null;
@@ -54,7 +55,7 @@ export function channelInviteRowPreview(text: string | null, ownOrigin: string):
   const m = settled();
   if (!m.has(link.url)) {
     void openOnce(link.url);
-    return null;
+    return link.url.split("#")[0] ?? null;
   }
   const o = m.get(link.url);
   if (o === null || o === undefined) return null;

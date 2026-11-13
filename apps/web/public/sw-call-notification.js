@@ -109,6 +109,13 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   reactedToYourMessage: "\u0001 reacted \u0002 to your message",
   /** A group message's body, "{name}: {text}", U+0001 = name, U+0002 = text. */
   senderPrefixed: "\u0001: \u0002",
+  /** ADR-0087 section 14 — a channel invitation card's body, never the link
+   *  it carries: "Invitation to {channel}", U+0001 = the channel's name. */
+  channelInvite: "Invitation to \u0001",
+  /** UX 15.2 — a publisher invitation card's body, U+0001 = the channel. */
+  publisherInvite: "Invitation to publish in \u0001",
+  /** The name of a channel whose invitation names none. */
+  channelFallbackName: "Channel",
   /** @type {readonly string[]} */
   attachments: Object.freeze([]),
 });
@@ -153,12 +160,12 @@ const MAX_NOTIFICATION_STRING = 200;
  * `attachments` is kept entry by entry: a malformed entry is dropped to an
  * empty string, which {@link attachmentsLine} reads as English.
  *
- * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, reactedToYourMessage: string, senderPrefixed: string, reactionsOff: boolean, attachments: string[] }}
+ * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, reactedToYourMessage: string, senderPrefixed: string, channelInvite: string, publisherInvite: string, channelFallbackName: string, reactionsOff: boolean, attachments: string[] }}
  */
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
-  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage" | "reactedToYourMessage" | "senderPrefixed"} key */
+  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage" | "reactedToYourMessage" | "senderPrefixed" | "channelInvite" | "publisherInvite" | "channelFallbackName"} key */
   const pick = (key) => {
     const v = source[key];
     return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING
@@ -182,6 +189,15 @@ export function notificationStrings(raw) {
       const v = pick("senderPrefixed");
       return v.includes("\u0001") && v.includes("\u0002") ? v : NOTIFICATION_STRINGS_EN.senderPrefixed;
     })(),
+    channelInvite: (() => {
+      const v = pick("channelInvite");
+      return v.includes("\u0001") ? v : NOTIFICATION_STRINGS_EN.channelInvite;
+    })(),
+    publisherInvite: (() => {
+      const v = pick("publisherInvite");
+      return v.includes("\u0001") ? v : NOTIFICATION_STRINGS_EN.publisherInvite;
+    })(),
+    channelFallbackName: pick("channelFallbackName"),
     reactionsOff: source.reactionsOff === true,
     attachments: Array.isArray(source.attachments)
       ? source.attachments

@@ -22,7 +22,9 @@ describe("channelInviteRowPreview", () => {
   it("reads a publisher invitation as the invitation, never the link", async () => {
     const url = `${ORIGIN}/g/AbCdEfGh#0123456789abcdef`;
     results.set(url, { channelIdHex: "00", name: "Pixel Pub Walk", publisherInvite: true });
-    expect(channelInviteRowPreview(url, ORIGIN)).toBeNull();
+    // While the link is opened the row never carries its secret (a desktop
+    // notification is taken from the row at that moment).
+    expect(channelInviteRowPreview(url, ORIGIN)).toBe(`${ORIGIN}/g/AbCdEfGh`);
     await settle();
     expect(channelInviteRowPreview(url, ORIGIN)).toBe(
       t("chats.preview.publisher_invite", { channel: "Pixel Pub Walk" }),

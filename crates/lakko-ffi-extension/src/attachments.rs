@@ -147,6 +147,48 @@ pub struct ParsedBody {
     /// identity.
     #[uniffi(default = None)]
     pub reaction_target_author: Option<Vec<u8>>,
+    /// ADR-0087 section 14 — the message carries a channel invitation card
+    /// (`Chat` only). The extension then says what the card says ("Invitation
+    /// to {channel}" / "Invitation to publish in {channel}") and never the
+    /// message text, which is the `/g/` link with its secret.
+    #[uniffi(default = None)]
+    pub channel_invite: Option<ChannelInviteNotice>,
+}
+
+/// What a notification needs from a channel invitation card, opened offline
+/// (ADR-0087 section 14; UX 15.2 for a publisher invitation). Nothing of the
+/// link itself: no secret, no ledger id.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInviteNotice {
+    /// The card opened as a channel's invitation. `false`: a card that does
+    /// not open (the notification says only that a message came).
+    pub opened: bool,
+    /// The channel's name the card carries, `None` when it names none.
+    pub channel_name: Option<String>,
+    /// A publisher invitation (preview kind 2) rather than a subscriber one.
+    pub publisher: bool,
+}
+
+/// The notice for the card bytes a chat envelope carried.
+fn channel_invite_notice(card: &[u8]) -> ChannelInviteNotice {
+    let opened = lakko_contacts::group_invite::ChannelInviteCard::decode(card)
+        .and_then(|c| c.open())
+        .ok();
+    match opened {
+        Some((_, preview)) => ChannelInviteNotice {
+            opened: true,
+            channel_name: preview
+                .group_name
+                .map(|n| n.trim().to_owned())
+                .filter(|n| !n.is_empty()),
+            publisher: preview.subscriber.is_none(),
+        },
+        None => ChannelInviteNotice {
+            opened: false,
+            channel_name: None,
+            publisher: false,
+        },
+    }
 }
 
 /// Add or take off a reaction (UX reactions-and-emoji section 17), the
@@ -182,6 +224,7 @@ impl ParsedBody {
             resend_origin_message_id: None,
             reaction_action: None,
             reaction_target_author: None,
+            channel_invite: None,
         }
     }
 }
@@ -202,12 +245,14 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text,
             attachments,
             resend,
+            channel_invite,
             ..
         } => ParsedBody {
             text,
             attachments: refs_to_ffi(attachments),
             resend_origin_group_b64: resend.as_ref().map(|r| r.group_id_b64.clone()),
             resend_origin_message_id: resend.map(|r| r.message_id),
+            channel_invite: channel_invite.as_deref().map(channel_invite_notice),
             ..ParsedBody::of(MessageBodyKind::Chat)
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
@@ -333,6 +378,60 @@ mod tests {
         let chat = parse_body_envelope(inner::compose("hi", Vec::new()).unwrap());
         assert!(chat.reaction_action.is_none());
         assert!(chat.reaction_target_author.is_none());
+    }
+
+    /// ADR-0087 section 14, UX 15.2 — a message carrying a publisher
+    /// invitation card tells the extension what the card says, so the
+    /// notification never reads the text (the `/g/` link with its secret).
+    /// Seen live 2026-11-12 on an iPhone.
+    #[test]
+    fn a_channel_invitation_card_reaches_the_extension_as_a_notice() {
+        use lakko_contacts::group_invite as gi;
+        let secret = gi::generate_link_key();
+        let preview = gi::GroupInvitePreview {
+            group_name: Some("Walk 22 channel".into()),
+            inviter_name: Some("Icons QA".into()),
+            member_count: 0,
+            channel_id: Some([0x42; 16]),
+            subscriber: None,
+            avatar: None,
+        };
+        let knock = gi::GroupKnockKey {
+            public_key: [0x4B; 32],
+            version: 1,
+        };
+        let signing = lakko_crypto::signing::SigningKey::from_seed(&[0x5A; 32]);
+        let wire =
+            gi::compose_with_preview(&signing, &[0x11; 32], 0, Some(&knock), &preview, &secret)
+                .unwrap();
+        let card = gi::ChannelInviteCard {
+            ledger_id: [7; 6],
+            link_secret: secret,
+            sealed: gi::seal_link(&secret, &wire).unwrap(),
+        }
+        .encode()
+        .unwrap();
+        let body = parse_body_envelope(
+            inner::compose_channel_invite("https://lakko.me/g/BwcHBwcH", &card).unwrap(),
+        );
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(
+            body.channel_invite,
+            Some(ChannelInviteNotice {
+                opened: true,
+                channel_name: Some("Walk 22 channel".into()),
+                publisher: true,
+            })
+        );
+        // A card that does not open is still a card: no text is previewed.
+        let mut broken = card;
+        let last = broken.len() - 1;
+        broken[last] ^= 1;
+        let body = parse_body_envelope(inner::compose_channel_invite("x", &broken).unwrap());
+        assert_eq!(body.channel_invite.map(|n| n.opened), Some(false));
+        // A plain message carries none.
+        let plain = parse_body_envelope(inner::compose("hi", Vec::new()).unwrap());
+        assert!(plain.channel_invite.is_none());
     }
 
     #[test]

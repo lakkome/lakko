@@ -400,10 +400,14 @@ public struct ChatListScreen: View {
     ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
-            let posts = channels.postsByChannel[channel.id] ?? []
             let lastPost = lastPosts[channel.id]
+            // The newest REAL post's time, the post the second line shows
+            // (the channel-post log holds text posts only). The raw rows the
+            // server holds (`postsByChannel`) include ban lists and metadata
+            // records: seen live 2026-11-12, a ban at 22:48 stood as the time
+            // of a channel whose newest post was at 22:39.
             let lastPostMs = ChannelsFormatting.newestPostMs(
-                posts.map(\.serverTsMs) + [lastPost.map { UInt64(clamping: max(0, $0.serverTsMs)) }].compactMap { $0 })
+                [lastPost.map { UInt64(clamping: max(0, $0.serverTsMs)) }].compactMap { $0 })
             let model = ChannelsFormatting.rowModel(
                 sharedName: channel.sharedName,
                 name: channel.localName,

@@ -425,9 +425,14 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
                 targetMessageId: target, emoji: emoji, add: body.reactionAction != .remove,
                 targetAuthorB64: body.reactionTargetAuthor?.base64EncodedString())
         }
+        // ADR-0087 section 14 — a channel invitation card reads like the
+        // card, never as its text (the `/g/` link with its secret).
+        let text = body.channelInvite.map {
+            nseChannelInviteLine(opened: $0.opened, channelName: $0.channelName, publisher: $0.publisher)
+        } ?? body.text
         return NseProcessedRow(
             kind: kind,
-            text: body.text,
+            text: text,
             attachmentCount: body.attachments.count,
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil,
             senderKeyB64: senderKeyB64,

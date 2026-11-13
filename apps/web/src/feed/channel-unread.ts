@@ -17,17 +17,25 @@ import { createSignal, onCleanup, onMount, type Accessor } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { channelsState } from "../state/channels-state";
-import type { ChannelPostSlot } from "./channel-post-log";
+import type { ChannelPostSlot, PersistedChannelPostMedia } from "./channel-post-log";
 import { loadChannelPostLog, subscribeChannelPostLogChanged } from "./channel-post-log-store";
 import { channelUnreadCount, emptyFeedMarks, type FeedMarks } from "./feed-marks";
 import { readFeedMarks, subscribeFeedMarksChanged } from "./feed-marks-store";
 
+/** The newest post of a channel this device could read. */
+export interface ChannelLastPost {
+  readonly text: string;
+  /** The post's attachments (kind and MIME type only); empty for none. */
+  readonly media: readonly PersistedChannelPostMedia[];
+  readonly serverTsMs: number;
+}
+
 /** What the channel rows read from the channel-post log: the count of new
- *  posts, and the newest post this device could read (its text and time), or
- *  `null` when it holds none. */
+ *  posts, and the newest post this device could read (its text, its
+ *  attachments and its time), or `null` when it holds none. */
 export interface ChannelRowFeed {
   readonly unread: Accessor<(channelIdHex: string) => number>;
-  readonly lastPost: Accessor<(channelIdHex: string) => { readonly text: string; readonly serverTsMs: number } | null>;
+  readonly lastPost: Accessor<(channelIdHex: string) => ChannelLastPost | null>;
 }
 
 export function createChannelUnread(): Accessor<(channelIdHex: string) => number> {
@@ -85,11 +93,13 @@ export function createChannelRowFeed(): ChannelRowFeed {
         own.has(hex),
       );
   };
-  const lastPost = (): ((hex: string) => { readonly text: string; readonly serverTsMs: number } | null) => {
+  const lastPost = (): ((hex: string) => ChannelLastPost | null) => {
     const p = posts();
     return (hex: string) => {
       const last = p[hex]?.posts.at(-1);
-      return last === undefined ? null : { text: last.text, serverTsMs: last.serverTsMs };
+      return last === undefined
+        ? null
+        : { text: last.text, media: last.media ?? [], serverTsMs: last.serverTsMs };
     };
   };
   return { unread, lastPost };

@@ -19,7 +19,7 @@ import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { channelHandleOf, channelRoleOf } from "../channels/channel-access";
-import { channelRowModel, channelRowPreview } from "../channels/channel-row";
+import { channelRowModel, channelRowPostedAtMs, channelRowPreview } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { createChannelRowFeed } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
@@ -284,14 +284,13 @@ export function createConversationRows() {
   const channelUnread = channelFeed.unread;
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
-    const posts = channelsState.postsByChannel();
     const held = channelsState.channels().filter((c) => !membershipEnd.isChannelEnding(c.id));
     const lastRead = channelFeed.lastPost();
     return held.map((c) => {
       const readable = lastRead(c.id);
-      const heldMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
-      const lastPostMs =
-        heldMs === null ? (readable?.serverTsMs ?? null) : Math.max(heldMs, readable?.serverTsMs ?? 0);
+      // The newest real post's time, the post the preview shows; a raw
+      // server row (a ban list, a metadata record) is not a post.
+      const lastPostMs = channelRowPostedAtMs(readable);
       // The @name from the channel's own record when this device read one
       // (a publisher that joined by a link holds no local one), else the
       // name it was found under.
@@ -313,12 +312,14 @@ export function createConversationRows() {
         kind: "channel" as const,
         title: model.title,
         // UX navigation 2.1: the second line is the last post this device can
-        // read; a channel has no sender to name. The @name (the model's
-        // subtitle) only when there is no readable post.
-        preview: channelRowPreview(readable?.text ?? null, model.subtitle),
+        // read (its text, else its attachment's kind, as a group's row); a
+        // channel has no sender to name. The @name (the model's subtitle)
+        // only when there is no readable post.
+        preview: channelRowPreview(readable, model.subtitle),
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
+        postedAtMs: lastPostMs,
         ...(handle !== undefined && handle.length > 0 ? { handle } : {}),
         unread: channelUnread()(c.id),
         pinned: false,

@@ -536,8 +536,9 @@ export function ChannelPublishersScreen(props: { readonly id: string }): JSX.Ele
     setError(null);
     setSent(null);
     try {
-      const url = await mintPublisherInviteLink(identity, props.id);
-      const outcome = await sendInvite(contact, { kind: "link", url });
+      // UX 15.2: the card travels in the message, so every client draws
+      // "... invites you to be a publisher of {channel}." with `Accept`.
+      const outcome = await sendInvite(contact, await mintPublisherInviteLink(identity, props.id));
       // Only an invitation written into their conversation is "sent"; a
       // contact request or nothing at all is not.
       if (outcome !== "invited") throw new Error(`publisher invitation not delivered: ${outcome}`);

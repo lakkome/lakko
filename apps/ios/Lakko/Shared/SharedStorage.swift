@@ -123,6 +123,7 @@ public enum SharedStorage {
         "chat.media.video_message",
         "chat.message.unsupported",
         "notification.message.new",
+        "channels.fallback_name",
     ]
 
     /// The one plural the extension shows ("Sent 3 attachments"). The

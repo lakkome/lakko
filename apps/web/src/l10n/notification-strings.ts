@@ -51,6 +51,13 @@ export interface NotificationWords {
   /** A group message's body, "{name}: {text}" (the list preview's rule),
    *  U+0001 = sender name, U+0002 = text. */
   senderPrefixed: string;
+  /** ADR-0087 section 14 — a channel invitation card's body,
+   *  "Invitation to {channel}", U+0001 = the channel's name; never the link. */
+  channelInvite: string;
+  /** UX 15.2 — a publisher invitation card's body, U+0001 = the channel. */
+  publisherInvite: string;
+  /** The name of a channel whose invitation names none. */
+  channelFallbackName: string;
   /** The `Reactions` switch is off on this device. */
   reactionsOff: boolean;
 }
@@ -72,6 +79,9 @@ export function renderNotificationStrings(): NotificationWords {
     attachments,
     reactedToYourMessage: t("notification.reaction.body", { name: "\u0001", emoji: "\u0002" }),
     senderPrefixed: t("chats.preview.sender", { name: "\u0001", text: "\u0002" }),
+    channelInvite: t("chats.preview.channel_invite", { channel: "\u0001" }),
+    publisherInvite: t("chats.preview.publisher_invite", { channel: "\u0001" }),
+    channelFallbackName: t("channels.fallback_name"),
     reactionsOff: !reactionNotificationsOn(),
   };
 }

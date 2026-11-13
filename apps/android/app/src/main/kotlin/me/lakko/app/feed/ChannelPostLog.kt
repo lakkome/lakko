@@ -16,11 +16,16 @@ import kotlinx.serialization.Serializable
  * this payload under a Keystore key; [ChannelPostSync] drives the sync while
  * the app is in front.
  *
+ * Version 2 keeps posts with attachments and no text, with each
+ * attachment's kind, so a channel's row in Chats names a caption-less photo,
+ * file or GIF as a group's row does; a version-1 log (which passed those
+ * posts over) is dropped and fetched again. As web.
+ *
  * Bounds, both chosen: posts older than the server's 30-day retention are
  * dropped, and at most [CHANNEL_POST_CAP] posts are kept per channel, newest
  * kept.
  */
-public const val CHANNEL_POST_LOG_VERSION: Int = 1
+public const val CHANNEL_POST_LOG_VERSION: Int = 2
 
 /** Most posts kept per channel (chosen, ADR-0063 open question 1). */
 public const val CHANNEL_POST_CAP: Int = 500
@@ -35,7 +40,16 @@ public const val CHANNEL_POST_PAGE: Int = 100
  *  loop; the rest arrives on the next sync. */
 public const val CHANNEL_POST_MAX_PAGES: Int = 5
 
-/** One decrypted text post. */
+/** Most attachments recorded per post: the row names the first and counts
+ *  the rest (chosen, as web). */
+public const val CHANNEL_POST_MEDIA_CAP: Int = 16
+
+/** What the log keeps of one attachment: only what names its kind on a list
+ *  row ("Photo", "GIF", "File"), never its key or blob id. */
+@Serializable
+public data class PersistedChannelPostMedia(val mime: String? = null, val kind: String? = null)
+
+/** One decrypted post: its text, its attachments, or both. */
 @Serializable
 public data class PersistedChannelPost(
     /** The server's per-channel cursor, the post's id in the feed. */
@@ -43,6 +57,8 @@ public data class PersistedChannelPost(
     /** Server receive time, unix ms. */
     val serverTsMs: Long,
     val text: String,
+    /** The post's attachments, in order; empty when it has none. */
+    val media: List<PersistedChannelPostMedia> = emptyList(),
 )
 
 /** One channel's slice of the log. */
@@ -56,9 +72,78 @@ public data class ChannelPostSlot(
 
 @Serializable
 public data class ChannelPostLog(
+    // Always written: the store's JSON leaves default values out, so without
+    // this a log of any version was written with no version at all and read
+    // back as the current one (a version-1 log survived the bump to 2).
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.ALWAYS)
     val version: Int = CHANNEL_POST_LOG_VERSION,
     val channels: Map<String, ChannelPostSlot> = emptyMap(),
 )
+
+/** The JSON shape of the stored log: unknown keys ignored, nulls left out. */
+private val channelPostLogJson = kotlinx.serialization.json.Json {
+    ignoreUnknownKeys = true
+    explicitNulls = false
+}
+
+/** The stored text of [log]; it always names its version. */
+public fun encodeChannelPostLog(log: ChannelPostLog): String =
+    channelPostLogJson.encodeToString(ChannelPostLog.serializer(), log)
+
+/**
+ * The per-channel cursors of a stored log [decodeChannelPostLog] refuses
+ * (a log of an older version): how far its sync had looked in each channel.
+ * Every post at or below such a cursor was already looked at, so the refetch
+ * that follows the drop must not count it as new ([readFloorAfterDrop]).
+ * Empty when the text is not a log at all, or a channel id or cursor is
+ * malformed (that channel alone is left out).
+ */
+public fun droppedLogCursors(text: String): Map<String, Long> {
+    val obj = try {
+        channelPostLogJson.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject
+    } catch (_: Throwable) {
+        null
+    } ?: return emptyMap()
+    val channels = obj["channels"] as? kotlinx.serialization.json.JsonObject ?: return emptyMap()
+    val out = LinkedHashMap<String, Long>()
+    for ((id, slot) in channels) {
+        if (!CHANNEL_ID_RE.matches(id)) continue
+        val o = slot as? kotlinx.serialization.json.JsonObject ?: continue
+        val cursor = (o["cursor"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+        val newestPost = (o["posts"] as? kotlinx.serialization.json.JsonArray).orEmpty().maxOfOrNull { p ->
+            ((p as? kotlinx.serialization.json.JsonObject)?.get("cursor") as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toLongOrNull() ?: 0L
+        } ?: 0L
+        val looked = maxOf(cursor, newestPost)
+        if (looked > 0) out[id] = looked
+    }
+    return out
+}
+
+/**
+ * Read a stored log, `null` when it cannot be used (the caller starts empty
+ * and fetches again). A log that names no version was written before the
+ * version was always written, i.e. version 1, and is refused like any other
+ * version but the current one.
+ */
+public fun decodeChannelPostLog(text: String): ChannelPostLog? {
+    val element = try {
+        channelPostLogJson.parseToJsonElement(text)
+    } catch (_: Throwable) {
+        return null
+    }
+    val obj = element as? kotlinx.serialization.json.JsonObject ?: return null
+    val version = (obj["version"] as? kotlinx.serialization.json.JsonPrimitive)
+        ?.let { if (it.isString) null else it.content.toIntOrNull() } ?: 1
+    if (version != CHANNEL_POST_LOG_VERSION) return null
+    val raw = try {
+        channelPostLogJson.decodeFromJsonElement(ChannelPostLog.serializer(), obj)
+    } catch (_: Throwable) {
+        return null
+    }
+    return sanitizeChannelPostLog(raw)
+}
 
 private val CHANNEL_ID_RE = Regex("^[0-9a-f]{32}$")
 
@@ -108,8 +193,11 @@ public fun retainChannels(log: ChannelPostLog, keep: Set<String>): ChannelPostLo
 
 /** What one post decoded to, as far as the log cares. */
 public sealed interface PostOutcome {
-    /** A text post: kept. */
-    public data class Text(val text: String) : PostOutcome
+    /** A post (text, attachments or both): kept. */
+    public data class Text(
+        val text: String,
+        val media: List<PersistedChannelPostMedia> = emptyList(),
+    ) : PostOutcome
 
     /** Read and not a feed item (a metadata record, a malformed record, a post
      *  that failed to open under its epoch's seed): passed over. */
@@ -157,7 +245,12 @@ public suspend fun syncChannelSlot(
                     blocked = true
                 }
                 is PostOutcome.Text -> {
-                    fresh += PersistedChannelPost(p.cursor, p.serverTsMs, outcome.text)
+                    fresh += PersistedChannelPost(
+                        p.cursor,
+                        p.serverTsMs,
+                        outcome.text,
+                        outcome.media.take(CHANNEL_POST_MEDIA_CAP),
+                    )
                     cursor = p.cursor
                 }
                 PostOutcome.Skip -> cursor = p.cursor

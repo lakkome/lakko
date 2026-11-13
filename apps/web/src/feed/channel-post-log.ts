@@ -17,8 +17,11 @@
  * at most `CHANNEL_POST_CAP` posts are kept per channel, newest kept.
  */
 
-/** Payload schema version this client writes. */
-export const CHANNEL_POST_LOG_VERSION = 1;
+/** Payload schema version this client writes. Version 2 records each
+ *  post's attachment kinds; a version-1 log (attachment posts stored as
+ *  empty text) is dropped and fetched again, so a caption-less photo already
+ *  held is named on the row too. */
+export const CHANNEL_POST_LOG_VERSION = 2;
 /** Most posts kept per channel (chosen, ADR-0063 open question 1). */
 export const CHANNEL_POST_CAP = 500;
 /** The server's post retention; older posts are dropped from the log. */
@@ -29,13 +32,37 @@ export const CHANNEL_POST_PAGE = 100;
  *  loop; the rest arrives on the next sync. */
 export const CHANNEL_POST_MAX_PAGES = 5;
 
-/** One decrypted text post. */
+/** What the log keeps of one attachment: only what names its kind on a
+ *  list row ("Photo", "GIF", "File"), never its key or blob id. */
+export interface PersistedChannelPostMedia {
+  readonly mime: string | null;
+  readonly kind: string | null;
+}
+
+/** One decrypted post. */
 export interface PersistedChannelPost {
   /** The server's per-channel cursor, the post's id in the feed. */
   readonly cursor: number;
   /** Server receive time, unix ms. */
   readonly serverTsMs: number;
+  /** The post's text; empty for a photo, file or GIF posted without one. */
   readonly text: string;
+  /** The post's attachments, in order; absent when it has none. A channel's
+   *  row in Chats names the kind of the first when the text is empty, as a
+   *  group's row does. */
+  readonly media?: readonly PersistedChannelPostMedia[];
+}
+
+/** Most attachments recorded per post: the row names the first and counts
+ *  the rest, and a post carries few (chosen). */
+export const CHANNEL_POST_MEDIA_CAP = 16;
+
+function decodeMedia(raw: unknown): PersistedChannelPostMedia | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const mime = typeof r.mime === "string" ? r.mime : null;
+  const kind = typeof r.kind === "string" ? r.kind : null;
+  return { mime, kind };
 }
 
 /** One channel's slice of the log. */
@@ -67,7 +94,18 @@ function decodePost(raw: unknown): PersistedChannelPost | null {
   if (!isCursor(r.cursor) || r.cursor === 0) return null;
   if (typeof r.serverTsMs !== "number" || !Number.isFinite(r.serverTsMs)) return null;
   if (typeof r.text !== "string") return null;
-  return { cursor: r.cursor, serverTsMs: r.serverTsMs, text: r.text };
+  const media = Array.isArray(r.media)
+    ? r.media
+        .slice(0, CHANNEL_POST_MEDIA_CAP)
+        .map(decodeMedia)
+        .filter((m): m is PersistedChannelPostMedia => m !== null)
+    : [];
+  return {
+    cursor: r.cursor,
+    serverTsMs: r.serverTsMs,
+    text: r.text,
+    ...(media.length > 0 ? { media } : {}),
+  };
 }
 
 /**
@@ -128,8 +166,12 @@ export function retainChannels(log: ChannelPostLog, keep: ReadonlySet<string>): 
 
 /** What one post decoded to, as far as the log cares. */
 export type PostOutcome =
-  /** A text post: kept. */
-  | { readonly kind: "text"; readonly text: string }
+  /** A post (text, attachments or both): kept. */
+  | {
+      readonly kind: "text";
+      readonly text: string;
+      readonly media?: readonly PersistedChannelPostMedia[];
+    }
   /** Read and not a feed item (a metadata record, a malformed record, a
    *  post that failed to open under its epoch's seed): passed over. */
   | { readonly kind: "skip" }
@@ -154,7 +196,7 @@ export interface ChannelSyncDeps {
 
 /**
  * Bring one channel's slot up to date: fetch after its cursor, decode each
- * post, keep the text ones. Stops at the first post that must wait for a
+ * post, keep the posts (text, attachments or both). Stops at the first post that must wait for a
  * seed, at an empty page, or after `CHANNEL_POST_MAX_PAGES` pages. A fetch
  * failure throws; the slot the caller holds is unchanged.
  */
@@ -178,7 +220,13 @@ export async function syncChannelSlot(
         break;
       }
       if (outcome.kind === "text") {
-        fresh.push({ cursor: p.cursor, serverTsMs: p.serverTsMs, text: outcome.text });
+        const media = (outcome.media ?? []).slice(0, CHANNEL_POST_MEDIA_CAP);
+        fresh.push({
+          cursor: p.cursor,
+          serverTsMs: p.serverTsMs,
+          text: outcome.text,
+          ...(media.length > 0 ? { media } : {}),
+        });
       }
       cursor = p.cursor;
     }

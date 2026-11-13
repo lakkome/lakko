@@ -215,11 +215,15 @@ export function installPublisherRemover(fn: PublisherRemover | null): void {
 
 /**
  * Owner: a one-use co-publisher link for one person (UX 15.2 `Add
- * publisher`). The screen sends the URL as a message in the one-to-one; the
- * link page shows `Accept`. Recorded so the request it brings is approved
- * without asking.
+ * publisher`), as the invitation the screen sends in the one-to-one: the
+ * card every client draws ("{name} invites you to be a publisher of
+ * {channel}." with `Accept`) and the URL as the message text. Recorded so
+ * the request it brings is approved without asking.
  */
-export async function mintPublisherInviteLink(identity: WasmIdentity, idHex: string): Promise<string> {
+export async function mintPublisherInviteLink(
+  identity: WasmIdentity,
+  idHex: string,
+): Promise<{ readonly kind: "card"; readonly url: string; readonly card: Uint8Array }> {
   if (!channelsState.keysByChannel().has(idHex) || channelsActions.coPublisherGroupIdOf(idHex) !== undefined) {
     throw new ChannelError("not-publisher");
   }
@@ -267,7 +271,7 @@ export async function mintPublisherInviteLink(identity: WasmIdentity, idHex: str
   });
   minted.revocationSeed.fill(0);
   minted.linkSecret.fill(0);
-  return minted.url;
+  return { kind: "card", url: minted.url, card: minted.card };
 }
 
 /** How long the Accept page itself watches for the owner's device (chosen):

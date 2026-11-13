@@ -84,6 +84,9 @@ internal fun PeopleSearchSection(
     /** The people whose one-to-one is among the conversations above (standard
      *  base64 account keys): a contact among them is left out. */
     chatPeersB64: Set<String> = emptySet(),
+    /** ADR-0087 section 5 — the ids (hex) of the groups and channels already
+     *  shown as rows of the list above: no card or handle row for them. */
+    listedConversationIdsHex: Set<String> = emptySet(),
     /** The name of a channel this device knows, by its id; `null` when none. */
     channelName: (channelIdHex: String) -> String? = { null },
     /** ADR-0087 section 5 — public groups and channels under People. */
@@ -117,10 +120,27 @@ internal fun PeopleSearchSection(
         val merged = mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex)
         peopleRows(withCurrentContacts(merged, contactKeys), excludeKeysB64, chatPeersB64)
     }
-    val channel = shown?.channel
     // ADR-0087 section 5 — the public groups and channels, asked here so the
     // field knows whether anything matched at all.
-    val found = rememberFoundConversations(query, conversations)
+    val foundAll = rememberFoundConversations(query, conversations)
+    val found = remember(foundAll.rows, foundAll.pending, listedConversationIdsHex) {
+        FoundConversations(
+            foundAll.rows.filter {
+                me.lakko.app.search.foundConversationShown(me.lakko.app.search.searchHex(it.id), listedConversationIdsHex)
+            },
+            foundAll.pending,
+        )
+    }
+    // One row per channel: the card stands for a channel the handle lookup
+    // also named.
+    val channel = shown?.channel?.takeIf { c ->
+        me.lakko.app.search.handleChannelRowShown(
+            channelIdHex = c.idHex,
+            foundIdsHex = foundAll.rows.map { me.lakko.app.search.searchHex(it.id) },
+            foundPending = found.pending,
+            listedIdsHex = listedConversationIdsHex,
+        )
+    }
     // who-can-find-me.md section 6.1, "One list": no headings. The rows this
     // device holds stand above (the caller's list), then the people (local
     // first), the groups and channels, the channel a handle names; the spinner

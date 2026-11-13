@@ -433,6 +433,32 @@ final class ChannelConversationTests: XCTestCase {
         XCTAssertEqual(byId[without]?.preview.contains("@quiet"), true)
     }
 
+    /// The row's time is the newest real post's, never a newer raw server
+    /// row (a ban list, a metadata record). Seen live 2026-11-12: a ban at
+    /// 22:48 stood as the time of a channel whose newest post was at 22:39.
+    @MainActor
+    func testAChannelRowTimeIgnoresABanListOrRecordRow() {
+        let channels = ChannelsUiState()
+        let id = String(repeating: "5", count: 32)
+        channels.addChannel(ChannelHandle(
+            id: id, localName: "Walk 22", localDescription: "", addedAtMs: 1, handle: "walk22"))
+        // The raw rows the server holds: the post, then a newer ban list.
+        channels.setPosts(channelId: id, posts: [
+            PostView(cursor: 5, serverTsMs: 9_000, payloadB64: ""),
+            PostView(cursor: 6, serverTsMs: 18_000, payloadB64: ""),
+        ])
+        let rows = ChatListScreen.channelRows(
+            channels: channels, channelUnread: [:],
+            lastPosts: [id: PersistedChannelPost(cursor: 5, serverTsMs: 9_000, text: "Newest post")])
+        XCTAssertEqual(rows.first?.lastActivityMs, 9_000)
+    }
+
+    /// The marker the app writes into the stored invitation lines is the one
+    /// the notification extension replaces (`nseChannelNameMark`).
+    func testTheInvitationLineMarkerMatchesTheExtension() {
+        XCTAssertEqual(ChannelInviteNotificationMirror.channelMark, "\u{E002}")
+    }
+
     /// A comment's menu is the message menu: Reply and Copy, then Delete for
     /// its writer or a publisher and Ban for a publisher on someone else's.
     func testTheCommentMenuOffersTheActionsThatApply() {

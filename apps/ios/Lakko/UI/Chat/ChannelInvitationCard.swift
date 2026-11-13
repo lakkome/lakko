@@ -109,6 +109,23 @@ struct CoPublisherCardFacts: Equatable {
     /// The channel's photo the link's preview carries.
     var avatar: ProfileAvatar? = nil
 
+    /// The channel's name, "Channel" when the invitation names none.
+    var displayName: String {
+        let name = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? Localization.text("channels.fallback_name") : name
+    }
+
+    /// UX 15.2 — "{name} invites you to be a publisher of {channel}." when
+    /// the invitation names who sent it, else the sentence without a name.
+    /// The card in a chat and the link page say the same.
+    var inviteLine: String {
+        let inviter = inviterName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return inviter.isEmpty
+            ? Localization.text("channels.publishers.invite_page", texts: ["channel": displayName])
+            : Localization.text(
+                "channels.publishers.invite_page_from", texts: ["name": inviter, "channel": displayName])
+    }
+
     static func facts(card: Data) -> CoPublisherCardFacts? {
         guard let opened = try? openChannelInviteCard(card: card),
               opened.preview.subscriber == nil,
@@ -127,26 +144,38 @@ struct CoPublisherInvitationCard: View {
     let facts: CoPublisherCardFacts
     let outgoing: Bool
     @ObservedObject private var l10n = Localization.shared
-    /// Section 15.2 — the join runs from the card; its progress and failure
-    /// show here.
-    @ObservedObject private var acceptance = CoPublisherAcceptance.shared
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             InitialsAvatar(
-                name: facts.channelName, identity: facts.channelIdHex, size: 40,
+                name: facts.displayName, identity: facts.channelIdHex, size: 40,
                 placeholderIcon: .megaphoneFill, photo: facts.avatar.map(AvatarPhoto.avatar))
             VStack(alignment: .leading, spacing: 4) {
-                Text(l10n.t("channels.publishers.invite_page", texts: ["channel": facts.channelName]))
+                Text(facts.inviteLine)
                     .font(.body)
                     .lineLimit(3)
                 if !outgoing {
-                    action
+                    CoPublisherInviteAction(facts: facts)
                 }
             }
         }
         .frame(minWidth: 220, alignment: .leading)
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// Section 15.2 — the publisher invitation's control, the same on the card
+/// in a chat and on the link page: `Accept` runs the join in place, its
+/// progress and failure show here, `Open` once this device publishes.
+struct CoPublisherInviteAction: View {
+    let facts: CoPublisherCardFacts
+    @ObservedObject private var l10n = Localization.shared
+    @ObservedObject private var acceptance = CoPublisherAcceptance.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            action
+        }
     }
 
     @ViewBuilder

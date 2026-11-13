@@ -212,6 +212,16 @@ public fun seedChannelRead(r: FeedReading, channelIdHex: String, newestHeld: Lon
     return r.copy(channelRead = next)
 }
 
+/**
+ * After a channel-post log of an older version is dropped and fetched again
+ * ([droppedLogCursors]): every channel's marker is raised to at least how far
+ * the old log had looked, so posts that log had already passed (and that a
+ * format change now files) are not counted as new. A marker never moves
+ * backwards; a channel with none gets the floor as its start.
+ */
+public fun readFloorAfterDrop(r: FeedReading, dropped: Map<String, Long>): FeedReading =
+    dropped.entries.fold(r) { acc, (id, cursor) -> advanceChannelRead(acc, id, cursor) }
+
 /** Where a channel's marker starts (as web's `seedChannelReads`): its
  *  slot's cursor, never below its newest post, never below zero. The slot
  *  cursor also covers posts passed over unread, so they never count as new. */

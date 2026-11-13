@@ -177,6 +177,9 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @property {{ fromSeed: (seed: Uint8Array) => any }} Identity
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
+ * @property {(card: Uint8Array) => any} [openChannelInviteCard]
+ *   ADR-0087 section 14 — opens a channel invitation card offline, for the
+ *   notification body ("Invitation to {channel}"). Read only.
  * @property {(bytes: Uint8Array) => any} [decodePushRoutingSecret]
  *   ADR-0042 / ADR-0044 — the fail-closed push-routing-secret envelope
  *   codec. THROWS when the bytes are not that envelope. Used only to
@@ -2396,7 +2399,7 @@ function reactionFromProcessed(wasm, processed, ownKeyB64) {
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
- * @param {{ attachments: readonly string[], unsupportedMessage: string }} words
+ * @param {{ attachments: readonly string[], unsupportedMessage: string, newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
  * @returns {string | null}
  */
 function previewFromProcessed(wasm, processed, words) {
@@ -2434,6 +2437,11 @@ function previewFromProcessed(wasm, processed, words) {
     if (kind === "unsupported") return words.unsupportedMessage;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
+      // ADR-0087 section 14, UX 15.2 — a message carrying a channel
+      // invitation card reads like its card ("Invitation to {channel}"),
+      // never as its text, which is the `/g/` link with its secret.
+      const card = parsed.channelInvite;
+      if (card instanceof Uint8Array && card.length > 0) return channelInvitePreview(wasm, card, words);
       const text = typeof parsed.text === "string" ? parsed.text : "";
       if (text.length > 0) return truncate(text);
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
@@ -2450,6 +2458,44 @@ function previewFromProcessed(wasm, processed, words) {
     return null;
   } finally {
     freeQuietly(parsed);
+  }
+}
+
+/**
+ * The body for a message carrying a channel invitation card (ADR-0087
+ * section 14; UX 15.2 for a publisher invitation): the card opened offline
+ * through the core, the channel's name in the stored words. A card that does
+ * not open reads as a new message; the link text is never shown.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} card
+ * @param {{ newMessage?: string, channelInvite?: string, publisherInvite?: string, channelFallbackName?: string }} words
+ * @returns {string}
+ */
+export function channelInvitePreview(wasm, card, words) {
+  const generic = typeof words.newMessage === "string" && words.newMessage.length > 0 ? words.newMessage : "New message";
+  const open = /** @type {any} */ (wasm).openChannelInviteCard;
+  if (typeof open !== "function") return generic;
+  let opened;
+  try {
+    opened = open(card);
+  } catch {
+    return generic;
+  }
+  try {
+    const preview = opened.preview;
+    const channelId = preview?.channelId;
+    if (!(channelId instanceof Uint8Array) || channelId.length !== 16) return generic;
+    const named = typeof preview.groupName === "string" ? preview.groupName.trim() : "";
+    const fallback = words.channelFallbackName ?? "Channel";
+    const name = named.length > 0 ? named : fallback;
+    const publisher = preview.subscriber === undefined || preview.subscriber === null;
+    const template = publisher
+      ? (words.publisherInvite ?? "Invitation to publish in \u0001")
+      : (words.channelInvite ?? "Invitation to \u0001");
+    return truncate(template.replace("\u0001", name));
+  } finally {
+    freeQuietly(opened);
   }
 }
 

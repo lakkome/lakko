@@ -8,11 +8,10 @@
  * started if there is none, by the same route `Invite contacts` on a call
  * takes (`calls/invite-route.ts`).
  *
- * The message is `composeChannelInviteEnvelope(url, card)` for a subscriber
- * invitation: the card a client draws with `Subscribe`, and the link as its
- * text, so a client that does not draw the card still shows a link that opens
- * the link page. A publisher invitation is the co-publisher link as text (the
- * core takes no publisher card).
+ * The message is `composeChannelInviteEnvelope(url, card)`: the card a
+ * client draws (`Subscribe` for a subscriber invitation, `Accept` for a
+ * publisher one, UX 15.2), and the link as its text, so a client that does
+ * not draw the card still shows a link that opens the link page.
  *
  * Must be called inside the providers a chat screen runs in.
  */
@@ -38,7 +37,7 @@ import { sealedWakeForGroup } from "../push/group-routing";
 import { loadWasm } from "../wasm";
 import { hexToBytes as hexToBytesOrNull } from "../calls/group-call-record";
 
-/** What to send: a subscriber invitation card with its link, or a link alone. */
+/** What to send: an invitation card with its link, or a link alone. */
 export type ChannelInvitation =
   | { readonly kind: "card"; readonly url: string; readonly card: Uint8Array }
   | { readonly kind: "link"; readonly url: string };

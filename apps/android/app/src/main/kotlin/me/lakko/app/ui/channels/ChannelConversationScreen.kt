@@ -53,6 +53,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -155,11 +156,15 @@ public fun ChannelConversationScreen(
     var pressed by rememberSaveable(channelId) { mutableStateOf(subscribeOnOpen) }
     val reading = isPublisher || followed || pressed
     val record = remember(channel) { channel?.sharedMeta()?.fullRecord() }
-    val public = record?.listed ?: channel?.sharedListed ?: false
+    // Section 12 — unknown visibility shows no line, never "Private channel".
+    val knownPublic = remember(channel, channelId) {
+        me.lakko.app.channels.channelVisibilityOf(context, state.boundAccount, channel, channelId)
+    }
+    val public = knownPublic ?: false
     val counts by (ChannelPublisherLoop.peek(state)?.subscriberCounts
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap())).collectAsState()
     val band = counts[channelId]?.let(::subscriberBand)
-    val (lineKey, lineArgs) = channelHeaderLineKey(public, band)
+    val headerLine = channelHeaderLineKey(knownPublic, band)?.let { (key, args) -> strings.format(key, args) }
     val title = channel?.let { channelTitle(it, strings) }
         ?: name?.trim()?.takeIf { it.isNotEmpty() }
         ?: handle?.trim()?.removePrefix("@")?.takeIf { it.isNotEmpty() }?.let { "@$it" }
@@ -220,13 +225,15 @@ public fun ChannelConversationScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                strings.format(lineKey, lineArgs),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            headerLine?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 },
@@ -242,7 +249,7 @@ public fun ChannelConversationScreen(
                 !reading -> SubscribeCard(
                     title = title,
                     handle = record?.handle?.handle ?: channel?.handle?.takeIf { it.isNotBlank() } ?: handle,
-                    line = strings.format(lineKey, lineArgs),
+                    line = headerLine,
                     description = channel?.let { channelDescription(it) },
                     avatar = avatar,
                     seed = channelId,
@@ -273,7 +280,7 @@ public fun ChannelConversationScreen(
 private fun SubscribeCard(
     title: String,
     handle: String?,
-    line: String,
+    line: String?,
     description: String?,
     avatar: me.lakko.app.profile.AvatarRefs?,
     seed: String,
@@ -289,7 +296,7 @@ private fun SubscribeCard(
         handle?.trim()?.removePrefix("@")?.takeIf { it.isNotEmpty() }?.let {
             Text("@$it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        line?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         description?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
         Spacer(Modifier.height(8.dp))
         Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
@@ -558,8 +565,30 @@ private fun ChannelTimelineView(
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val width = maxWidth - 24.dp
             val items = timeline?.posts.orEmpty().asReversed()
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            // docs/ux/feed.md section 5 — the list at its newest end, in the
+            // foreground: the newest post shown is read and the channel's
+            // count in Chats clears (as a group chat does, and as web and iOS).
+            val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+            val newestCursor = timeline?.let { me.lakko.app.channels.channelReadThroughOnScreen(it) }
+            LaunchedEffect(channelId, newestCursor, pendingMedia.size) {
+                val cursor = newestCursor ?: return@LaunchedEffect
+                val account = state.boundAccount ?: return@LaunchedEffect
+                lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                    androidx.compose.runtime.snapshotFlow {
+                        me.lakko.app.channels.channelListAtNewestEnd(listState.firstVisibleItemIndex, pendingMedia.size)
+                    }.collect { atEnd ->
+                        if (atEnd) {
+                            me.lakko.app.feed.FeedReadingStore.update(context, account) {
+                                me.lakko.app.feed.advanceChannelRead(it, channelId, cursor)
+                            }
+                        }
+                    }
+                }
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
+                state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),

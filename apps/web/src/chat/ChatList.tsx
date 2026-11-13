@@ -50,7 +50,6 @@ import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
 import { useLineage } from "./use-lineage";
 import { uiRules } from "./ui-rules";
-import { badgeText } from "../feed/feed-marks";
 import { formatListTime } from "./list-time";
 import { rowMatchesQuery } from "./list-preview";
 import { showsEmptyState } from "./list-empty-state";
@@ -99,7 +98,8 @@ import {
 } from "../contacts/pending-contacts";
 import { displayLocale } from "../l10n/display-locale";
 import { channelsState } from "../state/channels-state";
-import { channelAvatarKey } from "../channels/channel-avatar";
+import { channelRowTime } from "../channels/channel-row";
+import { ChannelRow } from "./ChannelRow";
 import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 type Flag = "pinned" | "muted" | "archived";
@@ -165,70 +165,6 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
         </button>
       </div>
     </>
-  );
-}
-
-/**
- * A subscribed channel in the conversation list.
- *
- * Deliberately short: the list says nothing about which kind a row is, so
- * this draws the same avatar, title and second line as every other row. What
- * it does NOT have is the global pin / mute glyphs - those are keyed on a
- * conversation group id a channel does not carry (the pin shown is the one
- * inside the open folder). The badge is
- * the channel's count of new posts (docs/ux/feed.md section 5, "Channel
- * posts"): the posts newer than the newest one read, in the feed or in the
- * channel, drawn like a chat's unread badge.
- */
-function ChannelRow(props: {
-  row: ConversationRow;
-  /** Pinned inside the open folder (a channel has no global pin). */
-  pinned: boolean;
-  /** The channel is the one open beside the list. */
-  selected: boolean;
-  onMenu: (x: number, y: number) => void;
-}): JSX.Element {
-  const press = createLongPress((x, y) => props.onMenu(x, y));
-  return (
-    <A
-      href={paths.channel(props.row.id)}
-      class="lk-row"
-      classList={{ selected: props.selected }}
-      activeClass=""
-      inactiveClass=""
-      onContextMenu={(e) => {
-        e.preventDefault();
-        props.onMenu(e.clientX, e.clientY);
-      }}
-      onPointerDown={press.onPointerDown}
-      onPointerMove={press.onPointerMove}
-      onPointerUp={press.onPointerUp}
-      onPointerCancel={press.onPointerCancel}
-      onPointerLeave={press.onPointerLeave}
-      onClick={(e) => press.swallowClick(e)}
-    >
-      <Avatar label={props.row.title} id={props.row.id} conversationKey={channelAvatarKey(props.row.id)} playVideo="hover" />
-      <div class="lk-row-body">
-        <div class="lk-row-line">
-          <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
-            <span class="lk-ellipsis">{props.row.title}</span>
-          </span>
-        </div>
-        <div class="lk-row-line">
-          <span class="lk-row-sub">{props.row.preview}</span>
-          <span class="lk-row-trail">
-            <Show when={props.pinned}>
-              <Icon name="pin-fill" size={14} title={t("chats.row.pinned")} />
-            </Show>
-            <Show when={props.row.unread > 0}>
-              <span class="lk-badge" title={t("channels.row.new_posts_a11y", { count: props.row.unread })}>
-                {badgeText(props.row.unread)}
-              </span>
-            </Show>
-          </span>
-        </div>
-      </div>
-    </A>
   );
 }
 
@@ -691,6 +627,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 return (
                   <ChannelRow
                     row={row}
+                    time={channelRowTime(row.postedAtMs, clock(), displayLocale())}
                     pinned={currentFolder() !== null && pinnedHere(row)}
                     selected={props.activeGroupIdB64 === row.id}
                     onMenu={(x, y) => setMenu({ row, g: null, x, y })}

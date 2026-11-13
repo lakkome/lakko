@@ -143,6 +143,23 @@ internal fun channelInvitePreviewText(
     mapOf("channel" to summary.channelName),
 )
 
+/**
+ * What a notification (or any other one-line preview) says for a message:
+ * its text, or, for a message carrying a channel invitation card, the card's
+ * line ("Invitation to {channel}" / "Invitation to publish in {channel}")
+ * and never the text, which is the `/g/` link with its secret. A card that
+ * does not open reads as a new message.
+ */
+internal fun invitationAwarePreviewText(
+    text: String,
+    card: ByteArray?,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+    summarize: (ByteArray) -> ChannelInviteSummary? = ::channelInviteSummary,
+): String {
+    if (card == null || card.isEmpty()) return text
+    return summarize(card)?.let { channelInvitePreviewText(it, strings) } ?: strings["notification.message.new"]
+}
+
 /** The link a publisher invitation's `Accept` hands to the co-publisher
  *  join (`CoPublisher.requestToCoPublish`, which reads what follows `/g/`):
  *  the card's own slug and secret. */
@@ -217,7 +234,9 @@ internal fun ChannelInviteBubbleCard(
             Text(f.name, style = MaterialTheme.typography.titleSmall)
             Text(
                 if (f.publisherInvite) {
-                    t("channels.publishers.invite_page", mapOf("channel" to f.name))
+                    // UX 15.2 — "{name} invites you to be a publisher of
+                    // {channel}." when the invitation names its owner.
+                    me.lakko.app.chat.publisherInviteLine(f.preview.inviterName, f.name).text()
                 } else if (f.public) {
                     t("channels.header.public")
                 } else {

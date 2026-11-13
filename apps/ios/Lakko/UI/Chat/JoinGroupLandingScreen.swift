@@ -92,6 +92,12 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// ADR-0087 section 7.2 — the link is a channel subscriber invitation
     /// (preview kind 3): the page is a channel's link page.
     @Published public private(set) var channel: ChannelLinkFacts?
+    /// ADR-0087 section 15.2 — the link invites to publish in a channel
+    /// (preview kind 2): the page says "{name} invites you to be a publisher
+    /// of {channel}." with `Accept`, which runs the join in place, as the
+    /// card in a chat does. Never the group page (seen live 2026-11-12:
+    /// "Icons QA invites you to a group, 0 members").
+    @Published private(set) var publisher: CoPublisherCardFacts?
 
     private let slug: String
     private let linkKeyFragment: String?
@@ -186,6 +192,19 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         case .channel(let facts, let channel):
             preview = facts
             self.channel = channel
+        case .publisher(let facts, let invite):
+            preview = facts
+            // The link `Accept` runs: the same form the card in a chat
+            // carries, so the card and the page show one join's progress.
+            guard let base = try? GroupInviteUrl.composePointerGroupInviteUrl(
+                    blobId: located.blobId, origin: ApiEndpoints.webOrigin),
+                  let link = URL(string: InviteLinkSecret.link(base: base, secret: secret)) else {
+                state = .damaged
+                return
+            }
+            publisher = CoPublisherCardFacts(
+                channelIdHex: invite.channelIdHex, channelName: invite.channelName,
+                inviterName: invite.inviterName, link: link, avatar: invite.avatar)
         case .damaged:
             state = .damaged
             return
@@ -193,8 +212,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         // The PLAINTEXT capability: what the consume's joiner tag and the join
         // attribution are computed over.
         resolved = (cap.wire(), located.blobId)
-        // A channel's link page subscribes; it has no join request.
-        guard channel == nil else {
+        // A channel's link page subscribes, a publisher invitation accepts;
+        // neither has a join request.
+        guard channel == nil, publisher == nil else {
             state = .ready
             return
         }
@@ -238,15 +258,25 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         return nil
     }
 
+    /// What a publisher invitation link (preview kind 2) says.
+    struct PublisherLinkFacts: Equatable {
+        let channelIdHex: String
+        let channelName: String
+        let inviterName: String?
+        let avatar: ProfileAvatar?
+    }
+
     /// What the link's secret does to the card.
     enum PreviewOutcome: Equatable {
-        /// The capability carries no preview (a co-publisher link): the card
-        /// without one.
+        /// The capability carries no preview: the card without one.
         case none
         /// The preview opened under the link secret.
         case opened(GroupInviteFacts)
         /// A channel subscriber invitation (ADR-0087 section 7, kind 3).
         case channel(GroupInviteFacts, ChannelLinkFacts)
+        /// A publisher invitation (ADR-0087 section 15.2, kind 2): a channel
+        /// id and no subscriber keys.
+        case publisher(GroupInviteFacts, PublisherLinkFacts)
         /// The capability carries a preview that does not open under the
         /// secret the blob opened with.
         case damaged
@@ -267,6 +297,15 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                     channelIdHex: AttachmentBridge.hex(channelId), name: opened.groupName ?? "",
                     description: subscriber.description, access: subscriber.access,
                     avatar: ProfileAvatar(opened.avatar)))
+        }
+        if let channelId = opened.channelId, channelId.count == 16 {
+            return .publisher(
+                GroupInviteFacts(
+                    groupName: opened.groupName, inviterName: opened.inviterName,
+                    memberCount: opened.memberCount),
+                PublisherLinkFacts(
+                    channelIdHex: AttachmentBridge.hex(channelId), channelName: opened.groupName ?? "",
+                    inviterName: opened.inviterName, avatar: ProfileAvatar(opened.avatar)))
         }
         return .opened(GroupInviteFacts(
             groupName: opened.groupName,
@@ -391,7 +430,7 @@ public struct JoinGroupLandingScreen: View {
         // A channel's link page is titled with the channel (as on web), never
         // "Join a group".
         .navigationTitle(viewModel.channel.map { $0.name.isEmpty ? l10n.t("channels.meta.title") : $0.name }
-            ?? l10n.t("group.join.title"))
+            ?? (viewModel.publisher != nil ? l10n.t("channels.join.title") : l10n.t("group.join.title")))
         .task { await viewModel.run() }
         // The join landed: straight to the group's chat, no extra step.
         .onChange(of: viewModel.state) { _, state in
@@ -460,6 +499,10 @@ public struct JoinGroupLandingScreen: View {
                 }
                 .tint(.lakkoAccent)
                 footer
+            case .ready where viewModel.publisher != nil:
+                if let publisher = viewModel.publisher {
+                    publisherBlock(publisher)
+                }
             case .ready where viewModel.channel != nil:
                 if let channel = viewModel.channel {
                     channelBlock(channel)
@@ -570,6 +613,23 @@ public struct JoinGroupLandingScreen: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// Section 15.2 — "Icons QA invites you to be a publisher of Walk 22
+    /// channel." and the card's own control: `Accept` runs the join here,
+    /// then the waiting line; `Open` once this device publishes.
+    private func publisherBlock(_ facts: CoPublisherCardFacts) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            InitialsAvatar(
+                name: facts.displayName, identity: facts.channelIdHex, size: 64,
+                placeholderIcon: .megaphoneFill, photo: facts.avatar.map(AvatarPhoto.avatar),
+                playsVideo: true)
+            Text(facts.inviteLine)
+                .font(.title3)
+                .foregroundStyle(Color.lakkoText)
+                .fixedSize(horizontal: false, vertical: true)
+            CoPublisherInviteAction(facts: facts)
+        }
     }
 
     /// `Invited by <name>`, from the sealed preview: small, muted, one line.

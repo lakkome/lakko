@@ -207,6 +207,31 @@ export interface MintedCoPublisherLink {
   readonly sealed: Uint8Array;
   /** The 12-byte link secret (the URL fragment). SECRET. */
   readonly linkSecret: Uint8Array;
+  /** The invitation card the one-to-one message carries beside the URL
+   *  (ADR-0087 section 14, UX 15.2): the ledger id, the secret and the sealed
+   *  blob, so every client draws "... invites you to be a publisher of
+   *  {channel}." with `Accept` from the message alone. SECRET (it holds the
+   *  link secret); it travels only inside the end-to-end encrypted message. */
+  readonly card: Uint8Array;
+}
+
+/**
+ * The channel name a co-publisher link carries in its preview: the name the
+ * channel's own record gives, else the name this device keeps for it, else
+ * its @name. `undefined` when it has none of them (the link then carries no
+ * name and the receiving client says "Channel"); never the generic word.
+ */
+export function coPublisherLinkChannelName(
+  sharedName: string | undefined,
+  localName: string | undefined,
+  localHandle: string | undefined,
+): string | undefined {
+  for (const candidate of [sharedName, localName]) {
+    const name = (candidate ?? "").trim();
+    if (name.length > 0) return name;
+  }
+  const handle = (localHandle ?? "").trim().replace(/^@/, "");
+  return handle.length > 0 ? handle : undefined;
 }
 
 /**
@@ -225,7 +250,13 @@ export async function mintOneUseCoPublisherLink(
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
   const channelId = publisherGroup.channelId();
-  const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
+  const channelIdHex = bytesToHex(channelId);
+  const handle = channelsState.channels().find((c) => c.id === channelIdHex);
+  const name = coPublisherLinkChannelName(
+    channelsState.metaByChannel().get(channelIdHex)?.name,
+    handle?.localName,
+    handle?.localHandle,
+  );
   const inviterName = await ownInviterName(wasm);
   const root = wasm.dsJournalRootSeed(identity.ed25519Seed, groupId);
   const knockSeed = wasm.groupKnockSeed(root, INITIAL_KNOCK_VERSION);
@@ -235,7 +266,7 @@ export async function mintOneUseCoPublisherLink(
     groupId,
     0n,
     channelId,
-    name === undefined || name.length === 0 ? undefined : name,
+    name,
     wasm.groupKnockPublicKey(knockSeed),
     INITIAL_KNOCK_VERSION,
     undefined,
@@ -267,7 +298,8 @@ export async function mintOneUseCoPublisherLink(
     secret: linkSecret,
     widths: inviteLinkWidths(wasm),
   });
-  return { url, ledgerId, revocationSeed: revocation.seed, capabilityWire, sealed, linkSecret };
+  const card = wasm.composeChannelInviteCard(ledgerId, linkSecret, sealed);
+  return { url, ledgerId, revocationSeed: revocation.seed, capabilityWire, sealed, linkSecret, card };
 }
 
 /** Capability wires read off sealed knock rows, keyed like the bindings

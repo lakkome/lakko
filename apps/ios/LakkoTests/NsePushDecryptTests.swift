@@ -309,6 +309,31 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(many, "Sent 2 attachments")
     }
 
+    /// ADR-0087 section 14, UX 15.2 — a message carrying a channel
+    /// invitation card is notified like its card, never as its text (the
+    /// `/g/` link with its secret, seen live 2026-11-12); the stored words
+    /// carry the channel's place as a marker the app writes.
+    func testAChannelInvitationNotifiesLikeItsCard() {
+        let saved = nseNotificationWordLookup
+        defer { nseNotificationWordLookup = saved }
+        nseNotificationWordLookup = { _ in nil }
+        XCTAssertEqual(
+            nseChannelInviteLine(opened: true, channelName: "Walk 22 channel", publisher: true),
+            "Invitation to publish in Walk 22 channel")
+        XCTAssertEqual(
+            nseChannelInviteLine(opened: true, channelName: " ", publisher: false), "Invitation to Channel")
+        XCTAssertEqual(nseChannelInviteLine(opened: false, channelName: nil, publisher: true), "New message")
+        // The app writes the same marker (`ChannelInviteNotificationMirror`).
+        XCTAssertEqual(nseChannelNameMark, "\u{E002}")
+        let words = [
+            "chats.preview.publisher_invite": "Приглашение публиковать в \(nseChannelNameMark)",
+        ]
+        nseNotificationWordLookup = { words[$0] }
+        XCTAssertEqual(
+            nseChannelInviteLine(opened: true, channelName: "Walk 22", publisher: true),
+            "Приглашение публиковать в Walk 22")
+    }
+
     /// ADR-0061 — the attachment line and the server's generic placeholder
     /// come from the words the app stored, English per word when it has not.
     func testNotificationWordsFollowTheStoredLanguage() {

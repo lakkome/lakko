@@ -252,6 +252,14 @@ final class Localization: ObservableObject {
                 texts: ["name": ReactionNotificationMirror.nameMark, "emoji": ReactionNotificationMirror.emojiMark], counts: [:]) {
                 words["notification.reaction.body"] = line
             }
+            // ADR-0087 section 14 — a channel invitation's line, with the
+            // marker the extension replaces with the channel's name.
+            for key in ["chats.preview.channel_invite", "chats.preview.publisher_invite"] {
+                if let line = built?.format(
+                    key: key, texts: ["channel": ChannelInviteNotificationMirror.channelMark], counts: [:]) {
+                    words[key] = line
+                }
+            }
             SharedStorage.setNotificationWords(words)
         }
     }

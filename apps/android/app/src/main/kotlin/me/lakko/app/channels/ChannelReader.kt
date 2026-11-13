@@ -212,6 +212,26 @@ public class ChannelReader(
 }
 
 /**
+ * Section 12 — the visibility of [channelId] as this device knows it
+ * ([channelIsPublic] over the held metadata record and read key); `null`
+ * when nothing says, which shows no header line.
+ */
+public fun channelVisibilityOf(
+    context: Context,
+    accountIdB64: String?,
+    channel: ChannelHandle?,
+    channelId: String,
+): Boolean? {
+    val record = channel?.sharedMeta()?.fullRecord()
+    val recordPublic = record?.listed ?: channel?.takeIf { it.sharedUpdatedAtMs != null }?.sharedListed
+    return channelIsPublic(
+        handlePublic = record?.handle?.public,
+        recordPublic = recordPublic,
+        holdsReadKey = ChannelReadKeys.get(context, accountIdB64, channelId) != null,
+    )
+}
+
+/**
  * Section 6 — a public channel's read key as the record or a link carried it,
  * per account and channel. Not secret beyond the channel (it is in the public
  * record), so plain preferences.

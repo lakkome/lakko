@@ -197,6 +197,9 @@ private fun addChannelPosts(
     val fromSelf = source.idHex in ctx.ownChannels
     for (p in slot.posts) {
         if (p.cursor <= 0 || p.serverTsMs < oldest) continue
+        // The feed ranks text; a post with attachments only is kept in the
+        // log for the channel's row in Chats, not shown here as an empty item.
+        if (p.text.isBlank()) continue
         val mentionsMe = !fromSelf && ctx.ownUsername != null && ctx.mentions(p.text, ctx.ownUsername)
         candidates += FeedCandidateInput(
             conversation = conversation,

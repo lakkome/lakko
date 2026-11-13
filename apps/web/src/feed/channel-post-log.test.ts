@@ -134,3 +134,40 @@ describe("syncChannelSlot", () => {
     expect(slot.cursor).toBe(CHANNEL_POST_PAGE + 1);
   });
 });
+
+describe("attachment kinds in the log", () => {
+  it("keeps a caption-less photo, file or GIF post with its attachments' kinds", async () => {
+    const d = deps([{ posts: [post(1, "t:hello"), post(2, "gif")], nextAfter: 2 }], (p) =>
+      p === "gif"
+        ? { kind: "text", text: "", media: [{ mime: "image/gif", kind: "gif" }] }
+        : { kind: "text", text: p.slice(2) },
+    );
+    const slot = await syncChannelSlot(ID, undefined, d, NOW);
+    expect(slot.posts.at(-1)).toEqual({
+      cursor: 2,
+      serverTsMs: NOW,
+      text: "",
+      media: [{ mime: "image/gif", kind: "gif" }],
+    });
+    expect(slot.posts[0]).not.toHaveProperty("media");
+  });
+
+  it("round-trips the kinds through the stored form and drops malformed ones", () => {
+    const log = decodeChannelPostLog({
+      version: CHANNEL_POST_LOG_VERSION,
+      channels: {
+        [ID]: {
+          cursor: 2,
+          posts: [
+            { cursor: 1, serverTsMs: NOW, text: "", media: [{ mime: "image/jpeg", kind: 7 }, "bad"] },
+            { cursor: 2, serverTsMs: NOW, text: "", media: "not a list" },
+          ],
+        },
+      },
+    });
+    expect(log?.channels[ID]?.posts).toEqual([
+      { cursor: 1, serverTsMs: NOW, text: "", media: [{ mime: "image/jpeg", kind: null }] },
+      { cursor: 2, serverTsMs: NOW, text: "" },
+    ]);
+  });
+});

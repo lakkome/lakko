@@ -148,7 +148,14 @@ export async function syncAll(
         (bytes) => parseBodyEnvelopeWith(wasm, bytes),
       );
       if (d.kind === "meta") metas.push(d);
-      return d.kind === "text" ? { kind: "text", text: d.text } : { kind: "skip" };
+      if (d.kind !== "text") return { kind: "skip" };
+      // The attachments' kinds go with the text, so a photo, file or GIF
+      // posted without a caption still names itself on the channel's row.
+      const media = (d.body?.attachments ?? []).map((a) => ({
+        mime: a.mime ?? null,
+        kind: a.kind ?? null,
+      }));
+      return { kind: "text", text: d.text, ...(media.length > 0 ? { media } : {}) };
     };
     const slot = log.channels[channel.idHex];
     try {

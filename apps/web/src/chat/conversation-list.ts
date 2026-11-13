@@ -54,6 +54,11 @@ export interface ConversationRow {
   readonly personKey?: string | undefined;
   /** A group's or channel's `@name`, for the local search (ADR-0087). */
   readonly handle?: string | undefined;
+  /** A channel's newest post time, unix ms, which its row shows where a
+   *  group's row shows its last message's time; `null` while nothing has
+   *  been posted (`lastActivityMs` then falls back to when the channel was
+   *  added, which the row does not show). Absent for other kinds. */
+  readonly postedAtMs?: number | null;
 }
 
 /**

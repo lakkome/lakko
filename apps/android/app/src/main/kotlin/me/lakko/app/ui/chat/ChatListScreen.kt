@@ -281,6 +281,11 @@ public fun ChatListScreen(
     // The pending contacts the text matches: rows of the list, so the people
     // half leaves them out (`docs/ux/who-can-find-me.md` section 6.1).
     val visibleInvited = remember(invited, query) { me.lakko.app.contacts.PendingContacts.matching(invited, query) }
+    // ADR-0087 section 5 — the groups and channels standing as rows above:
+    // the network half draws no second row for them.
+    val visibleConversationIds = remember(visible) {
+        visible.filter { it.kind != ConversationRowKind.CHAT }.mapTo(HashSet()) { it.id.lowercase() }
+    }
     val visibleInvitedKeys = remember(visibleInvited) { visibleInvited.mapTo(HashSet()) { it.signaturePubkeyB64 } }
     val foundNoRow = searchFoundNoRow(visible.size, visibleInvited.size)
     val synchronizing = remember(state) { repository.isSynchronizing() }
@@ -507,6 +512,7 @@ public fun ChatListScreen(
                                     },
                                     excludeKeysB64 = visibleInvitedKeys,
                                     chatPeersB64 = visibleChatPeers,
+                                    listedConversationIdsHex = visibleConversationIds,
                                     conversations = conversationSearch,
                                 )
                             }
@@ -669,7 +675,10 @@ internal fun rememberConversationRows(
         channelHandles.map { channel ->
             val model = channelRowModel(
                 channel = channel,
-                posts = channelPosts[channel.id],
+                // The row's time and order come from the newest real post
+                // below, never from the raw server rows, which include ban
+                // lists and metadata records (seen live 2026-11-12).
+                posts = null,
                 subscriberCount = null,
                 // The owner reads "Your channel", a publisher who is not
                 // the owner "Publisher" (ADR-0087 section 15).
@@ -687,7 +696,8 @@ internal fun rememberConversationRows(
             // newest post this device can read, the time its time; the
             // @name (the model's subtitle) only when there is none.
             val newest = channelLastPost(channelPostLog[channel.id])
-            val newestMs = maxOf(newest?.serverTsMs ?: 0L, model.sortMs)
+            val newestMs = channelRowActivityMs(newest, channel.addedAtMs.toLong())
+            val newestLine = newest?.let { channelRowPreviewLine(it, strings) }
             ConversationListRow(
                 id = channel.id,
                 kind = ConversationRowKind.CHANNEL,
@@ -695,9 +705,11 @@ internal fun rememberConversationRows(
                 preview = if (me.lakko.app.channels.channelIsOrphaned(channel.id, orphanedChannels)) {
                     strings["channels.keys_reset.row_sub"]
                 } else {
-                    newest?.text ?: model.subtitle
+                    newestLine ?: model.subtitle
                 },
-                time = if (newest != null && newest.serverTsMs >= model.sortMs) {
+                // The newest post's own time, as a group row's; the time the
+                // channel was added never stands for a post's.
+                time = if (newest != null) {
                     formatListTime(newest.serverTsMs, now, zone, use24h, locale)
                 } else {
                     model.time
@@ -1690,10 +1702,32 @@ private fun NoMatchPanel() {
     }
 }
 
-/** The newest post of a channel's log that has text to show, as one line;
- *  `null` when the device holds none (docs/ux/navigation.md section 2). */
+/** The newest post of a channel's log, its text cut to its first non-blank
+ *  line; `null` when the device holds none, or the newest has neither text
+ *  nor attachments (docs/ux/navigation.md section 2). */
 internal fun channelLastPost(slot: me.lakko.app.feed.ChannelPostSlot?): me.lakko.app.feed.PersistedChannelPost? {
     val newest = slot?.posts?.maxByOrNull { it.cursor } ?: return null
-    val line = newest.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
+    val line = newest.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+    if (line.isEmpty() && newest.media.isEmpty()) return null
     return newest.copy(text = line)
 }
+
+/** When a channel row stands in the list: its newest real post's time (the
+ *  channel-post log holds text posts only), else when the channel was added.
+ *  Never a raw server row's, which may be a ban list or a metadata record. */
+internal fun channelRowActivityMs(newest: me.lakko.app.feed.PersistedChannelPost?, addedAtMs: Long): Long =
+    newest?.serverTsMs ?: addedAtMs
+
+/** A channel row's second line for its newest post, in a group row's words:
+ *  the text, else the attachment's kind ("Photo", "File", "GIF", "Voice
+ *  message", "Video message", "Photo and 2 more"); `null` when it has none. */
+internal fun channelRowPreviewLine(
+    post: me.lakko.app.feed.PersistedChannelPost,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String? = previewLine(
+    text = post.text,
+    attachments = post.media.map { PreviewAttachment(it.kind, it.mime) },
+    deleted = false,
+    author = null,
+    strings = strings,
+).takeIf { it.isNotEmpty() }

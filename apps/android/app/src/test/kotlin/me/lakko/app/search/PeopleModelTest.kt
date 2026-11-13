@@ -227,6 +227,31 @@ class PeopleModelTest {
     }
 
     @Test
+    fun `a channel the card already shows gets no second handle row`() {
+        // Base scenario 22 (2026-11-12): "@walk_22_channel" listed the card
+        // and, below it, the same channel again from the handle lookup.
+        val id = "0123456789abcdef0123456789abcdef"
+        assertFalse(handleChannelRowShown(id, listOf(id.uppercase()), foundPending = false))
+        assertTrue(handleChannelRowShown(id, listOf("ffffffffffffffffffffffffffffffff"), foundPending = false))
+        assertTrue(handleChannelRowShown(id, emptyList(), foundPending = false))
+        // Not while the cards are still asked: no row that turns into a copy.
+        assertFalse(handleChannelRowShown(id, emptyList(), foundPending = true))
+        // Nor when the channel already stands as a row of the list.
+        assertFalse(handleChannelRowShown(id, emptyList(), foundPending = false, listedIdsHex = setOf(id)))
+    }
+
+    @Test
+    fun `a followed channel found on the network is not drawn under its own row`() {
+        // Live on the Pixel 7a (2026-11-12): "@walk_22_channel" showed the
+        // followed channel's list row and, below it, its network card.
+        val id = "0123456789abcdef0123456789abcdef"
+        assertFalse(foundConversationShown(id, setOf(id)))
+        assertFalse(foundConversationShown(id.uppercase(), setOf(id)))
+        assertTrue(foundConversationShown(id, setOf("ffffffffffffffffffffffffffffffff")))
+        assertTrue(foundConversationShown(id, emptySet()))
+    }
+
+    @Test
     fun `a channel reads its name when known, else its handle, never a prefix`() {
         assertEquals("Trip news", channelResultLabel(" Trip news ", "trip"))
         assertEquals("@trip", channelResultLabel(null, "trip"))

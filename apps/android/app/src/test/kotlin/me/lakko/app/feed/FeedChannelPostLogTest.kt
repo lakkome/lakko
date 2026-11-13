@@ -6,6 +6,7 @@ package me.lakko.app.feed
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** ADR-0063 section 3 — the channel-post log's merge and per-channel sync. */
@@ -36,7 +37,9 @@ class FeedChannelPostLogTest {
 
     @Test
     fun sanitizeRefusesAnUnknownVersionAndDropsBadChannelsAlone() {
-        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 2)))
+        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 3)))
+        // Version 1 passed caption-less attachment posts over: refetched.
+        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 1)))
         val log = sanitizeChannelPostLog(
             ChannelPostLog(
                 channels = mapOf(
@@ -79,6 +82,61 @@ class FeedChannelPostLogTest {
         val slot = syncChannelSlot(id, null, deps, now)
         assertEquals(2L, slot.cursor)
         assertEquals(listOf("hello"), slot.posts.map { it.text })
+    }
+
+    @Test
+    fun aLogStoredWithNoVersionIsTheOldOneAndIsFetchedAgain() {
+        // Live on the Pixel 7a (2026-11-12): the store's JSON leaves default
+        // values out, so the version-1 log carried no version and was read as
+        // version 2; its cursor stood past the caption-less posts, so they
+        // were never filed and the row kept the first post.
+        val v1OnDisk = """{"channels":{"$id":{"cursor":4,"posts":[{"cursor":1,"serverTsMs":$now,"text":"First post"}]}}}"""
+        assertNull(decodeChannelPostLog(v1OnDisk))
+        assertNull(decodeChannelPostLog("""{"version":1,"channels":{}}"""))
+        assertNull(decodeChannelPostLog("not json"))
+    }
+
+    @Test
+    fun aDroppedLogStillTellsHowFarItHadLookedPerChannel() {
+        val v1OnDisk = """{"channels":{"$id":{"cursor":4,"posts":[{"cursor":1,"serverTsMs":$now,"text":"First post"}]},""" +
+            """"not-hex":{"cursor":9},"ffffffffffffffffffffffffffffffff":{"posts":[{"cursor":7,"serverTsMs":$now,"text":"x"}]}}}"""
+        assertEquals(
+            mapOf(id to 4L, "ffffffffffffffffffffffffffffffff" to 7L),
+            droppedLogCursors(v1OnDisk),
+        )
+        assertEquals(emptyMap<String, Long>(), droppedLogCursors("not json"))
+    }
+
+    @Test
+    fun aStoredLogNamesItsVersionAndReadsBackWithItsAttachments() {
+        val log = ChannelPostLog(
+            channels = mapOf(
+                id to ChannelPostSlot(
+                    2,
+                    listOf(post(1), PersistedChannelPost(2, now, "", listOf(PersistedChannelPostMedia("image/gif", "gif")))),
+                ),
+            ),
+        )
+        val text = encodeChannelPostLog(log)
+        assertTrue(text.contains("\"version\":$CHANNEL_POST_LOG_VERSION"))
+        assertEquals(log, decodeChannelPostLog(text))
+        assertEquals(ChannelPostLog(), decodeChannelPostLog(encodeChannelPostLog(ChannelPostLog())))
+    }
+
+    @Test
+    fun syncKeepsAnAttachmentPostWithNoTextAndItsKinds() = runTest {
+        // Base scenario 22 (2026-11-12): a photo, a file and a GIF posted
+        // without a caption were passed over, so the row kept the first post.
+        val deps = FakeDeps(
+            pages = listOf(listOf(wire(1), wire(2))),
+            outcomes = mapOf(
+                "w1" to PostOutcome.Text("First post"),
+                "w2" to PostOutcome.Text("", listOf(PersistedChannelPostMedia(mime = "image/gif", kind = "gif"))),
+            ),
+        )
+        val slot = syncChannelSlot(id, null, deps, now)
+        assertEquals(listOf(1L, 2L), slot.posts.map { it.cursor })
+        assertEquals(listOf(PersistedChannelPostMedia("image/gif", "gif")), slot.posts.last().media)
     }
 
     @Test

@@ -62,16 +62,20 @@ public object FeedSealedStore {
 
     public fun loadChannelPostLog(context: Context, accountIdB64: String): ChannelPostLog {
         val text = read(context, POSTS_DIR, accountIdB64) ?: return ChannelPostLog()
-        val raw = try {
-            json.decodeFromString(ChannelPostLog.serializer(), text)
-        } catch (_: Throwable) {
-            null
-        }
-        return sanitizeChannelPostLog(raw) ?: ChannelPostLog()
+        return decodeChannelPostLog(text) ?: ChannelPostLog()
+    }
+
+    /** What the sync loads: the log, and, when the stored one was of an
+     *  older version and is dropped, its per-channel cursors
+     *  ([droppedLogCursors]); `null` when nothing was dropped. */
+    public fun loadChannelPostLogForSync(context: Context, accountIdB64: String): Pair<ChannelPostLog, Map<String, Long>?> {
+        val text = read(context, POSTS_DIR, accountIdB64) ?: return ChannelPostLog() to null
+        decodeChannelPostLog(text)?.let { return it to null }
+        return ChannelPostLog() to droppedLogCursors(text)
     }
 
     public fun saveChannelPostLog(context: Context, accountIdB64: String, log: ChannelPostLog): Boolean {
-        val ok = write(context, POSTS_DIR, accountIdB64, json.encodeToString(ChannelPostLog.serializer(), log))
+        val ok = write(context, POSTS_DIR, accountIdB64, encodeChannelPostLog(log))
         if (ok) postsVersion.update { it + 1 }
         return ok
     }

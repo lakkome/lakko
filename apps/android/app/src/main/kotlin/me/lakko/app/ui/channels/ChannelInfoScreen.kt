@@ -106,7 +106,12 @@ public fun ChannelInfoScreen(
     val publisher = keys.containsKey(channelId)
     val owner = publisher && state.joinedGroupIdOf(channelId) == null
     val record = remember(channel) { channel?.sharedMeta()?.fullRecord() }
-    val public = record?.listed ?: channel?.sharedListed ?: false
+    // Section 12 — unknown visibility shows no header line; the owner's
+    // controls (which always hold the record) read it as known.
+    val knownPublic = remember(channel, channelId) {
+        me.lakko.app.channels.channelVisibilityOf(context, state.boundAccount, channel, channelId)
+    }
+    val public = knownPublic ?: false
     val handle = record?.handle?.handle ?: channel?.handle?.takeIf { it.isNotBlank() }
     var page by remember(channelId) { mutableStateOf(InfoPage.Info) }
     var membersOpen by remember { mutableStateOf(false) }
@@ -121,7 +126,8 @@ public fun ChannelInfoScreen(
     }
     val title = channelTitle(channel, strings)
     val count = counts[channelId]
-    val (lineKey, lineArgs) = channelHeaderLineKey(public, count?.let(::subscriberBand))
+    val headerLine = channelHeaderLineKey(knownPublic, count?.let(::subscriberBand))
+        ?.let { (key, args) -> strings.format(key, args) }
 
     BackHandler(enabled = page != InfoPage.Info) { page = InfoPage.Info }
 
@@ -233,7 +239,7 @@ public fun ChannelInfoScreen(
                         channel = channel,
                         title = title,
                         handle = handle.takeIf { InfoSection.HANDLE in sections },
-                        line = strings.format(lineKey, lineArgs),
+                        line = headerLine,
                         avatar = record?.avatar?.let { me.lakko.app.profile.avatarRefsOf(it) },
                         canRename = InfoSection.RENAME_GROUP in sections,
                         state = state,
@@ -433,7 +439,7 @@ private fun InfoHeader(
     channel: ChannelHandle,
     title: String,
     handle: String?,
-    line: String,
+    line: String?,
     avatar: me.lakko.app.profile.AvatarRefs?,
     canRename: Boolean,
     state: ChannelsUiState,
@@ -527,7 +533,7 @@ private fun InfoHeader(
                     }
                 }
             }
-            Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            line?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             channelDescription(channel)?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium, modifier = if (canRename) Modifier.clickable { editing = true } else Modifier)

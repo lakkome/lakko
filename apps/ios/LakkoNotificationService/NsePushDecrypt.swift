@@ -1107,6 +1107,27 @@ public func nseAttachmentsLine(count: Int) -> String {
     return count == 1 ? "Sent an attachment" : "Sent \(count) attachments"
 }
 
+/// The marker the stored channel-invitation lines carry where the channel's
+/// name goes (the app renders the template with it,
+/// ``ChannelInviteNotificationMirror/channelMark``).
+let nseChannelNameMark = "\u{E002}"
+
+/// ADR-0087 section 14, UX 15.2 — what a notification says for a message
+/// carrying a channel invitation card: the card's line ("Invitation to
+/// {channel}" / "Invitation to publish in {channel}"), never the message text,
+/// which is the `/g/` link with its secret (seen live 2026-11-12). A card that
+/// does not open says only that a message came.
+public func nseChannelInviteLine(opened: Bool, channelName: String?, publisher: Bool) -> String {
+    guard opened else { return nseWord("notification.message.new", english: "New message") }
+    let named = channelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let name = named.isEmpty ? nseWord("channels.fallback_name", english: "Channel") : named
+    let key = publisher ? "chats.preview.publisher_invite" : "chats.preview.channel_invite"
+    let english = publisher ? "Invitation to publish in \(nseChannelNameMark)" : "Invitation to \(nseChannelNameMark)"
+    var template = nseNotificationWordLookup(key) ?? english
+    if !template.contains(nseChannelNameMark) { template = english }
+    return template.replacingOccurrences(of: nseChannelNameMark, with: name)
+}
+
 /// The body the server put on a wake, in the interface language when it is
 /// one of the two generic placeholders `push-gw` sends (`New message`,
 /// `Incoming call`); any other body is returned unchanged.

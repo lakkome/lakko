@@ -125,13 +125,41 @@ public fun foldChannelTimeline(rows: List<ChannelRow>): ChannelTimeline {
     return ChannelTimeline(posts = posts.values.toList(), earlierUnavailable = earlier)
 }
 
-/** Section 12 — the one line under a channel's name. [band] is the rough
- *  size of a public channel (`"10k+"`), `null` when not known. */
-public fun channelHeaderLineKey(public: Boolean, band: String?): Pair<String, Map<String, String>> = when {
+/** The cursor a channel screen marks read once its list shows the newest
+ *  post: the newest post of the timeline (readable or not, as web), `null`
+ *  when it holds none. */
+public fun channelReadThroughOnScreen(timeline: ChannelTimeline): Long? =
+    timeline.posts.maxOfOrNull { it.cursor }
+
+/** The channel list (newest at the bottom, reversed) stands at its newest
+ *  end: the first item on screen is the newest post or one of the uploads
+ *  in flight drawn under it. */
+public fun channelListAtNewestEnd(firstVisibleItemIndex: Int, pendingUploads: Int): Boolean =
+    firstVisibleItemIndex <= pendingUploads
+
+/** Section 12 — the one line under a channel's name. [public] is `null`
+ *  when this device does not know the channel's visibility: then there is
+ *  no line (as web `channelHeaderLine` and iOS `ChannelHeaderLine`), never
+ *  "Private channel". [band] is the rough size of a public channel
+ *  (`"10k+"`), `null` when not known. */
+public fun channelHeaderLineKey(public: Boolean?, band: String?): Pair<String, Map<String, String>>? = when {
+    public == null -> null
     !public -> "channels.header.private" to emptyMap()
     band == null -> "channels.header.public" to emptyMap()
     else -> "channels.header.public_count" to mapOf("band" to band)
 }
+
+/**
+ * Section 12 — whether a channel is public as this device knows it, `null`
+ * when nothing says. The signed `@name` in the newest metadata record says so
+ * first ([handlePublic]), then the record's own flag ([recordPublic]; `null`
+ * when no record has been read), then a held read key: only a public
+ * channel's record, search card or link carries one, so a subscriber who
+ * came from a search card knows the channel is public before its first read
+ * (as iOS `ChannelExtras.isPublic`).
+ */
+public fun channelIsPublic(handlePublic: Boolean?, recordPublic: Boolean?, holdsReadKey: Boolean): Boolean? =
+    handlePublic ?: recordPublic ?: if (holdsReadKey) true else null
 
 /** ADR-0059 section 4 — the size band a count falls in, as shown. */
 public fun subscriberBand(count: Long): String = when {

@@ -369,7 +369,9 @@ private class RealThrowawayGroup(
         val kind = previewKindOf(body.kind) ?: return null
         return ProcessedRow(
             kind = kind,
-            text = body.text,
+            // ADR-0087 section 14 — a channel invitation card reads like the
+            // card, never as its text (the `/g/` link with its secret).
+            text = me.lakko.app.ui.channels.invitationAwarePreviewText(body.text, body.channelInvite),
             attachmentCount = body.attachments.size,
             senderName = senderNameOf(app.senderLeaf),
             senderAccountB64 = senderAccountOf(app),
