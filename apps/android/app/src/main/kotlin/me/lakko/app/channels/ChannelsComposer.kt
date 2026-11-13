@@ -107,6 +107,37 @@ public sealed class ChannelsComposerException(message: String) : Exception(messa
     /** Wrapped UniFFI `FfiException.Channels` — the
      *  underlying detail is in the message. */
     public class Ffi(message: String) : ChannelsComposerException(message)
+
+    /** docs/ux/second-device.md section 4a — this device holds no
+     *  PublisherGroup for the channel: the account publishes it from another
+     *  device, and this one reads it. Never founded outside New channel. */
+    public class NotPublishedHere : ChannelsComposerException("the channel's publishing state is not on this device")
+}
+
+/** How a PublisherGroup is opened ([publisherGroupOpenMode]). */
+public enum class PublisherGroupOpenMode {
+    /** A co-published channel: the group its link conveyed, never created. */
+    LOAD_JOINED,
+
+    /** An owned channel: the group at the owner's derived id, never created. */
+    LOAD,
+
+    /** New channel only: load the group, or found it when absent. */
+    LOAD_OR_FOUND,
+}
+
+/**
+ * docs/ux/second-device.md section 4a, the trap rule — how the PublisherGroup
+ * of a channel is opened: a co-published channel by the group id its link
+ * conveyed; an owned one at its derived id, founded only when [allowFound]
+ * (the New channel flow). Every other path loads, and a miss means the
+ * account publishes the channel from another device: founding a fresh group
+ * at the derived id there would reset the live channel journal.
+ */
+public fun publisherGroupOpenMode(joined: Boolean, allowFound: Boolean): PublisherGroupOpenMode = when {
+    joined -> PublisherGroupOpenMode.LOAD_JOINED
+    allowFound -> PublisherGroupOpenMode.LOAD_OR_FOUND
+    else -> PublisherGroupOpenMode.LOAD
 }
 
 /**
@@ -167,6 +198,10 @@ public object ChannelsComposer {
          *  owner's derivation, which this account cannot compute): the group
          *  is opened under it and never created. */
         joinedGroupId: ByteArray? = null,
+        /** New channel only: found the group when absent. Everywhere else the
+         *  group is loaded, and a miss throws
+         *  [ChannelsComposerException.NotPublishedHere]. */
+        allowFound: Boolean = false,
     ): ChannelPublisherKeys {
         val channelId = channelIdFromHex(channelIdHex)
 
@@ -185,11 +220,14 @@ public object ChannelsComposer {
         // Rust-core invariant.
         var seedEpoch: UInt? = null
         val seed: ByteArray = try {
-            val publisher = if (joinedGroupId != null) {
-                uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined(identity, joinedGroupId, channelId)
-                    ?: throw ChannelsComposerException.Ffi("the co-published group is not in this provider")
-            } else {
-                uniffiPublisherGroupOpenOrCreate(identity, channelId)
+            val publisher = when (publisherGroupOpenMode(joined = joinedGroupId != null, allowFound = allowFound)) {
+                PublisherGroupOpenMode.LOAD_JOINED ->
+                    uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined(identity, joinedGroupId ?: ByteArray(0), channelId)
+                        ?: throw ChannelsComposerException.NotPublishedHere()
+                PublisherGroupOpenMode.LOAD ->
+                    uniffi.lakko_ffi_uniffi.publisherGroupLoad(identity, channelId)
+                        ?: throw ChannelsComposerException.NotPublishedHere()
+                PublisherGroupOpenMode.LOAD_OR_FOUND -> uniffiPublisherGroupOpenOrCreate(identity, channelId)
             }
             try {
                 // The PublisherGroup epoch the seed serves (both the group and

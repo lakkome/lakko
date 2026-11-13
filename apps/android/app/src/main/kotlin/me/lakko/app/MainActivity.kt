@@ -1545,6 +1545,67 @@ private fun SessionRoot(
             }
         }
     }
+    // docs/ux/second-device.md section 4a - the account's channels travel
+    // between its devices through the channel subscription register: a
+    // channel subscribed, created or co-published here is written to it, one
+    // written on another device is added here (the shared subscriber key and
+    // the read key installed), and one left there goes here too.
+    val channelSyncContext = LocalContext.current.applicationContext
+    LaunchedEffect(channelsState, deviceGroupSync) {
+        me.lakko.app.channels.ChannelSubscriptionSync.appContext = channelSyncContext
+        val port = me.lakko.app.channels.SyncChannelRegisterPort(deviceGroupSync)
+        kotlinx.coroutines.flow.combine(
+            channelsState.channels,
+            channelsState.subscriberKeysByChannel,
+            channelsState.keysByChannel,
+            channelsState.publisherKeysReady,
+            kotlinx.coroutines.flow.combine(
+                deviceGroupSync.channelSubscriptions,
+                me.lakko.app.channels.ChannelSubscriptionSync.readKeysVersion,
+            ) { registers, version -> registers to version },
+        ) { _, _, _, ready, regs -> ready to regs }
+            .let { me.lakko.app.channels.debounced(it, 300L) }
+            .collect { me.lakko.app.channels.ChannelSubscriptionSync.reconcile(channelsState, port) }
+    }
+    // docs/ux/second-device.md section 4a - the pairing state bundle (v4)
+    // carries the newest seeds of each channel the register lists as live;
+    // a received bundle adds seeds this device holds none of for that epoch.
+    DisposableEffect(channelsState, deviceGroupSync) {
+        fun sameAccount(acct: String): Boolean = channelsState.boundAccount?.let {
+            me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(it) ==
+                me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(acct)
+        } == true
+        me.lakko.app.devices.StateBundle.channelSeedSource = { acct ->
+            if (!sameAccount(acct)) {
+                emptyMap()
+            } else {
+                deviceGroupSync.channelSubscriptions.value.orEmpty()
+                    .filter { it.subscribed }
+                    .associate { r ->
+                        val id = me.lakko.app.channels.ChannelsComposer.bytesToHex(r.channelId)
+                        id to channelsState.heldEpochSeeds(id)
+                    }
+                    .filterValues { it.isNotEmpty() }
+            }
+        }
+        me.lakko.app.devices.StateBundle.channelSeedSink = { acct, seeds ->
+            if (sameAccount(acct)) channelsState.addCarriedSeeds(seeds) else null
+        }
+        // The account's reader key a rotation on this device always reseals to.
+        me.lakko.app.channels.ChannelReseal.accountReaderKeyOf = { acct, channelId ->
+            if (!sameAccount(acct)) {
+                null
+            } else {
+                channelsState.subscriberKeysByChannel.value[channelId]
+                    ?.let { me.lakko.app.channels.ChannelsComposer.bytesToHex(it.publicKey) }
+            }
+        }
+        onDispose {
+            me.lakko.app.channels.ChannelReseal.accountReaderKeyOf = null
+            me.lakko.app.devices.StateBundle.channelSeedSource = null
+            me.lakko.app.devices.StateBundle.channelSeedSink = null
+        }
+    }
     // Bind the channels state to the account once the identity secrets land:
     // load this account's persisted channel list + subscriber seeds, restore
     // the publisher MLS provider snapshot, and re-open the publisher keys of

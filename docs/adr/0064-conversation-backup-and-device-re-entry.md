@@ -48,7 +48,9 @@ either sense:
    device, carries at most 1000 messages in one journal row, and drops the
    author, reactions, replies, forwards, edits and deletes
    (`history_placeholder.rs`). Channel subscriptions, subscriber keys and posts
-   reach no second device by any path.
+   reached no second device by any path (since 2026-11-13 the subscriptions
+   and the shared subscriber key travel in the `lakko-sync`
+   channel-subscription register; posts still do not).
 2. **Being in the conversation.** The device is brought in by a member that is
    online (ADR-0050 section 2.5a), which checks for new devices every ten
    minutes. A conversation whose other members are away, or which has no other
@@ -428,6 +430,19 @@ the PublisherGroup by an external commit under the same rule as section 5
 Entering advances the epoch and so changes the channel seed, so the entering
 device then runs the existing reseal fan-out to the subscribers (the ADR-0028
 "reseal after add" rule), without a second rotation.
+
+**Amended 2026-11-13 (maintainer), ahead of this ADR's build.** The channel
+list and the shared subscriber key no longer wait for the vault: they travel
+in the `lakko-sync` channel-subscription register (ADR-0050 section 2.9 as
+amended that day), carried between the account's devices and in the backup;
+the pairing state bundle hands over the newest epoch seeds once. The
+subscriber key is, as written above, one per account and channel, shared by
+its devices. The "owned or co-published" paragraph does not hold yet: a
+PublisherGroup leaf is the account key, so a second device of the same
+account cannot enter by an external commit without removing the first
+device's leaf. Until PublisherGroup leaves are per device (G-54), every
+device of an owner or co-publisher but the one holding the PublisherGroup is a
+reader of the channel (UX `second-device.md` section 4a).
 
 ## Alternatives considered
 

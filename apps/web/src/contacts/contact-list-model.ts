@@ -207,3 +207,12 @@ export function sentRowLines(record: SentRequestRecord): {
 export function contactsBadge(waiting: number): string | null {
   return waiting > 0 ? badgeText(waiting) : null;
 }
+
+/** The `@username` line under a row's name, or `null` when the name already is
+ *  that username (a person with no display name is titled by it): a row never
+ *  says the same thing twice. */
+export function subLineUsername(name: string, username: string | null): string | null {
+  if (username === null) return null;
+  return name.trim() === username.trim() ? null : username;
+}
+

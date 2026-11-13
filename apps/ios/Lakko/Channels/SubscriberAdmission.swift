@@ -214,6 +214,13 @@ final class SubscriberAdmission: ObservableObject {
         return markSet ? .remove : .leave
     }
 
+    /// A row this device never removes: its own subscriber key, or the
+    /// account's reader key it registered (2026-11-13).
+    nonisolated static func isOwnRow(_ pubkeyHex: String, ownKeyHex: String?, accountReaderHex: String?) -> Bool {
+        let row = pubkeyHex.lowercased()
+        return row == ownKeyHex || row == accountReaderHex
+    }
+
     /// The mark after a pass judged rows (in row order, each with its
     /// verdict): on a device that set the mark, past every row judged; on
     /// any other, only past the rows let in before the first one left alone,
@@ -266,6 +273,9 @@ final class SubscriberAdmission: ObservableObject {
         let ownKeyHex = state.subscriberKeysByChannel[channelId]
             .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
             .map { ChannelsComposer.bytesToHex($0).lowercased() }
+        // 2026-11-13: the account's reader key this device registered is its
+        // own too (its other devices read with it): never removed here.
+        let accountReaderHex = state.extras(channelId).readerKeyRegisteredHex?.lowercased()
         let mark = state.extras(channelId).admittedThroughSeq ?? 0
         let markSet = state.extras(channelId).admissionMarkSet == true
         var judged: [(seq: UInt64, verdict: LetIn)] = []
@@ -293,7 +303,8 @@ final class SubscriberAdmission: ObservableObject {
                 }
                 let verdict = Self.letInVerdict(
                     seq: row.seq, ticketLive: ticketLive, mark: mark, markSet: markSet,
-                    isOwnKey: row.pubkeyHex.lowercased() == ownKeyHex)
+                    isOwnKey: Self.isOwnRow(
+                        row.pubkeyHex, ownKeyHex: ownKeyHex, accountReaderHex: accountReaderHex))
                 switch verdict {
                 case .admit:
                     do {

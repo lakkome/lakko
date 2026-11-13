@@ -521,7 +521,7 @@ public enum PairingOrchestrator {
         var historySealed: Data?
         /// The state bundle (contacts, pins, known groups), applied at
         /// ``persist()``.
-        var stateBundle: StateBundle.V3?
+        var stateBundle: StateBundle.V4?
         /// The only owner of the device-identity seed once the join moved
         /// it here; zeroed in place after the write and on release.
         private var deviceSeed: Data
@@ -985,7 +985,9 @@ public enum PairingOrchestrator {
             let bundle = StateBundle.build(
                 accountIdB64: accountIdB64,
                 profiles: ProfileDirectory.shared.profilesForBundle(accountIdB64: accountIdB64),
-                ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64))
+                ownKeysB64: StateBundle.ownKeysB64(accountIdB64: accountIdB64),
+                // Bundle v4 — the newest epoch seeds of the subscribed channels.
+                channelSeeds: ChannelSubscriptionSync.shared.carriedSeedsForBundle())
             try await StateBundle.publish(
                 bundle: bundle,
                 group: ensured.group,

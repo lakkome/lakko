@@ -48,6 +48,7 @@ final class ChannelPublisherLoops {
         knockCursor = [:]
         journalCursor = [:]
         rotateRequested = []
+        ChannelAccountReaderKey.reset()
     }
 
     func runLoop(
@@ -71,6 +72,10 @@ final class ChannelPublisherLoops {
             if Task.isCancelled { return }
             if channels.orphanedByReset(channelId: channelId) { continue }
             await openOnce(channelId: channelId, accountIdB64: accountIdB64, seed: seed)
+            // Rotation, admission, record re-issue, the public seed and the
+            // journal poll run only for a channel whose PublisherGroup this
+            // device holds (`docs/ux/second-device.md` section 4a).
+            guard opened.contains(channelId) else { continue }
             refreshPublisherSeed(channelId: channelId, channels: channels, seed: seed)
             if rotateRequested.contains(channelId) {
                 await rotateRequestedNow(channelId: channelId, channels: channels, client: client, seed: seed)
@@ -81,6 +86,13 @@ final class ChannelPublisherLoops {
                 await sendOwedRotateRequest(channelId: channelId, channels: channels, seed: seed)
             }
             await publishPublicSeed(channelId: channelId, channels: channels, client: client, seed: seed)
+            // 2026-11-13 — the account's reader key (the subscription
+            // register's) is a real subscriber of the channel, registered once
+            // by this device, so the account's other devices read it.
+            await ChannelAccountReaderKey.ensure(
+                channelId: channelId, state: channels,
+                keyHex: ChannelAccountReaderKey.keyHex(channelId: channelId),
+                ports: ChannelAccountReaderKey.livePorts(state: channels, client: client, currentSeed: seed))
             await pollJournal(channelId: channelId, seed: seed)
             // The owner's commits the poll applied (a rotation, an approve, a
             // removal) moved a co-publisher's content seed: the composer takes
@@ -97,8 +109,12 @@ final class ChannelPublisherLoops {
         guard !opened.contains(channelId) else { return }
         do {
             let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: seed)
-            let group = try CoPublisher.openPublisherGroup(
-                identity: identity, accountIdB64: accountIdB64, channelIdHex: channelId)
+            // Never founds (the trap rule): a channel whose group is not in
+            // this device's provider is read here, and its keys leave memory.
+            guard let group = try CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId) else {
+                channelsRef?.noteNoPublisherGroupHere(channelId)
+                return
+            }
             ChannelPublisherIdentity.shared.persist()
             await CoPublisher.claimJournal(ds: DsClient(), identity: identity, publisherGroup: group)
             opened.insert(channelId)

@@ -163,6 +163,28 @@ final class ChannelConversationTests: XCTestCase {
         XCTAssertNil(ChannelInviteCardFacts.facts(card: Data([1, 2, 3])))
     }
 
+    func testAMovedCardLeavesNoLocalEntryAndAFullStoreDropsTheOldest() {
+        let account = "test-invite-cards-\(UUID().uuidString)"
+        defer { ChannelInviteCardStore.shared.delete(accountIdB64: account) }
+        let store = ChannelInviteCardStore.shared
+        store.put(card: Data([9]), conversationIdHex: "ab01", messageId: -7, accountIdB64: account)
+        store.move(conversationIdHex: "ab01", from: -7, to: 70, accountIdB64: account)
+        XCTAssertNil(store.card(conversationIdHex: "ab01", messageId: -7, accountIdB64: account))
+        XCTAssertEqual(store.card(conversationIdHex: "ab01", messageId: 70, accountIdB64: account), Data([9]))
+        // Fill past the cap: the first cards stored are the ones dropped,
+        // whatever their keys sort as.
+        for i in 0..<(ChannelInviteCardStore.cap + 3) {
+            store.put(card: Data([UInt8(i % 256)]), conversationIdHex: "cd02", messageId: Int64(i), accountIdB64: account)
+        }
+        XCTAssertNil(store.card(conversationIdHex: "ab01", messageId: 70, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 0, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 1, accountIdB64: account))
+        XCTAssertNil(store.card(conversationIdHex: "cd02", messageId: 2, accountIdB64: account))
+        XCTAssertNotNil(store.card(conversationIdHex: "cd02", messageId: 3, accountIdB64: account))
+        XCTAssertNotNil(
+            store.card(conversationIdHex: "cd02", messageId: Int64(ChannelInviteCardStore.cap + 2), accountIdB64: account))
+    }
+
     // MARK: - Admission seeds to a rotated co-publisher (ADR-0074 section 3.7)
 
     private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }

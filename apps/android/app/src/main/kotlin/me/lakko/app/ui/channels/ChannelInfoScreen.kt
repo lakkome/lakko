@@ -107,7 +107,18 @@ public fun ChannelInfoScreen(
     val loop = remember(state) { ChannelPublisherLoop.peek(state) }
     val counts by (loop?.subscriberCounts ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap())).collectAsState()
     val publisher = keys.containsKey(channelId)
-    val owner = publisher && state.joinedGroupIdOf(channelId) == null
+    val owner = publisher && state.accountRoleOf(channelId) == me.lakko.app.channels.ChannelAccountRole.OWNER
+    // docs/ux/second-device.md section 4a — the account owns or co-publishes
+    // the channel from another device: a subscriber's screen with the exit
+    // block empty.
+    val keysReady by state.publisherKeysReady.collectAsState()
+    val orphanedSet by state.orphaned.collectAsState()
+    val readerRole = me.lakko.app.channels.readerDeviceRole(
+        role = remember(channels, keys, channelId) { state.accountRoleOf(channelId) },
+        publishesHere = publisher && channelId !in orphanedSet,
+        orphaned = channelId in orphanedSet,
+        keysReady = keysReady,
+    )
     val record = remember(channel) { channel?.sharedMeta()?.fullRecord() }
     // Section 12 — unknown visibility shows no header line; the owner's
     // controls (which always hold the record) read it as known.
@@ -150,9 +161,9 @@ public fun ChannelInfoScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     val deleteScope = rememberCoroutineScope()
     var deleteError by remember { mutableStateOf<UiText?>(null) }
-    val sections = remember(owner, publisher, handle, membersOn, hasOtherPublishers) {
+    val sections = remember(owner, publisher, handle, membersOn, hasOtherPublishers, readerRole) {
         try {
-            uniffi.lakko_ffi_uniffi.channelInfoSections(
+            me.lakko.app.channels.readerDeviceSections(readerRole, uniffi.lakko_ffi_uniffi.channelInfoSections(
                 uniffi.lakko_ffi_uniffi.ChannelInfoCapabilities(
                     role = when {
                         owner -> uniffi.lakko_ffi_uniffi.ChannelRole.OWNER
@@ -163,7 +174,7 @@ public fun ChannelInfoScreen(
                     hasOtherPublishers = hasOtherPublishers,
                     membersOfGroupsAndChannelsOn = membersOn,
                 ),
-            )
+            ))
         } catch (_: Throwable) {
             emptyList()
         }
@@ -482,7 +493,8 @@ private fun InfoHeader(
     var description by remember(channel.id) { mutableStateOf(channelDescription(channel).orEmpty()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
-    val owner = state.keysByChannel.value.containsKey(channel.id) && state.joinedGroupIdOf(channel.id) == null
+    val owner = state.keysByChannel.value.containsKey(channel.id) &&
+        state.accountRoleOf(channel.id) == me.lakko.app.channels.ChannelAccountRole.OWNER
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         // Section 4.5.2 — the owner sets, changes and removes the photo.
         ChannelPhotoHeader(

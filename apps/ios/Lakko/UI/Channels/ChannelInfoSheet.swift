@@ -83,14 +83,16 @@ struct ChannelInfoSheet: View {
     private var sections: [InfoSection] {
         // Read so the screen redraws when the publisher record changes.
         _ = publishersRevision
-        return channelInfoSections(caps: ChannelInfoCapabilities(
+        return ChannelReaderDeviceInfo.sections(
+            readerDevice: state.readerDeviceRole(channelId) != nil,
+            channelInfoSections(caps: ChannelInfoCapabilities(
             role: role,
             hasHandle: !handle.isEmpty,
             // The co-publishers this account approved; a co-publisher always
             // has the owner. Delete channel itself waits for the core route.
             hasOtherPublishers: CoPublisherKeyBook.hasOtherPublishers(
                 channelIdHex: channelId, isOwner: isOwner),
-            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil))
+            membersOfGroupsAndChannelsOn: reach.setting.mode == .some && reach.setting.groups != nil)))
     }
 
     private var title: String {

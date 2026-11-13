@@ -2073,6 +2073,14 @@
       "text": "Las reacciones en un canal son anónimas. Nadie puede ver quién reaccionó, ni siquiera el propietario del canal.",
       "status": "machine"
     },
+    "channels.reader_device.owner": {
+      "text": "Publicas en este canal desde el dispositivo en el que lo creaste.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Publicas en este canal desde el dispositivo en el que te convertiste en editor.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko renueva la protección del canal por sí solo. Renuévala ahora si crees que el dispositivo de un suscriptor se vio comprometido.",
       "status": "machine"

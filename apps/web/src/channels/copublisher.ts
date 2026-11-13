@@ -102,7 +102,7 @@ import {
 import {
   bytesToHex,
   freshPublisherKeys,
-  openOrFoundPublisherGroup,
+  openHeldPublisherGroup,
   type ChannelPublisherKeys,
 } from "./composer";
 import { LegacyChannelError, isLegacyV1PublisherGroupId } from "./legacy-v1";
@@ -131,7 +131,8 @@ type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
 /** Path prefix every group/co-publisher invite URL starts with. */
 const GROUP_INVITE_URL_PREFIX = "/g/";
 
-/** Open (or create) the persistent PublisherGroup handle for a channel. The
+/** Open the persistent PublisherGroup handle this device holds for a channel
+ *  (never founds one: see `openHeldPublisherGroup`). The
  *  caller owns the returned handle and MUST `.free()` it when done. */
 export async function openPublisherGroup(
   identity: Identity,
@@ -152,9 +153,12 @@ export async function openPublisherGroup(
     if (joined === undefined) throw new Error("co-publisher: the joined PublisherGroup is not on this device");
     return joined;
   }
-  // A channel minted under the retired v1 derivation refuses inside with the
-  // readable copy. A group founded here claims its journal (ADR-0057).
-  return await openOrFoundPublisherGroup(wasm, identity, channelId);
+  // 2026-11-13, the trap rule: this is every path but New channel, so the
+  // group is loaded, never founded. A device of the owner that holds no group
+  // state is a reader of the channel (PublisherGroupNotHeldError); founding
+  // here would claim-reset the live journal. A channel minted under the
+  // retired v1 derivation refuses inside with the readable copy.
+  return await openHeldPublisherGroup(wasm, identity, channelId);
 }
 
 /**

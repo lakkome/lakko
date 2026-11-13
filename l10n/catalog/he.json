@@ -2073,6 +2073,14 @@
       "text": "תגובות בערוץ הן אנונימיות. אף אחד לא יכול לראות מי הגיב, אפילו לא בעל הערוץ.",
       "status": "machine"
     },
+    "channels.reader_device.owner": {
+      "text": "אתם מפרסמים בערוץ הזה מהמכשיר שבו יצרתם אותו.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "אתם מפרסמים בערוץ הזה מהמכשיר שבו הפכתם למפרסמים.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko מרעננת את ההגנה של הערוץ בעצמה. רעננו אותה עכשיו אם אתם חושבים שהמכשיר של אחד המנויים נפרץ.",
       "status": "machine"

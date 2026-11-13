@@ -96,6 +96,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0079 section 4 — the account's own invite links, every device's,
     /// revoked ones included.
     @Published public private(set) var linkRecords: [LinkRecord] = []
+    /// ADR-0050 section 2.9 (amended 2026-11-13) — the account's channel
+    /// subscription registers, leaves included, ascending by channel id: what
+    /// ``ChannelSubscriptionSync`` reconciles this device's channel list with.
+    @Published public private(set) var channelSubscriptions: [ChannelSubscriptionRegister] = []
     /// ADR-0079 (reworked 2026-10-17) — bumped whenever a claim of a link
     /// request from another device of the account is recorded.
     @Published public private(set) var linkClaimsVersion: Int = 0
@@ -516,6 +520,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if name != ownUsername { ownUsername = name }
         let links = (try? s.allLinkRecords()) ?? []
         if links != linkRecords { linkRecords = links }
+        let subscriptions = (try? s.allChannelSubscriptions()) ?? []
+        if subscriptions != channelSubscriptions { channelSubscriptions = subscriptions }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
         // UX 17.5 / 17.6 — the synced acknowledged set ends the new-device
@@ -1294,6 +1300,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentQuickReaction()
         guard bound.isCurrent else { return }
         await flushUnsentLinkRecords()
+        guard bound.isCurrent else { return }
+        await flushUnsentChannelSubscriptions()
         guard bound.isCurrent else { return }
         await flushUnsentDeviceAcks()
         while !Task.isCancelled, bound.isCurrent {
@@ -2204,6 +2212,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0050 section 2.9 (amended 2026-11-13) — a channel
+            // subscription register, the same way; ``ChannelSubscriptionSync``
+            // reconciles the channel list from ``channelSubscriptions``.
+            if isChannelSubscriptionEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyChannelSubscriptionEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("channel-subscription: envelope refused")
+                }
+                return
+            }
             // UX 17.6 — a device acknowledgement, the same way: the synced
             // acknowledged set reaches the new-device warning through
             // ``refreshDerived()``.
@@ -2420,6 +2442,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         for envelope in (try? syncedState.deviceAckEnvelopes()) ?? [] {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — and every channel
+        // subscription register, leaves included, with its original stamp.
+        for envelope in (try? syncedState.channelSubscriptionEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
     }
 
     // MARK: - ADR-0079: the link-record register
@@ -2535,6 +2562,101 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         return (try? syncedState.linkAnswerVerdict(
             linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, pressedAtMs: pressedAtMs)) ?? .dead
     }
+
+    // MARK: - ADR-0050 section 2.9 (amended 2026-11-13): channel subscriptions
+
+    static func channelSubscriptionsUnsentKey(accountIdB64: String) -> String {
+        "lakko.channel-subscriptions.unsent.v1.\(accountIdB64)"
+    }
+
+    /// Send every channel subscription register again when an earlier send
+    /// was not confirmed (re-sending is a no-op on a device that holds them).
+    func flushUnsentChannelSubscriptions() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.channelSubscriptionsUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.channelSubscriptionEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("channel-subscription: register send failed; retried at the next start")
+        }
+    }
+
+    /// The register of `channelId`, live or left, or `nil` when none is held.
+    public func channelSubscription(channelId: Data) -> ChannelSubscriptionRegister? {
+        guard ready else { return nil }
+        return (try? syncedState.channelSubscription(channelId: channelId)).flatMap { $0 }
+    }
+
+    /// Write a live register for `channelId` (the core stamps it above the
+    /// held one), fold and persist it at once, and send it to the account's
+    /// other devices. `nil` when the synced state is not loaded yet; `false`
+    /// when the core refused it; `true` when it is held (written now or
+    /// already identical).
+    @discardableResult
+    public func setChannelSubscription(
+        channelId: Data, role: ChannelSubscriptionRole, subscriberSecret: Data, readKey: Data,
+        publisherGroupId: Data, name: String, handle: String
+    ) -> Bool? {
+        guard ready, !deviceRemoved else { return nil }
+        let written: Bool
+        do {
+            written = try syncedState.setChannelSubscription(
+                hlc: Hlc.mint(), channelId: channelId, role: role, subscriberSecret: subscriberSecret,
+                readKey: readKey, publisherGroupId: publisherGroupId, name: name, handle: handle)
+        } catch {
+            NSLog("channel-subscription: register refused")
+            return false
+        }
+        if written { afterChannelSubscriptionWrite(channelId: channelId) }
+        return true
+    }
+
+    /// Write the left tombstone for `channelId` and send it. `nil` when the
+    /// synced state is not loaded yet (the caller keeps the leave owed);
+    /// `true` once held as left (written now, already left, or never held).
+    @discardableResult
+    public func leaveChannelSubscription(channelId: Data) -> Bool? {
+        guard ready, !deviceRemoved else { return nil }
+        do {
+            if try syncedState.leaveChannelSubscription(hlc: Hlc.mint(), channelId: channelId) {
+                afterChannelSubscriptionWrite(channelId: channelId)
+            }
+        } catch {
+            NSLog("channel-subscription: leave refused")
+            return false
+        }
+        return true
+    }
+
+    /// Fold, persist, mark unsent and send the one register; the mark goes
+    /// once it is out (a start retries it otherwise).
+    private func afterChannelSubscriptionWrite(channelId: Data) {
+        stateChanged()
+        persistSyncState()
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.channelSubscriptionsUnsentKey(accountIdB64: account)
+        UserDefaults.standard.set(true, forKey: key)
+        let envelope = (try? syncedState.channelSubscriptionEnvelopeFor(channelId: channelId)).flatMap { $0 }
+        Task { @MainActor [weak self] in
+            guard let self, let envelope else { return }
+            do {
+                try await self.sendLineageEnvelopes([envelope])
+                // Another register whose send failed this session keeps the
+                // mark: the start-up flush sends them all.
+                if self.activeAccountIdB64 == account, !self.channelSubscriptionSendFailed {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+            } catch {
+                self.channelSubscriptionSendFailed = true
+                NSLog("channel-subscription: register send failed; retried at the next start")
+            }
+        }
+    }
+
+    /// A channel subscription register failed to send this session.
+    private var channelSubscriptionSendFailed = false
 
     // MARK: - UX 17.5 / 17.6: the device-acknowledgement register
 

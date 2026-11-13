@@ -39,7 +39,7 @@
 //! ambiguity, no floating-point, no map iteration order):
 //!
 //! ```text
-//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (2)
+//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (3)
 //! message_id:        u64 (big-endian)
 //! direction:         u8  (0 = outgoing, 1 = incoming, 2 = system)
 //! created_at_len:    u16 (big-endian)   + created_at UTF-8 bytes
@@ -63,7 +63,29 @@
 //!     mime_present:  u8 (0 | 1)  [ + mime_len: u16 + mime UTF-8 ]
 //!     width_present:  u8 (0 | 1)  [ + width: u32 ]
 //!     height_present: u8 (0 | 1)  [ + height: u32 ]
+//! card_present:      u8 (0 | 1)  [ + card_len: u16 + card bytes ]
+//! reply_present:     u8 (0 | 1)  [ + reply ]
+//!   reply:
+//!     target:        i64 (big-endian)
+//!     author_present:  u8 (0 | 1)  [ + author_len: u16 + author UTF-8 ]
+//!     excerpt_present: u8 (0 | 1)  [ + excerpt_len: u16 + excerpt UTF-8 ]
+//! forward_present:   u8 (0 | 1)  [ + forward ]
+//!   forward:
+//!     author_present:  u8 (0 | 1)  [ + author_len: u16 + author UTF-8 ]
+//!     origin_present:  u8 (0 | 1)  [ + origin ]
+//!   origin:
+//!     group_len: u8 + group id bytes, message_id: i64 (big-endian)
 //! ```
+//!
+//! ## Version 3: the channel invitation card, the reply, the forward
+//!
+//! Version 2 carried the text and the attachments only, so a message that
+//! was a channel invitation (ADR-0087 section 14) reached a new device as
+//! its bare `/g/` link, and a reply or a forward lost its quote or its
+//! "Forwarded from" line. Version 3 appends the card bytes (opaque here,
+//! 1 to [`MAX_CHANNEL_INVITE_BYTES`]), the reply (target `messageId`, the
+//! author and excerpt snapshot) and the forward (author snapshot, the
+//! origin group id and `messageId`). Version 2 is refused (flag day).
 //!
 //! ## Version 2: media metadata (ADR-0047)
 //!
@@ -100,7 +122,7 @@ use crate::error::{Error, Result};
 /// Wire-format version byte. Bump on any layout change; the
 /// decoder refuses any other value so an older binary fails
 /// loudly rather than mis-parsing a newer placeholder.
-pub const HISTORY_PLACEHOLDER_VERSION: u8 = 2;
+pub const HISTORY_PLACEHOLDER_VERSION: u8 = 3;
 
 /// Hard cap on the message text, in UTF-8 bytes (1 MiB). Larger
 /// inputs are refused at encode time and rejected at decode.
@@ -127,6 +149,24 @@ pub const MAX_KIND_BYTES: usize = 32;
 /// Hard cap on the waveform, in bytes (one amplitude per bar), matching
 /// ADR-0047's `MAX_WAVEFORM_BYTES`.
 pub const MAX_WAVEFORM_BYTES: usize = 128;
+
+/// Hard cap on a channel invitation card (ADR-0087 section 14), in bytes.
+/// Equal to `lakko_attachments::MAX_CHANNEL_INVITE_BYTES`, which `lakko-mls`
+/// does not depend on; the FFI crates pin the two equal in a test.
+pub const MAX_CHANNEL_INVITE_BYTES: usize = 2048;
+
+/// Hard cap on a reply's or a forward's author snapshot, in UTF-8 bytes.
+/// Equal to `lakko_attachments::MAX_REPLY_AUTHOR_BYTES` and
+/// `MAX_FORWARDED_FROM_BYTES` (pinned in the FFI crates).
+pub const MAX_SNAPSHOT_AUTHOR_BYTES: usize = 255;
+
+/// Hard cap on a reply's excerpt snapshot, in UTF-8 bytes. Equal to
+/// `lakko_attachments::MAX_REPLY_EXCERPT_BYTES` (pinned in the FFI crates).
+pub const MAX_REPLY_EXCERPT_BYTES: usize = 512;
+
+/// Hard cap on a forward's origin group id, in bytes: the decoded size of
+/// the envelope's `MAX_FORWARD_ORIGIN_GROUP_BYTES` (128) base64 characters.
+pub const MAX_ORIGIN_GROUP_BYTES: usize = 96;
 
 /// SHA-256 blob id length.
 const BLOB_ID_LEN: usize = 32;
@@ -219,6 +259,36 @@ pub struct HistoryThumbPlaceholder {
     pub height: Option<u32>,
 }
 
+/// The reply a [`HistoryMessagePlaceholder`] carries (ADR-0052): the target's
+/// DS `messageId` and the snapshot the replier saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryReplyPlaceholder {
+    /// The target's DS `messageId`.
+    pub target: i64,
+    /// The quoted author's name as the replier saw it.
+    pub author: Option<String>,
+    /// The quoted excerpt as the replier saw it.
+    pub excerpt: Option<String>,
+}
+
+/// The forward a [`HistoryMessagePlaceholder`] carries (ADR-0052 decision 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryForwardPlaceholder {
+    /// The original author's name, a snapshot.
+    pub author: Option<String>,
+    /// The origin conversation and message, kept only as a whole.
+    pub origin: Option<HistoryForwardOrigin>,
+}
+
+/// Where a forwarded message came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryForwardOrigin {
+    /// The origin conversation's group id, 1 to [`MAX_ORIGIN_GROUP_BYTES`].
+    pub group_id: Vec<u8>,
+    /// The original's DS `messageId`.
+    pub message_id: i64,
+}
+
 /// The decoded display projection of one history-bundle message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryMessagePlaceholder {
@@ -235,6 +305,13 @@ pub struct HistoryMessagePlaceholder {
     pub text: String,
     /// Attachment references.
     pub attachments: Vec<HistoryAttachmentPlaceholder>,
+    /// ADR-0087 section 14 — the channel invitation card the message's
+    /// envelope carried, opaque here, 1 to [`MAX_CHANNEL_INVITE_BYTES`].
+    pub channel_invite: Option<Vec<u8>>,
+    /// ADR-0052 — the reply this message is.
+    pub reply: Option<HistoryReplyPlaceholder>,
+    /// ADR-0052 decision 2 — the forward attribution this message carries.
+    pub forward: Option<HistoryForwardPlaceholder>,
 }
 
 impl HistoryMessagePlaceholder {
@@ -326,7 +403,75 @@ impl HistoryMessagePlaceholder {
                 },
             }
         }
+
+        self.encode_extras(&mut out)?;
         Ok(out)
+    }
+
+    /// Append the version-3 card, reply and forward.
+    fn encode_extras(&self, out: &mut Vec<u8>) -> Result<()> {
+        match &self.channel_invite {
+            None => out.push(0),
+            Some(card) => {
+                if card.is_empty() || card.len() > MAX_CHANNEL_INVITE_BYTES {
+                    return Err(Error::Codec(format!(
+                        "history placeholder: channel invite {} bytes not in 1..={MAX_CHANNEL_INVITE_BYTES}",
+                        card.len()
+                    )));
+                }
+                encode_opt_bytes(out, Some(card), MAX_CHANNEL_INVITE_BYTES, "channel invite")?;
+            },
+        }
+        match &self.reply {
+            None => out.push(0),
+            Some(reply) => {
+                out.push(1);
+                out.extend_from_slice(&reply.target.to_be_bytes());
+                encode_opt_string(
+                    out,
+                    reply.author.as_deref(),
+                    MAX_SNAPSHOT_AUTHOR_BYTES,
+                    "reply author",
+                )?;
+                encode_opt_string(
+                    out,
+                    reply.excerpt.as_deref(),
+                    MAX_REPLY_EXCERPT_BYTES,
+                    "reply excerpt",
+                )?;
+            },
+        }
+        match &self.forward {
+            None => out.push(0),
+            Some(forward) => {
+                out.push(1);
+                encode_opt_string(
+                    out,
+                    forward.author.as_deref(),
+                    MAX_SNAPSHOT_AUTHOR_BYTES,
+                    "forward author",
+                )?;
+                match &forward.origin {
+                    None => out.push(0),
+                    Some(origin) => {
+                        let len = u8::try_from(origin.group_id.len())
+                            .ok()
+                            .filter(|n| *n != 0 && usize::from(*n) <= MAX_ORIGIN_GROUP_BYTES)
+                            .ok_or_else(|| {
+                                Error::Codec(format!(
+                                    "history placeholder: forward origin group {} bytes not in 1..={MAX_ORIGIN_GROUP_BYTES}",
+                                    origin.group_id.len()
+                                ))
+                            })?;
+                        out.push(1);
+                        out.push(len);
+                        out.extend_from_slice(&origin.group_id);
+                        out.extend_from_slice(&origin.message_id.to_be_bytes());
+                    },
+                }
+            },
+        }
+        Ok(())
     }
 
     /// Parse the canonical wire bytes. Bounded: every length is
@@ -400,6 +545,8 @@ impl HistoryMessagePlaceholder {
             });
         }
 
+        let (channel_invite, reply, forward) = decode_extras(&mut r)?;
+
         if !r.is_empty() {
             return Err(Error::Codec(format!(
                 "history placeholder: {} trailing byte(s)",
@@ -413,8 +560,58 @@ impl HistoryMessagePlaceholder {
             created_at,
             text,
             attachments,
+            channel_invite,
+            reply,
+            forward,
         })
     }
+}
+
+/// The version-3 card, reply and forward, read after the attachments.
+type Extras = (
+    Option<Vec<u8>>,
+    Option<HistoryReplyPlaceholder>,
+    Option<HistoryForwardPlaceholder>,
+);
+
+/// Read the version-3 card, reply and forward.
+fn decode_extras(r: &mut Reader<'_>) -> Result<Extras> {
+    let channel_invite = r.opt_bytes(MAX_CHANNEL_INVITE_BYTES, "channel invite")?;
+    if channel_invite.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Error::Codec(
+            "history placeholder: channel invite is empty".into(),
+        ));
+    }
+    let reply = if r.presence("reply")? {
+        Some(HistoryReplyPlaceholder {
+            target: r.i64("reply target")?,
+            author: r.opt_string(MAX_SNAPSHOT_AUTHOR_BYTES, "reply author")?,
+            excerpt: r.opt_string(MAX_REPLY_EXCERPT_BYTES, "reply excerpt")?,
+        })
+    } else {
+        None
+    };
+    let forward = if r.presence("forward")? {
+        let author = r.opt_string(MAX_SNAPSHOT_AUTHOR_BYTES, "forward author")?;
+        let origin = if r.presence("forward origin")? {
+            let len = usize::from(r.u8()?);
+            if len == 0 || len > MAX_ORIGIN_GROUP_BYTES {
+                return Err(Error::Codec(format!(
+                    "history placeholder: forward origin group length {len} not in 1..={MAX_ORIGIN_GROUP_BYTES}"
+                )));
+            }
+            Some(HistoryForwardOrigin {
+                group_id: r.take(len, "forward origin group")?.to_vec(),
+                message_id: r.i64("forward origin message")?,
+            })
+        } else {
+            None
+        };
+        Some(HistoryForwardPlaceholder { author, origin })
+    } else {
+        None
+    };
+    Ok((channel_invite, reply, forward))
 }
 
 /// Encode an optional string as `present:u8 [+ len:u16 + utf8]`.
@@ -518,6 +715,10 @@ impl<'a> Reader<'a> {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(b);
         Ok(u64::from_be_bytes(arr))
+    }
+
+    fn i64(&mut self, field: &str) -> Result<i64> {
+        Ok(i64::from_be_bytes(self.array::<8>(field)?))
     }
 
     fn array<const N: usize>(&mut self, field: &str) -> Result<[u8; N]> {
@@ -670,6 +871,9 @@ mod tests {
             created_at: "2026-06-04T12:00:00Z".into(),
             text: "hello \u{1f600} world".into(),
             attachments: vec![sample_attachment()],
+            channel_invite: None,
+            reply: None,
+            forward: None,
         }
     }
 
@@ -689,6 +893,9 @@ mod tests {
             created_at: String::new(),
             text: String::new(),
             attachments: vec![],
+            channel_invite: None,
+            reply: None,
+            forward: None,
         };
         let bytes = msg.encode().expect("encode");
         assert_eq!(
@@ -748,6 +955,148 @@ mod tests {
     }
 
     #[test]
+    fn version_2_is_refused() {
+        let mut bytes = sample().encode().expect("encode");
+        bytes[0] = 2;
+        let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("v2 must be refused");
+        assert!(matches!(err, Error::Codec(m) if m.contains("version")));
+    }
+
+    fn with_card_reply_forward() -> HistoryMessagePlaceholder {
+        let mut msg = sample();
+        msg.channel_invite = Some(vec![0x5A; 300]);
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: -7,
+            author: Some("Ann".into()),
+            excerpt: Some("see you \u{1f600}".into()),
+        });
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: Some("Bob".into()),
+            origin: Some(HistoryForwardOrigin {
+                group_id: vec![0x42; 32],
+                message_id: 1234,
+            }),
+        });
+        msg
+    }
+
+    #[test]
+    fn card_reply_and_forward_round_trip() {
+        let msg = with_card_reply_forward();
+        let bytes = msg.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            msg
+        );
+
+        let mut bare = msg;
+        bare.reply = Some(HistoryReplyPlaceholder {
+            target: 0,
+            author: None,
+            excerpt: None,
+        });
+        bare.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: None,
+        });
+        let bytes = bare.encode().expect("encode");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
+            bare
+        );
+    }
+
+    #[test]
+    fn card_bounds_are_enforced_both_ways() {
+        let mut msg = sample();
+        msg.channel_invite = Some(vec![1; MAX_CHANNEL_INVITE_BYTES]);
+        let at_bound = msg.encode().expect("a card at the bound encodes");
+        assert_eq!(
+            HistoryMessagePlaceholder::decode(&at_bound).expect("decode"),
+            msg
+        );
+
+        msg.channel_invite = Some(vec![1; MAX_CHANNEL_INVITE_BYTES + 1]);
+        assert!(msg.encode().is_err());
+        msg.channel_invite = Some(Vec::new());
+        assert!(msg.encode().is_err());
+
+        // A declared card length over the cap, or an empty present card, is
+        // refused on decode.
+        let mut bytes = sample().encode().expect("encode");
+        let card_presence_at = bytes.len() - 3;
+        bytes.truncate(card_presence_at);
+        let mut over = bytes.clone();
+        over.push(1);
+        over.extend_from_slice(
+            &u16::try_from(MAX_CHANNEL_INVITE_BYTES + 1)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        over.extend(std::iter::repeat_n(0u8, MAX_CHANNEL_INVITE_BYTES + 1));
+        over.extend_from_slice(&[0, 0]);
+        assert!(HistoryMessagePlaceholder::decode(&over).is_err());
+        let mut empty = bytes;
+        empty.extend_from_slice(&[1, 0, 0, 0, 0]);
+        assert!(HistoryMessagePlaceholder::decode(&empty).is_err());
+    }
+
+    #[test]
+    fn forward_origin_group_bounds_are_enforced_both_ways() {
+        let mut msg = with_card_reply_forward();
+        let origin = |len: usize| HistoryForwardOrigin {
+            group_id: vec![9; len],
+            message_id: 1,
+        };
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(MAX_ORIGIN_GROUP_BYTES)),
+        });
+        assert!(msg.encode().is_ok());
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(MAX_ORIGIN_GROUP_BYTES + 1)),
+        });
+        assert!(msg.encode().is_err());
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: None,
+            origin: Some(origin(0)),
+        });
+        assert!(msg.encode().is_err());
+
+        // Hand-built: forward present, no author, origin present with a zero
+        // group length.
+        let mut bytes = sample().encode().expect("encode");
+        bytes.pop();
+        bytes.extend_from_slice(&[1, 0, 1, 0]);
+        bytes.extend_from_slice(&1i64.to_be_bytes());
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn oversized_reply_and_forward_snapshots_are_refused() {
+        let mut msg = sample();
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: 1,
+            author: Some("a".repeat(MAX_SNAPSHOT_AUTHOR_BYTES + 1)),
+            excerpt: None,
+        });
+        assert!(msg.encode().is_err());
+        msg.reply = Some(HistoryReplyPlaceholder {
+            target: 1,
+            author: None,
+            excerpt: Some("e".repeat(MAX_REPLY_EXCERPT_BYTES + 1)),
+        });
+        assert!(msg.encode().is_err());
+        msg.reply = None;
+        msg.forward = Some(HistoryForwardPlaceholder {
+            author: Some("f".repeat(MAX_SNAPSHOT_AUTHOR_BYTES + 1)),
+            origin: None,
+        });
+        assert!(msg.encode().is_err());
+    }
+
+    #[test]
     fn oversized_waveform_and_kind_are_refused_both_ways() {
         let mut msg = sample();
         let mut att = voice_note_attachment();
@@ -769,7 +1118,9 @@ mod tests {
         att.height = None;
         msg.attachments = vec![att];
         let mut bytes = msg.encode().expect("encode");
-        let waveform_len_at = bytes.len() - (1 + 1 + 1 + 3 + 2);
+        // After the waveform: width, height, thumb presence, then the
+        // card, reply and forward presence bytes (all absent).
+        let waveform_len_at = bytes.len() - (1 + 1 + 1 + 3 + 3 + 2);
         bytes[waveform_len_at..waveform_len_at + 2].copy_from_slice(
             &u16::try_from(MAX_WAVEFORM_BYTES + 1)
                 .expect("fits")
@@ -784,9 +1135,9 @@ mod tests {
         msg.attachments = vec![voice_note_attachment()];
         let bytes = msg.encode().expect("encode");
         // The last byte of a voice attachment without a thumb is the thumb
-        // presence byte.
+        // presence byte; the card, reply and forward presence bytes follow.
         let mut bad = bytes;
-        let last = bad.len() - 1;
+        let last = bad.len() - 4;
         assert_eq!(bad[last], 0);
         bad[last] = 2;
         let err = HistoryMessagePlaceholder::decode(&bad).expect_err("must reject");
@@ -872,6 +1223,36 @@ mod tests {
                 )
         }
 
+        fn reply() -> impl Strategy<Value = HistoryReplyPlaceholder> {
+            (
+                any::<i64>(),
+                opt_string(MAX_SNAPSHOT_AUTHOR_BYTES),
+                opt_string(MAX_REPLY_EXCERPT_BYTES),
+            )
+                .prop_map(|(target, author, excerpt)| HistoryReplyPlaceholder {
+                    target,
+                    author,
+                    excerpt,
+                })
+        }
+
+        fn forward() -> impl Strategy<Value = HistoryForwardPlaceholder> {
+            (
+                opt_string(MAX_SNAPSHOT_AUTHOR_BYTES),
+                proptest::option::of((
+                    proptest::collection::vec(any::<u8>(), 1..=MAX_ORIGIN_GROUP_BYTES),
+                    any::<i64>(),
+                )),
+            )
+                .prop_map(|(author, origin)| HistoryForwardPlaceholder {
+                    author,
+                    origin: origin.map(|(group_id, message_id)| HistoryForwardOrigin {
+                        group_id,
+                        message_id,
+                    }),
+                })
+        }
+
         proptest! {
             /// Any placeholder within the caps encodes, decodes to an equal
             /// value, and re-encodes to identical bytes.
@@ -886,6 +1267,11 @@ mod tests {
                 created_at in opt_string(40),
                 text in opt_string(200),
                 attachments in proptest::collection::vec(attachment(), 0..4),
+                channel_invite in proptest::option::of(
+                    proptest::collection::vec(any::<u8>(), 1..=MAX_CHANNEL_INVITE_BYTES),
+                ),
+                reply in proptest::option::of(reply()),
+                forward in proptest::option::of(forward()),
             ) {
                 let msg = HistoryMessagePlaceholder {
                     message_id,
@@ -893,6 +1279,9 @@ mod tests {
                     created_at: created_at.unwrap_or_default(),
                     text: text.unwrap_or_default(),
                     attachments,
+                    channel_invite,
+                    reply,
+                    forward,
                 };
                 let bytes = msg.encode().expect("within caps");
                 let back = HistoryMessagePlaceholder::decode(&bytes).expect("decodes");
@@ -983,6 +1372,9 @@ mod tests {
             created_at: "t".into(),
             text: "a".repeat(MAX_TEXT_BYTES + 1),
             attachments: vec![],
+            channel_invite: None,
+            reply: None,
+            forward: None,
         };
         assert!(msg.encode().is_err());
     }
@@ -995,6 +1387,9 @@ mod tests {
             created_at: "t".into(),
             text: "x".into(),
             attachments: vec![sample_attachment(); MAX_ATTACHMENTS + 1],
+            channel_invite: None,
+            reply: None,
+            forward: None,
         };
         assert!(msg.encode().is_err());
     }

@@ -176,8 +176,7 @@ public object ChannelInviteLinks {
                 // The conversation screen registers the key (subscribeOnOpen).
             }
             is FfiChannelAccess.Private -> {
-                val kp = state.subscriberKeysByChannel.value[idHex]
-                    ?: ChannelsComposer.freshSubscriberKeys().also { state.setSubscriberKeys(idHex, it) }
+                val kp = ChannelSubscriptionSync.keyForSubscribing(state, idHex)
                 val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
                 ChannelInviteSigner.fromInviteSeed(access.inviteSeed).use { signer ->
                     val proof = signer.signProof(channelId, kp.publicKey)

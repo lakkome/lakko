@@ -93,6 +93,11 @@ final class ChannelConversationModel: ObservableObject {
 
     var isPublisher: Bool { state.keysByChannel[channelId] != nil }
 
+    /// UX second-device 4a — the account owns or co-publishes this channel
+    /// and this device holds no PublisherGroup for it: the line in place of
+    /// the composer; `nil` otherwise.
+    var readerDeviceRole: ChannelReaderDeviceRole? { state.readerDeviceRole(channelId) }
+
     var channelIdBytes: Data? { ChannelsClient.hexToData(channelId) }
 
     private var currentIdentity: Identity? { try? Identity.fromSeed(seed: accountIdentitySeed) }
@@ -295,11 +300,9 @@ final class ChannelConversationModel: ObservableObject {
         ensureListed()
         state.onSubscribedHere?(channelId)
         access = .subscribing
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         if let readKey = foundReadKey {
             state.updateExtras(channelId) { $0.readKey = readKey }
         }
@@ -329,11 +332,9 @@ final class ChannelConversationModel: ObservableObject {
         state.onSubscribedHere?(channelId)
         access = .subscribing
         guard let id = channelIdBytes else { return }
-        let keys = state.subscriberKeysByChannel[channelId] ?? {
-            let fresh = ChannelsComposer.freshSubscriberKeys()
-            state.setSubscriberKeys(channelId: channelId, keys: fresh)
-            return fresh
-        }()
+        // One key per account and channel: a key another device of the
+        // account subscribed with is reused (the subscription register).
+        let keys = state.subscriberKeysForSubscribe(channelId)
         do {
             let signer = try ChannelInviteSigner.fromInviteSeed(inviteSeed: inviteSeed)
             let ticket = try signer.sealTicket(

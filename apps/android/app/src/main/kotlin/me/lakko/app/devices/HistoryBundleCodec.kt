@@ -9,14 +9,18 @@ import android.util.Log
 import me.lakko.app.chat.MessageLogPayload
 import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.chat.PersistedAttachment
+import me.lakko.app.chat.PersistedForward
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
+import me.lakko.app.chat.PersistedReply
 import me.lakko.app.chat.PersistedThumb
 import me.lakko.app.chat.bundleFloor
 import me.lakko.app.chat.higherFloor
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
+import uniffi.lakko_ffi_uniffi.HistoryForward
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
+import uniffi.lakko_ffi_uniffi.HistoryReply
 import uniffi.lakko_ffi_uniffi.HistoryThumb
 import uniffi.lakko_ffi_uniffi.StructuredHistoryGroup
 import uniffi.lakko_ffi_uniffi.StructuredHistoryMessage
@@ -278,7 +282,15 @@ public object HistoryBundleCodec {
 
     /** Encode a local-store message row into the canonical
      *  cross-platform placeholder bytes via the shared Rust core. */
-    private fun encodePlaceholder(m: PersistedMessage): ByteArray {
+    private fun encodePlaceholder(m: PersistedMessage): ByteArray = encodeHistoryPlaceholder(placeholderOf(m))
+
+    /**
+     * A local-store message row as the placeholder record. Version 3 also
+     * carries the ADR-0087 channel invitation card (without it the new device
+     * drew an invitation as its bare `/g/` link, seen live 2026-11-13) and
+     * the ADR-0052 reply and forward. A deleted row carries no card.
+     */
+    internal fun placeholderOf(m: PersistedMessage): HistoryPlaceholder {
         // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
         // voice message, video note or GIF restores as itself on the new
         // device. The core applies the envelope's bounds on encode and decode.
@@ -299,21 +311,40 @@ public object HistoryBundleCodec {
                 thumb = a.thumb?.let(::historyThumb),
             )
         }
-        val placeholder = HistoryPlaceholder(
+        val card = if (m.deleted) {
+            null
+        } else {
+            m.channelInviteB64?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+                ?.takeIf { it.isNotEmpty() }
+        }
+        val forward = m.forward?.let { f ->
+            val origin = f.originGroupIdHex?.let(::hexToBytes)?.takeIf { f.originMessageId != null }
+            HistoryForward(
+                author = f.author,
+                originGroupId = origin,
+                originMessageId = if (origin == null) null else f.originMessageId,
+            )
+        }
+        return HistoryPlaceholder(
             messageId = m.messageId.toULong(),
             direction = directionFromString(m.direction),
             createdAt = m.createdAt,
             text = m.text,
             attachments = attachments,
+            channelInvite = card,
+            reply = m.reply?.let { HistoryReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+            forward = forward,
         )
-        return encodeHistoryPlaceholder(placeholder)
     }
 
     /** Decode canonical placeholder bytes (from any platform) back
      *  into a local-store message row. Throws on malformed input;
      *  callers wrap in try/catch. */
-    private fun decodePlaceholder(bytes: ByteArray): PersistedMessage {
-        val placeholder = decodeHistoryPlaceholder(bytes)
+    private fun decodePlaceholder(bytes: ByteArray): PersistedMessage = persistedOf(decodeHistoryPlaceholder(bytes))
+
+    /** A decoded placeholder as the local-store row, the invitation card and
+     *  the reply and forward included. */
+    internal fun persistedOf(placeholder: HistoryPlaceholder): PersistedMessage {
         val attachments = placeholder.attachments.map { a ->
             PersistedAttachment(
                 blobIdB64 = Base64.encodeToString(a.blobId, Base64.NO_WRAP),
@@ -346,6 +377,16 @@ public object HistoryBundleCodec {
             text = placeholder.text,
             attachments = attachments,
             createdAt = placeholder.createdAt,
+            reply = placeholder.reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) },
+            forward = placeholder.forward?.let {
+                PersistedForward(
+                    author = it.author,
+                    originGroupIdHex = it.originGroupId?.let(::bytesToHex),
+                    originMessageId = it.originMessageId,
+                )
+            },
+            channelInviteB64 = placeholder.channelInvite?.takeIf { it.isNotEmpty() }
+                ?.let { java.util.Base64.getEncoder().encodeToString(it) },
         )
     }
 

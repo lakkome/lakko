@@ -4478,6 +4478,91 @@ pub struct HistoryPlaceholder {
     pub text: String,
     /// Attachment references.
     pub attachments: Vec<HistoryAttachment>,
+    /// ADR-0087 section 14 — the channel invitation card the message's
+    /// envelope carried, opaque. Dropped when empty or longer than the
+    /// envelope's bound (2048 bytes).
+    #[uniffi(default = None)]
+    pub channel_invite: Option<Vec<u8>>,
+    /// ADR-0052 — the reply this message is, as stored.
+    #[uniffi(default = None)]
+    pub reply: Option<HistoryReply>,
+    /// ADR-0052 decision 2 — the forward attribution, as stored.
+    #[uniffi(default = None)]
+    pub forward: Option<HistoryForward>,
+}
+
+/// The reply a [`HistoryPlaceholder`] carries (ADR-0052). An author or
+/// excerpt that is empty or over the envelope's bound is dropped alone.
+#[derive(uniffi::Record)]
+pub struct HistoryReply {
+    /// The target's DS `messageId`.
+    pub target: i64,
+    /// The quoted author's name as the replier saw it.
+    #[uniffi(default = None)]
+    pub author: Option<String>,
+    /// The quoted excerpt as the replier saw it.
+    #[uniffi(default = None)]
+    pub excerpt: Option<String>,
+}
+
+/// The forward a [`HistoryPlaceholder`] carries (ADR-0052 decision 2). The
+/// origin is kept only when both `origin_group_id` (1 to 96 bytes) and
+/// `origin_message_id` are present; a forward with neither an author nor an
+/// origin is dropped.
+#[derive(uniffi::Record)]
+pub struct HistoryForward {
+    /// The original author's name, a snapshot.
+    #[uniffi(default = None)]
+    pub author: Option<String>,
+    /// The origin conversation's group id (raw bytes).
+    #[uniffi(default = None)]
+    pub origin_group_id: Option<Vec<u8>>,
+    /// The original's DS `messageId`.
+    #[uniffi(default = None)]
+    pub origin_message_id: Option<i64>,
+}
+
+/// The card, reply and forward of a history placeholder with the chat
+/// envelope's bounds applied (`lakko-attachments`): a field the live
+/// envelope would have dropped is dropped here too, alone, so a stored row
+/// that somehow exceeds a bound costs that field and never the message.
+#[allow(clippy::type_complexity)]
+fn bounded_history_extras(
+    card: Option<Vec<u8>>,
+    reply: Option<(i64, Option<String>, Option<String>)>,
+    forward: Option<(Option<String>, Option<Vec<u8>>, Option<i64>)>,
+) -> (
+    Option<Vec<u8>>,
+    Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
+) {
+    use lakko_mls::history_placeholder as hp;
+    fn snapshot(v: Option<String>, max: usize) -> Option<String> {
+        v.filter(|s| !s.is_empty() && s.len() <= max)
+    }
+    let card = card.filter(|c| !c.is_empty() && c.len() <= hp::MAX_CHANNEL_INVITE_BYTES);
+    let reply = reply.map(|(target, author, excerpt)| hp::HistoryReplyPlaceholder {
+        target,
+        author: snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES),
+        excerpt: snapshot(excerpt, hp::MAX_REPLY_EXCERPT_BYTES),
+    });
+    let forward = forward.and_then(|(author, group, message)| {
+        let author = snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES);
+        let origin = match (group, message) {
+            (Some(group_id), Some(message_id))
+                if !group_id.is_empty() && group_id.len() <= hp::MAX_ORIGIN_GROUP_BYTES =>
+            {
+                Some(hp::HistoryForwardOrigin {
+                    group_id,
+                    message_id,
+                })
+            },
+            _ => None,
+        };
+        (author.is_some() || origin.is_some())
+            .then_some(hp::HistoryForwardPlaceholder { author, origin })
+    });
+    (card, reply, forward)
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], FfiError> {
@@ -4534,12 +4619,22 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
             thumb,
         }));
     }
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        placeholder.channel_invite,
+        placeholder.reply.map(|r| (r.target, r.author, r.excerpt)),
+        placeholder
+            .forward
+            .map(|f| (f.author, f.origin_group_id, f.origin_message_id)),
+    );
     let msg = HistoryMessagePlaceholder {
         message_id: placeholder.message_id,
         direction: placeholder.direction.into(),
         created_at: placeholder.created_at,
         text: placeholder.text,
         attachments,
+        channel_invite,
+        reply,
+        forward,
     };
     Ok(msg.encode()?)
 }
@@ -4556,7 +4651,33 @@ pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec
 #[uniffi::export]
 pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, FfiError> {
     let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(&bytes)?;
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        msg.channel_invite,
+        msg.reply.map(|r| (r.target, r.author, r.excerpt)),
+        msg.forward.map(|f| {
+            let (group, message) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            (f.author, group, message)
+        }),
+    );
     Ok(HistoryPlaceholder {
+        channel_invite,
+        reply: reply.map(|r| HistoryReply {
+            target: r.target,
+            author: r.author,
+            excerpt: r.excerpt,
+        }),
+        forward: forward.map(|f| {
+            let (origin_group_id, origin_message_id) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            HistoryForward {
+                author: f.author,
+                origin_group_id,
+                origin_message_id,
+            }
+        }),
         message_id: msg.message_id,
         direction: msg.direction.into(),
         created_at: msg.created_at,
@@ -4627,6 +4748,9 @@ mod history_placeholder_media_tests {
             created_at: "2026-09-14T12:00:00Z".into(),
             text: String::new(),
             attachments: vec![att],
+            channel_invite: None,
+            reply: None,
+            forward: None,
         })
         .expect("encodes");
         decode_history_placeholder(bytes)
@@ -4649,6 +4773,89 @@ mod history_placeholder_media_tests {
             (thumb.size, thumb.width, thumb.height),
             (5000, Some(240), None)
         );
+    }
+
+    #[test]
+    fn the_history_bounds_equal_the_envelope_bounds() {
+        use lakko_mls::history_placeholder as hp;
+        assert_eq!(
+            hp::MAX_CHANNEL_INVITE_BYTES,
+            lakko_attachments::MAX_CHANNEL_INVITE_BYTES
+        );
+        assert_eq!(
+            hp::MAX_SNAPSHOT_AUTHOR_BYTES,
+            lakko_attachments::MAX_REPLY_AUTHOR_BYTES
+        );
+        assert_eq!(
+            hp::MAX_SNAPSHOT_AUTHOR_BYTES,
+            lakko_attachments::MAX_FORWARDED_FROM_BYTES
+        );
+        assert_eq!(
+            hp::MAX_REPLY_EXCERPT_BYTES,
+            lakko_attachments::MAX_REPLY_EXCERPT_BYTES
+        );
+        assert_eq!(
+            hp::MAX_ORIGIN_GROUP_BYTES,
+            lakko_attachments::MAX_FORWARD_ORIGIN_GROUP_BYTES / 4 * 3
+        );
+    }
+
+    #[test]
+    fn card_reply_and_forward_survive_the_history_bundle() {
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 9,
+            direction: HistoryMessageDirection::Outgoing,
+            created_at: "2026-11-13T12:00:00Z".into(),
+            text: "https://lakko.me/g/abcdefgh#secret".into(),
+            attachments: vec![],
+            channel_invite: Some(vec![0x33; 700]),
+            reply: Some(HistoryReply {
+                target: 4,
+                author: Some("Ann".into()),
+                excerpt: Some(String::new()),
+            }),
+            forward: Some(HistoryForward {
+                author: Some("x".repeat(300)),
+                origin_group_id: Some(vec![7; 32]),
+                origin_message_id: Some(11),
+            }),
+        })
+        .expect("encodes");
+        let back = decode_history_placeholder(bytes).expect("decodes");
+        assert_eq!(back.channel_invite, Some(vec![0x33; 700]));
+        let reply = back.reply.expect("reply kept");
+        assert_eq!(
+            (reply.target, reply.author.as_deref(), reply.excerpt),
+            (4, Some("Ann"), None)
+        );
+        let forward = back.forward.expect("forward kept");
+        // An over-long author is dropped alone; the origin stays.
+        assert_eq!(forward.author, None);
+        assert_eq!(forward.origin_group_id, Some(vec![7; 32]));
+        assert_eq!(forward.origin_message_id, Some(11));
+    }
+
+    #[test]
+    fn an_out_of_bounds_card_or_half_an_origin_is_dropped_not_the_message() {
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 9,
+            direction: HistoryMessageDirection::Incoming,
+            created_at: String::new(),
+            text: "t".into(),
+            attachments: vec![],
+            channel_invite: Some(vec![1; 2049]),
+            reply: None,
+            forward: Some(HistoryForward {
+                author: None,
+                origin_group_id: Some(vec![7; 32]),
+                origin_message_id: None,
+            }),
+        })
+        .expect("encodes");
+        let back = decode_history_placeholder(bytes).expect("decodes");
+        assert_eq!(back.text, "t");
+        assert_eq!(back.channel_invite, None);
+        assert!(back.forward.is_none());
     }
 
     #[test]

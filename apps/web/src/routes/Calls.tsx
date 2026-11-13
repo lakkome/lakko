@@ -191,7 +191,7 @@ export default function Calls(): JSX.Element {
   );
 
   return (
-    <aside class="lk-pane" aria-label={t("nav.calls")}>
+    <aside class="lk-pane lk-pane-page" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
         <h1>{t("nav.calls")}</h1>
         <div class="lk-actions">

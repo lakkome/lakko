@@ -106,6 +106,14 @@ export interface ChannelAccessRecord {
    *  publisher pass retries it until then, so the removed device does not
    *  keep reading until the owner's next scheduled rotation. */
   readonly rotateRequestOwed?: boolean;
+  /**
+   * 2026-11-13 (follow-up decision 1): on the publishing device, the
+   * account's one subscriber key (the channel-subscription register's) that
+   * this device registered at the channels service, lower-case hex. Its
+   * every rotation reseals the new seed to it, whatever the admission mark
+   * says, so the account's reader devices keep reading a private channel.
+   */
+  readonly readerKeyRegisteredHex?: string;
 }
 
 /** One publisher the owner approved here. */
@@ -260,6 +268,9 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
     ...(r.admissionMarkSet === true ? { admissionMarkSet: true as const } : {}),
     ...(r.recordOwed === true ? { recordOwed: true } : {}),
     ...(r.rotateRequestOwed === true ? { rotateRequestOwed: true } : {}),
+    ...(typeof r.readerKeyRegisteredHex === "string" && /^[0-9a-f]{64}$/.test(r.readerKeyRegisteredHex)
+      ? { readerKeyRegisteredHex: r.readerKeyRegisteredHex }
+      : {}),
     publisherKeys: (Array.isArray(r.publisherKeys) ? r.publisherKeys : []).flatMap((e: unknown) => {
       if (typeof e !== "object" || e === null) return [];
       const p = e as Record<string, unknown>;

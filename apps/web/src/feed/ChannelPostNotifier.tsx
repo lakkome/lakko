@@ -21,7 +21,7 @@ import { onCleanup, onMount, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { channelHandleOf, channelRoleOf } from "../channels/channel-access";
+import { channelHandleOf, channelReaderDeviceRoleOf, channelRoleOf } from "../channels/channel-access";
 import { channelFlagsOf } from "../channels/channel-flags";
 import { channelRowPreview, channelTitle } from "../channels/channel-row";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -104,7 +104,9 @@ export function ChannelPostNotifier(): JSX.Element {
       const decision = decideChannelRead(wasm, read, {
         muted: channelFlagsOf(sync.flags(), id).muted,
         openAndVisible: shows(path),
-        own: role === "owner" || role === "publisher",
+        // A reader device of the owner or a publisher (UX second-device.md
+        // section 4a) announces nothing: the account posts there itself.
+        own: role === "owner" || role === "publisher" || channelReaderDeviceRoleOf(id) !== null,
         lastNotified: stored[id] ?? 0,
         nowMs: Date.now(),
       });

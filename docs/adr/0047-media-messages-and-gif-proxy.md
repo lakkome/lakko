@@ -141,6 +141,11 @@ came back as a plain file.
   carries unit tests for the new fields and a property test that any placeholder within
   the caps round-trips byte-stably; the existing `history_placeholder` fuzz target already
   asserts decode/encode round-trip stability over arbitrary input.
+- **Version 3 (2026-11-13):** the placeholder also carries the channel invitation card
+  (ADR-0087 section 14, opaque, 1 to 2048 bytes), the reply (ADR-0052: target `messageId`,
+  author and excerpt snapshot) and the forward (author snapshot, origin group id of 1 to
+  96 bytes and `messageId`); version 2 is refused. Seen live: a second device restored an
+  invitation as its bare `/g/` link.
 
 ## Alternatives
 

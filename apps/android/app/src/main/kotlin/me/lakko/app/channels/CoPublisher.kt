@@ -98,23 +98,29 @@ public object CoPublisher {
     // Owner side
     // -----------------------------------------------------------------
 
-    /** Open (or create) the persistent PublisherGroup handle for a channel. The
-     *  caller owns the returned handle and MUST `.close()` it when done. A
+    /** Open the persistent PublisherGroup handle for a channel. The caller
+     *  owns the returned handle and MUST `.close()` it when done. A
      *  co-published channel ([coPublished]) is opened under the group id its
-     *  link conveyed and never founded here (ADR-0078 section 6). */
+     *  link conveyed and never founded here (ADR-0078 section 6). An owned
+     *  channel is founded only when [allowFound] (New channel); everywhere
+     *  else a miss throws [ChannelsComposerException.NotPublishedHere]: the
+     *  account publishes the channel from another device, and founding at the
+     *  derived id would reset its live journal (docs/ux/second-device.md
+     *  section 4a). */
     public fun openPublisherGroup(
         identity: Identity,
         channelIdHex: String,
         coPublished: CoPublishedJournalMarks? = null,
+        allowFound: Boolean = false,
     ): PublisherGroup {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
         return try {
             loadPublisherGroup(identity, channelIdHex, coPublished)
-                ?: if (coPublished?.journalIdOf(channelIdHex) != null) {
-                    throw CoPublisherException.NotAChannelGroup
-                } else {
-                    publisherGroupOpenOrCreate(identity, channelId)
+                ?: when (publisherGroupOpenMode(joined = coPublished?.journalIdOf(channelIdHex) != null, allowFound = allowFound)) {
+                    PublisherGroupOpenMode.LOAD_JOINED -> throw CoPublisherException.NotAChannelGroup
+                    PublisherGroupOpenMode.LOAD -> throw ChannelsComposerException.NotPublishedHere()
+                    PublisherGroupOpenMode.LOAD_OR_FOUND -> publisherGroupOpenOrCreate(identity, channelId)
                 }
         } catch (e: Throwable) {
             // A channel minted under the retired v1 derivation refuses here and
@@ -406,12 +412,13 @@ public object CoPublisher {
     /**
      * ADR-0057 obligations 1 and 7 — the channel owner claims the
      * PublisherGroup journal with its ROOT (derived from the account identity
-     * the publisher runs on) at the current epoch: at creation the first
-     * claim, on every later open an idempotent re-send. A `409` while the
-     * group sits at its founding epoch 0 means the group was re-founded under
-     * its deterministic id after lost state, and the root RESETS the chain the
-     * gone group left; at any later epoch a `409` is left alone. Best effort:
-     * a failure is logged and the next open retries.
+     * the publisher runs on) at the current epoch: an idempotent re-send of
+     * the claim New channel made. A `409` is left alone at every epoch: a
+     * group is founded only in New channel ([foundAndClaimAtCreation], which
+     * resets there), so a `409` here is a journal another device of the
+     * account (or the live group) holds, and resetting it would cut the
+     * channel off (docs/ux/second-device.md section 4a). Best effort: a
+     * failure is logged and the next open retries.
      *
      * Only the CHANNEL OWNER claims. A co-publisher's root is derived from its
      * own account seed, so its claim would squat the journal against the
@@ -432,7 +439,6 @@ public object CoPublisher {
                 journalIdHex = DsClient.pseudonymHex(groupId),
                 epoch = signer.epoch,
                 epochKey = signer.verifyingKey,
-                refounded = signer.epoch == 0uL,
                 coPublished = coPublished,
                 root = { me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId) },
                 put = { make -> ds.putStatement(make) },
@@ -460,7 +466,7 @@ public object CoPublisher {
         identity: Identity,
         channelIdHex: String,
     ) {
-        val publisherGroup = openPublisherGroup(identity, channelIdHex)
+        val publisherGroup = openPublisherGroup(identity, channelIdHex, allowFound = true)
         try {
             val signer = signerOf(publisherGroup, identity)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
@@ -711,6 +717,7 @@ public object CoPublisher {
                 channelIdHex,
                 targetEpoch,
                 ChannelReseal.throughFor(accountIdB64, channelIdHex),
+                ChannelReseal.accountKeysFor(accountIdB64, channelIdHex),
             )
         }
 

@@ -1409,12 +1409,24 @@ private final class SessionModels: ObservableObject {
                 MainActor.assumeIsolated { searchSession?.noteContactsChanged() }
             }
         // ADR-0087 section 9 — a channel's end, in both directions.
-        channels.onUnsubscribedHere = { [weak chatRepository] channelId in
+        channels.onUnsubscribedHere = { [weak chatRepository, weak channels] channelId in
             chatRepository?.noteChannelUnsubscribed(channelIdHex: channelId.lowercased())
+            channels?.onRelationshipEnded?(channelId)
         }
-        channels.onRemovedHere = { [weak chatRepository] channelId, name in
+        channels.onRemovedHere = { [weak chatRepository, weak channels] channelId, name in
             chatRepository?.noteChannelRemoved(channelIdHex: channelId.lowercased(), name: name)
+            channels?.onRelationshipEnded?(channelId)
         }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — the channel subscription
+        // register: this device's channels reach the account's other devices,
+        // and theirs reach this one (`docs/ux/second-device.md` section 4a).
+        ChannelSubscriptionSync.shared.bind(
+            accountIdB64: accountIdB64, channels: channels, port: deviceGroupSync,
+            changes: Publishers.MergeMany(
+                deviceGroupSync.$channelSubscriptions.map { _ in () }.eraseToAnyPublisher(),
+                deviceGroupSync.$ready.map { _ in () }.eraseToAnyPublisher(),
+                deviceGroupSync.$endedConversations.map { _ in () }.eraseToAnyPublisher())
+            .eraseToAnyPublisher())
         channels.onSubscribedHere = { [weak chatRepository] channelId in
             chatRepository?.noteChannelSubscribed(channelIdHex: channelId.lowercased())
         }

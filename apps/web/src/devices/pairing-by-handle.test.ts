@@ -83,7 +83,7 @@ import {
   STATE_EXPORTER_LABEL,
   encodeStateBundle,
   loadKnownGroupIds,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 import { loadAccepted } from "../contacts/local-store";
 import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
@@ -407,8 +407,8 @@ describe("the anonymous join applies the pairing state bundle", () => {
   const ACCOUNT = new Uint8Array(16).fill(0x42);
   const ACCOUNT_B64 = btoa(String.fromCharCode(...ACCOUNT));
   const GROUP = "Z3JvdXAtb25lLWlkLWJ5dGVzLTMyLWxvbmctIQ==";
-  const BUNDLE: StateBundleV3 = {
-    v: 3,
+  const BUNDLE: StateBundle = {
+    v: 4,
     contacts: [{ signaturePubkeyB64: "cGVlci1rZXk=", displayName: "Peer", acceptedAtMs: 5 }],
     pins: [],
     knownGroupIdsB64: [GROUP],
@@ -416,6 +416,7 @@ describe("the anonymous join applies the pairing state bundle", () => {
     groupNames: [],
     profiles: [],
     pendingContacts: [],
+    channelSeeds: [],
   };
 
   /** The confirming device, as in the suite above, publishing a state row. */

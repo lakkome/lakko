@@ -476,10 +476,14 @@ internal suspend fun createChannel(
     val owner = publisher.withIdentity(persist = false) { identity -> ChannelsClient.ownerSigner(identity, id) }
     owner.use { client.createChannel(id, it, private = private) }
     val keys = publisher.withIdentity { identity ->
+        // New channel is the one flow that may found the PublisherGroup
+        // (docs/ux/second-device.md section 4a); it was founded and claimed
+        // just above.
         ChannelsComposer.freshPublisherKeys(
             identity = identity,
             channelIdHex = id,
             existingSigningSeed = state.persistedPublisherSigningSeed(id),
+            allowFound = true,
         )
     }
     state.addChannel(

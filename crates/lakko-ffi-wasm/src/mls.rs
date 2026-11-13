@@ -4178,16 +4178,74 @@ fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue
     Ok(arr)
 }
 
+/// The card, reply and forward of a history placeholder with the chat
+/// envelope's bounds applied (`lakko-attachments`): a field the live
+/// envelope would have dropped is dropped here too, alone, so a stored row
+/// that somehow exceeds a bound costs that field and never the message.
+#[allow(clippy::type_complexity)]
+fn bounded_history_extras(
+    card: Option<Vec<u8>>,
+    reply: Option<(i64, Option<String>, Option<String>)>,
+    forward: Option<(Option<String>, Option<Vec<u8>>, Option<i64>)>,
+) -> (
+    Option<Vec<u8>>,
+    Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
+) {
+    use lakko_mls::history_placeholder as hp;
+    fn snapshot(v: Option<String>, max: usize) -> Option<String> {
+        v.filter(|s| !s.is_empty() && s.len() <= max)
+    }
+    let card = card.filter(|c| !c.is_empty() && c.len() <= hp::MAX_CHANNEL_INVITE_BYTES);
+    let reply = reply.map(|(target, author, excerpt)| hp::HistoryReplyPlaceholder {
+        target,
+        author: snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES),
+        excerpt: snapshot(excerpt, hp::MAX_REPLY_EXCERPT_BYTES),
+    });
+    let forward = forward.and_then(|(author, group, message)| {
+        let author = snapshot(author, hp::MAX_SNAPSHOT_AUTHOR_BYTES);
+        let origin = match (group, message) {
+            (Some(group_id), Some(message_id))
+                if !group_id.is_empty() && group_id.len() <= hp::MAX_ORIGIN_GROUP_BYTES =>
+            {
+                Some(hp::HistoryForwardOrigin {
+                    group_id,
+                    message_id,
+                })
+            },
+            _ => None,
+        };
+        (author.is_some() || origin.is_some())
+            .then_some(hp::HistoryForwardPlaceholder { author, origin })
+    });
+    (card, reply, forward)
+}
+
 /// Encode a placeholder to the canonical `payload_bytes` wire
 /// bytes. `direction` is 0 = outgoing, 1 = incoming, 2 = system.
 /// `attachments` is an `Array<HistoryAttachmentInput>`.
+///
+/// The trailing arguments are optional (version 3): `channelInvite` the
+/// channel invitation card bytes (ADR-0087 section 14); `replyTarget` /
+/// `replyAuthor` / `replyExcerpt` a reply (ADR-0052, present when
+/// `replyTarget` is); `forwardedFrom` / `forwardOriginGroup` (raw group id
+/// bytes) / `forwardOriginMessage` a forward (the origin kept only when both
+/// halves are given). A field out of the envelope's bounds is dropped alone.
 #[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
+#[allow(clippy::too_many_arguments)]
 pub fn encode_history_placeholder(
     message_id: u64,
     direction: u8,
     created_at: &str,
     text: &str,
     attachments: Vec<HistoryAttachmentInput>,
+    channel_invite: Option<Vec<u8>>,
+    reply_target: Option<i64>,
+    reply_author: Option<String>,
+    reply_excerpt: Option<String>,
+    forwarded_from: Option<String>,
+    forward_origin_group: Option<Vec<u8>>,
+    forward_origin_message: Option<i64>,
 ) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{
         HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
@@ -4223,12 +4281,24 @@ pub fn encode_history_placeholder(
             thumb,
         }));
     }
+    let forward = (forwarded_from.is_some()
+        || forward_origin_group.is_some()
+        || forward_origin_message.is_some())
+    .then_some((forwarded_from, forward_origin_group, forward_origin_message));
+    let (channel_invite, reply, forward) = bounded_history_extras(
+        channel_invite,
+        reply_target.map(|t| (t, reply_author, reply_excerpt)),
+        forward,
+    );
     let msg = HistoryMessagePlaceholder {
         message_id,
         direction: dir,
         created_at: created_at.to_string(),
         text: text.to_string(),
         attachments: atts,
+        channel_invite,
+        reply,
+        forward,
     };
     msg.encode().map_err(mls_err)
 }
@@ -4363,6 +4433,9 @@ pub struct OpenedHistoryPlaceholder {
     created_at_val: String,
     text_val: String,
     attachments_val: Vec<OpenedHistoryAttachment>,
+    channel_invite_val: Option<Vec<u8>>,
+    reply_val: Option<lakko_mls::history_placeholder::HistoryReplyPlaceholder>,
+    forward_val: Option<lakko_mls::history_placeholder::HistoryForwardPlaceholder>,
 }
 
 #[wasm_bindgen]
@@ -4389,6 +4462,45 @@ impl OpenedHistoryPlaceholder {
     pub fn attachments(&self) -> Vec<OpenedHistoryAttachment> {
         self.attachments_val.clone()
     }
+    /// ADR-0087 section 14 — the channel invitation card, when the message
+    /// carried one.
+    #[wasm_bindgen(getter, js_name = channelInvite)]
+    pub fn channel_invite(&self) -> Option<Vec<u8>> {
+        self.channel_invite_val.clone()
+    }
+    /// ADR-0052 — the reply target's DS `messageId`, when this is a reply.
+    #[wasm_bindgen(getter, js_name = replyTarget)]
+    pub fn reply_target(&self) -> Option<i64> {
+        self.reply_val.as_ref().map(|r| r.target)
+    }
+    #[wasm_bindgen(getter, js_name = replyAuthor)]
+    pub fn reply_author(&self) -> Option<String> {
+        self.reply_val.as_ref().and_then(|r| r.author.clone())
+    }
+    #[wasm_bindgen(getter, js_name = replyExcerpt)]
+    pub fn reply_excerpt(&self) -> Option<String> {
+        self.reply_val.as_ref().and_then(|r| r.excerpt.clone())
+    }
+    /// ADR-0052 decision 2 — the forward's original author, a snapshot.
+    #[wasm_bindgen(getter, js_name = forwardedFrom)]
+    pub fn forwarded_from(&self) -> Option<String> {
+        self.forward_val.as_ref().and_then(|f| f.author.clone())
+    }
+    /// The forward's origin group id (raw bytes), when both halves survive.
+    #[wasm_bindgen(getter, js_name = forwardOriginGroup)]
+    pub fn forward_origin_group(&self) -> Option<Vec<u8>> {
+        self.forward_val
+            .as_ref()
+            .and_then(|f| f.origin.as_ref())
+            .map(|o| o.group_id.clone())
+    }
+    #[wasm_bindgen(getter, js_name = forwardOriginMessage)]
+    pub fn forward_origin_message(&self) -> Option<i64> {
+        self.forward_val
+            .as_ref()
+            .and_then(|f| f.origin.as_ref())
+            .map(|o| o.message_id)
+    }
 }
 
 /// Decode canonical `payload_bytes` (produced by
@@ -4398,7 +4510,20 @@ impl OpenedHistoryPlaceholder {
 pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsValue> {
     let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
         .map_err(mls_err)?;
+    let (channel_invite_val, reply_val, forward_val) = bounded_history_extras(
+        msg.channel_invite,
+        msg.reply.map(|r| (r.target, r.author, r.excerpt)),
+        msg.forward.map(|f| {
+            let (group, message) = f
+                .origin
+                .map_or((None, None), |o| (Some(o.group_id), Some(o.message_id)));
+            (f.author, group, message)
+        }),
+    );
     Ok(OpenedHistoryPlaceholder {
+        channel_invite_val,
+        reply_val,
+        forward_val,
         message_id_val: msg.message_id,
         direction_val: msg.direction.tag(),
         created_at_val: msg.created_at,

@@ -263,11 +263,24 @@ function tagToDirection(tag: number): PersistedMessage["direction"] {
   }
 }
 
+/** Standard base64 to bytes, or `undefined` when it does not decode. */
+function decodeB64OrUndefined(b64: string | undefined): Uint8Array | undefined {
+  if (b64 === undefined || b64.length === 0) return undefined;
+  try {
+    return base64Decode(b64);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Encode the local-store message row into the canonical
- *  cross-platform placeholder bytes (version 2, which carries the ADR-0047
- *  media metadata, so a voice message, video note or GIF restores as itself
- *  on the new device). The local-only `played` marker is never transferred. */
-function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
+ *  cross-platform placeholder bytes (version 3: the ADR-0047 media metadata,
+ *  so a voice message, video note or GIF restores as itself on the new
+ *  device; the ADR-0087 channel invitation card, so an invitation restores
+ *  as its card and not as the bare `/g/` link; the ADR-0052 reply and forward
+ *  snapshots). The local-only `played` marker is never transferred. Exported
+ *  for the tests. */
+export function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
   const messageId = safeBigInt(m.messageId) ?? 0n;
   const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
     const size = safeBigInt(a.sizeStr) ?? 0n;
@@ -296,18 +309,31 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
     }
     return input;
   });
+  const card = m.deleted === true ? undefined : decodeB64OrUndefined(m.channelInviteB64);
+  const replyTarget = m.reply === undefined ? null : safeBigInt(m.reply.target);
+  const forwardOriginId = m.forward?.origin === undefined ? null : safeBigInt(m.forward.origin.messageId);
+  const forwardOriginGroup =
+    forwardOriginId === null ? undefined : decodeB64OrUndefined(m.forward?.origin?.groupIdB64);
   return wasm.encodeHistoryPlaceholder(
     messageId,
     directionToTag(m.direction),
     m.createdAt,
     m.text,
     attachments,
+    card,
+    replyTarget ?? undefined,
+    replyTarget === null ? undefined : m.reply?.author,
+    replyTarget === null ? undefined : m.reply?.excerpt,
+    m.forward?.author,
+    forwardOriginGroup,
+    forwardOriginGroup === undefined ? undefined : (forwardOriginId ?? undefined),
   );
 }
 
 /** Decode canonical placeholder bytes back into a local-store
- *  message row. Returns `null` on any malformed payload. */
-function decodeMessagePlaceholder(
+ *  message row. Returns `null` on any malformed payload. Exported for the
+ *  tests. */
+export function decodeMessagePlaceholder(
   wasm: Wasm,
   m: OpenedHistoryMessage,
 ): PersistedMessage | null {
@@ -328,12 +354,41 @@ function decodeMessagePlaceholder(
     name: a.name ?? null,
     ...persistedMediaFromOpened(a),
   }));
+  const card = opened.channelInvite;
+  const replyTarget = opened.replyTarget;
+  const replyAuthor = opened.replyAuthor;
+  const replyExcerpt = opened.replyExcerpt;
+  const forwardedFrom = opened.forwardedFrom;
+  const originGroup = opened.forwardOriginGroup;
+  const originMessage = opened.forwardOriginMessage;
+  const origin =
+    originGroup !== undefined && originMessage !== undefined
+      ? { groupIdB64: base64Encode(originGroup), messageId: originMessage.toString() }
+      : undefined;
   return {
     messageId: opened.messageId.toString(),
     direction: tagToDirection(opened.direction),
     text: opened.text,
     attachments,
     createdAt: opened.createdAt,
+    ...(card !== undefined && card.length > 0 ? { channelInviteB64: base64Encode(card) } : {}),
+    ...(replyTarget !== undefined
+      ? {
+          reply: {
+            target: replyTarget.toString(),
+            ...(replyAuthor !== undefined ? { author: replyAuthor } : {}),
+            ...(replyExcerpt !== undefined ? { excerpt: replyExcerpt } : {}),
+          },
+        }
+      : {}),
+    ...(forwardedFrom !== undefined || origin !== undefined
+      ? {
+          forward: {
+            ...(forwardedFrom !== undefined ? { author: forwardedFrom } : {}),
+            ...(origin !== undefined ? { origin } : {}),
+          },
+        }
+      : {}),
   };
 }
 

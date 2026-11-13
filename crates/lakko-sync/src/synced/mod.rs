@@ -56,6 +56,9 @@
 //! - [`channel_comment`] — the account's own comments under channel posts
 //!   (the nonce each comment's write key is derived from, so any device can
 //!   delete it), bounded the same way, and their envelope.
+//! - [`channel_subscription`] — the account's channel subscriptions (the
+//!   role, the one subscriber key per channel, the read key, a
+//!   co-publisher's PublisherGroup id; 2026-11-13) and their envelope.
 //! - [`quick_reaction`] — the account's quick reaction (UX
 //!   `reactions-and-emoji.md` D3: the emoji a double tap sends, synced) and
 //!   its envelope.
@@ -64,6 +67,7 @@
 
 pub mod channel_comment;
 pub mod channel_reaction;
+pub mod channel_subscription;
 pub mod device_ack;
 pub mod entry;
 pub mod lineage;
@@ -88,6 +92,17 @@ pub use channel_reaction::{
     CHANNEL_REACTION_ENVELOPE_MAX_ENTRIES, CHANNEL_REACTION_ENVELOPE_MAX_LEN,
     CHANNEL_REACTION_ENVELOPE_MIN_LEN, CHANNEL_REACTION_ENVELOPE_VERSION,
     CHANNEL_REACTION_RETENTION_MS,
+};
+pub use channel_subscription::{
+    compose_channel_subscription_envelope, decode_channel_subscription_envelope,
+    is_channel_subscription_envelope, ChannelSubscribed, ChannelSubscriptionEntry,
+    ChannelSubscriptionEnvelopeError, ChannelSubscriptionRole, CHANNEL_SUBSCRIPTIONS_MAX_CLIENT,
+    CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN, CHANNEL_SUBSCRIPTION_ENVELOPE_DOMAIN_V1,
+    CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_ENTRIES, CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN,
+    CHANNEL_SUBSCRIPTION_ENVELOPE_MIN_LEN, CHANNEL_SUBSCRIPTION_ENVELOPE_VERSION_V1,
+    CHANNEL_SUBSCRIPTION_GROUP_ID_LEN, CHANNEL_SUBSCRIPTION_HANDLE_MAX_BYTES,
+    CHANNEL_SUBSCRIPTION_NAME_MAX_BYTES, CHANNEL_SUBSCRIPTION_READ_KEY_LEN,
+    CHANNEL_SUBSCRIPTION_SECRET_LEN,
 };
 pub use device_ack::{
     compose_device_ack_envelope, decode_device_ack_envelope, is_device_ack_envelope,

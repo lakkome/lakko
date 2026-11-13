@@ -742,6 +742,16 @@ move out of `RotationPanel` and `CoPublishersPanel` into app-wide loops beside
 owner opens its screen. Each pass reads only channels this device publishes; the rotation
 pass runs only for channels this device owns (2026-11-08, section 15).
 
+**Amended 2026-11-13 (maintainer).** "This device owns" and "this device publishes" mean
+"this device holds the channel's PublisherGroup", not "this account owns the channel".
+The channels now reach every device of the account (the `lakko-sync` channel-subscription
+register, ADR-0050 section 2.9 as amended that day) with the account's one subscriber key,
+so a second device of the owner or of a publisher lists and reads the channel. It runs no
+publisher pass, no rotation and no admission for it, shows no composer and no owner or
+publisher control (UX `second-device.md` section 4a), and never founds a PublisherGroup
+or resets the channel journal: founding happens only in create-channel. A lost
+publishing device leaves the channel without anyone who can post (G-54).
+
 ### 13. A post carries what a message can
 
 **The plaintext of a post is the chat envelope.** `classify_post_plaintext` keeps its

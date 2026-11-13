@@ -28,9 +28,11 @@ import { Icon } from "../ui/icons";
 import { InfoRowButton } from "../ui/LabelledRows";
 import { PushedScreen } from "../ui/PushedScreen";
 import { channelAvatarKey } from "./channel-avatar";
+import { readerDeviceSections } from "./channel-subscription-plan";
 import {
   channelAvatarOf,
   channelHandleOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSubscriberCount,
   channelVisibilityOf,
@@ -76,14 +78,20 @@ export function ChannelInfo(props: {
   const sections = createMemo((): readonly InfoSection[] => {
     const r = role();
     if (r === null) return [];
-    return channelInfoSections(uiRules(), {
-      role: r,
-      hasHandle: handle() !== null,
-      hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
-      // Shown for every role: the switch itself reads the setting and says
-      // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
-      membersOfGroupsAndChannelsOn: true,
-    });
+    // 2026-11-13 (UX second-device.md section 4a): on a device of the owner
+    // or a publisher that cannot post here, a subscriber's blocks and an empty
+    // exit block.
+    return readerDeviceSections(
+      channelInfoSections(uiRules(), {
+        role: r,
+        hasHandle: handle() !== null,
+        hasOtherPublishers: channelPublishers(props.id).some((p) => !p.isOwner),
+        // Shown for every role: the switch itself reads the setting and says
+        // when it is off (`settings/MembersCanFindMeSwitch.tsx`).
+        membersOfGroupsAndChannelsOn: true,
+      }),
+      channelReaderDeviceRoleOf(props.id),
+    );
   });
   const has = (s: InfoSection): boolean => sections().includes(s);
 

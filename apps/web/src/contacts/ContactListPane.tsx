@@ -30,6 +30,7 @@ import {
   matchesContactQuery,
   sentRowLines,
   sortIncomingRequests,
+  subLineUsername,
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
@@ -99,7 +100,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const nameOf = (c: AcceptedContact): string =>
     memberNameOf(profiles.resolve(c.signaturePubkeyB64), "the contact list");
   const usernameOf = (c: AcceptedContact): string | null =>
-    profiles.resolve(c.signaturePubkeyB64).username;
+    subLineUsername(nameOf(c), profiles.resolve(c.signaturePubkeyB64).username);
 
   /** One row of the alphabetical list: a contact, or an inviter added
    *  through their link (ADR-0079) who is shown exactly like one. */
@@ -117,7 +118,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         kind: "invited",
         p,
         name: invitedName(p),
-        username: p.username.length > 0 ? `@${p.username}` : null,
+        username: subLineUsername(invitedName(p), p.username.length > 0 ? `@${p.username}` : null),
       }),
     ),
   ];
@@ -210,7 +211,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                   <Avatar label={memberNameOf(r(), "a contact request avatar")} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} playVideo="hover" />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r(), "a contact request row")}</span>
-                    <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                    <Show when={subLineUsername(memberNameOf(r(), "a contact request row"), r().username)}>
+                      {(u) => <span class="lk-row-sub">{u()}</span>}
+                    </Show>
                     <Show when={props.viaGroupName?.(req) ?? null}>
                       {(name) => <span class="lk-row-sub">{viaGroupLine(name())}</span>}
                     </Show>

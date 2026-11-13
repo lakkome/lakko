@@ -492,6 +492,9 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     return next;
   });
   setCoPublisherGroupIds((map) => new Map([...stored.coPublisherGroupIds, ...map]));
+  // v4 pairing bundle: seeds the confirming device carried, offered before
+  // this session's state existed. Never over a seed held for an epoch.
+  takeCarriedChannelSeeds(args.accountIdB64);
   setAccessByChannel((map) => new Map([...(stored.channelAccess ?? new Map()), ...map]));
   // G-50 — the stored entries belong to the restored provider; one already
   // in memory (recorded before this settled) wins on its id.
@@ -627,6 +630,70 @@ function dropChannelsMemory(): void {
   setHydrated(false);
 }
 
+// ---------------------------------------------------------
+// Seeds a pairing carried (state bundle v4)
+// ---------------------------------------------------------
+
+/** Per account: the carried seeds not yet added to its channel state. In this
+ *  page's memory only: the restore route lands the session in the page that
+ *  applied the bundle. */
+const carriedSeeds = new Map<string, Map<string, Map<number, Uint8Array>>>();
+
+/** Add carried seeds to the channel state, each only where no seed is held
+ *  for its epoch. Pure over the two maps; returns the merged map, or `null`
+ *  when nothing is added. */
+export function mergeCarriedSeeds(
+  held: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+  carried: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+): Map<string, ReadonlyMap<number, Uint8Array>> | null {
+  let next: Map<string, ReadonlyMap<number, Uint8Array>> | null = null;
+  for (const [idHex, inner] of carried) {
+    const have = held.get(idHex);
+    let merged: Map<number, Uint8Array> | null = null;
+    for (const [epoch, seed] of inner) {
+      if (have?.has(epoch) === true || seed.length !== 32) continue;
+      merged ??= new Map(have ?? []);
+      merged.set(epoch, seed.slice());
+    }
+    if (merged === null) continue;
+    next ??= new Map(held);
+    next.set(idHex, merged);
+  }
+  return next;
+}
+
+function takeCarriedChannelSeeds(accountIdB64: string): void {
+  const offered = carriedSeeds.get(accountIdB64);
+  if (offered === undefined) return;
+  carriedSeeds.delete(accountIdB64);
+  const merged = mergeCarriedSeeds(untrack(subscribedSeedsByChannel), offered);
+  if (merged !== null) setSubscribedSeedsByChannel(merged);
+}
+
+/**
+ * State bundle v4, receiving device: the seeds the confirming device carried.
+ * Added now when this account's channel state is loaded, else when it is.
+ * Kept for a channel whose register has not arrived yet (it is in the
+ * channel log under its id); the subscription runtime drops them if the
+ * account left the channel.
+ */
+export function offerCarriedChannelSeeds(
+  accountIdB64: string,
+  seeds: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>,
+): void {
+  const held = carriedSeeds.get(accountIdB64) ?? new Map<string, Map<number, Uint8Array>>();
+  for (const [idHex, inner] of seeds) {
+    const into = held.get(idHex) ?? new Map<number, Uint8Array>();
+    for (const [epoch, seed] of inner) if (!into.has(epoch)) into.set(epoch, seed.slice());
+    held.set(idHex, into);
+  }
+  carriedSeeds.set(accountIdB64, held);
+  if (sink !== null && sink.accountIdB64 === accountIdB64 && hydrated()) {
+    takeCarriedChannelSeeds(accountIdB64);
+    schedulePersist();
+  }
+}
+
 function hexBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -641,6 +708,7 @@ function hexBytes(hex: string): Uint8Array {
 // is the session's; it is dropped when it belongs to one of `ids` or to
 // nobody (the session already ended), never when another account owns it.
 registerAccountMemory("channels-state", (ids) => {
+  for (const id of ids) carriedSeeds.delete(id);
   const owner = sink?.accountIdB64 ?? counterOwner;
   if (owner !== null && !ids.includes(owner)) return;
   if (flushTimer !== null) {

@@ -400,10 +400,29 @@ struct ChannelConversationScreen: View {
         case .failed(let copy):
             statusBar(copy.text, danger: true, retry: true)
         case .reading:
-            // Section 12 — a subscriber has no composer: the timeline runs to
-            // the bottom of the pane.
-            EmptyView()
+            if let reader = model.readerDeviceRole {
+                // UX second-device 4a — the owner's or a publisher's device
+                // that cannot post: one line in place of the composer.
+                readerDeviceLine(reader)
+            } else {
+                // Section 12 — a subscriber has no composer: the timeline runs
+                // to the bottom of the pane.
+                EmptyView()
+            }
         }
+    }
+
+    /// No button, no link: secondary text where the composer would be.
+    private func readerDeviceLine(_ reader: ChannelReaderDeviceRole) -> some View {
+        Text(l10n.t(reader.lineKey))
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+            .padding(12)
+            .background(Color.lakkoSurface)
+            .overlay(alignment: .top) { Rectangle().fill(Color.lakkoBorder).frame(height: 1) }
     }
 
     private var subscribeBar: some View {

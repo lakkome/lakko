@@ -148,6 +148,17 @@ import {
   ownFeedbackChanged,
   splitNonces,
 } from "../../channels/own-feedback-register";
+import {
+  channelSubscriptionsChanged,
+  installChannelSubscriptionRegister,
+  type ChannelSubscriptionPort,
+} from "../../channels/channel-subscription-register";
+import {
+  allChannelSubscriptionViews,
+  channelSubscriptionView,
+  writeChannelLeave,
+  writeChannelSubscription,
+} from "../../channels/channel-subscription-wasm";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
 import {
   bindDeviceCards,
@@ -534,6 +545,8 @@ export function DeviceGroupSyncProvider(props: {
   let uninstallQuickReactionRegister: (() => void) | null = null;
   /** ADR-0087 section 13a: the own channel reactions and comments. */
   let uninstallOwnFeedbackRegister: (() => void) | null = null;
+  /** 2026-11-13: the account's channel subscriptions. */
+  let uninstallChannelSubscriptionRegister: (() => void) | null = null;
   void loadWasm().then((w) => {
     wasmSync = w;
   });
@@ -707,6 +720,8 @@ export function DeviceGroupSyncProvider(props: {
     }
     // ADR-0087 section 13a: the own channel reactions and comments.
     ownFeedbackChanged();
+    // 2026-11-13: the account's channel subscriptions.
+    channelSubscriptionsChanged();
     setStateVersion((v) => v + 1);
   }
 
@@ -947,6 +962,11 @@ export function DeviceGroupSyncProvider(props: {
     void flushUnsentOwnFeedback();
     uninstallOwnFeedbackRegister?.();
     uninstallOwnFeedbackRegister = installOwnFeedbackRegister(ownFeedbackPortFor(accountIdB64));
+    void flushUnsentChannelSubscriptions();
+    uninstallChannelSubscriptionRegister?.();
+    uninstallChannelSubscriptionRegister = installChannelSubscriptionRegister(
+      channelSubscriptionPortFor(wasm, accountIdB64),
+    );
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
@@ -1142,6 +1162,8 @@ export function DeviceGroupSyncProvider(props: {
     uninstallQuickReactionRegister = null;
     uninstallOwnFeedbackRegister?.();
     uninstallOwnFeedbackRegister = null;
+    uninstallChannelSubscriptionRegister?.();
+    uninstallChannelSubscriptionRegister = null;
     activeAccountIdB64 = null;
     boundSyncGeneration = null;
     ownDeviceGroupId = null;
@@ -1269,6 +1291,10 @@ export function DeviceGroupSyncProvider(props: {
       if (quick !== undefined) await sendLineageEnvelopes([quick]);
       // ADR-0079 - and every link record, each with its original stamp.
       await sendLineageEnvelopes(synced.linkRecordEnvelopes());
+      // 2026-11-13 - and every channel-subscription register, leaves
+      // included, each with its original stamp: how a new device learns the
+      // account's channels.
+      await sendLineageEnvelopes(synced.channelSubscriptionEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -1593,6 +1619,74 @@ export function DeviceGroupSyncProvider(props: {
             BigInt(Math.max(0, Math.floor(postAtMs))),
           ),
         );
+      },
+    };
+  }
+
+  // ----- 2026-11-13: the channel-subscription register ------------------
+
+  /** `localStorage` marker: a channel-subscription register written here has
+   *  not been confirmed sent. Re-sending every held register is idempotent
+   *  (the fold keeps the newer stamp). */
+  const channelSubscriptionsUnsentKey = (account: string): string =>
+    `lakko.channel-subscriptions.unsent.v1.${account}`;
+
+  async function sendChannelSubscriptionEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      localStorage.setItem(channelSubscriptionsUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: this send is the only attempt */
+    }
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(channelSubscriptionsUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "channel subscription register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentChannelSubscriptions(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(channelSubscriptionsUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    let envelopes: Uint8Array[];
+    try {
+      envelopes = synced.channelSubscriptionEnvelopes();
+    } catch {
+      return;
+    }
+    await sendChannelSubscriptionEnvelopes(account, envelopes);
+  }
+
+  /** The port the channel runtime reads and writes the account's channel
+   *  subscriptions through. Each write folds here at once and goes to the
+   *  account's other devices. */
+  function channelSubscriptionPortFor(wasm: Awaited<ReturnType<typeof loadWasm>>, accountIdB64: string): ChannelSubscriptionPort {
+    const sent = async (envelope: Uint8Array | null): Promise<boolean> => {
+      if (envelope === null) return false;
+      refresh();
+      if (activeAccountIdB64 === accountIdB64) await sendChannelSubscriptionEnvelopes(accountIdB64, [envelope]);
+      return true;
+    };
+    return {
+      accountIdB64,
+      all: () => (synced === null ? [] : allChannelSubscriptionViews(synced, wasm)),
+      get: (channelIdHex) => (synced === null ? undefined : channelSubscriptionView(synced, wasm, channelIdHex)),
+      set: async (channelIdHex, value) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) throw new Error("synced state not loaded");
+        return sent(writeChannelSubscription(synced, wasm, mintHlc(), channelIdHex, value));
+      },
+      leave: async (channelIdHex) => {
+        if (synced === null || activeAccountIdB64 !== accountIdB64) return false;
+        return sent(writeChannelLeave(synced, mintHlc(), channelIdHex));
       },
     };
   }
@@ -3020,6 +3114,19 @@ export function DeviceGroupSyncProvider(props: {
       if (wasmSync !== null && wasmSync.isChannelCommentEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyChannelCommentEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // 2026-11-13 - the channel-subscription register, the same way. The
+      // channel runtime reconciles the channel list from the fold.
+      if (wasmSync !== null && wasmSync.isChannelSubscriptionEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyChannelSubscriptionEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
           }

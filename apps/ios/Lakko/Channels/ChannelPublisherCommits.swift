@@ -125,7 +125,8 @@ public enum ChannelPublisherCommits {
                     channelIdHex: context.channelIdHex, targetEpoch: targetEpoch,
                     client: context.channelsClient,
                     throughSeq: ChannelReseal.resealThrough(
-                        isPublic: extras?.isPublic, mark: extras?.admittedThroughSeq))
+                        isPublic: extras?.isPublic, mark: extras?.admittedThroughSeq),
+                    ownReaderKeyHex: extras?.readerKeyRegisteredHex)
                 state?.setEpoch(channelId: context.channelIdHex, epoch: targetEpoch)
             },
             appoint: { joinerKey in
@@ -271,7 +272,8 @@ public enum ChannelReseal {
         channelIdHex: String,
         targetEpoch: UInt32,
         client: ChannelsClient,
-        throughSeq: UInt64? = nil
+        throughSeq: UInt64? = nil,
+        ownReaderKeyHex: String? = nil
     ) async throws {
         let seed = try publisherGroup.channelSeed(identity: identity)
         let channelIdBytes = try publisherGroup.channelId()
@@ -291,9 +293,13 @@ public enum ChannelReseal {
             subscribers = try await client.listSubscribers(
                 channelIdHex: channelIdHex, accountIdentity: ownerIdentity)
         }
+        // 2026-11-13 — the account's own reader key (its other devices read
+        // with it) gets every new seed, above the mark too, like this
+        // device's own key is never removed.
+        let resealed = withOwnReaderKey(subscribers, ownReaderKeyHex)
         var batch: [RotateBatchEntry] = []
-        batch.reserveCapacity(subscribers.count)
-        for subscriberHex in subscribers {
+        batch.reserveCapacity(resealed.count)
+        for subscriberHex in resealed {
             guard let subscriberBytes = CoPublisher.hexToData(subscriberHex) else {
                 throw CoPublisherError.malformedSubscriberHex(subscriberHex)
             }
@@ -327,6 +333,13 @@ public enum ChannelReseal {
     nonisolated static func resealThrough(isPublic: Bool?, mark: UInt64?) -> UInt64? {
         guard isPublic == false else { return nil }
         return mark ?? 0
+    }
+
+    /// The per-key reseal set with the account's own reader key added once
+    /// (2026-11-13; web `withOwnReaderKey`).
+    nonisolated static func withOwnReaderKey(_ keys: [String], _ own: String?) -> [String] {
+        guard let own = own?.lowercased() else { return keys }
+        return keys.contains { $0.lowercased() == own } ? keys : keys + [own]
     }
 
     /// The rows a per-key reseal seals to: those at or below `throughSeq`.

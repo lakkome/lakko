@@ -77,6 +77,7 @@ entry's status line, not a mechanical fact.
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 | [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
 | [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
+| [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Open (accepted for now, 2026-11-13) | needs per-device PublisherGroup leaves; see the entry |
 
 ## MLS state machine
 
@@ -3211,3 +3212,35 @@ were walked.
 
 **Closing:** not a client fix. Either the rotation changes, or a grant reaches
 the adder some other way. Maintainer's decision.
+
+<a id="g-54"></a>
+### G-54: A channel has one publishing device per owner or publisher
+
+**Recorded 2026-11-13 with the maintainer's decision that a second device of
+a channel's owner or co-publisher is a reader for now.** A channel's
+PublisherGroup leaf is the account key (web: the session account identity;
+iOS and Android: an identity from the account's lineage or phrase seed), so
+two devices of one account cannot both be leaves, and copying the MLS state
+to a second device is ADR-0050 section 2.9a reason 3. The channels now reach
+every device of the account through the synced channel-subscription register
+(`lakko_sync::synced::channel_subscription`), with the one subscriber key per
+account and channel, so every device reads; only the device holding the
+PublisherGroup posts, approves, rotates and admits (UX
+`second-device.md` section 4a). Consequences:
+
+- The owner (or a publisher) must use that one device to post.
+- If that device is lost, forgotten or wiped, nobody can post in the channel
+  again, approve a publisher, admit a private-channel subscriber or rotate
+  its keys; the channel stays readable for its subscribers until its posts age
+  out. A restore from the phrase does not bring publishing back (the
+  PublisherGroup state is not in the backup).
+- A naive client fix makes it worse: a device that founds a PublisherGroup
+  for an owned channel it lacks state for re-founds it at the same
+  deterministic id and resets the live journal (iOS, Android, and web from any
+  action that opens the group, found by the 2026-11-13 recon). No client may
+  found a PublisherGroup or reset a channel journal except in create-channel.
+
+**Closing:** per-device PublisherGroup leaves (the ADR-0050 pattern applied to
+PublisherGroup: device leaves bound to the account key, an add-own-device
+path, one rule for the single rotator among owner devices). A `lakko-mls`
+change under invariant #3; not designed yet.

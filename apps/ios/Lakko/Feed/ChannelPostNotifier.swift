@@ -316,6 +316,9 @@ final class ChannelPostNotifier {
             own: { [weak channels] id in
                 channels?.keysByChannel[id] != nil
                     || CoPublishedJournals.shared.journalIdHex(channelIdHex: id) != nil
+                    // UX second-device 4a — a reader device of the owner or a
+                    // publisher announces no post of the channel.
+                    || channels?.readerDeviceRole(id) != nil
             },
             title: { [weak channels] id in
                 guard let channel = channels?.channels.first(where: { $0.id.lowercased() == id }) else {

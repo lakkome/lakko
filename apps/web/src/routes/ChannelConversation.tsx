@@ -50,6 +50,7 @@ import { channelAvatarKey } from "../channels/channel-avatar";
 import {
   catchUpChannel,
   channelReadStateOf,
+  channelReaderDeviceRoleOf,
   channelRoleOf,
   channelSeedFor,
   channelVisibilityOf,
@@ -116,6 +117,10 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
    *  dialog over it, not a banner beside it. */
   const endedHere = (): EndNotice | null => membershipEnd.notices().find((n) => n.key === `3:${id}`) ?? null;
   const canPublish = (): boolean => role() === "owner" || role() === "publisher";
+  /** 2026-11-13 (UX second-device.md section 4a): the account owns or
+   *  publishes in this channel, but this device holds no publishing state for
+   *  it: a reader here. */
+  const readerRole = (): "owner" | "publisher" | null => channelReaderDeviceRoleOf(id);
   const reading = (): boolean => canPublish() || channelReadStateOf(id) === "reading";
   const facts = (): ReturnType<typeof channelFacts> => channelFacts(id);
 
@@ -287,7 +292,9 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
       const epoch = newestHeldEpoch();
       return epoch === undefined ? undefined : channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
     },
-    enabled: () => !canPublish() && channelReadStateOf(id) === "reading",
+    // A reader device of the owner or a publisher uploads no member card,
+    // as the publishing device does not (it may hold no registered key).
+    enabled: () => !canPublish() && readerRole() === null && channelReadStateOf(id) === "reading",
   });
 
   // Reactions in view, one batched read (ADR-0087 section 13a).
@@ -581,6 +588,15 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
           </Show>
           <Show when={canPublish()}>
             <ChannelComposer publish={publish} editing={editing()} onCancelEdit={() => setEditing(null)} hub={hub} />
+          </Show>
+          {/* UX second-device.md section 4a: the account posts here from
+              another device; one line in place of the composer, no control. */}
+          <Show when={!canPublish() ? readerRole() : null}>
+            {(r) => (
+              <p class="lk-channel-reader-line">
+                {r() === "owner" ? t("channels.reader_device.owner") : t("channels.reader_device.publisher")}
+              </p>
+            )}
           </Show>
         </Show>
       </div>

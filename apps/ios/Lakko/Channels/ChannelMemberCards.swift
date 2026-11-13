@@ -22,7 +22,10 @@ enum ChannelMemberCards {
     /// Upload this subscriber's card for the newest epoch it holds a seed for,
     /// when not done yet. Best effort.
     static func uploadIfNeeded(state: ChannelsUiState, channelId: String) async {
-        guard let keys = state.subscriberKeysByChannel[channelId],
+        // A reader device of the owner or a publisher holds the account's
+        // register key, which is no subscriber row at the service.
+        guard state.readerDeviceRole(channelId) == nil,
+              let keys = state.subscriberKeysByChannel[channelId],
               let (epoch, seed) = state.subscribedSeeds(channelId: channelId).max(by: { $0.key < $1.key }),
               let channelIdBytes = CoPublisher.hexToData(channelId) else { return }
         let grant = ReachCenter.shared.channelGrant(channelId: channelIdBytes)

@@ -42,6 +42,7 @@ import { TranslationProvider } from "./translation/TranslationContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
+import { ChannelSubscriptionSync } from "./channels/ChannelSubscriptionSync";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
 import { ChannelPostNotifier } from "./feed/ChannelPostNotifier";
 import { ChannelPublisherLoops } from "./channels/ChannelPublisherLoops";
@@ -232,6 +233,12 @@ const App: Component = () => (
            * PublisherGroup open.
            */}
           <ChannelsHydration />
+          {/*
+           * 2026-11-13: the account's channel subscriptions reach every
+           * device of the account (and a leave on one drops the channel on
+           * the others), through its synced-state registers.
+           */}
+          <ChannelSubscriptionSync />
           {/*
            * ADR-0063 section 4: while the app is in front, channel posts are
            * fetched and filed into the log the Feed ranks.

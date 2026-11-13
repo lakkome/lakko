@@ -380,6 +380,9 @@ public suspend fun resealToSubscribers(
     /** [ChannelReseal.resealThrough]: `null` reseals to every row; a value
      *  only to the rows at or below it (a private channel's rows let in). */
     throughSeq: Long? = null,
+    /** docs/ux/second-device.md section 4a — the account's own reader key
+     *  of the channel (hex): resealed to whatever the mark says. */
+    alwaysKeys: Set<String> = emptySet(),
 ) {
     val seed = publisherGroup.channelSeed(identity)
     val channelIdBytes = publisherGroup.channelId()
@@ -394,10 +397,13 @@ public suspend fun resealToSubscribers(
                 val page = channelsClient.subscriberPage(channelIdHex, proofs, after)
                 rows += page.rows
                 val last = page.rows.lastOrNull() ?: break
-                if (last.seq > throughSeq || page.nextAfter <= after) break
+                if (page.nextAfter <= after) break
+                // Past the mark, read on only while the account's own key
+                // has not shown up.
+                if (last.seq > throughSeq && ChannelReseal.allSeen(rows, alwaysKeys)) break
                 after = page.nextAfter
             }
-            ChannelReseal.resealKeys(rows, throughSeq)
+            ChannelReseal.resealKeys(rows, throughSeq, alwaysKeys)
         }
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
@@ -442,9 +448,34 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
 public object ChannelReseal {
     public fun resealThrough(mark: Long): Long = mark
 
-    /** The rows a per-key reseal seals to: those at or below [throughSeq]. */
-    public fun resealKeys(rows: List<SubscriberRow>, throughSeq: Long): List<String> =
-        rows.filter { it.seq <= throughSeq }.map { it.pubkeyHex }
+    /** The rows a per-key reseal seals to: those at or below [throughSeq],
+     *  and the account's own reader key ([alwaysKeys], hex) wherever its row
+     *  is (docs/ux/second-device.md section 4a: the account's other devices
+     *  read under it, like "this device's own key is never removed"). */
+    public fun resealKeys(rows: List<SubscriberRow>, throughSeq: Long, alwaysKeys: Set<String> = emptySet()): List<String> {
+        val always = alwaysKeys.mapTo(HashSet()) { it.lowercase() }
+        return rows.filter { it.seq <= throughSeq || it.pubkeyHex.lowercase() in always }.map { it.pubkeyHex }
+    }
+
+    /** Whether every key of [alwaysKeys] has a row in [rows]. */
+    public fun allSeen(rows: List<SubscriberRow>, alwaysKeys: Set<String>): Boolean {
+        if (alwaysKeys.isEmpty()) return true
+        val seen = rows.mapTo(HashSet()) { it.pubkeyHex.lowercase() }
+        return alwaysKeys.all { it.lowercase() in seen }
+    }
+
+    /** The account's reader key of a channel (hex) as the bound channels
+     *  state holds it, or `null`; set by the session shell. */
+    @Volatile
+    public var accountReaderKeyOf: ((accountIdB64: String, channelIdHex: String) -> String?)? = null
+
+    /** [accountReaderKeyOf] as the set a reseal takes. */
+    public fun accountKeysFor(accountIdB64: String, channelIdHex: String): Set<String> =
+        try {
+            accountReaderKeyOf?.invoke(accountIdB64, channelIdHex)?.let { setOf(it) } ?: emptySet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
 
     /** [resealThrough] for [channelIdHex] as this device keeps it. Throws
      *  when the channel state is not reachable yet (the reseal stays owed

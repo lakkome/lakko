@@ -209,6 +209,74 @@ gives the same answer). Unbuilt.
   surfaces and writes no row here. A chat-list preview never shows a
   membership row.
 
+## 4a. Channels on another device of the account (2026-11-13)
+
+Maintainer decisions of 2026-11-13. Seen live the same day: a channel never
+reached a second device. Every channel the account is subscribed to now
+reaches every device of the account, and each device reads it as the device
+it was subscribed on does.
+
+**A subscriber's channels.** The channel appears in the list on every device,
+with the same row, order, folders and pins as on the first. Its posts open.
+On a device paired while another device was alive, the posts the first device
+could read open too (the pairing hands over the keys of the newest periods).
+On a device restored from the phrase alone, posts from the last few key
+periods open (the newest four the channel service keeps for the account);
+older ones show the existing line "Earlier posts aren't available." at the top
+of the timeline (section 15.2.1 of
+[`group-and-channel-privacy.md`](group-and-channel-privacy.md)). Reactions,
+comments, read position, mute and unsubscribing work as on the first device;
+unsubscribing on one device removes the channel from all of them (ADR-0087
+section 9, unchanged).
+
+**An owner's or a publisher's channel on a device that cannot post.** Only the
+device that holds the channel's publishing state posts in it: for the owner,
+the device the channel was created on; for a publisher, the device where they
+accepted the publisher invitation. Every other device of that account is a
+reader of the channel for now (publishing from any device is a later step):
+
+- The channel appears in the list and its posts open, as for a subscriber.
+- **No composer.** Where the composer would be, one line in secondary text,
+  not a disabled field:
+  - owner: "You post in this channel from the device you created it on."
+    (`channels.reader_device.owner`)
+  - publisher: "You post in this channel from the device where you became a
+    publisher." (`channels.reader_device.publisher`)
+  The line has no button and no link. It does not name the other device.
+- **Message menu:** what a subscriber has (React, Forward, Save, Copy). No
+  Edit, no Delete on posts, no deleting or banning under comments.
+- **Comments and reactions:** as a subscriber.
+- **Info screen** (section 12.1 of `group-and-channel-privacy.md`): the
+  owner-only and publisher-only blocks are **hidden**, not disabled:
+  `Invite people`, `Invite link`, `Publishers`, `Channel type`, editing the
+  name, description and photo in the header, and `Reactions`. `Subscribers`
+  shows what a subscriber sees (the band, the named people, no `Remove`).
+  `Members can find me` stays. The exit block is empty on an owner's reader
+  device (no `Unsubscribe`, no `Delete channel`: the channel is deleted on the
+  device it was created on) and on a publisher's (no `Step down`; it lives on
+  the publishing device). Hidden rather than disabled because nothing on this
+  device can make the control work, and a dimmed control asks the person to
+  find out why.
+- **Notifications:** a reader device of an owner or a publisher announces no
+  post of that channel. Only the account's own side posts there, and this
+  device cannot tell a post of this account from a post of another publisher.
+- **Requests and approvals** (publisher requests, private-channel waiting
+  subscribers) are shown and acted on only on the publishing device.
+
+What it never shows: "read-only", "this device is not a publisher", a key, a
+group, a retry, or a way to move publishing to this device.
+
+**If the publishing device is gone.** The channel stays readable on the other
+devices and nobody can post in it (known gap G-54). Nothing on the screen
+changes; the line above stays true to the person: they posted from that
+device.
+
+**Never founds anything.** A device that lists an owned or co-published
+channel and holds no publishing state for it never creates one: opening the
+channel, its info screen or any channel loop must not start a new channel
+group or reset the channel's journal. Creating a channel happens only in New
+channel.
+
 ## 5. Failures
 
 Anything that keeps a chat from admitting the device (peer offline, cap
@@ -231,3 +299,8 @@ not a screen.
   device's device card, optional (section 2.1).
 - Whether this device's own DeviceGroup is still active (`DeviceGroup.isActive`),
   which drives section 3.1.
+- Per channel (section 4a): the account's subscription register from the
+  synced state (`SyncedState.allChannelSubscriptions`: role, the one
+  subscriber key, read key, a publisher's group id, name, handle) and whether
+  this device holds the channel's publishing state; together they decide
+  reader or publisher on this device.

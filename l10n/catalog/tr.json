@@ -2073,6 +2073,14 @@
       "text": "Kanaldaki tepkiler anonimdir. Kimin tepki verdiğini kimse göremez, kanalın sahibi bile.",
       "status": "machine"
     },
+    "channels.reader_device.owner": {
+      "text": "Bu kanalda, kanalı oluşturduğunuz cihazdan paylaşım yaparsınız.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "Bu kanalda, yayıncı olduğunuz cihazdan paylaşım yaparsınız.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko kanalın korumasını kendiliğinden yeniler. Bir abonenin cihazının ele geçirildiğini düşünüyorsanız şimdi yenileyin.",
       "status": "machine"

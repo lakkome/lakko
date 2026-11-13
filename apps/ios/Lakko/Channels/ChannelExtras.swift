@@ -59,6 +59,19 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     /// ticket: it removes nobody and moves its mark only past rows it let in
     /// (``SubscriberAdmission/letInVerdict(seq:ticketLive:mark:markSet:isOwnKey:)``).
     public var admissionMarkSet: Bool?
+    /// ADR-0050 section 2.9 (amended 2026-11-13) — what the ACCOUNT is in the
+    /// channel as its synced subscription register says: `"owner"` or
+    /// `"coPublisher"`; `nil` for a subscriber or before a register landed.
+    /// A device holding no PublisherGroup for a channel the account owns or
+    /// co-publishes reads it as a reader (``ChannelsUiState/readerDeviceRole(_:)``).
+    public var accountRole: String?
+    /// 2026-11-13 (follow-up decision 1) — on the publishing device, the
+    /// account's one subscriber key (the subscription register's) this device
+    /// registered at the channels service, lower-case hex. Every rotation it
+    /// makes reseals the new seed to it, whatever the admission mark says, so
+    /// the account's reader devices keep reading a private channel
+    /// (``ChannelAccountReaderKey``). The web `readerKeyRegisteredHex`.
+    public var readerKeyRegisteredHex: String?
 
     public init() {}
 

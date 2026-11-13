@@ -81,7 +81,7 @@ import {
   pollForStateBundle,
   publishStateBundle,
   type CarriedOwnPredecessor,
-  type StateBundleV3,
+  type StateBundle,
 } from "./state-bundle";
 import { loadMlsSnapshot } from "../chat/mls-store";
 import {
@@ -379,7 +379,7 @@ export async function prepareJoinFlow(args: {
               console.info(
                 `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
                   `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
-                  `${extras.pendingContacts} pending contacts`,
+                  `${extras.pendingContacts} pending contacts, ${extras.channelSeeds} channels with seeds`,
               );
             }
           } catch (err) {
@@ -419,7 +419,7 @@ export async function prepareJoinFlow(args: {
  *  effort and never throws: a failure leaves the device as one that knows
  *  only the current key (logged without any key material). */
 async function storeOwnPredecessors(
-  bundle: StateBundleV3,
+  bundle: StateBundle,
   accountIdB64: string,
   deviceKey: DeviceCipher,
 ): Promise<void> {
@@ -448,7 +448,7 @@ async function receiveStateBundle(
   identity: WasmIdentity,
   rendezvous: Uint8Array,
   welcomeCursor: number,
-): Promise<StateBundleV3 | null> {
+): Promise<StateBundle | null> {
   const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
   if (outcome.kind !== "received") return null;
   const wasm = await loadWasm();
@@ -670,7 +670,7 @@ export async function prepareAnonymousJoinFlow(args: {
   // scanner published was never read on this route, and a confirmed device
   // opened every chat empty.
   let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
-  let pendingState: StateBundleV3 | null = null;
+  let pendingState: StateBundle | null = null;
 
   return {
     qrPayload,
@@ -808,7 +808,7 @@ export async function prepareAnonymousJoinFlow(args: {
         console.info(
           `state bundle: ${applied.contacts} contacts, ${applied.pins} pins, ` +
             `${extras.groupNames} group names, ${extras.profiles} profiles, ` +
-            `${extras.pendingContacts} pending contacts`,
+            `${extras.pendingContacts} pending contacts, ${extras.channelSeeds} channels with seeds`,
         );
       }
     },

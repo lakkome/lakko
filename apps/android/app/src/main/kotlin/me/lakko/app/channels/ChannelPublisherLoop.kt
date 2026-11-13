@@ -171,9 +171,12 @@ public class ChannelPublisherLoop private constructor(
         }
     }
 
-    /** Whether this account OWNS [channelId] (a co-published one carries the
-     *  group id its link conveyed). */
-    public fun isOwner(channelId: String): Boolean = state.joinedGroupIdOf(channelId) == null
+    /** Whether this account OWNS [channelId] AND this device holds its
+     *  PublisherGroup (docs/ux/second-device.md section 4a: owner by the
+     *  role, a co-published one carries the group id its link conveyed, and
+     *  only the device that holds the group acts as the owner). */
+    public fun isOwner(channelId: String): Boolean =
+        state.publishesHere(channelId) && state.accountRoleOf(channelId) == ChannelAccountRole.OWNER
 
     private suspend fun groupFor(pub: ChannelPublisherIdentity, channelId: String): PublisherGroup {
         groups[channelId]?.let { return it }

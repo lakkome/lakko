@@ -49,10 +49,11 @@ public enum HistoryBundleCodec {
     /// Caller handles the `nil` case by skipping the mailbox
     /// PUT; the joining side's `pollForHistoryBundle` timeout
     /// fires harmlessly.
-    public static func buildFromMessageLog(
+    static func buildFromMessageLog(
         accountIdB64: String,
         secret: Data,
-        store: MessageLogStore = MessageLogStore()
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
     ) throws -> Data? {
         guard let log = store.getLog(accountIdB64: accountIdB64) else {
             return nil
@@ -83,7 +84,12 @@ public enum HistoryBundleCodec {
                 // shape that did not interoperate with web).
                 let placeholder: Data
                 do {
-                    placeholder = try Self.encodePlaceholder(m)
+                    // ADR-0087 section 14 — the invitation card lives beside
+                    // the log, keyed on (conversation, message id); without it
+                    // the new device draws the bare `/g/` link.
+                    let card = m.deleted ? nil : cards.card(
+                        conversationIdHex: hex, messageId: m.messageId, accountIdB64: accountIdB64)
+                    placeholder = try Self.encodePlaceholder(m, channelInvite: card)
                 } catch {
                     continue
                 }
@@ -129,11 +135,12 @@ public enum HistoryBundleCodec {
     /// device's persistent message log. Returns the number of
     /// rows applied (across all groups). Idempotent on
     /// `messageId` — collisions take the on-disk value.
-    public static func applyToMessageLog(
+    static func applyToMessageLog(
         accountIdB64: String,
         secret: Data,
         sealedBytes: Data,
-        store: MessageLogStore = MessageLogStore()
+        store: MessageLogStore = MessageLogStore(),
+        cards: ChannelInviteCardStore = .shared
     ) throws -> Int {
         let opened = try openHistoryBundleStructured(
             secret: secret,
@@ -148,9 +155,21 @@ public enum HistoryBundleCodec {
             // the shared Rust core. Bytes from a web or Android scanner decode
             // identically here. A bookkeeping row from a sender that still
             // carries them is dropped: it is nothing the person reads.
-            decoded[Self.bytesToHex(g.groupId), default: []] += g.messages
-                .compactMap { Self.decodePlaceholder($0.payloadBytes) }
-                .filter { !Self.isBookkeepingSystemRow($0) }
+            let hex = Self.bytesToHex(g.groupId)
+            for opened in g.messages.compactMap({ Self.decodeOpenedPlaceholder($0.payloadBytes) }) {
+                if Self.isBookkeepingSystemRow(opened.message) { continue }
+                decoded[hex, default: []].append(opened.message)
+                // ADR-0087 section 14 — the card goes where this client keeps
+                // cards, so the bubble and the Chats row draw it. A card this
+                // device already holds for the row stays.
+                if let card = opened.channelInvite,
+                   cards.card(conversationIdHex: hex, messageId: opened.message.messageId,
+                              accountIdB64: accountIdB64) == nil {
+                    cards.put(
+                        card: card, conversationIdHex: hex, messageId: opened.message.messageId,
+                        accountIdB64: accountIdB64)
+                }
+            }
         }
         let merged = Self.mergeBundle(held: existing.groups, decoded: decoded)
 
@@ -236,8 +255,10 @@ public enum HistoryBundleCodec {
     // MARK: - Placeholder codec (G-6 step 2)
 
     /// Encode a local-store message row into the canonical
-    /// cross-platform placeholder bytes via the shared Rust core.
-    static func encodePlaceholder(_ m: PersistedMessage) throws -> Data {
+    /// cross-platform placeholder bytes via the shared Rust core. Version 3
+    /// also carries `channelInvite` (the ADR-0087 card this client keeps
+    /// beside the log) and the row's ADR-0052 reply and forward.
+    static func encodePlaceholder(_ m: PersistedMessage, channelInvite: Data? = nil) throws -> Data {
         // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
         // voice message, video note or GIF restores as itself on the new
         // device. The core applies the envelope's bounds on encode and decode.
@@ -258,20 +279,43 @@ public enum HistoryBundleCodec {
                 thumb: a.thumb.flatMap(Self.historyThumb(from:))
             )
         }
+        let forward = m.forward.map { f in
+            let origin = f.originGroupIdHex.flatMap(Self.hexToBytes)
+            return HistoryForward(
+                author: f.author,
+                originGroupId: f.originMessageId == nil ? nil : origin,
+                originMessageId: origin == nil ? nil : f.originMessageId
+            )
+        }
         let placeholder = HistoryPlaceholder(
             messageId: UInt64(bitPattern: m.messageId),
             direction: Self.directionFromString(m.direction),
             createdAt: m.createdAt,
             text: m.text,
-            attachments: attachments
+            attachments: attachments,
+            channelInvite: channelInvite,
+            reply: m.reply.map { HistoryReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
+            forward: forward
         )
         return try encodeHistoryPlaceholder(placeholder: placeholder)
+    }
+
+    /// A decoded placeholder: the log row and the invitation card, which this
+    /// client keeps beside the log rather than in the row.
+    struct OpenedPlaceholder {
+        let message: PersistedMessage
+        let channelInvite: Data?
     }
 
     /// Decode canonical placeholder bytes (from any platform)
     /// back into a local-store message row; `nil` on malformed
     /// input.
     static func decodePlaceholder(_ bytes: Data) -> PersistedMessage? {
+        decodeOpenedPlaceholder(bytes)?.message
+    }
+
+    /// ``decodePlaceholder(_:)`` with the invitation card.
+    static func decodeOpenedPlaceholder(_ bytes: Data) -> OpenedPlaceholder? {
         guard let placeholder = try? decodeHistoryPlaceholder(bytes: bytes) else {
             return nil
         }
@@ -301,12 +345,24 @@ public enum HistoryBundleCodec {
                 }
             )
         }
-        return PersistedMessage(
+        let message = PersistedMessage(
             messageId: Int64(bitPattern: placeholder.messageId),
             direction: Self.directionToString(placeholder.direction),
             text: placeholder.text,
             attachments: attachments,
-            createdAt: placeholder.createdAt
+            createdAt: placeholder.createdAt,
+            reply: placeholder.reply.map { PersistedReply(target: $0.target, author: $0.author, excerpt: $0.excerpt) },
+            forward: placeholder.forward.map {
+                PersistedForward(
+                    author: $0.author,
+                    originGroupIdHex: $0.originGroupId.map(Self.bytesToHex),
+                    originMessageId: $0.originMessageId
+                )
+            }
+        )
+        return OpenedPlaceholder(
+            message: message,
+            channelInvite: placeholder.channelInvite.flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 

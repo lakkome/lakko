@@ -18,7 +18,7 @@ import org.junit.Test
  * The host JVM cannot load the native library, so [VersionGate] stands in
  * for `SyncedState.fromBytes`: it refuses every first byte but the current
  * encoding version, which is the rule of `SyncedState::from_bytes` in
- * `crates/lakko-sync/src/synced/state.rs` (`STATE_VERSION` = 12; version 1,
+ * `crates/lakko-sync/src/synced/state.rs` (`STATE_VERSION` = 13; version 1,
  * the layout before saved messages, is refused). What these tests pin is
  * this client's handling of that refusal, not the refusal itself, which the
  * core's own tests cover.
@@ -139,7 +139,7 @@ class SyncedStateBlobTest {
 
     private companion object {
         /** `STATE_VERSION` in `crates/lakko-sync/src/synced/state.rs`. */
-        const val CURRENT: Byte = 0x0c
+        const val CURRENT: Byte = 0x0d
     }
 
     /** ADR-0087 section 9 - a flag day: the state file of the version before

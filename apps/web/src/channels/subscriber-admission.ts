@@ -217,6 +217,9 @@ async function admitTicketedRows(channelIdHex: string, identity: WasmIdentity): 
     live ??= new Set((await listInviteKeys(channelIdHex, identity)).map((k) => k.invitePkHex.toLowerCase()));
     const markSet = channelsActions.accessOf(channelIdHex).admissionMarkSet === true;
     const own = ownSubscriberKeyHex(channelIdHex);
+    // 2026-11-13: the account's reader key this device registered is its own
+    // too (its other devices read with it): never removed here.
+    const accountReader = channelsActions.accessOf(channelIdHex).readerKeyRegisteredHex ?? null;
     let through = mark;
     let blocked = false;
     for (const row of rows) {
@@ -224,7 +227,8 @@ async function admitTicketedRows(channelIdHex: string, identity: WasmIdentity): 
       const verdict = letInVerdict(
         ticketKeyAdmits(invitePk, live),
         markSet,
-        own !== null && row.subscriberId.toLowerCase() === own,
+        (own !== null && row.subscriberId.toLowerCase() === own) ||
+          (accountReader !== null && row.subscriberId.toLowerCase() === accountReader),
       );
       if (verdict === "admit") {
         await admitSubscriber(channelIdHex, row.subscriberId, identity);

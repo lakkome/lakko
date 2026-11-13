@@ -134,7 +134,29 @@ pub mod fuzz_api {
             && device_ack_envelope_holds(bytes)
             && channel_reaction_envelope_holds(bytes)
             && channel_comment_envelope_holds(bytes)
+            && channel_subscription_envelope_holds(bytes)
             && persisted_state_holds(bytes)
+    }
+
+    /// The channel-subscription envelope (2026-11-13): canonical, within its
+    /// bounds, folds to exactly its registers, is carried back by
+    /// `channel_subscription_envelopes`, does not apply twice, and a live
+    /// register it carries reads as subscribed and a leave as not.
+    fn channel_subscription_envelope_holds(bytes: &[u8]) -> bool {
+        let Ok(entries) = crate::synced::decode_channel_subscription_envelope(bytes) else {
+            return true;
+        };
+        let mut state = SyncedState::new();
+        crate::synced::compose_channel_subscription_envelope(&entries).as_deref() == Ok(bytes)
+            && bytes.len() <= crate::synced::CHANNEL_SUBSCRIPTION_ENVELOPE_MAX_LEN
+            && entries.iter().all(|e| e.value.validate().is_ok())
+            && state.apply_channel_subscription_envelope(bytes) == Ok(true)
+            && state.all_channel_subscriptions() == entries
+            && state.channel_subscription_envelopes() == vec![bytes.to_vec()]
+            && state.apply_channel_subscription_envelope(bytes) == Ok(false)
+            && entries.iter().all(|e| {
+                state.is_channel_subscribed(&e.value.channel_id) == e.value.is_subscribed()
+            })
     }
 
     /// The own channel-reaction envelope (ADR-0087 section 13a; a reaction on
@@ -348,6 +370,14 @@ pub mod fuzz_api {
                 return false;
             }
         }
+        for envelope in state.channel_subscription_envelopes() {
+            if rebuilt
+                .apply_channel_subscription_envelope(&envelope)
+                .is_err()
+            {
+                return false;
+            }
+        }
         let reactions = |s: &SyncedState| {
             s.entries()
                 .into_iter()
@@ -364,6 +394,7 @@ pub mod fuzz_api {
         }
         rebuilt.all_lineage() == state.all_lineage()
             && rebuilt.all_link_records() == state.all_link_records()
+            && rebuilt.all_channel_subscriptions() == state.all_channel_subscriptions()
             && rebuilt.recovery_email_register() == state.recovery_email_register()
             && rebuilt.own_username_register() == state.own_username_register()
             && rebuilt.quick_reaction_register() == state.quick_reaction_register()
@@ -542,6 +573,9 @@ mod fuzz_api_tests {
     use crate::fuzz_api::{decode_synced_and_check, replay_and_check};
 
     #[test]
+    // One wire per register kind, each damaged every way; splitting it would
+    // only move the list.
+    #[allow(clippy::too_many_lines)]
     fn the_synced_decode_oracle_holds_on_valid_and_damaged_input() {
         let mut state = crate::SyncedState::new();
         state.set_lineage(3, b"succ-a", b"root").unwrap();
@@ -601,6 +635,24 @@ mod fuzz_api_tests {
             .delete_channel_comment(13, [3; 16], 7, [9; 16], 1_000)
             .unwrap();
         let persisted_comments = removed.to_bytes();
+        removed
+            .set_channel_subscription(
+                14,
+                &[5; 16],
+                crate::synced::ChannelSubscribed {
+                    role: crate::synced::ChannelSubscriptionRole::CoPublisher,
+                    subscriber_secret: [6; 32],
+                    read_key: Some([7; 32]),
+                    publisher_group_id: Some([8; 32]),
+                    name: "News".into(),
+                    handle: "news".into(),
+                },
+            )
+            .unwrap();
+        let subscription = removed.channel_subscription_envelopes().remove(0);
+        assert!(removed.leave_channel_subscription(15, &[5; 16]));
+        let left = removed.channel_subscription_envelopes().remove(0);
+        let persisted_subscriptions = removed.to_bytes();
         for wire in [
             &envelope,
             &persisted,
@@ -618,6 +670,9 @@ mod fuzz_api_tests {
             &commented,
             &uncommented,
             &persisted_comments,
+            &subscription,
+            &left,
+            &persisted_subscriptions,
         ] {
             assert!(decode_synced_and_check(wire));
             for i in 0..wire.len() {

@@ -1663,6 +1663,14 @@
       "text": "Publishing...",
       "comment": "A channel post is being published."
     },
+    "channels.reader_device.owner": {
+      "text": "You post in this channel from the device you created it on.",
+      "comment": "Channel screen, in place of the post composer, on another device of the channel's owner: this device reads the channel but cannot post. Posting works only on the device where the channel was created."
+    },
+    "channels.reader_device.publisher": {
+      "text": "You post in this channel from the device where you became a publisher.",
+      "comment": "Channel screen, in place of the post composer, on another device of a channel publisher (co-publisher): this device reads the channel but cannot post. Posting works only on the device where the person accepted the publisher invitation."
+    },
     "channels.copublishers.desc": {
       "text": "People who can post to this channel. Share a link; approve them when they ask.",
       "comment": "Description of the co-publishers card: the link lets someone ask, only approval lets them post.",

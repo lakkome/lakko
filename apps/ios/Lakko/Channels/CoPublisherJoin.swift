@@ -239,6 +239,9 @@ enum CoPublisherJoin {
         // The joined group and the keys on disk before the record goes (and
         // before the mailbox cursor moves past the Welcome).
         if let persist { try persist() } else { try ChannelPublisherIdentity.shared.persistOrThrow() }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — the account's other
+        // devices list the channel as a co-publisher's (readers there).
+        state.onRelationshipStarted?(channelIdHex)
         if let accountIdB64 {
             PendingPublisherRequests.drop(channelIdHex: channelIdHex, accountIdB64: accountIdB64)
         }

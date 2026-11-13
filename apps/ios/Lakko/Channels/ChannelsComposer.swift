@@ -136,7 +136,8 @@ public enum ChannelsComposer {
         accountIdB64: String?,
         channelIdHex: String,
         existingSigningSeed: Data? = nil,
-        joinedGroupId: Data? = nil
+        joinedGroupId: Data? = nil,
+        mayFound: Bool = false
     ) throws -> ChannelPublisherKeys {
         let channelId = try channelIdFromHex(channelIdHex)
         // ADR-0078 section 6 — a co-published channel's group id is the
@@ -175,6 +176,10 @@ public enum ChannelsComposer {
             } else if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
                 group = existing
             } else {
+                // The trap rule (ADR-0087 section 12 as amended 2026-11-13):
+                // only New channel founds; anywhere else a missing group means
+                // this device reads the channel and publishes nothing.
+                guard mayFound else { throw CoPublisherError.notOnThisDevice }
                 group = try LakkoCore.publisherGroupOpenOrCreate(
                     identity: identity,
                     channelId: channelId

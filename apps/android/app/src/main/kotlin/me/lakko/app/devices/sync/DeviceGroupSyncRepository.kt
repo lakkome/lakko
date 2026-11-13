@@ -489,6 +489,7 @@ public class DeviceGroupSyncRepository(
         mutableReadCursors.value = emptyMap()
         mutableOrder.value = null
         mutableFolders.value = emptyList()
+        mutableChannelSubscriptions.value = null
         mutablePending.value = false
         mutableDeviceRemoved.value = false
     }
@@ -617,6 +618,7 @@ public class DeviceGroupSyncRepository(
                 republishQuickReaction(state)
                 republishDeviceAcks(state)
                 republishLinkRecords(state)
+                republishChannelSubscriptions(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
                 // conversation id; a screen holding ANY segment's id reads the
@@ -1294,6 +1296,107 @@ public class DeviceGroupSyncRepository(
         if (next != mutableLinkRecords.value) mutableLinkRecords.value = next
     }
 
+    // ------------------------------------------------------------
+    // docs/ux/second-device.md section 4a - the account's channel
+    // subscription register (lakko-sync `channel_subscription`)
+    // ------------------------------------------------------------
+
+    private val mutableChannelSubscriptions: MutableStateFlow<List<uniffi.lakko_ffi_uniffi.ChannelSubscriptionRegister>?> =
+        MutableStateFlow(null)
+
+    /** Every channel subscription register the fold holds, leaves included,
+     *  ascending by channel id; `null` while the state is not open. */
+    public val channelSubscriptions: StateFlow<List<uniffi.lakko_ffi_uniffi.ChannelSubscriptionRegister>?> =
+        mutableChannelSubscriptions.asStateFlow()
+
+    /** Project the register. Under [stateLock]. */
+    private fun republishChannelSubscriptions(state: SyncedState) {
+        val next = runCatching { state.allChannelSubscriptions() }.getOrNull() ?: return
+        val held = mutableChannelSubscriptions.value
+        if (held == null || held != next) mutableChannelSubscriptions.value = next
+    }
+
+    /** The account this repository is bound to (standard base64), or
+     *  `null` between sessions. */
+    public val boundAccountIdB64: String?
+        get() = activeAccountIdB64.get()
+
+    /**
+     * Write [channelId]'s subscription register and send it to the account's
+     * other devices. The fold is written at once (a reconcile that reads the
+     * register next sees it); the send runs in the background, and a failed
+     * send is kept by the pending flag and re-sent with the catch-up.
+     *
+     * [expectedHlc]: when given, the write happens only while the register
+     * held for [channelId] still carries that stamp (`0` = none held), so a
+     * reconcile planned against an older register never overwrites a leave
+     * written meanwhile. `false` when the state is not open, the value is
+     * refused, the identical value is held, or the expectation failed.
+     */
+    public fun setChannelSubscription(
+        channelId: ByteArray,
+        role: uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole,
+        subscriberSecret: ByteArray,
+        readKey: ByteArray,
+        publisherGroupId: ByteArray,
+        name: String,
+        handle: String,
+        expectedHlc: ULong? = null,
+    ): Boolean = writeChannelSubscription(channelId) { state ->
+        if (expectedHlc != null) {
+            val held = runCatching { state.channelSubscription(channelId) }.getOrNull()?.hlc ?: 0uL
+            if (held != expectedHlc) return@writeChannelSubscription false
+        }
+        state.setChannelSubscription(Hlc.mint(), channelId, role, subscriberSecret, readKey, publisherGroupId, name, handle)
+    }
+
+    /** Write the leave of [channelId] at once and send it. `false` when
+     *  nothing was held or it was already left. */
+    public fun leaveChannelSubscription(channelId: ByteArray): Boolean =
+        writeChannelSubscription(channelId) { it.leaveChannelSubscription(Hlc.mint(), channelId) }
+
+    private fun writeChannelSubscription(channelId: ByteArray, write: (SyncedState) -> Boolean): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                write(state)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel subscription refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.channelSubscriptionEnvelopeFor(channelId) }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            scope.launchBound(sessionBinding) {
+                try {
+                    sendServiceEnvelope(envelope)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "channel subscription not published (${cause.javaClass.simpleName})")
+                    pendingFlag?.recordFailure()
+                }
+            }
+        }
+        return true
+    }
+
+    /** A received channel subscription envelope, folded by its own stamp. */
+    private fun applyChannelSubscription(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyChannelSubscriptionEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "channel subscription envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** Fold one local link-record write, then send that record to the
      *  account's other devices. A failed publish is kept by the pending
      *  flag and re-sent with the catch-up. */
@@ -1649,6 +1752,10 @@ public class DeviceGroupSyncRepository(
         for (envelope in runCatching { restored.deviceAckEnvelopes() }.getOrNull().orEmpty()) applyDeviceAck(envelope)
         // ADR-0079 - and the link records.
         for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
+        // docs/ux/second-device.md section 4a - and the channel subscriptions.
+        for (envelope in runCatching { restored.channelSubscriptionEnvelopes() }.getOrNull().orEmpty()) {
+            applyChannelSubscription(envelope)
+        }
     }
 
     /** Permanently destroy the repository — cancels the
@@ -1954,6 +2061,12 @@ public class DeviceGroupSyncRepository(
                 runCatching { syncedState?.channelCommentEnvelopes() }.getOrNull().orEmpty()
         }
         for (envelope in feedbackEnvelopes) sendServiceEnvelope(envelope)
+        // docs/ux/second-device.md section 4a - nor are the channel
+        // subscription registers, each with its own stamp.
+        val channelSubscriptionEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.channelSubscriptionEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in channelSubscriptionEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -2256,6 +2369,13 @@ public class DeviceGroupSyncRepository(
                                 // ADR-0079 - one of the account's invite links
                                 // from another of its devices.
                                 applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isChannelSubscriptionEnvelope(body.envelope)
+                            ) {
+                                // docs/ux/second-device.md section 4a - a
+                                // channel the account subscribed to or left on
+                                // another of its devices.
+                                applyChannelSubscription(body.envelope)
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isChannelReactionEnvelope(body.envelope)
                             ) {

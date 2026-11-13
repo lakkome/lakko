@@ -15,9 +15,16 @@ import SwiftUI
 final class ChannelInviteCardStore: @unchecked Sendable {
     static let shared = ChannelInviteCardStore()
     private let lock = NSLock()
-    private var cache: [String: [String: Data]] = [:]
+    private var cache: [String: [String: Entry]] = [:]
 
-    private static func key(_ accountIdB64: String) -> String { "lakko.channel-invite-cards.v2.\(accountIdB64)" }
+    /// One stored card and the order it was stored in, so the oldest goes
+    /// first when the store is full.
+    private struct Entry: Codable {
+        let card: Data
+        let seq: UInt64
+    }
+
+    private static func key(_ accountIdB64: String) -> String { "lakko.channel-invite-cards.v3.\(accountIdB64)" }
 
     private static func slot(_ conversationIdHex: String, _ messageId: Int64) -> String {
         "\(conversationIdHex.lowercased()):\(messageId)"
@@ -30,33 +37,54 @@ final class ChannelInviteCardStore: @unchecked Sendable {
         guard let accountIdB64, !conversationIdHex.isEmpty else { return }
         lock.lock()
         var map = loadLocked(accountIdB64)
-        map[Self.slot(conversationIdHex, messageId)] = card
-        if map.count > Self.cap { map.remove(at: map.startIndex) }
+        let next = (map.values.map(\.seq).max() ?? 0) &+ 1
+        map[Self.slot(conversationIdHex, messageId)] = Entry(card: card, seq: next)
+        Self.trim(&map)
         cache[accountIdB64] = map
         lock.unlock()
-        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
-        defer { gate.leave() }
-        UserDefaults.standard.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+        persist(map, accountIdB64: accountIdB64)
     }
 
     func card(conversationIdHex: String, messageId: Int64, accountIdB64: String?) -> Data? {
         guard let accountIdB64, !conversationIdHex.isEmpty else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return loadLocked(accountIdB64)[Self.slot(conversationIdHex, messageId)]
+        return loadLocked(accountIdB64)[Self.slot(conversationIdHex, messageId)]?.card
     }
 
-    /// A sent row got its DS id: the card moves from the local id to it.
+    /// A sent row got its DS id: the card moves from the local id to it, and
+    /// the local id's entry goes.
     func move(conversationIdHex: String, from localId: Int64, to messageId: Int64, accountIdB64: String?) {
-        guard let card = card(conversationIdHex: conversationIdHex, messageId: localId, accountIdB64: accountIdB64)
-        else { return }
-        put(card: card, conversationIdHex: conversationIdHex, messageId: messageId, accountIdB64: accountIdB64)
+        guard let accountIdB64, !conversationIdHex.isEmpty, localId != messageId else { return }
+        lock.lock()
+        var map = loadLocked(accountIdB64)
+        guard let entry = map.removeValue(forKey: Self.slot(conversationIdHex, localId)) else {
+            lock.unlock()
+            return
+        }
+        map[Self.slot(conversationIdHex, messageId)] = entry
+        cache[accountIdB64] = map
+        lock.unlock()
+        persist(map, accountIdB64: accountIdB64)
     }
 
-    private func loadLocked(_ accountIdB64: String) -> [String: Data] {
+    /// Drop the oldest entries until the map is within ``cap``.
+    private static func trim(_ map: inout [String: Entry]) {
+        guard map.count > cap else { return }
+        let oldest = map.sorted { $0.value.seq < $1.value.seq }.prefix(map.count - cap).map(\.key)
+        for key in oldest { map.removeValue(forKey: key) }
+    }
+
+    private func persist(_ map: [String: Entry], accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        UserDefaults.standard.set(try? JSONEncoder().encode(map), forKey: Self.key(accountIdB64))
+    }
+
+    private func loadLocked(_ accountIdB64: String) -> [String: Entry] {
         if let held = cache[accountIdB64] { return held }
         let map = UserDefaults.standard.data(forKey: Self.key(accountIdB64))
-            .flatMap { try? JSONDecoder().decode([String: Data].self, from: $0) } ?? [:]
+            .flatMap { try? JSONDecoder().decode([String: Entry].self, from: $0) } ?? [:]
         cache[accountIdB64] = map
         return map
     }

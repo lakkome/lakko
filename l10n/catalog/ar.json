@@ -2073,6 +2073,14 @@
       "text": "التفاعلات في القناة مجهولة. لا يمكن لأحد أن يرى من تفاعل، ولا حتى مالك القناة.",
       "status": "machine"
     },
+    "channels.reader_device.owner": {
+      "text": "تنشر في هذه القناة من الجهاز الذي أنشأتها عليه.",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "تنشر في هذه القناة من الجهاز الذي أصبحت عليه ناشرًا.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "يجدّد Lakko حماية القناة تلقائيًا. جدّدها الآن إذا كنت تعتقد أن جهاز أحد المشتركين قد تعرّض للاختراق.",
       "status": "machine"

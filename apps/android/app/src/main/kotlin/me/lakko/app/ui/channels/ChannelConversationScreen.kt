@@ -154,6 +154,16 @@ public fun ChannelConversationScreen(
     val channel = channels.firstOrNull { it.id == channelId }
     val isOrphaned = channelIsOrphaned(channelId, orphaned)
     val isPublisher = keysByChannel.containsKey(channelId) && !isOrphaned
+    // docs/ux/second-device.md section 4a — the account owns or co-publishes
+    // this channel from another device: read it here, with one line in
+    // place of the composer.
+    val publisherKeysReady by state.publisherKeysReady.collectAsState()
+    val readerRole = me.lakko.app.channels.readerDeviceRole(
+        role = remember(channels, keysByChannel, channelId) { state.accountRoleOf(channelId) },
+        publishesHere = isPublisher,
+        orphaned = isOrphaned,
+        keysReady = publisherKeysReady,
+    )
     val followed = channel != null && subscriberKeys.containsKey(channelId)
     var pressed by rememberSaveable(channelId) { mutableStateOf(subscribeOnOpen) }
     val reading = isPublisher || followed || pressed
@@ -263,7 +273,7 @@ public fun ChannelConversationScreen(
         Box(Modifier.fillMaxSize().padding(inner)) {
             when {
                 isOrphaned -> OrphanedNotice(onRemove = {
-                    state.removeChannel(channelId)
+                    state.removeOrphanedFromDevice(channelId)
                     onBack()
                 })
                 !reading -> SubscribeCard(
@@ -280,6 +290,7 @@ public fun ChannelConversationScreen(
                     state = state,
                     client = client,
                     isPublisher = isPublisher,
+                    readerRole = readerRole,
                     publicChannel = public,
                     register = !isPublisher && !followed,
                     onRegistered = {
@@ -349,6 +360,9 @@ private fun ChannelTimelineView(
     state: ChannelsUiState,
     client: ChannelsClient,
     isPublisher: Boolean,
+    /** docs/ux/second-device.md section 4a — the account's role when this
+     *  device reads a channel it owns or co-publishes elsewhere, else `null`. */
+    readerRole: me.lakko.app.channels.ChannelAccountRole?,
     publicChannel: Boolean,
     /** A subscriber's first read: register this device's key first. */
     register: Boolean,
@@ -422,8 +436,9 @@ private fun ChannelTimelineView(
         failure = null
         if (!isPublisher) {
             try {
-                val kp = state.subscriberKeysByChannel.value[channelId]
-                    ?: ChannelsComposer.freshSubscriberKeys().also { state.setSubscriberKeys(channelId, it) }
+                // docs/ux/second-device.md section 4a — the account's one key
+                // for the channel when another device subscribed it.
+                val kp = me.lakko.app.channels.ChannelSubscriptionSync.keyForSubscribing(state, channelId)
                 val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
                 if (register || attempt > 0) {
                     phase = ReaderPhase.Registering
@@ -848,6 +863,18 @@ private fun ChannelTimelineView(
                     onRemoveAttachment = { index ->
                         pending.value = pending.value.filterIndexed { i, _ -> i != index }
                     },
+                )
+            }
+        } else {
+            // docs/ux/second-device.md section 4a — one line in secondary
+            // text where the composer would be: no button, no link.
+            readerRole?.let { me.lakko.app.channels.readerDeviceLineKey(it) }?.let { key ->
+                Text(
+                    t(key),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 )
             }
         }

@@ -139,6 +139,11 @@ internal class StoredChannels(
     val publisherIds: Set<String>,
     val readable: List<ChannelReadable>,
 ) {
+    /** The channels whose posts never notify on this device: those it
+     *  publishes to, and those the account owns or co-publishes from another
+     *  device (docs/ux/second-device.md section 4a). */
+    val ownIds: Set<String> = channelsOwnedByAccount(held, publisherIds)
+
     companion object {
         fun load(context: Context, account: String): StoredChannels {
             val subscriberPrefs = me.lakko.app.channels.ChannelKeyStore.encryptedPrefs(context)
@@ -212,7 +217,7 @@ internal fun storedChannelFacts(context: Context, account: String, stored: Store
 
         override fun openAndVisible(channelIdHex: String): Boolean = VisibleChannel.isShown(channelIdHex)
 
-        override fun own(channelIdHex: String): Boolean = channelIdHex.lowercase() in stored.publisherIds
+        override fun own(channelIdHex: String): Boolean = channelIdHex.lowercase() in stored.ownIds
 
         override fun title(channelIdHex: String): String = channelNotificationTitle(stored.held, channelIdHex)
 
@@ -243,7 +248,11 @@ public fun liveChannelFacts(
     isMuted: (String) -> Boolean,
 ): ChannelPostNotifier.Facts = object : ChannelPostNotifier.Facts {
     private val list = channels.channels.value
-    private val publishing = channels.keysByChannel.value.keys.mapTo(HashSet()) { it.lowercase() }
+    // docs/ux/second-device.md section 4a — a reader device of the owner or
+    // a publisher announces no post of the channel either.
+    private val publishing = channelsOwnedByAccount(list, channels.keysByChannel.value.keys) +
+        list.filter { channels.accountRoleOf(it.id) != me.lakko.app.channels.ChannelAccountRole.SUBSCRIBER }
+            .map { it.id.lowercase() }
 
     override val held: Set<String> = list.mapTo(HashSet()) { it.id.lowercase() }
 
@@ -256,4 +265,20 @@ public fun liveChannelFacts(
     override fun title(channelIdHex: String): String = channelNotificationTitle(list, channelIdHex)
 
     override fun body(channelIdHex: String, post: PersistedChannelPost): String = channelNotificationBodyOf(post)
+}
+
+/**
+ * The channels of [held] whose posts never notify on this device: the ones
+ * it publishes to ([publisherIds]) and the ones the account owns or
+ * co-publishes from another device (their stored role), lowercase. Only the
+ * account's own side posts there, and a reader device cannot tell its own
+ * account's post from another publisher's (docs/ux/second-device.md
+ * section 4a).
+ */
+internal fun channelsOwnedByAccount(held: List<ChannelHandle>, publisherIds: Set<String>): Set<String> {
+    val out = publisherIds.mapTo(HashSet()) { it.lowercase() }
+    for (c in held) {
+        if (c.role != me.lakko.app.channels.ChannelAccountRole.SUBSCRIBER) out += c.id.lowercase()
+    }
+    return out
 }

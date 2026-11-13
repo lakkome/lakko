@@ -292,6 +292,33 @@ pub enum BoundsError {
     /// `reactions-and-emoji.md` D3).
     #[error("quick reaction length is out of bounds")]
     QuickReaction,
+    /// A channel subscription's state byte was neither left nor subscribed
+    /// (maintainer decision of 2026-11-13).
+    #[error("unknown channel subscription state")]
+    ChannelSubscriptionState,
+    /// A channel subscription's role byte was none this build knows.
+    #[error("unknown channel subscription role")]
+    ChannelSubscriptionRole,
+    /// A channel subscription's read key was neither absent nor 32 bytes.
+    #[error("channel subscription read key length is out of bounds")]
+    ChannelSubscriptionReadKey,
+    /// A channel subscription's PublisherGroup id was not 32 bytes for a
+    /// co-publisher, or present for another role.
+    #[error("channel subscription publisher group id does not fit its role")]
+    ChannelSubscriptionPublisherGroup,
+    /// A channel subscription's name was neither empty nor a display name.
+    #[error("channel subscription name fails the display-name rule")]
+    ChannelSubscriptionName,
+    /// A channel subscription's handle was neither empty nor a canonical
+    /// name.
+    #[error("channel subscription handle is not a canonical name")]
+    ChannelSubscriptionHandle,
+    /// The account already holds the most live channel subscriptions a
+    /// client writes
+    /// ([`super::channel_subscription::CHANNEL_SUBSCRIPTIONS_MAX_CLIENT`]). A
+    /// writer-side rule, never a decode bound.
+    #[error("too many channel subscriptions")]
+    TooManyChannelSubscriptions,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -1024,8 +1051,10 @@ pub enum SyncEntry {
     /// deletion (ADR-0087 section 13a).
     ChannelComment(super::channel_comment::ChannelCommentEntry),
     /// The account's quick reaction (UX `reactions-and-emoji.md` D3).
-    /// Appended last.
     QuickReaction(super::quick_reaction::QuickReactionEntry),
+    /// One of the account's channel subscriptions, or its leave (2026-11-13).
+    /// Appended last.
+    ChannelSubscription(super::channel_subscription::ChannelSubscriptionEntry),
 }
 
 /// Which register an entry writes.
@@ -1082,9 +1111,11 @@ pub enum RegisterKey {
         u64,
         [u8; super::channel_comment::CHANNEL_COMMENT_NONCE_LEN],
     ),
-    /// The account's one quick-reaction register. Appended last, so the
-    /// register order of every older kind is unchanged.
+    /// The account's one quick-reaction register.
     QuickReaction,
+    /// The subscription register of this channel. Appended last, so the
+    /// register order of every older kind is unchanged.
+    ChannelSubscription([u8; super::channel_subscription::CHANNEL_SUBSCRIPTION_CHANNEL_ID_LEN]),
 }
 
 impl RegisterKey {
@@ -1120,6 +1151,7 @@ const TAG_DEVICE_ACK: u8 = 16;
 const TAG_CHANNEL_REACTION: u8 = 17;
 const TAG_CHANNEL_COMMENT: u8 = 18;
 const TAG_QUICK_REACTION: u8 = 19;
+const TAG_CHANNEL_SUBSCRIPTION: u8 = 20;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -1152,6 +1184,7 @@ impl SyncEntry {
                 RegisterKey::ChannelComment(c.channel_id, c.post_cursor, c.comment_nonce)
             },
             Self::QuickReaction(_) => RegisterKey::QuickReaction,
+            Self::ChannelSubscription(c) => RegisterKey::ChannelSubscription(c.channel_id),
         }
     }
 
@@ -1179,6 +1212,7 @@ impl SyncEntry {
             Self::ConversationEnd(e) => e.validate(),
             Self::ChannelReaction(r) => r.validate(),
             Self::QuickReaction(q) => q.validate(),
+            Self::ChannelSubscription(c) => c.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -1277,6 +1311,12 @@ impl SyncEntry {
             Self::QuickReaction(q) => {
                 out.push(TAG_QUICK_REACTION);
                 q.encode_body(&mut out);
+            },
+            // The key first, the state byte after it: on an exact stamp tie a
+            // subscription (state 2) beats a leave (state 1).
+            Self::ChannelSubscription(c) => {
+                out.push(TAG_CHANNEL_SUBSCRIPTION);
+                c.encode_body(&mut out);
             },
             Self::LinkRecord(r) => {
                 out.push(TAG_LINK_RECORD);
@@ -1465,6 +1505,9 @@ impl SyncEntry {
             ),
             TAG_QUICK_REACTION => Self::QuickReaction(
                 super::quick_reaction::QuickReactionEntry::take_body(&mut cur)?,
+            ),
+            TAG_CHANNEL_SUBSCRIPTION => Self::ChannelSubscription(
+                super::channel_subscription::ChannelSubscriptionEntry::take_body(&mut cur)?,
             ),
             _ => return Err(CodecError::UnknownTag),
         };

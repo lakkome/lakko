@@ -368,8 +368,12 @@ export async function resealToSubscribers(
       after = page.nextAfter;
     }
   }
+  // 2026-11-13: the account's own reader key (its other devices read with
+  // it) gets every new seed, above the mark too, like this device's own key
+  // is never removed.
+  const resealed = withOwnReaderKey(keys, plan.ownReaderKeyHex);
   const bytesByHex = new Map<string, Uint8Array>();
-  for (const subscriberHex of keys) {
+  for (const subscriberHex of resealed) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
       // Malformed subscriber hex from the server: refuse to post a partial
@@ -404,6 +408,18 @@ export async function resealToSubscribers(
 export function resealPlan(channelIdHex: string): {
   readonly readKey: Uint8Array | null;
   readonly perKeyThroughSeq: number | "all";
+  /** The account's own reader key this device registered (2026-11-13), or
+   *  `null`: resealed to whatever the mark says. */
+  readonly ownReaderKeyHex: string | null;
+} {
+  const own = channelsActions.accessOf(channelIdHex).readerKeyRegisteredHex ?? null;
+  return { ...resealRows(channelIdHex), ownReaderKeyHex: own };
+}
+
+/** The per-key rows and the public read key of a reseal. */
+function resealRows(channelIdHex: string): {
+  readonly readKey: Uint8Array | null;
+  readonly perKeyThroughSeq: number | "all";
 } {
   const access = channelsActions.accessOf(channelIdHex);
   const meta = channelsState.metaByChannel().get(channelIdHex);
@@ -423,6 +439,14 @@ export function resealPlan(channelIdHex: string): {
   const readKey = access.readKeyB64 === null ? null : b64ToBytesStd(access.readKeyB64);
   if (readKey === null || readKey.length !== 32) return { readKey: null, perKeyThroughSeq: "all" };
   return { readKey, perKeyThroughSeq };
+}
+
+/** The per-key reseal set with the account's own reader key added once
+ *  (2026-11-13). Pure. */
+export function withOwnReaderKey(keys: readonly string[], ownReaderKeyHex: string | null): string[] {
+  if (ownReaderKeyHex === null) return [...keys];
+  const own = ownReaderKeyHex.toLowerCase();
+  return keys.some((k) => k.toLowerCase() === own) ? [...keys] : [...keys, own];
 }
 
 function b64ToBytesStd(b64: string): Uint8Array | null {

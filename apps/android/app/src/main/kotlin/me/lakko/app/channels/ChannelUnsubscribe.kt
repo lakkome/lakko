@@ -60,12 +60,26 @@ public object ChannelUnsubscribe {
      * server's 90-day prune retires a row nobody reads).
      *
      * ADR-0087 section 9.5: the row and its posts go from every device of the
-     * person. [tellDevices] says so over the DeviceGroup; a device acting on
-     * that register passes `false`.
+     * person. [tellDevices] says so over the DeviceGroup (the conversation
+     * end and the channel subscription register's leave, written BEFORE the
+     * channel goes so no reconcile adds it back); a device acting on either
+     * register passes `false`. [tellServer] `false`: the device that left
+     * already told the service (docs/ux/second-device.md section 4a).
      */
-    public fun leave(state: ChannelsUiState, channelId: String, baseUrl: String, tellDevices: Boolean = true) {
-        val keys = state.subscriberKeysByChannel.value[channelId]?.let {
-            ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
+    public fun leave(
+        state: ChannelsUiState,
+        channelId: String,
+        baseUrl: String,
+        tellDevices: Boolean = true,
+        tellServer: Boolean = true,
+    ) {
+        if (tellDevices) ChannelSubscriptionSync.recordLeave(channelId)
+        val keys = if (!tellServer) {
+            null
+        } else {
+            state.subscriberKeysByChannel.value[channelId]?.let {
+                ChannelSubscriberKeys(secret = it.secret.copyOf(), publicKey = it.publicKey.copyOf())
+            }
         }
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)

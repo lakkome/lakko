@@ -257,6 +257,8 @@ public object ChannelReadKeys {
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(key(accountIdB64, channelId), Base64.encodeToString(readKey, Base64.NO_WRAP))
             .apply()
+        // docs/ux/second-device.md section 4a — the register carries it.
+        ChannelSubscriptionSync.noteReadKeyStored()
     }
 
     /** Forget device / Delete account. */

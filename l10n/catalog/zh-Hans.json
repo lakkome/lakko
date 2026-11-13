@@ -2073,6 +2073,14 @@
       "text": "频道中的回应是匿名的。没有人能看到谁做出了回应，频道所有者也不能。",
       "status": "machine"
     },
+    "channels.reader_device.owner": {
+      "text": "你只能在创建此频道的设备上发帖。",
+      "status": "machine"
+    },
+    "channels.reader_device.publisher": {
+      "text": "你只能在成为发布者的那台设备上在此频道发帖。",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko 会自动更新频道的保护。如果你认为某位订阅者的设备已被入侵，请立即更新。",
       "status": "machine"

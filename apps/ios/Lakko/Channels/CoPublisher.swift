@@ -43,12 +43,39 @@ public enum CoPublisher {
     /// the stack this build talks to (`ApiEndpoints.webOrigin`).
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
-    /// Open (or create) the persistent PublisherGroup handle for a channel.
+    /// Open the persistent PublisherGroup handle of a channel this device
+    /// publishes. Never creates one: a channel whose group is not in this
+    /// device's channel provider is read here, not published
+    /// (``CoPublisherError/notOnThisDevice``). The trap rule of ADR-0087
+    /// section 12 as amended 2026-11-13: founding a group at a channel's
+    /// derived id outside New channel would fork the live journal (the
+    /// claim would reset it), which is what a second device of the owner
+    /// would do. Only ``foundPublisherGroup(identity:accountIdB64:channelIdHex:)``
+    /// creates, and only New channel calls it.
+    public static func openPublisherGroup(
+        identity: Identity,
+        accountIdB64: String?,
+        channelIdHex: String
+    ) throws -> PublisherGroup {
+        do {
+            guard let existing = try loadPublisherGroup(identity: identity, channelIdHex: channelIdHex) else {
+                throw CoPublisherError.notOnThisDevice
+            }
+            return existing
+        } catch let error as CoPublisherError {
+            throw error
+        } catch {
+            throw LegacyChannelV1.mapOpenError(error)
+        }
+    }
+
+    /// New channel only: open, or found when absent, the PublisherGroup of a
+    /// channel this device is creating now.
     ///
     /// `accountIdB64` is the account whose `identity` this is, captured when
     /// the caller's work began: a group founded here is marked for it
     /// (``markFounded(_:accountIdB64:)``).
-    public static func openPublisherGroup(
+    public static func foundPublisherGroup(
         identity: Identity,
         accountIdB64: String?,
         channelIdHex: String
@@ -978,6 +1005,10 @@ public enum CoPublisherError: Error, LocalizedError {
     /// Not a `/g/` ledger link, or one whose row is gone (revoked, expired).
     case notACoPublisherLink
     case notAChannelGroup
+    /// The channel's PublisherGroup is not in this device's channel
+    /// provider: this device reads the channel and publishes nothing in it
+    /// (`docs/ux/second-device.md` section 4a).
+    case notOnThisDevice
     /// ADR-0028 amendment 2026-09-28 — the link's secret is missing or the
     /// capability does not open under it.
     case linkDamaged
@@ -994,6 +1025,8 @@ public enum CoPublisherError: Error, LocalizedError {
             return "not a live /g/ co-publisher link"
         case .notAChannelGroup:
             return "co-publisher link does not target a channel PublisherGroup"
+        case .notOnThisDevice:
+            return "the channel's publisher group is not on this device"
         case .linkDamaged:
             return inviteLinkDamagedMessage
         }

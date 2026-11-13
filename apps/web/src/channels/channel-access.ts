@@ -61,6 +61,7 @@ import {
   composePost,
   freshPublisherKeys,
   freshSubscriberKeys,
+  subscriberKeysOfSecret,
   isCurrentSubscriberKey,
   openSubscriberSeedEnvelope,
   type ChannelSubscriberKeys,
@@ -86,6 +87,13 @@ import { LegacyChannelError } from "./legacy-v1";
 import { composerSeedFor, outgoingPublisherSeed, readsPublicSeeds } from "./publisher-seed";
 import { listedStamp, nextListingStamp } from "../discover/listing";
 import { channelsActions, channelsState, awaitChannelsHydration } from "../state/channels-state";
+import {
+  channelSubscriptionOf,
+  clearChannelIntent,
+  liveRegisterSecret,
+  noteChannelIntent,
+} from "./channel-subscription-register";
+import { readerDeviceRole } from "./channel-subscription-plan";
 import {
   claimChannelHandle,
   replaceChannelHandle,
@@ -240,8 +248,14 @@ function isPublisherHere(idHex: string): boolean {
   return channelsState.keysByChannel().has(idHex);
 }
 
+/** This device holds the channel's PublisherGroup (keys are set only once
+ *  the group loaded or was founded in New channel) and it is the owner's:
+ *  no co-published group id here, and the account's register does not say
+ *  co-publisher (2026-11-13: never "has keys and no mark" alone). */
 function isOwnerHere(idHex: string): boolean {
-  return isPublisherHere(idHex) && channelsActions.coPublisherGroupIdOf(idHex) === undefined;
+  if (!isPublisherHere(idHex) || channelsActions.coPublisherGroupIdOf(idHex) !== undefined) return false;
+  const reg = channelSubscriptionOf(idHex);
+  return !(reg?.subscribed === true && reg.role === "co-publisher");
 }
 
 /** Only the channel owner's device rotates the channel key (maintainer,
@@ -262,6 +276,25 @@ export function channelVisibilityOf(idHex: string): ChannelVisibility | null {
     metaListed: meta?.handle?.isPublic ?? meta?.listed,
     cameBy: a.visibility,
   });
+}
+
+/**
+ * Reactive. 2026-11-13 (UX `second-device.md` section 4a): this device lists
+ * a channel the ACCOUNT owns or co-publishes but holds no PublisherGroup for
+ * it, so it is a reader here: `"owner"` or `"publisher"`. `null` on the
+ * publishing device and for a plain subscription. Decided by the account's
+ * register and group presence, never by local keys alone.
+ */
+export function channelReaderDeviceRoleOf(idHex: string): "owner" | "publisher" | null {
+  return readerDeviceRole({
+    listed: channelsState.channels().some((c) => c.id === idHex),
+    publishing: isPublisherHere(idHex),
+    registerRole: channelSubscriptionOf(idHex)?.subscribed === true ? (channelSubscriptionOf(idHex)?.role ?? null) : null,
+  });
+}
+
+function sameSecret(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** Reactive. `null`: this device holds nothing for the channel. */
@@ -828,7 +861,19 @@ export type ChannelAccessKey =
 
 async function ensureSubscriberKeys(idHex: string): Promise<ChannelSubscriberKeys> {
   await awaitChannelsHydration();
+  // 2026-11-13, one key per account and channel: where the account already
+  // is subscribed (another device of it), this device takes that key and
+  // never makes one; the service already knows it.
+  const shared = liveRegisterSecret(idHex);
   const existing = channelsState.subscriberKeysByChannel().get(idHex);
+  if (shared !== null) {
+    if (existing !== undefined && sameSecret(existing.secret, shared)) return existing;
+    const adopted = await subscriberKeysOfSecret(shared);
+    if (adopted !== null) {
+      channelsActions.setSubscriberKeys(idHex, adopted);
+      return adopted;
+    }
+  }
   if (existing !== undefined && (await isCurrentSubscriberKey(existing))) return existing;
   const fresh = await freshSubscriberKeys();
   channelsActions.setSubscriberKeys(idHex, fresh);
@@ -847,6 +892,9 @@ export async function subscribeToChannel(
   access: ChannelAccessKey,
   facts: { name: string; description: string; handle?: string; avatar?: AvatarData | null },
 ): Promise<"reading" | "waiting"> {
+  // 2026-11-13: the account's register follows this subscribe (a leave the
+  // account holds is overruled by subscribing again here).
+  noteChannelIntent(idHex, "subscribed");
   const keys = await ensureSubscriberKeys(idHex);
   const pubHex = bytesToHex(keys.public);
   const wasm = await loadWasm();
@@ -870,6 +918,8 @@ export async function subscribeToChannel(
       }
     }
   } catch (err) {
+    // Nothing subscribed: the account's register is not told anything.
+    clearChannelIntent(idHex);
     throw new ChannelError(serviceErrorCode(err), { cause: err });
   }
   if (!channelsState.channels().some((c) => c.id === idHex)) {

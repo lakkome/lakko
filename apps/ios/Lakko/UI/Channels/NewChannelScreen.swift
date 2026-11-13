@@ -231,10 +231,12 @@ struct NewChannelScreen: View {
             let owner = try Identity.fromSeed(seed: accountIdentitySeed)
             _ = try await client.createChannel(channelIdHex: id, accountIdentity: owner, isPrivate: !isPublic)
             let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
+            // New channel is the one place a PublisherGroup is founded.
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: id,
-                existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id))
-            let publisherGroup = try CoPublisher.openPublisherGroup(
+                existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id),
+                mayFound: true)
+            let publisherGroup = try CoPublisher.foundPublisherGroup(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: id)
             try ChannelPublisherIdentity.shared.persistOrThrow()
             let signer = try publisherGroup.dsAccessSigner(identity: identity)
@@ -247,6 +249,9 @@ struct NewChannelScreen: View {
                 id: id, localName: channelName, localDescription: channelDescription,
                 addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000), handle: written.handle))
             state.setKeys(channelId: id, keys: keys)
+            // ADR-0050 section 2.9 (amended 2026-11-13) — the account's other
+            // devices list the channel as its owner's (readers there).
+            state.onRelationshipStarted?(id)
             PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
             if let generation = state.currentKeyGeneration {
                 state.recordOwnerKeyGeneration(channelId: id, generation: generation)

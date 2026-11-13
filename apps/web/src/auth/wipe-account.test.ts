@@ -276,6 +276,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.channels.notified.v1.${acct}`, JSON.stringify({ ["ab".repeat(16)]: 7 }));
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
   put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
+  put(`lakko.channel-subscriptions.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
@@ -297,6 +298,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   );
   put(`lakko.reset-continuity.v1.${acct}`, JSON.stringify({ moved: { G: 1 }, resent: {} }));
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
+  put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
   put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
@@ -705,6 +707,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.recent-reactions:": "account",
   "lakko.quick-reaction.unsent.v1.": "account",
   "lakko.channel-feedback.unsent.v1.": "account",
+  "lakko.channel-subscriptions.unsent.v1.": "account",
+  "lakko.channels.orphan-removed.v1": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",
   // Reactions section 12: this device's notification filter.

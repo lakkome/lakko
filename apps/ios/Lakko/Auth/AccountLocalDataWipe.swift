@@ -347,6 +347,13 @@ enum AccountLocalDataWipe {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.linkRecordsUnsentKey(accountIdB64: accountIdB64))
         }
+        // ADR-0050 section 2.9 (amended 2026-11-13) — the unsent channel
+        // subscription marker and the channel intents not folded yet.
+        step("channel-subscriptions-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.channelSubscriptionsUnsentKey(accountIdB64: accountIdB64))
+            ChannelSubscriptionSync.OwedStore.clear(accountIdB64: accountIdB64, defaults: standard)
+        }
         step("pending-contacts") { PendingContactStore.clear(accountIdB64: accountIdB64) }
         // ADR-0079 (reworked 2026-10-17) — the link requests not decided yet
         // (sealed, they carry link secrets) and the claims of link requests.

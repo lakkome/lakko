@@ -21,7 +21,7 @@ describe("resealPlan (ADR-0087 sections 6 and 7)", () => {
       admittedThroughSeq: 42,
       admissionSeeds: [{ version: 1, seedB64: KEY_B64 }],
     }));
-    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: 42 });
+    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: 42, ownReaderKeyHex: null });
   });
 
   it("a public channel files the public seed and reseals per key only to its private-era rows", () => {
@@ -33,7 +33,7 @@ describe("resealPlan (ADR-0087 sections 6 and 7)", () => {
 
   it("a private channel on a device holding no admission seed reseals only to its readers, never every row", () => {
     channelsActions.updateAccess(ID, (r) => ({ ...r, visibility: "private", admittedThroughSeq: 7, admissionSeeds: [] }));
-    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: 7 });
+    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: 7, ownReaderKeyHex: null });
   });
 
   it("a device that checks no tickets (a channel from before phase B) reseals to every row", () => {
@@ -43,6 +43,6 @@ describe("resealPlan (ADR-0087 sections 6 and 7)", () => {
 
   it("a public channel whose read key this device lacks reseals to every row", () => {
     channelsActions.updateAccess(ID, (r) => ({ ...r, visibility: "public", readKeyB64: null }));
-    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: "all" });
+    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: "all", ownReaderKeyHex: null });
   });
 });

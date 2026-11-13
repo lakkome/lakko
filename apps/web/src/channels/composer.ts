@@ -356,6 +356,22 @@ export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
   }
 }
 
+/** The subscriber key pair of a 32-byte Ed25519 seed (the account's shared
+ *  key from its channel-subscription register), or `null` when the core
+ *  refuses the seed. */
+export async function subscriberKeysOfSecret(secret: Uint8Array): Promise<ChannelSubscriberKeys | null> {
+  const wasm = await loadWasm();
+  let kp: InstanceType<Wasm["ChannelSubscriberKeypair"]> | null = null;
+  try {
+    kp = new wasm.ChannelSubscriberKeypair(secret);
+    return { secret: secret.slice(), public: kp.public() };
+  } catch {
+    return null;
+  } finally {
+    kp?.free();
+  }
+}
+
 /**
  * `true` when `keys` is an ADR-0060 Ed25519 key pair: its stored public
  * half is the Ed25519 public key of its secret. A pair stored before the
@@ -521,6 +537,68 @@ export async function openOrFoundPublisherGroup(
     }
   }
   return publisher;
+}
+
+/** 2026-11-13 (the trap rule): this device holds no PublisherGroup for the
+ *  channel, so it is a reader of it here. Nothing is founded and no journal
+ *  is claimed or reset for it outside New channel. */
+export class PublisherGroupNotHeldError extends Error {
+  override name = "PublisherGroupNotHeldError";
+  constructor() {
+    super("this device holds no PublisherGroup for the channel");
+  }
+}
+
+/**
+ * Open the channel's PublisherGroup this device holds, for every path but New
+ * channel (2026-11-13, the trap rule): `PublisherGroup.load` only. A miss is
+ * {@link PublisherGroupNotHeldError} and nothing is founded: founding here
+ * on a device of the owner that holds no group state would claim-reset the
+ * live journal onto a group only this device holds. A held group whose
+ * founding claim was never confirmed (the marker of
+ * {@link openOrFoundPublisherGroup}) claims again, as before. The caller owns
+ * the handle.
+ */
+export async function openHeldPublisherGroup(
+  wasm: Wasm,
+  identity: WasmIdentity,
+  channelId: Uint8Array,
+  storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
+  owner: string | null = boundContactsAccount(),
+): Promise<InstanceType<Wasm["PublisherGroup"]>> {
+  let loaded: InstanceType<Wasm["PublisherGroup"]> | undefined;
+  try {
+    loaded = wasm.PublisherGroup.load(identity, channelId);
+  } catch (err) {
+    // Retired v1 state refuses here and cannot be repaired.
+    rethrowAsLegacyChannel(err);
+  }
+  if (loaded === undefined) throw new PublisherGroupNotHeldError();
+  const groupId = loaded.groupId();
+  const key = foundingKey(owner, groupId);
+  if (isUnconfirmedFounding(storage, key)) {
+    try {
+      const epochSigner = loaded.dsAccessSigner(identity);
+      const root = wasm.dsJournalRootSigner(identity, groupId);
+      try {
+        await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
+      } finally {
+        epochSigner.free();
+        root.free();
+      }
+      clearUnconfirmedFounding(storage, key);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: PublisherGroup claim failed; the channel is not opened", err);
+      try {
+        loaded.free();
+      } catch {
+        /* already freed */
+      }
+      throw err;
+    }
+  }
+  return loaded;
 }
 
 /**

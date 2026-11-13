@@ -47,10 +47,21 @@ public object ChannelSubscriberRows {
      *   owner), left alone: it cannot tell a reader from before from a row
      *   with no ticket. No ticket alone never lets a row in.
      */
-    public fun letInVerdict(row: Row, ticketLive: Boolean, mark: Long, markSet: Boolean, ownKeyHex: String?): LetIn = when {
+    public fun letInVerdict(
+        row: Row,
+        ticketLive: Boolean,
+        mark: Long,
+        markSet: Boolean,
+        ownKeyHex: String?,
+        /** docs/ux/second-device.md section 4a — the account's reader key this
+         *  device registered (the account's other devices read under it):
+         *  treated as this device's own key, never removed. */
+        accountKeyHex: String? = null,
+    ): LetIn = when {
         row.seq <= mark -> LetIn.ADMIT
         ticketLive -> LetIn.ADMIT
         ownKeyHex != null && row.pubkeyHex.equals(ownKeyHex, ignoreCase = true) -> LetIn.LEAVE
+        accountKeyHex != null && row.pubkeyHex.equals(accountKeyHex, ignoreCase = true) -> LetIn.LEAVE
         markSet -> LetIn.REMOVE
         else -> LetIn.LEAVE
     }
@@ -153,12 +164,13 @@ public object ChannelSubscriberRows {
         val live = ChannelPublisherSigners.derive(pub, channelId).use { client.listInviteKeys(channelId, it) }.toSet()
         val rows = read(context, state, client, channelId)
         val ownKeyHex = state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(ChannelsComposer::bytesToHex)
+        val accountKeyHex = ChannelAccountReaderKey.registeredKeyHex(context, account, channelId)
         val mark = ChannelAdmissionMark.get(context, account, channelId)
         val markSet = ChannelAdmissionMark.isSet(context, account, channelId)
         val keep = ArrayList<String>()
         val judged = ArrayList<Pair<Row, LetIn>>()
         for (row in rows.sortedBy { it.seq }) {
-            val verdict = letInVerdict(row, row.inviteKeyHex != null && row.inviteKeyHex in live, mark, markSet, ownKeyHex)
+            val verdict = letInVerdict(row, row.inviteKeyHex != null && row.inviteKeyHex in live, mark, markSet, ownKeyHex, accountKeyHex)
             when (verdict) {
                 LetIn.ADMIT -> keep += row.pubkeyHex
                 LetIn.LEAVE -> Unit
@@ -274,6 +286,9 @@ public object ChannelRemovalWatch {
 
     /** End [channelId] on this device after a removal. */
     public fun ended(state: ChannelsUiState, channelId: String, name: String, onNotice: (String, String) -> Unit) {
+        // docs/ux/second-device.md section 4a — the account's key was
+        // removed: the account's other devices drop the channel too.
+        ChannelSubscriptionSync.recordLeave(channelId)
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
         ChannelMemberCards.forgetUploads(channelId)

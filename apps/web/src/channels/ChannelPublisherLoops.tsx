@@ -38,6 +38,8 @@ import { base64Encode } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import { loadWasm } from "../wasm";
 import { channelsActions, channelsState } from "../state/channels-state";
+import { noteChannelIntent } from "./channel-subscription-register";
+import { ensureAccountReaderKey } from "./account-reader-key";
 import { admitNewSubscribers } from "./subscriber-admission";
 import { runPublisherRemoval, runRotationOnce, type RotationContext } from "./rotation-cron";
 import { loadRotationState, saveRotationState, type ChannelRotationState } from "./rotation-state-store";
@@ -933,7 +935,10 @@ export const ChannelPublisherLoops: Component = () => {
     for (const idHex of [...channelsState.keysByChannel().keys()]) {
       if (orphaned.has(idHex) || stopped.has(idHex)) continue;
       if (chats.conversationAccountIdentity() !== lineage) return;
-      const owner = channelsActions.coPublisherGroupIdOf(idHex) === undefined;
+      // 2026-11-13: decided on group presence (this loop runs only for the
+      // channels whose PublisherGroup this device holds) and the owner rule,
+      // never on "has keys and no co-publisher mark" alone.
+      const owner = channelRotatesHere(idHex);
       try {
         if (owner && channelsActions.accessOf(idHex).owedType !== null) {
           await runOwedChannelType(lineage, current, idHex).catch(() => undefined);
@@ -961,6 +966,9 @@ export const ChannelPublisherLoops: Component = () => {
             console.warn("[channels] a public seed was not written; tried again next pass", err instanceof Error ? err.name : "");
           }
         }
+        // 2026-11-13: the account's reader key (the register's) is a real
+        // subscriber of the channel, registered once by this device.
+        await ensureAccountReaderKey(lineage, idHex);
         await admitNewSubscribers(idHex, lineage);
         // The owner's account key: the PublisherGroup's lowest leaf.
         const memberKeys = await withPublisherGroup(lineage, idHex, async (g) => {
@@ -1004,6 +1012,8 @@ export const ChannelPublisherLoops: Component = () => {
             if (removedPublisherFallback(channelsState.subscriberKeysByChannel().has(idHex)) === "subscriber") {
               // UX 15.2: they stay subscribed if they were.
               channelsActions.dropPublisherRole(idHex);
+              // 2026-11-13: the account's register says Subscriber again.
+              noteChannelIntent(idHex, "demoted");
               // No publisher pass runs for it now (its keys are gone); a later
               // invitation that makes them a publisher again starts passes anew.
               stopped.delete(idHex);
