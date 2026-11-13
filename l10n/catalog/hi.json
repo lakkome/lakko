@@ -8813,6 +8813,10 @@
       "text": "इस डिवाइस पर प्लेबैक।",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Lakko बंद होने पर चैनल पोस्ट देर से आ सकती हैं।",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "नोटिफ़िकेशन बंद हैं, इसलिए Lakko सिर्फ़ खुला होने पर ही रिंग कर सकता है। इन्हें चालू करें ताकि ऐप बंद होने पर भी कॉल और मैसेज आप तक पहुँचें।",
       "status": "machine"

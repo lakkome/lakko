@@ -8813,6 +8813,10 @@
       "text": "Reprodução neste dispositivo.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "As publicações dos canais podem chegar atrasadas enquanto o Lakko estiver fechado.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "As notificações estão desativadas, então o Lakko só pode tocar enquanto está aberto. Ative-as para que chamadas e mensagens cheguem até você quando ele não estiver.",
       "status": "machine"

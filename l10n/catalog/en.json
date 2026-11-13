@@ -9530,6 +9530,10 @@
       "text": "Playback on this device.",
       "comment": "Line under the Media title in Settings."
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Channel posts can arrive late while Lakko is closed.",
+      "comment": "Small line in Settings > Notifications, under the notification switches: channel posts are noticed only when the app reads the channel (there is no push for channels yet), so a notification can come late or only once Lakko is opened. Shown on no other screen."
+    },
     "settings.notifications.off.body": {
       "text": "Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not.",
       "comment": "Shown in Settings only when the system has notifications turned off for Lakko; the row opens the system notification settings."

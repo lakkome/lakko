@@ -281,6 +281,9 @@ targets:
           - voip
         BGTaskSchedulerPermittedIdentifiers:
           - me.lakko.dev.contact-refresh
+          # `docs/ux/channel-notifications.md` section 3 — channel posts read
+          # in the background (``ChannelPostBackgroundRefresh``).
+          - me.lakko.dev.channel-posts
         # CallKit files finished calls in the phone's own Recents (section 6,
         # "tapping the row calls back"). Tapping one there hands the app an
         # `INStartCallIntent` user activity, which iOS only delivers to an app

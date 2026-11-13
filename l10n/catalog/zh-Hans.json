@@ -8813,6 +8813,10 @@
       "text": "此设备上的播放。",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Lakko 关闭时，频道帖子可能会延迟送达。",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "通知已关闭，因此 Lakko 只能在打开时响铃。开启通知，这样即使 Lakko 未打开，通话和消息也能送达。",
       "status": "machine"

@@ -347,6 +347,9 @@ public object AccountLocalWipe {
         // topics, cached buckets, the share switches and the lists members
         // shared.
         Step("feed") { ctx, acct -> me.lakko.app.feed.FeedSealedStore.deleteAccount(ctx, acct) },
+        // docs/ux/channel-notifications.md section 5 — the last post notified
+        // per channel on this device.
+        Step("channel-notified") { ctx, acct -> me.lakko.app.feed.ChannelNotifiedStore.forgetAccount(ctx, acct) },
         // The feed tab selection and the import banner: device-wide rows of
         // the session that is ending.
         Step("feed-prefs") { ctx, _ -> me.lakko.app.feed.FeedPrefs.clear(ctx) },

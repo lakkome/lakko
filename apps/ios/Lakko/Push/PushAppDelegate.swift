@@ -158,6 +158,12 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             == NewDeviceNoticeCenter.notificationRouteDevices {
             Task { @MainActor in NewDeviceNoticeCenter.shared.openDevicesRequested = true }
         }
+        // `docs/ux/channel-notifications.md` section 1 — a channel post
+        // notification opens its channel.
+        if let channelId = userInfo[ChannelNotificationTaps.routeKey] as? String,
+           ChannelPostLogPayload.isChannelId(channelId) {
+            Task { @MainActor in ChannelNotificationTaps.shared.openChannelRequested = channelId }
+        }
         completionHandler()
     }
 }

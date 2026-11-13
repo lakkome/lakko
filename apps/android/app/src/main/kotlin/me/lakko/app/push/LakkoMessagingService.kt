@@ -367,16 +367,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     }
 
     private fun ensureNotificationChannel(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            me.lakko.app.l10n.Localization.strings.value["notification.channel.messages"],
-            NotificationManager.IMPORTANCE_HIGH,
-        ).apply {
-            description = me.lakko.app.l10n.Localization.strings.value["notification.channel.messages_desc"]
-        }
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.createNotificationChannel(channel)
+        ensureMessagesNotificationChannel(context)
     }
 
     // -----------------------------------------------------------------
@@ -426,6 +417,24 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         public const val EXTRA_WAKE_GROUP: String = "me.lakko.push.wake_group"
         public const val EXTRA_WAKE_POINTER: String = "me.lakko.push.wake_pointer"
     }
+}
+
+/**
+ * The message notification channel ([LakkoMessagingService.CHANNEL_ID]),
+ * created on first use; the channel post notifications
+ * (`docs/ux/channel-notifications.md`) post to it too.
+ */
+public fun ensureMessagesNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val channel = NotificationChannel(
+        LakkoMessagingService.CHANNEL_ID,
+        me.lakko.app.l10n.Localization.strings.value["notification.channel.messages"],
+        NotificationManager.IMPORTANCE_HIGH,
+    ).apply {
+        description = me.lakko.app.l10n.Localization.strings.value["notification.channel.messages_desc"]
+    }
+    val manager = context.getSystemService(NotificationManager::class.java)
+    manager?.createNotificationChannel(channel)
 }
 
 /**

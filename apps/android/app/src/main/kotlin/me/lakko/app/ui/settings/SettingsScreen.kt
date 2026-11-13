@@ -174,6 +174,14 @@ public fun SettingsScreen(
             }
             // reactions-and-emoji section 12 — the one Reactions switch.
             ReactionNotificationsRow()
+            // docs/ux/channel-notifications.md section 3 — the one place the
+            // cost of reading channels without a push is said.
+            Text(
+                t("settings.notifications.channel_posts_late"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
 
             SectionLabel(t("settings.section.account"))
             SettingsRow(t("settings.section.profile"), R.drawable.ic_lk_person_square, onOpenProfile)

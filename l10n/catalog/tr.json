@@ -8813,6 +8813,10 @@
       "text": "Bu cihazda oynatma.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Lakko kapalıyken kanal gönderileri gecikebilir.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Bildirimler kapalı, bu yüzden Lakko yalnızca açıkken çalabilir. Kapalıyken de aramalar ve mesajlar size ulaşsın diye bildirimleri açın.",
       "status": "machine"

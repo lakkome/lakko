@@ -8813,6 +8813,10 @@
       "text": "التشغيل على هذا الجهاز.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "قد تصل منشورات القنوات متأخرة عندما يكون Lakko مغلقًا.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "الإشعارات متوقفة، لذا لا يستطيع Lakko الرنين إلا وهو مفتوح. شغّلها لتصلك المكالمات والرسائل عندما لا يكون مفتوحًا.",
       "status": "machine"

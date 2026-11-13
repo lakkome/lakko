@@ -43,6 +43,7 @@ import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
+import { ChannelPostNotifier } from "./feed/ChannelPostNotifier";
 import { ChannelPublisherLoops } from "./channels/ChannelPublisherLoops";
 import { ChannelFeedbackRuntime } from "./channels/ChannelFeedbackRuntime";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
@@ -106,6 +107,11 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
     <Show when={isDesktop()} fallback={<OpenInApp />}>
       <DesktopBridge />
     </Show>
+    {/*
+     * docs/ux/channel-notifications.md - a new channel post this device
+     * read raises a notification. Inside the router: a tap opens the channel.
+     */}
+    <ChannelPostNotifier />
     {props.children}
     <CallHostView />
   </>

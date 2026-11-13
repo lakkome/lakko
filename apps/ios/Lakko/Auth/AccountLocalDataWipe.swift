@@ -412,6 +412,12 @@ enum AccountLocalDataWipe {
         step("publisher-commits") { PublisherCommitStore.deleteAll(accountIdB64: accountIdB64) }
         // ADR-0063 — the decrypted channel posts the feed reads.
         step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
+        // `docs/ux/channel-notifications.md` section 5 — the per-channel
+        // "last notified post" cursors (the delivered notifications go with
+        // the `delivered-notifications` step).
+        step("channel-notified") {
+            ChannelNotifiedStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
         // ADR-0059 — G-43 publisher roles learned this session (in memory,
         // keyed per (account, channel) owner key; cleared whole).
         step("publisher-roles") { ChannelPublisherRoleCache.shared.clearAll() }

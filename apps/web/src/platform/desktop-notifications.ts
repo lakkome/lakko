@@ -26,6 +26,11 @@ export interface NotifyRow {
   readonly preview: string;
   /** Where a click opens it; `null` when it cannot be opened. */
   readonly href: string | null;
+  /** A channel's row: its posts are announced by the channel rule
+   *  (`feed/ChannelPostNotifier.tsx`, `docs/ux/channel-notifications.md`),
+   *  which keeps history and the person's own posts quiet; a rise in its
+   *  count announces nothing here. */
+  readonly channel?: boolean;
 }
 
 /** What the window looks like when a change is seen. */
@@ -59,7 +64,7 @@ export function messageNotifications(
     if (previous === null) continue;
     const before = previous.get(row.key) ?? 0;
     if (row.unread <= before) continue;
-    if (row.muted || row.href === null) continue;
+    if (row.muted || row.href === null || row.channel === true) continue;
     // The conversation is on screen in front of the person.
     if (view.focused && view.path === row.href) continue;
     notify.push({

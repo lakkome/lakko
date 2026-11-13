@@ -272,6 +272,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  // docs/ux/channel-notifications.md section 5: the last post notified per channel.
+  put(`lakko.channels.notified.v1.${acct}`, JSON.stringify({ ["ab".repeat(16)]: 7 }));
   put(`lakko.quick-reaction.unsent.v1.${acct}`, "1");
   put(`lakko.channel-feedback.unsent.v1.${acct}`, "1");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
@@ -696,6 +698,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
   "lakko.channels.publish-counter.v2.": "account",
+  "lakko.channels.notified.v1.": "account",
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
   "lakko.emoji.recent:": "account",

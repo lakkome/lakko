@@ -644,6 +644,14 @@ struct LakkoApp: App {
             await contactsRepository.refreshInbox()
             ContactBackgroundRefresh.schedule()
         }
+        // `docs/ux/channel-notifications.md` section 3 — channel posts read
+        // while Lakko is in the background: one channel post sync within the
+        // task's budget, then the next request. No session: nothing runs.
+        .backgroundTask(.appRefresh(ChannelPostBackgroundRefresh.taskIdentifier)) {
+            ChannelPostBackgroundRefresh.schedule()
+            await ChannelPostBackgroundRefresh.runLive(
+                authRepository: authRepository, deviceGroupSync: deviceGroupSync)
+        }
     }
 
     /// What the window shows, wrapped in ``LocalizedRoot`` by ``body``.
@@ -733,6 +741,7 @@ struct LakkoApp: App {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     ContactBackgroundRefresh.schedule()
+                    ChannelPostBackgroundRefresh.schedule()
                 }
                 // The foreground receive runs only while the app is active;
                 // becoming active again sweeps at once, so an offer that
@@ -1374,6 +1383,15 @@ private final class SessionModels: ObservableObject {
             reading?.update { $0.seedingChannelReads([channelId: slot]) }
         }
         reading.bind(postSync: channelPostSync, channels: channelsState)
+        // `docs/ux/channel-notifications.md` — every channel read the sync
+        // makes may show a notification (``ChannelPostNotifier``).
+        let deviceGroupSync = services.deviceGroupSync
+        ChannelPostNotifier.attach(
+            to: channelPostSync, channels: channelsState, reading: reading,
+            flags: { [weak deviceGroupSync] in
+                guard let deviceGroupSync, deviceGroupSync.ready else { return nil }
+                return deviceGroupSync.flags
+            })
         let chatRepository = services.chatRepository
         let channels = channelsState
         let chatList = chatListVM
@@ -1819,6 +1837,15 @@ private struct SessionRoot: View, Equatable {
             NewDeviceNoticeCenter.shared.openDevicesRequested = false
             openDevices()
         }
+        // `docs/ux/channel-notifications.md` section 1 — a tap on a channel
+        // post notification opens the channel, at its newest end, where the
+        // newest notified post is. Also the tap that launched the app: the
+        // request waits in the shared center until this root reads it.
+        .onReceive(ChannelNotificationTaps.shared.$openChannelRequested) { requested in
+            guard let channelId = requested else { return }
+            ChannelNotificationTaps.shared.openChannelRequested = nil
+            openNotifiedChannel(channelId)
+        }
         // ADR-0074 section 3.5 — after a rotation of the account keys the
         // channels this device created follow the new owner key; the
         // session's key generation moves with them, so none reads as
@@ -2192,6 +2219,10 @@ private struct SessionRoot: View, Equatable {
                 if tab != .chats { selectedTab = .chats }
             })
         .toolbar(.hidden, for: .tabBar)
+        // `docs/ux/channel-notifications.md` section 2 — no notification for
+        // the channel open in front of the person.
+        .onAppear { VisibleChannel.appeared(channelId) }
+        .onDisappear { VisibleChannel.disappeared(channelId) }
     }
 
     @ViewBuilder
@@ -2761,6 +2792,17 @@ private struct SessionRoot: View, Equatable {
 
     private func push(_ route: TabRoute, on tab: SessionTab) {
         path(for: tab).wrappedValue.append(route)
+    }
+
+    /// A tap on a channel post notification: the channel on the Chats
+    /// stack, unless it is already the screen on top. A channel this device
+    /// no longer holds opens nothing.
+    private func openNotifiedChannel(_ channelId: String) {
+        guard models.channelsState.channels.contains(where: { $0.id == channelId }) else { return }
+        selectedTab = .chats
+        if chatsPath.last != .channel(channelId: channelId) {
+            push(.channel(channelId: channelId), on: .chats)
+        }
     }
 
     /// UX 17.5 — a tap on the new-device notification: Settings > Devices.

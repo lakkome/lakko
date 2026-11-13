@@ -370,6 +370,9 @@ final class AccountLocalDataWipeTests: XCTestCase {
         DeviceGroupSnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
         // ADR-0063 feed + ADR-0059 Discover (this branch's stores).
         ChannelPostLogStore().put(accountIdB64: x, payload: ChannelPostLogPayload(channels: [:]))
+        // `docs/ux/channel-notifications.md` section 5 — the per-channel
+        // "last notified post" cursors.
+        ChannelNotifiedStore().save(accountIdB64: x, channelIdHex: channelHex, cursor: 7, keep: [channelHex])
         try FeedStore().save(accountIdB64: x, state: FeedState())
         try FeedReadingStore().save(accountIdB64: x, reading: FeedReading.decode(Data()))
         try DiscoverStore().save(accountIdB64: x, kind: .prefs, plaintext: Data([1]))

@@ -1109,6 +1109,12 @@ a.lk-row.active {
 .lk-card-row-action {
   flex: 0 0 auto;
 }
+/* A small line under a card, about the whole card. */
+.lk-card-note {
+  font-size: 13px;
+  color: var(--surface-muted);
+  margin: 8px 16px 0;
+}
 .lk-stack {
   display: flex;
   flex-direction: column;

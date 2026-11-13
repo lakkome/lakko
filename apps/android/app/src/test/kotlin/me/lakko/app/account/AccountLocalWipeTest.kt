@@ -418,6 +418,9 @@ class AccountLocalWipeTest {
             context, acct, listOf(me.lakko.app.chat.LineageEntry("ab".repeat(32), group, 1UL)),
         )
         me.lakko.app.channels.OrphanedChannelsStore.onDevice(context).add(acct, listOf(CHANNEL))
+        // docs/ux/channel-notifications.md section 5 — the last post notified
+        // per channel on this device.
+        me.lakko.app.feed.ChannelNotifiedStore.on(context).write(acct, CHANNEL, 7L, setOf(CHANNEL))
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))

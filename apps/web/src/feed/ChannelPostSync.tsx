@@ -10,8 +10,14 @@
  * A channel post is not a conversation turn, so the cadence is a minute
  * (chosen), not the chat's long poll; a sync also runs as soon as the
  * channel state is hydrated and whenever the tab comes back into view. A
- * hidden tab does not sync. When ADR-0055's socket exists its notices
- * replace the timer.
+ * hidden tab syncs too, on the same timer (a browser slows a hidden tab's
+ * timers, not below once a minute): it is how a channel post is noticed for
+ * a notification while Lakko is open but not in front
+ * (`docs/ux/channel-notifications.md` section 3). When ADR-0055's socket
+ * exists its notices replace the timer.
+ *
+ * Every channel read is handed to `ChannelPostNotifier.tsx`
+ * ({@link subscribeChannelReads}) once the log holding it is saved.
  *
  * Only one sync runs at a time per page, and it is the only writer of the
  * log, so there is no merge between writers. A second tab may run its own;
@@ -43,8 +49,9 @@ import {
   type ChannelPostLog,
   type PostOutcome,
 } from "./channel-post-log";
+import type { ChannelRead } from "./channel-notify";
 import { seedChannelReads } from "./feed-marks";
-import { updateFeedMarks } from "./feed-marks-store";
+import { readFeedMarks, updateFeedMarks } from "./feed-marks-store";
 import type { CheckTally } from "./feed-refresh";
 import { reportChannelCheck } from "./feed-refresh-store";
 import {
@@ -58,6 +65,33 @@ const SYNC_INTERVAL_MS = 60_000;
 
 /** Callbacks of the mounted sync, for {@link requestChannelPostSync}. */
 const syncRequests = new Set<() => void>();
+
+/** Listeners of {@link subscribeChannelReads}. */
+const readListeners = new Set<(accountIdB64: string, reads: readonly ChannelRead[]) => void>();
+
+/**
+ * Hear every channel read a sync makes, with the slot before and after it
+ * and the read marker before it. Called after the log is saved, so a
+ * notification's tap finds the post in the channel. Returns the unsubscribe.
+ */
+export function subscribeChannelReads(
+  listener: (accountIdB64: string, reads: readonly ChannelRead[]) => void,
+): () => void {
+  readListeners.add(listener);
+  return () => readListeners.delete(listener);
+}
+
+function publishChannelReads(accountIdB64: string, reads: readonly ChannelRead[]): void {
+  if (reads.length === 0) return;
+  for (const l of readListeners) {
+    try {
+      l(accountIdB64, reads);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[feed] channel read listener failed", err);
+    }
+  }
+}
 
 /**
  * Sync now rather than at the next tick. Called after this device publishes
@@ -123,6 +157,9 @@ export async function syncAll(
   if (!isCurrent()) return null;
   const channels = readableChannels();
   const before = (await loadChannelPostLog(accountIdB64, deviceKey)) ?? emptyChannelPostLog();
+  // The read markers as they stand before this read: the notification rule
+  // tells a first read after subscribing (no marker yet) from a refetch.
+  const marksBefore = await readFeedMarks(accountIdB64).catch(() => null);
   // `channelsState.channels()` below is read for the retain: after a change
   // of account it would prune this account's log down to the other's list.
   if (!isCurrent()) return null;
@@ -132,6 +169,7 @@ export async function syncAll(
   );
   let changed = Object.keys(log.channels).length !== Object.keys(before.channels).length;
   let answered = 0;
+  const reads: ChannelRead[] = [];
 
   for (const channel of channels) {
     const metas: PostDecode[] = [];
@@ -172,6 +210,14 @@ export async function syncAll(
       if (next.cursor !== slot?.cursor || next.posts.length !== slot.posts.length) {
         log = { version: log.version, channels: { ...log.channels, [channel.idHex]: next } };
         changed = true;
+        if (marksBefore !== null) {
+          reads.push({
+            channelIdHex: channel.idHex,
+            slotBefore: slot,
+            slotAfter: next,
+            readMarker: marksBefore.channelRead[channel.idHex],
+          });
+        }
       }
     } catch (err) {
       // A channel the server does not answer for this time; the next sync
@@ -204,6 +250,7 @@ export async function syncAll(
   await saveChannelPostLog(accountIdB64, deviceKey, log);
   if (!isCurrent()) return null;
   publishChannelPostLogChanged(accountIdB64);
+  publishChannelReads(accountIdB64, reads);
   return tally;
 }
 
@@ -225,7 +272,6 @@ export const ChannelPostSync: Component = () => {
   const run = (): void => {
     const account = accountId();
     if (account === null || !channelsState.hydrated()) return;
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     if (running !== null) {
       again = true;
       return;

@@ -173,6 +173,24 @@ public fun ChannelConversationScreen(
         ?: t("channels.fallback_name")
     val avatar = record?.avatar?.let { me.lakko.app.profile.avatarRefsOf(it) }
 
+    // docs/ux/channel-notifications.md section 2 — while this screen is in
+    // front, a post of this channel does not notify.
+    val visibilityOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(channelId, visibilityOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> me.lakko.app.feed.VisibleChannel.shown(channelId)
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> me.lakko.app.feed.VisibleChannel.hidden(channelId)
+                else -> Unit
+            }
+        }
+        visibilityOwner.lifecycle.addObserver(observer)
+        onDispose {
+            visibilityOwner.lifecycle.removeObserver(observer)
+            me.lakko.app.feed.VisibleChannel.hidden(channelId)
+        }
+    }
+
     // A channel this device reads belongs in the one Chats list.
     LaunchedEffect(channelId, reading) {
         if (reading && state.channels.value.none { it.id == channelId }) {

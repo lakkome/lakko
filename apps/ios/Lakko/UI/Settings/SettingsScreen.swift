@@ -203,6 +203,10 @@ struct SettingsScreen: View {
                 .tint(Color.lakkoAccent)
             } header: {
                 Text(l10n.t("settings.section.notifications"))
+            } footer: {
+                // `docs/ux/channel-notifications.md` section 3 — the one
+                // place that says channel posts can come late.
+                Text(l10n.t("settings.notifications.channel_posts_late"))
             }
 
             // `docs/ux/chat-folders.md` section 4 — between Notifications

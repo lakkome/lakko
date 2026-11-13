@@ -8813,6 +8813,10 @@
       "text": "پخش در این دستگاه.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "پست‌های کانال ممکن است وقتی Lakko بسته است دیرتر برسند.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "اعلان‌ها خاموش است، بنابراین Lakko فقط وقتی باز است می‌تواند زنگ بزند. آن‌ها را روشن کنید تا تماس‌ها و پیام‌ها وقتی برنامه باز نیست هم به شما برسند.",
       "status": "machine"

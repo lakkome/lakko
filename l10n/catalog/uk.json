@@ -8813,6 +8813,10 @@
       "text": "Відтворення на цьому пристрої.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Дописи каналів можуть надходити із запізненням, поки Lakko закрито.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Сповіщення вимкнено, тому Lakko може дзвонити лише тоді, коли відкритий. Увімкніть їх, щоб дзвінки й повідомлення доходили до вас і тоді, коли застосунок закритий.",
       "status": "machine"

@@ -139,6 +139,7 @@ import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
+import { clearChannelNotified } from "../feed/channel-notified-store";
 import { cardsStorageKey, cityStorageKey, showCityStorageKey } from "../devices/device-cards";
 
 /**
@@ -337,6 +338,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "predecessor-mailbox-adopted",
       run: () => removeLocal(predecessorAdoptionStorageKey(accountIdB64)),
     },
+    // docs/ux/channel-notifications.md section 5: the last post notified per
+    // channel on this device.
+    { name: "channel-notified", run: () => clearChannelNotified(accountIdB64, storage) },
     { name: "guest-account", run: () => clearGuestAccount(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },

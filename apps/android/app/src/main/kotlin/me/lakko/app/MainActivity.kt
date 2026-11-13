@@ -347,6 +347,7 @@ class MainActivity : ComponentActivity() {
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
+        handleOpenChannelIntent(intent)
 
         setContent {
             me.lakko.app.l10n.ProvideLocalization {
@@ -475,6 +476,7 @@ class MainActivity : ComponentActivity() {
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
         handleOpenDevicesIntent(intent)
+        handleOpenChannelIntent(intent)
     }
 
     /**
@@ -555,6 +557,17 @@ class MainActivity : ComponentActivity() {
         if (!intent.getBooleanExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES, false)) return
         intent.removeExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES)
         me.lakko.app.devices.NewDeviceNotices.requestOpenDevices()
+    }
+
+    /** `docs/ux/channel-notifications.md` - a tap on a channel post
+     *  notification opens that channel. */
+    private fun handleOpenChannelIntent(intent: Intent) {
+        val id = intent.getStringExtra(me.lakko.app.feed.ChannelNotificationIntake.EXTRA_OPEN_CHANNEL)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        intent.removeExtra(me.lakko.app.feed.ChannelNotificationIntake.EXTRA_OPEN_CHANNEL)
+        me.lakko.app.feed.ChannelNotificationIntake.request(id)
     }
 
     private fun handleWakeIntent(intent: Intent) {
@@ -1833,8 +1846,44 @@ private fun SessionRoot(
     // channel-post log the feed ranks. At once on start (and on every return
     // to the foreground), then every minute, and at once after this device
     // publishes a post.
+    // docs/ux/channel-notifications.md — every channel read the sync makes
+    // goes to the notifier: the shared rule decides which post notifies.
+    DisposableEffect(channelsState, deviceGroupSync) {
+        val notifier = me.lakko.app.feed.ChannelPostNotifier(
+            me.lakko.app.feed.ChannelNotifiedStore.on(backupContext),
+        ) { me.lakko.app.feed.ChannelNotificationPoster.show(backupContext, it) }
+        val off = me.lakko.app.feed.subscribeChannelReads { account, reads ->
+            // Only the reads of the account this state is bound to.
+            if (channelsState.boundAccount != account) return@subscribeChannelReads
+            notifier.onReads(
+                account,
+                reads,
+                me.lakko.app.feed.liveChannelFacts(channelsState) { id ->
+                    me.lakko.app.channels.ChannelFlags.of(deviceGroupSync.flags.value, id)?.muted == true
+                },
+            )
+        }
+        onDispose { off() }
+    }
     val channelPostSync = remember(channelsState, channelsClient) {
         me.lakko.app.feed.ChannelPostSync(backupContext, channelsState, channelsClient)
+    }
+    // docs/ux/channel-notifications.md section 3 — the periodic background
+    // read while Lakko is not in front (idempotent: a schedule is kept).
+    LaunchedEffect(identitySecrets) {
+        if (identitySecrets == null) return@LaunchedEffect
+        me.lakko.app.feed.ChannelPostWorker.schedule(backupContext)
+    }
+    // A tapped channel post notification opens the channel.
+    val openChannelRequested by me.lakko.app.feed.ChannelNotificationIntake.openRequested
+        .collectAsStateWithLifecycle()
+    LaunchedEffect(openChannelRequested, guestShell) {
+        if (guestShell) return@LaunchedEffect
+        val id = openChannelRequested ?: return@LaunchedEffect
+        me.lakko.app.ui.profile.ProfileLeaveGuard.run {
+            navController.navigate(Routes.channel(id)) { launchSingleTop = true }
+            me.lakko.app.feed.ChannelNotificationIntake.consume(id)
+        }
     }
     val channelsBound by channelsState.channels.collectAsStateWithLifecycle()
     LaunchedEffect(lifecycleOwner, channelPostSync, identitySecrets, channelsBound.isNotEmpty()) {

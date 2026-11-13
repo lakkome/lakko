@@ -176,6 +176,28 @@ public class ChannelsUiState(
                 ?.apply()
         }
 
+        /**
+         * `docs/ux/channel-notifications.md` — the channels [accountIdB64]
+         * publishes to from this device (it holds a publisher signing seed
+         * for them), read from [publisherPrefs] without binding a state. The
+         * background read uses it: every post of such a channel is the
+         * person's own and never notifies. Empty on any read failure.
+         */
+        public fun publisherChannelIds(publisherPrefs: SharedPreferences?, accountIdB64: String): Set<String> {
+            val raw = try {
+                publisherPrefs?.getString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64), null)
+            } catch (_: Throwable) {
+                null
+            } ?: return emptySet()
+            val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptySet()
+            val out = HashSet<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val id = arr.optJSONObject(i)?.optString("channelId")?.takeIf { it.isNotEmpty() } ?: continue
+                out += id.lowercase()
+            }
+            return out
+        }
+
         /** Per channel, the higher of two counter floors (a counter never
          *  moves backwards, whichever side held it). */
         internal fun mergeCounterFloors(a: Map<String, ULong>, b: Map<String, ULong>): Map<String, ULong> {

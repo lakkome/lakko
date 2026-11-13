@@ -230,8 +230,16 @@ export function DesktopNotificationsSection(): JSX.Element {
         </Show>
         <ReactionNotificationsRow />
       </section>
+      <ChannelPostsLateNote />
     </>
   );
+}
+
+/** `docs/ux/channel-notifications.md` section 3: the one place the cost is
+ *  said. There is no push for channels yet; a post is noticed when Lakko
+ *  reads the channel. */
+export function ChannelPostsLateNote(): JSX.Element {
+  return <p class="lk-card-note">{t("settings.notifications.channel_posts_late")}</p>;
 }
 
 /** `docs/ux/reactions-and-emoji.md` section 12 — this device's filter, in
@@ -271,6 +279,7 @@ export function BrowserNotificationsSection(): JSX.Element {
       <section class="lk-card">
         <ReactionNotificationsRow />
       </section>
+      <ChannelPostsLateNote />
     </>
   );
 }

@@ -9093,6 +9093,10 @@
       "text": "Воспроизведение на этом устройстве.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "Посты каналов могут приходить с опозданием, пока Lakko закрыт.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "Уведомления выключены, поэтому Lakko может звонить только когда открыт. Включите их, чтобы звонки и сообщения доходили до вас и когда приложение закрыто.",
       "status": "machine"

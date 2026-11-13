@@ -529,6 +529,8 @@ dependencies {
     // 1.15d4 — ViewModel + StateFlow ↔ Compose glue.
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
+    // docs/ux/channel-notifications.md — the periodic background channel read.
+    implementation(libs.androidx.work.runtime.ktx)
 
     // 1.15d2 — networking + JSON for the OPAQUE auth client.
     //

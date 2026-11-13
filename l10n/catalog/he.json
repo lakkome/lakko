@@ -8813,6 +8813,10 @@
       "text": "ניגון במכשיר הזה.",
       "status": "machine"
     },
+    "settings.notifications.channel_posts_late": {
+      "text": "פוסטים בערוצים עלולים להגיע באיחור כש-Lakko סגור.",
+      "status": "machine"
+    },
     "settings.notifications.off.body": {
       "text": "ההתראות כבויות, ולכן Lakko יכולה לצלצל רק כשהיא פתוחה. הפעילו אותן כדי ששיחות והודעות יגיעו אליכם גם כשהיא סגורה.",
       "status": "machine"
