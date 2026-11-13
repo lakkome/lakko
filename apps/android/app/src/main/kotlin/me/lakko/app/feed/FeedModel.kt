@@ -3,6 +3,8 @@
 
 package me.lakko.app.feed
 
+import me.lakko.app.chat.toAttachmentRef
+
 /**
  * The feed's input, assembled from what this device already holds (ADR-0063
  * section 1, `docs/ux/feed.md` section 9). Mirror of
@@ -13,7 +15,8 @@ package me.lakko.app.feed
  * channel-post log into the flat conversation and candidate lists the ranking
  * reads, and keeps a reference from each candidate back to the row it came
  * from. Plain data in, plain data out: no Compose, no storage, and no FFI call
- * ([FeedAttachment.ref] is a generated record, which loads no native code).
+ * ([FeedAttachment.ref] is a generated record, which loads no native code; a
+ * channel post's is rebuilt from the reference its log entry keeps).
  *
  * One-to-one chats never reach it: the caller passes groups and channels only
  * (UX spec section 3).
@@ -185,6 +188,11 @@ public fun parseFeedTimeMs(value: String): Long? = try {
     }
 }
 
+/** The attachment a kept channel post's media entry names, the one a media
+ *  bubble downloads; `null` when the stored reference does not decode. */
+private fun channelAttachmentRef(stored: me.lakko.app.chat.PersistedAttachment): uniffi.lakko_ffi_uniffi.AttachmentRef? =
+    stored.toAttachmentRef()
+
 private fun addChannelPosts(
     ctx: FeedContext,
     source: FeedSource,
@@ -197,9 +205,13 @@ private fun addChannelPosts(
     val fromSelf = source.idHex in ctx.ownChannels
     for (p in slot.posts) {
         if (p.cursor <= 0 || p.serverTsMs < oldest) continue
-        // The feed ranks text; a post with attachments only is kept in the
-        // log for the channel's row in Chats, not shown here as an empty item.
-        if (p.text.isBlank()) continue
+        // A post shows its text and its attachments, as a group's message
+        // does (`docs/ux/feed.md` section 3, base scenario 32); one with
+        // neither has nothing to show.
+        if (p.text.isBlank() && p.media.isEmpty()) continue
+        val attachments = p.media.map { m ->
+            FeedAttachment(kind = m.kind, mime = m.mime, ref = m.ref?.let { channelAttachmentRef(it) })
+        }
         val mentionsMe = !fromSelf && ctx.ownUsername != null && ctx.mentions(p.text, ctx.ownUsername)
         candidates += FeedCandidateInput(
             conversation = conversation,
@@ -211,13 +223,14 @@ private fun addChannelPosts(
             mentionsMe = mentionsMe,
             repliesToMe = false,
             reactionsDistinct = 0,
-            hasMedia = false,
+            hasMedia = attachments.isNotEmpty(),
             text = p.text,
         )
         val message = FeedMessage(
             messageId = p.cursor,
             direction = if (fromSelf) "outgoing" else "incoming",
             text = p.text,
+            attachments = attachments,
             createdAt = java.time.Instant.ofEpochMilli(p.serverTsMs).toString(),
         )
         refs += FeedCandidateRef(source, message, mentionsMe, repliesToMe = false)

@@ -33,6 +33,7 @@ import { foldChannelMeta } from "../channels/channel-meta";
 import { decodeAndDecryptPost } from "../channels/composer";
 import { toPostDecode, type PostDecode } from "../channels/post-decode";
 import { parseBodyEnvelopeWith } from "../chat/attachments";
+import { persistedFromAttachmentRef } from "../chat/persisted-attachment";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import {
@@ -149,11 +150,13 @@ export async function syncAll(
       );
       if (d.kind === "meta") metas.push(d);
       if (d.kind !== "text") return { kind: "skip" };
-      // The attachments' kinds go with the text, so a photo, file or GIF
-      // posted without a caption still names itself on the channel's row.
+      // The attachments go with the text: their kinds, so a photo, file or
+      // GIF posted without a caption still names itself on the channel's
+      // row, and their references, so the feed draws them in place.
       const media = (d.body?.attachments ?? []).map((a) => ({
         mime: a.mime ?? null,
         kind: a.kind ?? null,
+        ref: persistedFromAttachmentRef(a),
       }));
       return { kind: "text", text: d.text, ...(media.length > 0 ? { media } : {}) };
     };

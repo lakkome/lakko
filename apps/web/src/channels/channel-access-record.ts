@@ -85,6 +85,12 @@ export interface ChannelAccessRecord {
    * these; a public channel's later rows read the public seed instead.
    */
   readonly admittedThroughSeq: number;
+  /** This device set the mark itself (it made the channel private, created
+   *  it private, or minted its first admission seed). A device that did not
+   *  (a co-publisher, another device of the owner) cannot tell a reader from
+   *  before the channel went private from a row with no ticket, so its
+   *  let-in pass removes nobody ({@link letInVerdict}). */
+  readonly admissionMarkSet?: true;
   /** Publisher account key -> its appointed co-publisher key (standard
    *  base64), for revoking the appointment. */
   readonly publisherKeys: readonly PublisherEntry[];
@@ -251,6 +257,7 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
       typeof r.admittedThroughSeq === "number" && Number.isInteger(r.admittedThroughSeq) && r.admittedThroughSeq >= 0
         ? r.admittedThroughSeq
         : 0,
+    ...(r.admissionMarkSet === true ? { admissionMarkSet: true as const } : {}),
     ...(r.recordOwed === true ? { recordOwed: true } : {}),
     ...(r.rotateRequestOwed === true ? { rotateRequestOwed: true } : {}),
     publisherKeys: (Array.isArray(r.publisherKeys) ? r.publisherKeys : []).flatMap((e: unknown) => {
@@ -294,6 +301,28 @@ export function rowsToAdmit<T extends { readonly seq: number }>(rows: readonly T
   return rows.filter((r) => r.seq > admittedThroughSeq).sort((a, b) => a.seq - b.seq);
 }
 
+/** What the let-in pass does with one row above the mark (ADR-0087
+ *  section 7). */
+export type LetIn = "admit" | "remove" | "leave";
+
+/**
+ * The let-in verdict of a row above the mark (the rows at or below it are
+ * readers: they came in before the channel went private, or an earlier pass
+ * judged them; UX 4.1 "Everyone subscribed stays"):
+ * - a ticket naming a live invite key: let in;
+ * - this device's own key: left alone (a publisher's own card key);
+ * - any other row, on a device that set the mark itself: removed;
+ * - on a device that did not, left alone: no ticket alone never lets a row
+ *   in, and the device holding the mark removes it. Pure; the same rule as
+ *   iOS `SubscriberAdmission.letInVerdict` and Android
+ *   `ChannelSubscriberRows.letInVerdict`.
+ */
+export function letInVerdict(ticketLive: boolean, markSet: boolean, isOwnKey: boolean): LetIn {
+  if (ticketLive) return "admit";
+  if (isOwnKey) return "leave";
+  return markSet ? "remove" : "leave";
+}
+
 /** The newest admission seed (highest version), or `null`. */
 export function newestAdmissionSeed(
   r: ChannelAccessRecord,
@@ -311,12 +340,15 @@ export function newestAdmissionSeed(
  */
 export function subscriberVia(
   invitePkHex: string | null,
-  links: readonly ChannelInviteLinkRecord[],
+  links: readonly Pick<ChannelInviteLinkRecord, "invitePkHex" | "label" | "kind">[],
 ): { readonly kind: "link"; readonly label: string } | { readonly kind: "invitation" } | null {
   if (invitePkHex === null) return null;
-  const link = links.find((l) => l.invitePkHex === invitePkHex.toLowerCase());
+  const link = links.find((l) => l.invitePkHex.toLowerCase() === invitePkHex.toLowerCase());
   if (link === undefined) return null;
-  return link.kind === "card" ? { kind: "invitation" } : { kind: "link", label: link.label };
+  // UX 15.1: a contact invitation, or a link the owner gave no label, reads
+  // `From an invitation` (the same rule on every client).
+  const label = link.label.trim();
+  return link.kind === "card" || label.length === 0 ? { kind: "invitation" } : { kind: "link", label };
 }
 
 /**

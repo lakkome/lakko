@@ -217,6 +217,7 @@ export async function repairPrivateChannelAccess(
     ...r,
     visibility: r.visibility ?? "private",
     admittedThroughSeq: Math.max(r.admittedThroughSeq, through),
+    admissionMarkSet: true,
     admissionSeeds: r.admissionSeeds.length > 0 ? r.admissionSeeds : [minted],
   }));
   try {
@@ -550,6 +551,7 @@ export async function createChannelFull(
     readKeyB64: isPublic ? bytesToB64(wasm.channelReadKey(lineage, channelIdFromHex(id))) : null,
     admissionSeeds,
     admittedThroughSeq: 0,
+    ...(isPublic ? {} : { admissionMarkSet: true as const }),
     // Owed until it lands: a failed first post is re-issued by the publisher
     // pass (`settleOwedRecord`), composed from this access record.
     recordOwed: true,
@@ -710,6 +712,7 @@ export async function runOwedChannelType(lineage: WasmIdentity, current: WasmIde
         ...r,
         visibility: "private",
         admittedThroughSeq: Math.max(r.admittedThroughSeq, through),
+        admissionMarkSet: true,
         admissionSeeds:
           r.admissionSeeds.length > 0 ? r.admissionSeeds : [{ version: 1, seedB64: bytesToB64(wasm.generateChannelAdmissionSeed()) }],
       }));
@@ -1027,6 +1030,33 @@ export interface ChannelSubscriberRow {
   readonly via: { kind: "link"; label: string } | { kind: "invitation" } | null;
 }
 
+/** The channel's links in the account's link register (every device's),
+ *  each with its invite key and the owner's label: what a subscriber row is
+ *  labelled by (UX 15.1). */
+async function registeredChannelLinkKeys(
+  idHex: string,
+): Promise<Array<{ readonly invitePkHex: string; readonly label: string; readonly kind: "link" }>> {
+  const records = registeredLinks().filter(
+    (r) => r.kind === "channel" && r.inviteSeed.length === 32 && bytesToHex(r.targetId) === idHex.toLowerCase(),
+  );
+  if (records.length === 0) return [];
+  const wasm = await loadWasm();
+  const out: Array<{ invitePkHex: string; label: string; kind: "link" }> = [];
+  for (const r of records) {
+    try {
+      const signer = wasm.ChannelInviteSigner.fromInviteSeed(r.inviteSeed);
+      try {
+        out.push({ invitePkHex: bytesToHex(signer.verifyingKey), label: r.label, kind: "link" });
+      } finally {
+        signer.free();
+      }
+    } catch {
+      // A seed the core refuses names no key.
+    }
+  }
+  return out;
+}
+
 /** Rows a page of the subscriber list shows (chosen). */
 const SUBSCRIBER_LIST_PAGE = 50;
 
@@ -1039,7 +1069,9 @@ export async function channelSubscriberPage(
 ): Promise<{ rows: readonly ChannelSubscriberRow[]; nextAfter: number; done: boolean }> {
   try {
     const page = await listSubscriberPage(idHex, identity, after, SUBSCRIBER_LIST_PAGE);
-    const links = accessOf(idHex).inviteLinks;
+    // This device's own records first (a contact invitation is kept only
+    // here), then the links any device of the account filed in the register.
+    const links = [...accessOf(idHex).inviteLinks, ...(await registeredChannelLinkKeys(idHex))];
     const rows: ChannelSubscriberRow[] = [];
     for (const e of page.entries) {
       const invitePk = await ticketInviteKeyHex(idHex, e.subscriberId, e.sealedTicket).catch(() => null);

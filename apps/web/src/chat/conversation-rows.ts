@@ -19,6 +19,7 @@ import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { channelHandleOf, channelRoleOf } from "../channels/channel-access";
+import { channelFlagsOf } from "../channels/channel-flags";
 import { channelRowModel, channelRowPostedAtMs, channelRowPreview } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { createChannelRowFeed } from "../feed/channel-unread";
@@ -322,9 +323,9 @@ export function createConversationRows() {
         postedAtMs: lastPostMs,
         ...(handle !== undefined && handle.length > 0 ? { handle } : {}),
         unread: channelUnread()(c.id),
-        pinned: false,
-        muted: false,
-        archived: false,
+        // UX group-and-channel-privacy 12: a channel's row is pinned, muted
+        // and archived like a group's, through the same synced flags.
+        ...channelFlagsOf(sync.flags(), c.id),
       };
     });
   };

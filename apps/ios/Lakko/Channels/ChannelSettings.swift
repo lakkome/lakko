@@ -98,6 +98,13 @@ enum ChannelSettings {
         if creating || wasPublic != change.isPublic {
             try await client.setPrivate(channelIdHex: channelId, isPrivate: !change.isPublic, accountIdentity: identity)
         }
+        // Section 4.1 — going private: "Everyone subscribed stays". The rows
+        // of today are readers on this device's mark (the web type change),
+        // so the let-in pass never removes them for having no ticket.
+        if wasPublic, !change.isPublic {
+            try await SubscriberAdmission.markCurrentRowsAsReaders(
+                channelId: channelId, state: state, client: client, accountIdentity: identity)
+        }
         let channel = state.channels.first { $0.id == channelId }
         let held = state.sharedMeta(channelId: channelId)
         let now = max(UInt64(Date().timeIntervalSince1970 * 1000), (held?.updatedAtMs ?? 0) &+ 1)

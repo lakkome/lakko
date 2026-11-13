@@ -44,6 +44,21 @@ public struct ChannelExtras: Codable, Equatable, Sendable {
     /// pass, so the removed person does not keep reading until the owner's
     /// next scheduled rotation. Written before the publish.
     public var rotateRequestOwed: Bool?
+    /// ADR-0087 section 7 / UX 4.1 — this device's admission mark of a
+    /// private channel: the service row number through which rows are
+    /// readers (they came in before the channel went private, or a let-in
+    /// pass let them in), the web access record's `admittedThroughSeq`;
+    /// `nil` reads as 0. A rotation reseals per key to exactly these rows
+    /// (``ChannelReseal/resealThrough(isPublic:mark:)``).
+    /// Only ever raised.
+    public var admittedThroughSeq: UInt64?
+    /// This device set the mark itself (it made the channel private or
+    /// minted its first admission seed), the web `admissionMarkSet`. A device
+    /// that did not (a co-publisher, another device of the owner) cannot tell
+    /// a reader from before the channel went private from a row with no
+    /// ticket: it removes nobody and moves its mark only past rows it let in
+    /// (``SubscriberAdmission/letInVerdict(seq:ticketLive:mark:markSet:isOwnKey:)``).
+    public var admissionMarkSet: Bool?
 
     public init() {}
 

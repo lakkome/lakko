@@ -35,8 +35,19 @@ final class AccountLocalDataWipeTests: XCTestCase {
         0x0B, 0x1B, 0x2B, 0x3B, 0x4B, 0x5B, 0x6B, 0x7B,
         0x8B, 0x9B, 0xAB, 0xBB, 0xCB, 0xDB, 0xEB, 0xB2,
     ])
+    /// The account of the unknown-store test alone: its planted stores name
+    /// no account any other test inventories, so a removal the App Group
+    /// preferences daemon has not applied yet cannot reach another test's
+    /// walk (the full suite saw `lakko.test-unknown-store.v1` survive into
+    /// the next test's inventory of account A).
+    private let accountIdC = Data([
+        0x0C, 0x1C, 0x2C, 0x3C, 0x4C, 0x5C, 0x6C, 0x7C,
+        0x8C, 0x9C, 0xAC, 0xBC, 0xCC, 0xDC, 0xEC, 0xC3,
+    ])
     private var a: String { base64Encode(accountIdA) }
     private var b: String { base64Encode(accountIdB) }
+    private var c: String { base64Encode(accountIdC) }
+    private static let unknownSharedKey = "lakko.test-unknown-store.v1"
 
     private let channelA = Data(repeating: 0xCA, count: 16)
     private let channelB = Data(repeating: 0xCB, count: 16)
@@ -55,6 +66,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         savedFolderTab = UserDefaults.standard.object(forKey: AccountLocalDataWipe.selectedFolderTabKey)
         savedAnswers = UserDefaults.standard.object(forKey: DeviceLinkAnswerLimit.defaultKey)
         savedMarks = JournalFoundingMarks.shared.all()
+        // A planted unknown store left by an interrupted run.
+        SharedStorage.sharedDefaults()?.removeObject(forKey: Self.unknownSharedKey)
         wipeQuietly(a)
         wipeQuietly(b)
         // The clean-up above is a wipe like any other and seals both
@@ -192,23 +205,24 @@ final class AccountLocalDataWipeTests: XCTestCase {
     /// know about is reported, in every place it can be, rather than passing
     /// silently.
     func testAStoreTheWipeDoesNotKnowIsReportedAsLeftover() throws {
-        let unknownKey = "lakko.test-unknown-store.v1.\(a)"
+        let unknownKey = "lakko.test-unknown-store.v1.\(c)"
         UserDefaults.standard.set(Data([1]), forKey: unknownKey)
-        SharedStorage.sharedDefaults()?.set(["x": a], forKey: "lakko.test-unknown-store.v1")
+        SharedStorage.sharedDefaults()?.set(["x": c], forKey: Self.unknownSharedKey)
         defer {
             UserDefaults.standard.removeObject(forKey: unknownKey)
-            SharedStorage.sharedDefaults()?.removeObject(forKey: "lakko.test-unknown-store.v1")
+            SharedStorage.sharedDefaults()?.removeObject(forKey: Self.unknownSharedKey)
+            SharedStorage.sharedDefaults()?.synchronize()
         }
         let appSupport = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let unknownFile = appSupport.appendingPathComponent(
-            "lakko-test-unknown/\(a.replacingOccurrences(of: "/", with: "_")).bin")
+            "lakko-test-unknown/\(c.replacingOccurrences(of: "/", with: "_")).bin")
         try FileManager.default.createDirectory(
             at: unknownFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data([1]).write(to: unknownFile)
         defer { try? FileManager.default.removeItem(at: unknownFile.deletingLastPathComponent()) }
 
-        let report = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+        let report = AccountLocalDataWipe.wipe(accountIdB64: c, removeDeliveredNotifications: {})
 
         let places = Set(report.leftovers.map(\.place))
         XCTAssertTrue(report.leftovers.contains(AccountDataInventory.Item(place: .standardDefaults, name: unknownKey)))

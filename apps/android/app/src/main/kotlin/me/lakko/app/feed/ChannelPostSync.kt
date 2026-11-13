@@ -17,6 +17,7 @@ import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.ClassifiedPost
 import me.lakko.app.channels.classifyChannelPlaintext
+import me.lakko.app.chat.from
 
 /**
  * Channels join the foreground poll (ADR-0063 section 4): while the app is in
@@ -229,12 +230,19 @@ public class ChannelPostSync(
                 } else if (body.kind == uniffi.lakko_ffi_uniffi.MessageBodyKind.CHAT &&
                     (body.text.isNotEmpty() || body.attachments.isNotEmpty())
                 ) {
-                    // The attachments' kinds go with the text, so a photo,
-                    // file or GIF posted without a caption still names itself
-                    // on the channel's row (as a group's row does).
+                    // The attachments go with the text: their kinds, so a
+                    // photo, file or GIF posted without a caption still names
+                    // itself on the channel's row (as a group's row does), and
+                    // their references, so the feed draws them in place.
                     PostOutcome.Text(
                         body.text,
-                        body.attachments.map { PersistedChannelPostMedia(mime = it.mime, kind = it.kind) },
+                        body.attachments.map {
+                            PersistedChannelPostMedia(
+                                mime = it.mime,
+                                kind = it.kind,
+                                ref = me.lakko.app.chat.PersistedAttachment.from(it),
+                            )
+                        },
                     )
                 } else {
                     PostOutcome.Skip

@@ -244,6 +244,19 @@ home and settings surface; the two web-only ADR-0049 routes on UniFFI and in
 both apps; APNs and FCM provider configuration under the names the code reads;
 `allowBackup=false` on Android.
 
+**E2. Ship the desktop client (ADR-0085).** It works from a dev build but
+cannot be released (checked against the code 2026-11-13):
+an installable build (`apps/desktop/src-tauri/tauri.conf.json` has
+`bundle.active: false`, so no .dmg, Windows installer or Linux packages;
+macOS signing and notarization not done, ADR-0085 S5 and decision 9.5;
+Windows toasts need the installer's Start menu shortcut with the app id);
+updates through `lakko-tuf` from the first version (decision 9.4; the TUF
+repository layout and signing tool are not started); Windows and Linux run on
+a real or virtual machine (so far compiled in a container only, the S5 exit
+criterion); the Windows TPM key path (decision 9.2; without it a Windows
+computer with a TPM is software-backed, ADR-0085 section 13); and the macOS
+Secure Enclave success path exercised on the signed build (section 11).
+
 **F. Run it for the public.** Tokens on every write endpoint; per-IP rate
 limits at nginx and real PoW effort; nightly database and blob backups with a
 tested restore; CI on push and PR with branch protection; metrics and alerts

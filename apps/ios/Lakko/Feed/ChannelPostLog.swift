@@ -17,8 +17,11 @@ import Foundation
 /// dropped (the log never keeps what the server could no longer serve), and
 /// at most ``cap`` posts are kept per channel, newest kept.
 enum ChannelPostLog {
-    /// Payload schema version this client writes.
-    static let version = 1
+    /// Payload schema version this client writes. Version 2 keeps each
+    /// attachment of a post (its reference and its caption); a version-1 log
+    /// (the word line only) is dropped and fetched again. The read markers
+    /// live apart (``FeedReading``) and survive.
+    static let version = 2
     /// Most posts kept per channel (chosen, ADR-0063 open question 1).
     static let cap = 500
     /// The server's post retention; older posts are dropped from the log.
@@ -58,8 +61,10 @@ enum ChannelPostLog {
 
     /// What one post decoded to, as far as the log cares.
     enum PostOutcome: Equatable {
-        /// A text post: kept.
-        case text(String)
+        /// A post: kept. The line is what the channel's row in Chats shows;
+        /// a post with attachments also keeps its own words and the
+        /// attachments, which the feed draws.
+        case text(String, caption: String? = nil, attachments: [PersistedAttachment] = [])
         /// Read and not a feed item (a metadata record, a malformed record, a
         /// post that failed to open under its epoch's seed): passed over.
         case skip
@@ -96,9 +101,12 @@ enum ChannelPostLog {
                     blocked = true
                     break
                 }
-                if case .text(let text) = outcome {
+                if case .text(let text, let caption, let attachments) = outcome {
                     fresh.append(
-                        PersistedChannelPost(cursor: p.cursor, serverTsMs: p.serverTsMs, text: text))
+                        PersistedChannelPost(
+                            cursor: p.cursor, serverTsMs: p.serverTsMs, text: text,
+                            caption: attachments.isEmpty ? nil : (caption ?? ""),
+                            attachments: attachments.isEmpty ? nil : attachments))
                 }
                 cursor = p.cursor
             }
@@ -108,13 +116,39 @@ enum ChannelPostLog {
     }
 }
 
-/// One decrypted text post.
+/// One decrypted post.
 struct PersistedChannelPost: Codable, Equatable {
     /// The server's per-channel cursor, the post's id in the feed.
     let cursor: UInt64
     /// Server receive time, unix ms.
     let serverTsMs: Int64
+    /// The post's line on the channel's row in Chats: its words, else a word
+    /// for what it carries ("Photo", "GIF", a file's name).
     let text: String
+    /// The post's own words when it carries attachments (empty for a photo
+    /// posted without a caption); `nil` for a post with none, whose words
+    /// are ``text``.
+    let caption: String?
+    /// The post's attachments, in order, as the group message log keeps
+    /// them, so the feed draws a channel's photo, GIF, voice or video
+    /// message in place as it draws a group's (`docs/ux/feed.md` section 3,
+    /// base scenario 32). `nil` when it has none. The log is sealed as the
+    /// group log is (``ChannelPostLogStore``).
+    let attachments: [PersistedAttachment]?
+
+    init(
+        cursor: UInt64,
+        serverTsMs: Int64,
+        text: String,
+        caption: String? = nil,
+        attachments: [PersistedAttachment]? = nil
+    ) {
+        self.cursor = cursor
+        self.serverTsMs = serverTsMs
+        self.text = text
+        self.caption = caption
+        self.attachments = attachments
+    }
 }
 
 /// One channel's slice of the log.

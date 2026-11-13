@@ -33,8 +33,10 @@ public fun savedAttachmentKind(msg: ChatMessage): String {
 public fun savedExcerpt(
     msg: ChatMessage,
     inviteLine: (ByteArray?) -> String? = { me.lakko.app.ui.channels.channelInviteLine(it) },
+    /** A bare `/g/` link with no card: the row's line, never its secret. */
+    bareLinkLine: (String) -> String? = { me.lakko.app.ui.channels.bareGroupLinkSnapshotLine(it) },
 ): String =
-    (if (msg.deleted) null else inviteLine(msg.channelInvite)) ?: msg.text.ifEmpty {
+    (if (msg.deleted) null else inviteLine(msg.channelInvite) ?: bareLinkLine(msg.text)) ?: msg.text.ifEmpty {
         msg.attachments.firstOrNull()?.takeIf { savedAttachmentKind(msg) == "file" }?.name.orEmpty()
     }
 

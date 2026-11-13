@@ -68,6 +68,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.calls.quietOffer
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.withChannelFlags
 import me.lakko.app.chat.ChatFolder
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.FolderActions
@@ -338,7 +339,9 @@ public fun ChatListScreen(
             toggleFlag(
                 sync = deviceGroupSync,
                 groupIdHex = row.id,
-                current = flagsMap[row.id],
+                // A chat's or group's conversation id, or a channel's id
+                // (`ChannelFlags`): the synced flags take either.
+                current = flagsMap[row.id.lowercase()],
                 field = field,
                 scope = scope,
             )
@@ -433,7 +436,12 @@ public fun ChatListScreen(
                         selectedIndex = pagerState.currentPage,
                         onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
                         onEditFolder = { onEditFolder(it.idHex) },
-                        onMarkAllRead = { tabRows -> scope.launch { actions?.markAllRead(tabRows) } },
+                        onMarkAllRead = { tabRows ->
+                            scope.launch {
+                                actions?.markAllRead(tabRows)
+                                markChannelRowsRead(context, repository.currentAccountIdB64(), tabRows)
+                            }
+                        },
                         onReorder = onOpenFolderSettings,
                         onDelete = { deletingFolder = it },
                         onEditFolders = onOpenFolderSettings,
@@ -620,7 +628,8 @@ internal fun rememberConversationRows(
 
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.
-    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
+    val bareLinkOpenings by me.lakko.app.ui.channels.BareGroupLinks.openings.collectAsStateWithLifecycle()
+    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings, bareLinkOpenings) {
         threadConversationRows(
             context = context,
             repository = repository,
@@ -634,6 +643,7 @@ internal fun rememberConversationRows(
             use24h = use24h,
             locale = locale,
             strings = strings,
+            bareLinkOpenings = bareLinkOpenings,
         )
     }
 
@@ -670,7 +680,7 @@ internal fun rememberConversationRows(
     // ADR-0073 phase 2 / UX 16.6 — the channels a key reset orphaned on this
     // device carry their own secondary line.
     val orphanedChannels = channels?.orphaned?.collectAsStateWithLifecycle()?.value ?: emptySet()
-    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostLog, reading.channelRead, strings, orphanedChannels) {
+    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostLog, reading.channelRead, strings, orphanedChannels, flagsMap) {
         val now = System.currentTimeMillis()
         channelHandles.map { channel ->
             val model = channelRowModel(
@@ -698,6 +708,9 @@ internal fun rememberConversationRows(
             val newest = channelLastPost(channelPostLog[channel.id])
             val newestMs = channelRowActivityMs(newest, channel.addedAtMs.toLong())
             val newestLine = newest?.let { channelRowPreviewLine(it, strings) }
+            // UX group-and-channel-privacy 12 — pinned, muted and archived like
+            // a group's row, through the same synced flags, keyed on the
+            // channel id (`ChannelFlags`).
             ConversationListRow(
                 id = channel.id,
                 kind = ConversationRowKind.CHANNEL,
@@ -715,16 +728,14 @@ internal fun rememberConversationRows(
                     model.time
                 },
                 lastActivityMs = newestMs,
-                // Pinned, muted and archived are keyed on a conversation id a
-                // channel does not carry, so a channel row shows none of them
-                // (section 6.1). Its count is the feed's channel read state.
+                // Its count is the feed's channel read state.
                 unread = me.lakko.app.feed.channelUnreadCount(
                     postCursors = channelPostCursors[channel.id].orEmpty(),
                     readThrough = reading.channelRead[channel.id],
                     own = channelKeys.containsKey(channel.id),
                 ),
                 handle = channel.handle,
-            )
+            ).withChannelFlags(me.lakko.app.channels.ChannelFlags.of(flagsMap, channel.id))
         }
     }
     return remember(threadRows, channelRows) { threadRows + channelRows }
@@ -820,11 +831,9 @@ private fun ConversationList(
         items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
             val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
             if (row.kind == ConversationRowKind.CHANNEL) {
-                // Same avatar, same title, same second line as every other
-                // row. What it does NOT have is the badge, the glyphs and the
-                // flag items — all keyed on a conversation id a channel does
-                // not carry. Its menu holds only the folder items.
-                ChannelRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
+                // UX group-and-channel-privacy 12 — the same row as a group's:
+                // the same glyphs, swipes and menu; a tap opens the channel.
+                SwipeableThreadRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
             } else {
                 SwipeableThreadRow(
                     row = row,
@@ -889,24 +898,6 @@ private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClic
     }
 }
 
-/** A channel row: tap opens it, long press opens the folder items. */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ChannelRow(row: ConversationListRow, menu: RowMenuModel, onClick: () -> Unit) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Box {
-        ConversationRowBody(
-            row = row,
-            modifier = Modifier.combinedClickable(
-                onClick = onClick,
-                onLongClick = { if (menu.hasItems) menuOpen = true },
-            ),
-            hoverPlaysVideo = true,
-        )
-        RowMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, model = menu)
-    }
-}
-
 /**
  * The three ways to start something, `docs/ux/navigation.md` section 3.
  *
@@ -946,6 +937,27 @@ private fun CreateMenu(
                 leadingIcon = { LkIcon(R.drawable.ic_lk_bookmark, contentDescription = null, size = LkIconSize.Row) },
                 onClick = { onDismiss(); onOpenSaved() },
             )
+        }
+    }
+}
+
+/**
+ * Mark all read on the tab's channel rows with new posts (UX
+ * `chat-folders.md` 2.2; channels are rows like any other): each is read
+ * through the newest post this device holds, as opening it would.
+ */
+private suspend fun markChannelRowsRead(
+    context: android.content.Context,
+    accountIdB64: String?,
+    rows: List<ConversationListRow>,
+) {
+    val account = accountIdB64 ?: return
+    val ids = rows.filter { it.kind == ConversationRowKind.CHANNEL && it.unread > 0 }.map { it.id }
+    if (ids.isEmpty()) return
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val slots = me.lakko.app.feed.FeedSealedStore.loadChannelPostLog(context, account).channels
+        me.lakko.app.feed.FeedReadingStore.update(context, account) {
+            me.lakko.app.feed.markChannelsRead(it, ids, slots)
         }
     }
 }
@@ -1004,6 +1016,9 @@ internal fun threadConversationRows(
     use24h: Boolean,
     locale: Locale,
     strings: Strings = Localization.strings.value,
+    /** Ledger openings of bare `/g/` links (`BareGroupLinks`), for a row
+     *  whose last message is one. */
+    bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(repository, thread.groupIdHex)
     val last = previewSourceRow(thread.messages)
@@ -1029,6 +1044,7 @@ internal fun threadConversationRows(
             isGroup = kind == ConversationKind.Group,
             senderName = senderName,
             strings = strings,
+            bareLinkOpenings = bareLinkOpenings,
         ),
         time = activityMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         lastActivityMs = activityMs,
@@ -1087,6 +1103,8 @@ internal fun rowPreview(
     isGroup: Boolean,
     senderName: String?,
     strings: Strings = Localization.strings.value,
+    bareLinkOpenings: Map<String, me.lakko.app.ui.channels.BareLinkOpening> = emptyMap(),
+    ownOrigin: String = me.lakko.app.config.ApiEndpoints.webOrigin,
 ): String {
     val endedLine = me.lakko.app.chat.chatListLine(
         me.lakko.app.chat.membershipState(
@@ -1109,8 +1127,19 @@ internal fun rowPreview(
     val inviteText = last.channelInvite?.takeIf { !last.deleted }
         ?.let { me.lakko.app.ui.channels.channelInviteSummary(it) }
         ?.let { me.lakko.app.ui.channels.channelInvitePreviewText(it, strings) }
+    // A bare `/g/` link with no card (an older message): never its secret
+    // (`BareGroupLink.kt`; seen live 2026-11-13). The opening starts here and
+    // its outcome redraws the row.
+    val bareLinkText = if (inviteText == null && !last.deleted && (last.channelInvite?.isEmpty() != false)) {
+        me.lakko.app.ui.channels.bareGroupLinkOf(last.text, ownOrigin)?.let { link ->
+            me.lakko.app.ui.channels.BareGroupLinks.start(link)
+            me.lakko.app.ui.channels.bareGroupLinkRowLine(last.text, bareLinkOpenings[link], ownOrigin, strings)
+        }
+    } else {
+        null
+    }
     val line = previewLine(
-        text = inviteText ?: last.text,
+        text = inviteText ?: bareLinkText ?: last.text,
         attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),
@@ -1343,11 +1372,10 @@ internal class RowMenuModel(
     val folder: ChatFolder?,
     private val handlers: RowHandlers,
 ) {
-    private val isChannel = row.kind == ConversationRowKind.CHANNEL
-
-    /** Pin / Unpin shows for a chat or group everywhere, and for a channel
-     *  inside a folder (a folder's pins name any conversation). */
-    val showPin: Boolean = folder != null || !isChannel
+    /** Pin / Unpin shows on every row: inside a folder it acts on the
+     *  folder's own pins, in All chats on the synced pin. A channel's row
+     *  offers what a group's does (UX group-and-channel-privacy 12). */
+    val showPin: Boolean = true
 
     /** Pinned in the pin set this tab uses. */
     val pinned: Boolean = row.pinned
@@ -1355,7 +1383,7 @@ internal class RowMenuModel(
     /** UX spec 3.4 — ten pins per folder. */
     val pinEnabled: Boolean = folder == null || pinned || folder.pinned.size < FolderLimits.MAX_PINS
 
-    val showFlags: Boolean = !isChannel
+    val showFlags: Boolean = true
     val showFolderItems: Boolean = handlers.foldersEnabled
     val folders: List<ChatFolder> = handlers.folders
     val canCreateFolder: Boolean = handlers.folders.size < FolderLimits.MAX_FOLDERS
@@ -1367,7 +1395,7 @@ internal class RowMenuModel(
     }
 
     fun onFlag(field: FlagField) {
-        if (!isChannel) handlers.onToggleFlag(row, field)
+        handlers.onToggleFlag(row, field)
     }
 
     fun isIn(f: ChatFolder): Boolean = handlers.inFolder(f, row)
@@ -1495,7 +1523,8 @@ private fun MenuHelperLine(text: String) {
  * The one row shape, drawn identically for all three kinds
  * (`docs/ux/navigation.md` section 2.1): same avatar treatment, same title,
  * same second line, same trailing column. Nothing here says which kind a row
- * is — a channel simply has no flags and no badge to draw.
+ * is: a channel's flags are the synced flags under its channel id and its
+ * badge is its count of new posts.
  */
 @Composable
 internal fun ConversationRowBody(

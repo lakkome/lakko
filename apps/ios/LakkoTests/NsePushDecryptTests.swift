@@ -1030,4 +1030,19 @@ final class NsePushDecryptTests: XCTestCase {
         let quiet = await decryptPushOutcome(NsePushWake(groupHex: groupHex, pointer: 11), onlyProfile)
         XCTAssertEqual(quiet, .quiet(tag: groupHex))
     }
+
+    /// Base scenario 29 (2026-11-13) — a bare `/g/` link with no card reads,
+    /// in a notification, as the link without its secret.
+    func testBareGroupLinkNotificationShowsNoSecret() {
+        XCTAssertEqual(
+            nseWithoutGroupLinkSecret("https://test.lakko.me/g/AbCdEfGh#0123456789abcdef"),
+            "https://test.lakko.me/g/AbCdEfGh")
+        XCTAssertEqual(
+            nseWithoutGroupLinkSecret("  https://lakko.me/g/AbCdEfGh#secret \n"),
+            "https://lakko.me/g/AbCdEfGh")
+        // Not a bare `/g/` link: unchanged.
+        XCTAssertEqual(nseWithoutGroupLinkSecret("see https://lakko.me/g/AbCd#s"), "see https://lakko.me/g/AbCd#s")
+        XCTAssertEqual(nseWithoutGroupLinkSecret("https://lakko.me/c/AbCdEfGh#s"), "https://lakko.me/c/AbCdEfGh#s")
+        XCTAssertEqual(nseWithoutGroupLinkSecret("hello"), "hello")
+    }
 }

@@ -392,7 +392,8 @@ public fun FeedScreen(
                 kind = FeedSourceKind.CHANNEL,
                 idHex = c.id,
                 title = channelTitle(c, strings),
-                muted = flags[c.id]?.muted == true,
+                // The channel row's Mute (`ChannelFlags`).
+                muted = me.lakko.app.channels.ChannelFlags.of(flags, c.id)?.muted == true,
                 audience = 0,
             )
         }
@@ -751,13 +752,15 @@ public fun FeedScreen(
             )
         } else {
             // A channel post is not a group message: it travels as its words
-            // under the channel's name, with no origin to jump to.
+            // and attachments under the channel's name, with no origin to
+            // jump to.
             me.lakko.app.chat.ForwardRequest(
                 sourceGroupIdHex = ref.source.idHex,
                 message = ChatMessage(
                     messageId = 0L,
                     direction = Direction.Incoming,
                     text = ref.message.text,
+                    attachments = ref.message.attachments.mapNotNull { it.ref },
                     createdAt = ref.message.createdAt,
                 ),
                 authorLabel = ref.source.title,

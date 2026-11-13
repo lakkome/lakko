@@ -425,8 +425,19 @@ private fun ChannelTimelineView(
             }
         }
         readNow()
+        // ADR-0060 section 3 — the reader's card is uploaded once a seed of
+        // the current epoch is held: a private channel's subscriber holds
+        // none until the owner's device lets it in, so the card goes when the
+        // seed arrives and again after each rotation (base walk 2026-11-13).
+        var cardEpoch: UInt? = null
+        suspend fun refreshReaderCardIfDue() {
+            val epoch = state.epochByChannel.value[channelId]
+            val held = epoch?.takeIf { state.subscribedSeeds(channelId)[it] != null }
+            if (!me.lakko.app.channels.ChannelSubscriberListView.readerCardDue(cardEpoch, held)) return
+            if (me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)) cardEpoch = held
+        }
         if (!isPublisher) {
-            me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
+            refreshReaderCardIfDue()
         } else {
             me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
         }
@@ -438,6 +449,7 @@ private fun ChannelTimelineView(
                 state.subscriberKeysByChannel.value[channelId]?.let {
                     catchUpEnvelopes(state, client, channelId, ChannelsComposer.bytesToHex(it.publicKey))
                 }
+                refreshReaderCardIfDue()
             }
             readNow()
         }

@@ -29,7 +29,7 @@ import {
   listSubscribers,
   removeSubscriberAsPublisher,
 } from "./api";
-import { rowsToAdmit, ticketKeyAdmits } from "./channel-access-record";
+import { letInVerdict, rowsToAdmit, ticketKeyAdmits } from "./channel-access-record";
 import { loadWasm } from "../wasm";
 import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { rememberSubscriberCount } from "./ui-cache";
@@ -215,23 +215,42 @@ async function admitTicketedRows(channelIdHex: string, identity: WasmIdentity): 
     const rows = rowsToAdmit(page.entries, mark);
     if (rows.length === 0) return;
     live ??= new Set((await listInviteKeys(channelIdHex, identity)).map((k) => k.invitePkHex.toLowerCase()));
+    const markSet = channelsActions.accessOf(channelIdHex).admissionMarkSet === true;
+    const own = ownSubscriberKeyHex(channelIdHex);
     let through = mark;
+    let blocked = false;
     for (const row of rows) {
       const invitePk = await ticketInviteKeyHex(channelIdHex, row.subscriberId, row.sealedTicket);
-      if (ticketKeyAdmits(invitePk, live)) {
+      const verdict = letInVerdict(
+        ticketKeyAdmits(invitePk, live),
+        markSet,
+        own !== null && row.subscriberId.toLowerCase() === own,
+      );
+      if (verdict === "admit") {
         await admitSubscriber(channelIdHex, row.subscriberId, identity);
-      } else {
+      } else if (verdict === "remove") {
         // ADR-0087 section 7: a row with no valid ticket is removed.
         await removeSubscriberAsPublisher(channelIdHex, row.subscriberId, identity);
+      } else if (!markSet) {
+        // A row left alone on a device without its own mark is judged again
+        // (by the device holding the mark): the mark never passes it, so it
+        // is never read as a reader.
+        blocked = true;
       }
-      through = row.seq;
+      if (!blocked) through = row.seq;
     }
     await channelsActions.updateAccessDurable(channelIdHex, (r) => ({
       ...r,
       admittedThroughSeq: Math.max(r.admittedThroughSeq, through),
     }));
-    if (page.entries.length < ADMISSION_PAGE) return;
+    if (blocked || page.entries.length < ADMISSION_PAGE) return;
   }
+}
+
+/** This device's own registered subscriber key for the channel, or `null`. */
+function ownSubscriberKeyHex(channelIdHex: string): string | null {
+  const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
+  return keys === undefined ? null : bytesToHexLower(keys.public);
 }
 
 function b64ToBytes(b64: string): Uint8Array {

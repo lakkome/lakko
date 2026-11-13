@@ -2858,7 +2858,7 @@ public final class ChatViewModel: ObservableObject {
             messageId: message.messageId,
             snapshot: ReplySnapshot.replySnapshot(
                 for: message, authorLabel: replyAuthorLabel(for: message),
-                invitationLine: message.invitationLine(conversationIdHex: groupIdHex)),
+                invitationLine: message.snapshotInvitationLine(conversationIdHex: groupIdHex)),
             quotesOwn: message.direction == .outgoing)
         composerFocusRequest += 1
     }
@@ -3107,7 +3107,7 @@ public final class ChatViewModel: ObservableObject {
         }
         let taken = ReplySnapshot.replySnapshot(
             for: message, authorLabel: replyAuthorLabel(for: message),
-            invitationLine: message.invitationLine(conversationIdHex: groupIdHex))
+            invitationLine: message.snapshotInvitationLine(conversationIdHex: groupIdHex))
         let snapshot = message.direction == .outgoing ? ReplySnapshot.shownAsOwn(taken) : taken
         let lines = ReplySnapshot.replyQuoteLines(snapshot)
         switch entry.scope {

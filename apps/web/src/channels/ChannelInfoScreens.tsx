@@ -9,7 +9,7 @@
  * `channel-invites.ts` and `channel-publishers.ts` hold; none of them holds a
  * key or talks to a server itself.
  */
-import { createEffect, createResource, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { base64Encode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
@@ -28,7 +28,7 @@ import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { PickRow } from "../ui/LabelledRows";
 import { LakkoPicker } from "../ui/LakkoPicker";
-import { loadWasm } from "../wasm";
+import { loadWasm, wasmSync } from "../wasm";
 import { BannedList } from "./BannedList";
 import {
   channelHandleOf,
@@ -65,6 +65,7 @@ import { bytesToHex } from "./composer";
 import { channelInviteCandidates, inChannelKeys } from "./invite-candidates";
 import { useChannelInviteSender } from "./invite-contacts";
 import { loadChannelMembers, type ChannelMembersResult } from "./member-cards";
+import { subscriberListView, type SubscriberListView } from "./subscriber-list";
 
 // ---------------------------------------------------------------------------
 // Channel type (UX 4.1)
@@ -321,7 +322,10 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
     if (publishes() && isPrivate()) void loadPage();
   });
 
-  async function remove(pkHex: string): Promise<void> {
+  /** UX 7.3 — remove a subscriber: every key of the person (one per
+   *  device), each followed by the rotation the removal asks for. */
+  async function remove(pksHex: readonly string[]): Promise<void> {
+    if (pksHex.length === 0) return;
     const ok = await requestConfirm({
       title: t("channels.subscribers.remove_title"),
       body: t("channels.subscribers.remove_body"),
@@ -332,28 +336,58 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
     if (!ok) return;
     const identity = chats.conversationAccountIdentity();
     if (identity === null) return;
-    setRemoving(pkHex);
+    setRemoving(pksHex[0] ?? null);
     setRemoveError(null);
+    const gone = new Set<string>();
     try {
-      await removeChannelSubscriber(identity, props.id, pkHex);
-      setRows(rows().filter((r) => r.pkHex !== pkHex));
+      for (const pkHex of pksHex) {
+        await removeChannelSubscriber(identity, props.id, pkHex);
+        gone.add(pkHex);
+      }
     } catch (err) {
       setRemoveError(channelErrorText(err, () => t("group_handle.error.failed")));
     } finally {
+      if (gone.size > 0) {
+        setRows(rows().filter((r) => !gone.has(r.pkHex)));
+        setRemovedKeys(new Set([...removedKeys(), ...gone]));
+      }
       setRemoving(null);
     }
   }
+  /** Keys removed on this screen: their names go at once, without waiting
+   *  for the member cards to be read again. */
+  const [removedKeys, setRemovedKeys] = createSignal<ReadonlySet<string>>(new Set());
 
   const viaLine = (r: ChannelSubscriberRow): string => {
-    if (r.via === null) return "";
+    if (r.via === null) return t("channels.subscribers.from_invitation");
     return r.via.kind === "link" ? t("channels.subscribers.from_link", { label: r.via.label }) : t("channels.subscribers.from_invitation");
   };
 
-  const others = (): number | null => {
+  /** The shared rule (`lakko_ui_rules::subscribers`): named rows, the others
+   *  and their count, so the owner can always tell whom `Remove` takes. */
+  const view = createMemo((): SubscriberListView<ChannelSubscriberRow> | null => {
     const m = members();
-    if (props.count === null || m === undefined) return null;
-    return Math.max(0, props.count - m.rows.length);
-  };
+    const wasm = wasmSync();
+    if (m === undefined) return null;
+    const removed = removedKeys();
+    const kept = m.rows
+      .map((r) => ({ ...r, subscriberPksHex: r.subscriberPksHex.filter((k) => !removed.has(k)) }))
+      .filter((r) => r.isSelf || r.subscriberPksHex.length > 0);
+    try {
+      const ownKeys = channelsState.subscriberKeysByChannel().get(props.id);
+      return subscriberListView(
+        wasm,
+        kept,
+        rows(),
+        props.count,
+        publishes() && isPrivate(),
+        ownKeys === undefined ? null : bytesToHex(ownKeys.public),
+      );
+    } catch {
+      // The module is not loaded yet: the memo runs again once it is.
+      return null;
+    }
+  });
 
   return (
     <div class="lk-stack" style={{ padding: "16px" }}>
@@ -374,78 +408,85 @@ export function ChannelSubscribersScreen(props: { readonly id: string; readonly 
             </button>
           </div>
         </Show>
-        <Show when={!members.loading && members.error === undefined ? members() : undefined}>
-          {(m) => (
+        <Show when={removeError()}>
+          {(msg) => (
+            <p class="form-error" role="alert">
+              {msg()}
+            </p>
+          )}
+        </Show>
+        <Show when={!members.loading && members.error === undefined ? view() : undefined}>
+          {(v) => (
             <>
-              <Show when={m().rows.length === 0 && (props.count === null || props.count === 0)}>
+              <Show when={v().people.length === 0 && v().others.length === 0 && (props.count === null || props.count === 0)}>
                 <p class="lk-meta">{t("channels.subscribers.none")}</p>
               </Show>
               <ul class="lk-member-list" style={{ "list-style": "none", margin: 0, padding: 0 }}>
-                <For each={m().rows}>
-                  {(row): JSX.Element => (
+                <For each={v().people}>
+                  {(person): JSX.Element => (
                     <li class="lk-card-row">
                       <span class="lk-card-row-icon">
-                        <Avatar label={row.name} id={row.key} size="sm" personKey={row.personKeyB64} />
+                        <Avatar label={person.row.name} id={person.row.key} size="sm" personKey={person.row.personKeyB64} />
                       </span>
                       <div class="lk-card-row-body">
-                        <span class="lk-card-row-title">{row.isSelf ? t("channels.members.you") : row.name}</span>
-                        <Show when={row.username}>{(u) => <span class="lk-card-row-sub" dir="ltr">@{u()}</span>}</Show>
+                        <span class="lk-card-row-title">{person.row.isSelf ? t("channels.members.you") : person.row.name}</span>
+                        <Show when={person.row.name.startsWith("@") ? null : person.row.username}>{(u) => <span class="lk-card-row-sub" dir="ltr">@{u()}</span>}</Show>
                       </div>
+                      <Show when={person.removable}>
+                        <button
+                          type="button"
+                          class="danger lk-card-row-action"
+                          disabled={removing() !== null}
+                          onClick={() => void remove(person.pksHex)}
+                        >
+                          {t("common.remove")}
+                        </button>
+                      </Show>
                     </li>
                   )}
                 </For>
               </ul>
-              <Show when={others() !== null && (others() ?? 0) > 0}>
-                <p class="lk-meta">{t("channels.subscribers.others", { count: others() ?? 0 })}</p>
+              <Show when={v().othersCount > 0}>
+                <p class="lk-meta">{t("channels.subscribers.others", { count: v().othersCount })}</p>
+              </Show>
+              <Show when={v().others.length > 0}>
+                <ul style={{ "list-style": "none", margin: 0, padding: 0 }}>
+                  <For each={v().others}>
+                    {(r) => (
+                      <li class="lk-card-row">
+                        <div class="lk-card-row-body">
+                          <span class="lk-card-row-title">{viaLine(r)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          class="danger lk-card-row-action"
+                          disabled={removing() !== null}
+                          onClick={() => void remove([r.pkHex])}
+                        >
+                          {t("common.remove")}
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+              <Show when={pageError()}>
+                <div class="lk-alert danger" role="alert">
+                  {t("channels.subscribers.load_failed")}
+                  <button type="button" class="ghost" onClick={() => void loadPage()}>
+                    {t("common.try_again")}
+                  </button>
+                </div>
+              </Show>
+              <Show when={publishes() && isPrivate() && !done() && !pageError() && rows().length > 0}>
+                <button type="button" class="ghost" onClick={() => void loadPage()}>
+                  {t("channels.subscribers.more")}
+                </button>
               </Show>
             </>
           )}
         </Show>
       </section>
-
-      <Show when={publishes() && isPrivate()}>
-        <section class="lk-card">
-          <Show when={removeError()}>
-            {(m) => (
-              <p class="form-error" role="alert">
-                {m()}
-              </p>
-            )}
-          </Show>
-          <ul style={{ "list-style": "none", margin: 0, padding: 0 }}>
-            <For each={rows()}>
-              {(r) => (
-                <li class="lk-card-row">
-                  <div class="lk-card-row-body">
-                    <span class="lk-card-row-title">{viaLine(r) || t("channels.subscribers.title")}</span>
-                  </div>
-                  <button
-                    type="button"
-                    class="danger lk-card-row-action"
-                    disabled={removing() !== null}
-                    onClick={() => void remove(r.pkHex)}
-                  >
-                    {t("common.remove")}
-                  </button>
-                </li>
-              )}
-            </For>
-          </ul>
-          <Show when={pageError()}>
-            <div class="lk-alert danger" role="alert">
-              {t("channels.subscribers.load_failed")}
-              <button type="button" class="ghost" onClick={() => void loadPage()}>
-                {t("common.try_again")}
-              </button>
-            </div>
-          </Show>
-          <Show when={!done() && !pageError() && rows().length > 0}>
-            <button type="button" class="ghost" onClick={() => void loadPage()}>
-              {t("channels.subscribers.more")}
-            </button>
-          </Show>
-        </section>
-      </Show>
 
       <Show when={publishes()}>
         <BannedList channelIdHex={props.id} />

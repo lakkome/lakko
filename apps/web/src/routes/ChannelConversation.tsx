@@ -64,6 +64,7 @@ import { dayLabelOf, sameDay } from "../chat/timeline-layout";
 import { ChannelComposer } from "../channels/ChannelComposer";
 import { ChannelInfo, ChannelInfoScreenHost, type ChannelInfoScreen } from "../channels/ChannelInfo";
 import { ChannelPostItem } from "../channels/ChannelPostItem";
+import { useOwnMemberCard } from "../channels/own-member-card";
 import { fetchPosts, type ChannelPostView } from "../channels/api";
 import { foldBanListFromPlaintext } from "../channels/ban-list";
 import { foldChannelMeta } from "../channels/channel-meta";
@@ -267,6 +268,27 @@ function ChannelConversationFor(props: { readonly id: string }): JSX.Element {
   const heldSeedCount = createMemo(() => channelsState.subscribedSeedsByChannel().get(id)?.size ?? 0);
   createEffect(on(heldSeedCount, () => void load({ redecode: true }), { defer: true }));
   const timeline = createMemo(() => channelTimeline(posts(), decoded()));
+
+  // ADR-0060 section 3: a subscriber keeps its member card current while the
+  // channel is open: once it is let in and holds a seed (a private channel's
+  // subscriber holds none until the owner's device lets it in), after a
+  // rotation, a renamed profile or a changed setting. Base walk 2026-11-13:
+  // no card was ever uploaded from web since channels became conversations.
+  const newestHeldEpoch = createMemo((): number | undefined => {
+    const held = channelsState.subscribedSeedsByChannel().get(id);
+    if (held === undefined || held.size === 0) return undefined;
+    return Math.max(...held.keys());
+  });
+  useOwnMemberCard({
+    channelIdHex: () => id,
+    keys: () => channelsState.subscriberKeysByChannel().get(id),
+    epoch: newestHeldEpoch,
+    seed: () => {
+      const epoch = newestHeldEpoch();
+      return epoch === undefined ? undefined : channelsState.subscribedSeedsByChannel().get(id)?.get(epoch);
+    },
+    enabled: () => !canPublish() && channelReadStateOf(id) === "reading",
+  });
 
   // Reactions in view, one batched read (ADR-0087 section 13a).
   createEffect(() => {

@@ -427,9 +427,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         }
         // ADR-0087 section 14 — a channel invitation card reads like the
         // card, never as its text (the `/g/` link with its secret).
+        // A bare `/g/` link with no card: the link without its secret.
         let text = body.channelInvite.map {
             nseChannelInviteLine(opened: $0.opened, channelName: $0.channelName, publisher: $0.publisher)
-        } ?? body.text
+        } ?? nseWithoutGroupLinkSecret(body.text)
         return NseProcessedRow(
             kind: kind,
             text: text,

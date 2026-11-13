@@ -197,7 +197,7 @@ public final class SavedMessagesCenter: ObservableObject {
             let ref = FolderConversationRef(kind: kind, id: segmentId)
             let snap = SavedMessages.snapshot(
                 text: item.message.text, attachments: item.message.attachments, author: item.author,
-                invitationLine: item.message.invitationLine(conversationIdHex: item.ref.segmentIdHex))
+                invitationLine: item.message.snapshotInvitationLine(conversationIdHex: item.ref.segmentIdHex))
             registers.append(try composeSavedMessage(
                 hlc: sync.mintHlc(), conversation: ref, messageId: UInt64(item.ref.dsId),
                 savedAtMs: nowMs, sentAtMs: SavedMessages.sentAtMs(item.message), author: snap.author, excerpt: snap.excerpt, attachmentKind: snap.kind,

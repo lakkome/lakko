@@ -151,6 +151,17 @@ struct FeedReading: Equatable {
         return next
     }
 
+    /// Mark all read in Chats (`docs/ux/chat-folders.md` 2.2) on channels:
+    /// each of `channelIds` is read through the newest post this device holds
+    /// of it (its slot's cursor, never below its newest post), as opening it
+    /// to its newest end would. A channel with no slot is left as it is.
+    func markingChannelsRead(_ channelIds: [String], slots: [String: ChannelPostSlot]) -> FeedReading {
+        channelIds.reduce(self) { reading, id in
+            guard let slot = slots[id] else { return reading }
+            return reading.advancingChannelRead(id, cursor: max(slot.cursor, slot.posts.map(\.cursor).max() ?? 0))
+        }
+    }
+
     /// Give every channel that has no marker one at the newest post this
     /// device holds of it now (its slot's cursor, never below its newest
     /// post), so a fresh subscription starts with no count. A channel already
@@ -334,6 +345,17 @@ final class FeedReadingModel: ObservableObject {
         update { $0.advancingChannelRead(channelIdHex, cursor: cursor) }
     }
 
+    /// The post log as last seen (``bind(postSync:channels:)``): what Mark
+    /// all read reads channels through.
+    private var latestSlots: [String: ChannelPostSlot] = [:]
+
+    /// Mark all read on channels (``FeedReading/markingChannelsRead(_:slots:)``).
+    func markChannelsRead(_ channelIds: [String]) {
+        guard !channelIds.isEmpty else { return }
+        let slots = latestSlots
+        update { $0.markingChannelsRead(channelIds, slots: slots) }
+    }
+
     /// Keep ``channelUnread`` current from the post log and the channels this
     /// device publishes to.
     func bind(postSync: ChannelPostSync, channels: ChannelsUiState) {
@@ -345,6 +367,7 @@ final class FeedReadingModel: ObservableObject {
         .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self, weak channels] log, reading, _ in
             guard let self, let channels else { return }
+            self.latestSlots = log.channels
             let own = Set(channels.keysByChannel.keys)
             var counts: [String: Int] = [:]
             for c in channels.channels {

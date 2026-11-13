@@ -114,11 +114,18 @@ public enum ChannelPublisherCommits {
             },
             reseal: { targetEpoch in
                 let (identity, group) = try context.open()
+                // The mark as this device keeps it, from the store when no
+                // screen state is bound (a replay at start): never a reseal
+                // to every row for want of a state object.
+                let extras = state?.extras(context.channelIdHex)
+                    ?? ChannelExtrasStore.load(context.accountIdB64)[context.channelIdHex]
                 try await ChannelReseal.resealToSubscribers(
                     publisherGroup: group, identity: identity,
                     ownerIdentity: try context.ownerIdentity(),
                     channelIdHex: context.channelIdHex, targetEpoch: targetEpoch,
-                    client: context.channelsClient)
+                    client: context.channelsClient,
+                    throughSeq: ChannelReseal.resealThrough(
+                        isPublic: extras?.isPublic, mark: extras?.admittedThroughSeq))
                 state?.setEpoch(channelId: context.channelIdHex, epoch: targetEpoch)
             },
             appoint: { joinerKey in
@@ -253,18 +260,37 @@ public enum ChannelReseal {
     /// `targetEpoch`, stage the envelopes in bounded chunks and commit. A
     /// single seal failure aborts the whole batch. `ownerIdentity` signs the
     /// channels-service requests.
+    ///
+    /// `throughSeq` (``resealThrough(isPublic:mark:)``):
+    /// `nil` reseals to every row; a value reseals only to the rows at or
+    /// below it, the rows this device let in (a private channel).
     public static func resealToSubscribers(
         publisherGroup: PublisherGroup,
         identity: Identity,
         ownerIdentity: Identity,
         channelIdHex: String,
         targetEpoch: UInt32,
-        client: ChannelsClient
+        client: ChannelsClient,
+        throughSeq: UInt64? = nil
     ) async throws {
         let seed = try publisherGroup.channelSeed(identity: identity)
         let channelIdBytes = try publisherGroup.channelId()
-        let subscribers = try await client.listSubscribers(
-            channelIdHex: channelIdHex, accountIdentity: ownerIdentity)
+        let subscribers: [String]
+        if let throughSeq {
+            var rows: [ChannelsClient.SubscriberRow] = []
+            var after: UInt64 = 0
+            for _ in 0..<10_000 {
+                let page = try await client.subscriberPage(
+                    channelIdHex: channelIdHex, after: after, accountIdentity: ownerIdentity)
+                rows.append(contentsOf: page.rows)
+                guard let last = page.rows.last, last.seq <= throughSeq, page.nextAfter > after else { break }
+                after = page.nextAfter
+            }
+            subscribers = resealKeys(rows: rows, throughSeq: throughSeq)
+        } else {
+            subscribers = try await client.listSubscribers(
+                channelIdHex: channelIdHex, accountIdentity: ownerIdentity)
+        }
         var batch: [RotateBatchEntry] = []
         batch.reserveCapacity(subscribers.count)
         for subscriberHex in subscribers {
@@ -288,5 +314,23 @@ public enum ChannelReseal {
         }
         _ = try await client.commitRotation(
             channelIdHex: channelIdHex, targetEpoch: targetEpoch, accountIdentity: ownerIdentity)
+    }
+
+    /// ADR-0087 section 7 — whom a rotation reseals to per key, the web
+    /// `resealPlan`: in a private channel only the rows at or below this
+    /// device's mark — the readers from before the channel went private and
+    /// the rows a let-in pass let in — never a row with no valid ticket a
+    /// server could have added, whether or not this device holds an
+    /// admission seed (one without has let nobody in, so it reseals to the
+    /// readers only). `nil` (every row) for a public channel, whose readers
+    /// read its public seed besides, and for a channel of unknown type.
+    nonisolated static func resealThrough(isPublic: Bool?, mark: UInt64?) -> UInt64? {
+        guard isPublic == false else { return nil }
+        return mark ?? 0
+    }
+
+    /// The rows a per-key reseal seals to: those at or below `throughSeq`.
+    nonisolated static func resealKeys(rows: [ChannelsClient.SubscriberRow], throughSeq: UInt64) -> [String] {
+        rows.filter { $0.seq <= throughSeq }.map(\.pubkeyHex)
     }
 }

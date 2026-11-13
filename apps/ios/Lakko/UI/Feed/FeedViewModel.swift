@@ -406,7 +406,8 @@ final class FeedViewModel: ObservableObject {
                 kind: .channel,
                 idHex: c.id,
                 title: c.title,
-                muted: flags[c.id]?.muted == true,
+                // The channel row's Mute (``ChannelFlags``).
+                muted: flags[ChannelFlags.key(channelIdHex: c.id)]?.muted == true,
                 audience: 0)
         }
         return groups + channelSources
@@ -581,7 +582,8 @@ final class FeedViewModel: ObservableObject {
     /// Forward a feed item to `targetGroupIdHex`, as the chat forwards: a
     /// group message carries its text, its attachments re-encrypted under
     /// fresh keys, the original author's name and its origin; a channel post
-    /// carries its text and the channel's name and no origin. Returns `true`
+    /// carries its text, its attachments re-encrypted the same way, and the
+    /// channel's name and no origin. Returns `true`
     /// when it was sent; a failure is said once, here.
     func forward(_ ref: FeedCandidateRef, to targetGroupIdHex: String) async -> Bool {
         forwarding = nil
@@ -589,8 +591,11 @@ final class FeedViewModel: ObservableObject {
             switch ref.source.kind {
             case .channel:
                 let payload = FeedForward.channelPayload(text: ref.message.text, channelTitle: ref.source.title)
+                // Its attachments under fresh keys, as a group message's are.
+                let refs = try await ForwardAttachments.reencryptAll(ref.message.attachments)
                 try await chatRepository.sendMessage(
-                    groupIdHex: targetGroupIdHex, plaintext: payload.text, forward: payload.forward)
+                    groupIdHex: targetGroupIdHex, plaintext: payload.text,
+                    attachments: refs, forward: payload.forward)
             case .group:
                 guard let message = chatRepository.state.threads
                     .first(where: { $0.groupIdHex == ref.source.idHex })?

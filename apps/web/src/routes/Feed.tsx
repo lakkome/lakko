@@ -43,6 +43,7 @@
 import { createEffect, createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
+import { channelFlagsOf } from "../channels/channel-flags";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
@@ -434,7 +435,8 @@ export default function Feed(): JSX.Element {
         idHex: c.id,
         slug: c.id,
         title: channelTitle(shared.get(c.id)?.name, c.localName, c.localHandle),
-        muted: flags[c.id]?.muted === true,
+        // The channel row's Mute (`channels/channel-flags.ts`).
+        muted: channelFlagsOf(flags, c.id).muted,
         audience: 0,
       }),
     );

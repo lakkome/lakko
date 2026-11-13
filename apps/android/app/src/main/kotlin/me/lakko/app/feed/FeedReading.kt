@@ -228,6 +228,21 @@ public fun readFloorAfterDrop(r: FeedReading, dropped: Map<String, Long>): FeedR
 public fun channelReadSeed(slotCursor: Long, postCursors: List<Long>): Long =
     maxOf(slotCursor, postCursors.maxOrNull() ?: 0L, 0L)
 
+/**
+ * Mark all read in Chats (`docs/ux/chat-folders.md` 2.2) on channels: each of
+ * [channelIds] is read through the newest post this device holds of it
+ * ([channelReadSeed] of its slot in [slots]), as opening it to its newest end
+ * would. A channel with no slot is left as it is.
+ */
+public fun markChannelsRead(
+    r: FeedReading,
+    channelIds: Collection<String>,
+    slots: Map<String, ChannelPostSlot>,
+): FeedReading = channelIds.fold(r) { acc, id ->
+    val slot = slots[id] ?: return@fold acc
+    advanceChannelRead(acc, id, channelReadSeed(slot.cursor, slot.posts.map { it.cursor }))
+}
+
 /** `true` when the post at [cursor] is still new for the channel. */
 public fun isChannelPostUnread(r: FeedReading, channelIdHex: String, cursor: Long, own: Boolean): Boolean =
     !own && cursor > (r.channelRead[channelIdHex] ?: 0L)

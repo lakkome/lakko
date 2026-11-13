@@ -115,8 +115,8 @@ public enum ChatFolders {
         row.showsUnread || row.markedUnread
     }
 
-    /// The row the shared rules read. A channel has no flags on this client,
-    /// so its muted, archived and pinned fields are always false.
+    /// The row the shared rules read. A channel's muted, archived and pinned
+    /// are the synced flags under its channel id (``ChannelFlags``).
     public static func ffiRow(_ row: ConversationListRow) -> ConversationRow {
         ConversationRow(
             id: row.id,

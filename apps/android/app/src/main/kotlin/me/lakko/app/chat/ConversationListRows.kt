@@ -54,10 +54,10 @@ public data class ConversationListRow(
      */
     val lastActivityMs: Long?,
     /**
-     * Unread, pinned, muted and archived are keyed on a conversation id a
-     * channel does not carry (`docs/ux/navigation.md` section 6.1), so a
-     * channel row reports none of them. That is honest; inventing a badge that
-     * can never be non-zero is not.
+     * A chat's or group's unread count, or a channel's count of new posts.
+     * Pinned, muted and archived are the synced flags: a chat's or group's
+     * under its conversation id, a channel's under its channel id
+     * (`channels/ChannelFlags.kt`).
      */
     val unread: Int = 0,
     val pinned: Boolean = false,

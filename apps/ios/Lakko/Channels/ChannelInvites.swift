@@ -107,6 +107,12 @@ enum ChannelInvites {
             // mints no private link (the invite key is registered only once
             // the seed is known, below).
             let isOwner = ChannelOwnership.isOwner(channelId: channelIdHex, state: state)
+            // The first seed: the rows of today stay readers (the web
+            // repair), before any ticket can name it.
+            if isOwner, admissionSeeds(channelIdHex: channelIdHex).isEmpty {
+                try await SubscriberAdmission.markCurrentRowsAsReaders(
+                    channelId: channelIdHex, state: state, client: client, accountIdentity: identity)
+            }
             guard let admission = admissionSeed(channelIdHex: channelIdHex, mintIfMissing: isOwner) else {
                 throw isOwner ? InviteError.noAccess : InviteError.noAdmissionSeedYet
             }

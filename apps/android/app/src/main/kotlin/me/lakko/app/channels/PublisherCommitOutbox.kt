@@ -377,12 +377,28 @@ public suspend fun resealToSubscribers(
     publisherGroup: PublisherGroup,
     channelIdHex: String,
     targetEpoch: Long,
+    /** [ChannelReseal.resealThrough]: `null` reseals to every row; a value
+     *  only to the rows at or below it (a private channel's rows let in). */
+    throughSeq: Long? = null,
 ) {
     val seed = publisherGroup.channelSeed(identity)
     val channelIdBytes = publisherGroup.channelId()
     val target = targetEpoch.toUInt()
     ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
-        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
+        val subscribers = if (throughSeq == null) {
+            channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
+        } else {
+            val rows = ArrayList<SubscriberRow>()
+            var after = 0L
+            while (true) {
+                val page = channelsClient.subscriberPage(channelIdHex, proofs, after)
+                rows += page.rows
+                val last = page.rows.lastOrNull() ?: break
+                if (last.seq > throughSeq || page.nextAfter <= after) break
+                after = page.nextAfter
+            }
+            ChannelReseal.resealKeys(rows, throughSeq)
+        }
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytesOrNull(subscriberHex)
@@ -412,4 +428,30 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
         out[i] = (hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null).toByte()
     }
     return out
+}
+
+/**
+ * ADR-0087 section 7 — whom a rotation reseals to per key, the web
+ * `resealPlan`: only the rows at or below this device's mark — the readers
+ * from before the channel went private and the rows a let-in pass let in —
+ * never a row with no valid ticket a server could have added. This device
+ * keeps no type for the channel where the rotation runs, so it does the same
+ * in a public channel, as web does: its readers read the public seed the
+ * publisher loop files. Pure.
+ */
+public object ChannelReseal {
+    public fun resealThrough(mark: Long): Long = mark
+
+    /** The rows a per-key reseal seals to: those at or below [throughSeq]. */
+    public fun resealKeys(rows: List<SubscriberRow>, throughSeq: Long): List<String> =
+        rows.filter { it.seq <= throughSeq }.map { it.pubkeyHex }
+
+    /** [resealThrough] for [channelIdHex] as this device keeps it. Throws
+     *  when the channel state is not reachable yet (the reseal stays owed
+     *  and is retried), rather than resealing to every row for want of it. */
+    public fun throughFor(accountIdB64: String, channelIdHex: String): Long {
+        val context = SubscriberAdmission.appContext
+            ?: throw IllegalStateException("the channel's admission state is not loaded yet")
+        return resealThrough(ChannelAdmissionMark.get(context, accountIdB64, channelIdHex))
+    }
 }

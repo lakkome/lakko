@@ -163,12 +163,31 @@ enum ChannelMemberCards {
         let claim: ProfileClaim
         /// The account key the card is bound to (verified when it opened).
         var accountKey = Data()
+        /// Every subscriber key a card of this member was stored under (one
+        /// per device): what `Remove` takes in a private channel (UX 7.3).
+        var subscriberPks: [Data] = []
+        /// The viewer's own account ("You"), listed only on request.
+        var isSelf = false
+
+        /// The card carries something to call the person by: a display name
+        /// or a username shown here. A card without one is not a named row
+        /// (UX 15.1).
+        var named: Bool {
+            isSelf || !(claim.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                || claim.username != nil
+        }
     }
 
     /// ``refresh(state:channelId:resolveKey:)``, with the subscriber key of
     /// each name (the subscriber list's rows, ADR-0087 section 15).
+    ///
+    /// `includeSelf`: the subscriber list (UX 15.1) also gets one "You"
+    /// member carrying this account's own subscriber keys (this device's
+    /// registered key, and the keys of the account's other devices' cards),
+    /// so an own key is never shown as an anonymous subscriber.
     static func refreshMembers(
-        state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
+        state: ChannelsUiState, channelId: String, includeSelf: Bool = false,
+        resolveKey: (Data) async -> Data?
     ) async -> [Member] {
         // A publisher opens the cards of the epoch its composer seed serves
         // with that seed; every other epoch reads from the seeds kept.
@@ -183,6 +202,7 @@ enum ChannelMemberCards {
         let readForAccountIdB64 = ProfileDirectory.shared.accountIdB64
         var names: [Member] = []
         var seen = Set<Data>()
+        var selfPks: [Data] = ownPk.map { [$0] } ?? []
         var after: String?
         repeat {
             guard let page = try? await ChannelsClient().listMemberCards(
@@ -221,7 +241,18 @@ enum ChannelMemberCards {
                     break
                 }
                 // Every device of the own account is "you", not a member row.
-                guard key != ownAccountKey, seen.insert(key).inserted else { continue }
+                guard key != ownAccountKey else {
+                    if !selfPks.contains(member.subscriberPk) { selfPks.append(member.subscriberPk) }
+                    continue
+                }
+                guard seen.insert(key).inserted else {
+                    // Another device of the same member: one row, every key.
+                    if let at = names.firstIndex(where: { $0.accountKey == key }),
+                       !names[at].subscriberPks.contains(member.subscriberPk) {
+                        names[at].subscriberPks.append(member.subscriberPk)
+                    }
+                    continue
+                }
                 let username = shownUsername(
                     username: profile.username, carriesChannelGrant: channelGrant != nil,
                     grantHeld: ReachCenter.shared.holdsGrant(
@@ -231,7 +262,9 @@ enum ChannelMemberCards {
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: username == nil ? nil : profile.usernameCertificate,
                     avatar: ProfileAvatar(profile.avatar))
-                names.append(Member(subscriberPk: member.subscriberPk, claim: claim, accountKey: key))
+                names.append(Member(
+                    subscriberPk: member.subscriberPk, claim: claim, accountKey: key,
+                    subscriberPks: [member.subscriberPk]))
                 if channelGrant != nil {
                     ProfileDirectory.shared.acceptReceived(
                         claim, signatureKeyB64: keyB64, accountIdB64: readForAccountIdB64)
@@ -239,6 +272,11 @@ enum ChannelMemberCards {
             }
             after = page.nextAfter
         } while after != nil
+        if includeSelf, let first = selfPks.first {
+            names.insert(Member(
+                subscriberPk: first, claim: ProfileClaim(displayName: nil, username: nil, updatedAtMs: 0),
+                accountKey: ownAccountKey ?? Data(), subscriberPks: selfPks, isSelf: true), at: 0)
+        }
         return names
     }
 }

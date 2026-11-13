@@ -1128,6 +1128,24 @@ public func nseChannelInviteLine(opened: Bool, channelName: String?, publisher: 
     return template.replacingOccurrences(of: nseChannelNameMark, with: name)
 }
 
+/// A message whose whole text is one `/g/` link and that carries no card (an
+/// older message, a link pasted as text): the link WITHOUT its secret, what
+/// follows `#` (seen live 2026-11-13 on a Chats row; the app's row and the
+/// web say the same while the link is not opened). The extension opens no
+/// ledger, so it never says more. Any other text is returned unchanged. Any
+/// origin: a `/g/` link of another deployment carries a secret too.
+public func nseWithoutGroupLinkSecret(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isWhitespace }),
+          let schemeEnd = trimmed.range(of: "://"),
+          let hash = trimmed.firstIndex(of: "#"), hash > schemeEnd.upperBound else { return text }
+    let afterScheme = trimmed[schemeEnd.upperBound..<hash]
+    guard !afterScheme.contains("?"), let pathStart = afterScheme.firstIndex(of: "/") else { return text }
+    let parts = afterScheme[pathStart...].split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count == 3, parts[1] == "g", !parts[2].isEmpty else { return text }
+    return String(trimmed[..<hash])
+}
+
 /// The body the server put on a wake, in the interface language when it is
 /// one of the two generic placeholders `push-gw` sends (`New message`,
 /// `Incoming call`); any other body is returned unchanged.

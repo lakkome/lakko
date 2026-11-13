@@ -21,9 +21,9 @@ import SwiftUI
 /// filter with it, and channels are mapped in from their own store.
 ///
 /// **The row says nothing about which kind it is.** No badge, no label, no
-/// differing avatar; the kind only routes a tap. A channel additionally draws
-/// no pin, mute or archive mark, because those are keyed on a conversation id
-/// a channel does not carry. Its unread badge is its count of new posts
+/// differing avatar; the kind only routes a tap. A channel's pin, mute and
+/// archive are the same synced flags as a group's, keyed on the channel id
+/// (``ChannelFlags``). Its unread badge is its count of new posts
 /// (`docs/ux/feed.md` section 5, "Channel posts"), kept on this device.
 ///
 /// Rendered as the root of the Chats tab's `NavigationStack`; tapping a row
@@ -51,6 +51,9 @@ public struct ChatListScreen: View {
     @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
+    /// The ledger openings of bare `/g/` links a row's second line reads
+    /// (``BareGroupLink``): a finished opening redraws the row.
+    @ObservedObject private var bareGroupLinks = BareGroupLinks.shared
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -335,7 +338,8 @@ public struct ChatListScreen: View {
         let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
         return ConversationList.sorted(
             chatRows + Self.channelRows(
-                channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts))
+                channels: channels, channelUnread: channelUnread, lastPosts: channelLastPosts,
+                flags: flags))
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -396,11 +400,13 @@ public struct ChatListScreen: View {
     static func channelRows(
         channels: ChannelsUiState, channelUnread: [String: Int],
         lastPosts: [String: PersistedChannelPost] = [:],
+        flags flagsMap: [String: FlagsState] = [:],
         coPublished: (String) -> Bool = { CoPublishedJournals.shared.journalIdHex(channelIdHex: $0) != nil }
     ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
             let lastPost = lastPosts[channel.id]
+            let flags = flagsMap[ChannelFlags.key(channelIdHex: channel.id)]
             // The newest REAL post's time, the post the second line shows
             // (the channel-post log holds text posts only). The raw rows the
             // server holds (`postsByChannel`) include ban lists and metadata
@@ -434,7 +440,13 @@ public struct ChatListScreen: View {
                             .replacingOccurrences(of: "\n", with: " ")
                     } ?? model.secondLine),
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
-                unread: channelUnread[channel.id] ?? 0)
+                unread: channelUnread[channel.id] ?? 0,
+                // UX group-and-channel-privacy 12 — pinned, muted and archived
+                // like a group's row, through the same synced flags, keyed on
+                // the channel id (``ChannelFlags``).
+                pinned: flags?.pinned == true,
+                muted: flags?.muted == true,
+                archived: flags?.archived == true)
         }
     }
 
@@ -714,22 +726,22 @@ public struct ChatListScreen: View {
                 icon: pinned ? .pinSlash : .pin, enabled: !atLimit
             ) { Task { await toggleFolderPin(folder: folder, row: row) } })
             if atLimit { items.append(.text(ChatFolders.pinLimitLine, secondary: true)) }
-        } else if row.kind != .channel {
+        } else {
             items.append(.action(
                 l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"),
                 icon: row.pinned ? .pinSlash : .pin
             ) { Task { await toggleFlag(groupIdHex: row.id, field: .pin) } })
         }
-        if row.kind != .channel {
-            items.append(.action(
-                l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
-                icon: row.muted ? .bell : .bellSlash
-            ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
-            items.append(.action(
-                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                icon: row.archived ? .unarchive : .archive
-            ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
-        }
+        // A channel's row offers what a group's does (UX
+        // group-and-channel-privacy 12); its flags are keyed on the channel id.
+        items.append(.action(
+            l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
+            icon: row.muted ? .bell : .bellSlash
+        ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
+        items.append(.action(
+            l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+            icon: row.archived ? .unarchive : .archive
+        ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
         let folders = deviceGroupSync.folders
         let openEditor = {
             editor = FolderEditorRequest(folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
@@ -757,6 +769,11 @@ public struct ChatListScreen: View {
             })
         }
         return items
+    }
+
+    /// The channel rows Mark all read reads: those with new posts.
+    static func channelIdsToMarkRead(_ rows: [ConversationListRow]) -> [String] {
+        rows.filter { $0.kind == .channel && $0.unread > 0 }.map(\.id)
     }
 
     private func toggleMembership(folder: FolderView, row: ConversationListRow) async {
@@ -794,14 +811,17 @@ public struct ChatListScreen: View {
     /// Section 2.2 — for every conversation in the tab that has something
     /// unread, the same mark-read the chat itself does: the local badge, the
     /// read cursor every device of the account folds, and a manual "mark as
-    /// unread" cleared. Channels carry no unread state on this client.
+    /// unread" cleared. A channel with new posts is read through the newest
+    /// post this device holds, as opening it does (the feed's read state).
     private func markAllRead(in folder: FolderView?) async {
         let all = allRows
-        let targets = all.filter { row in
-            guard ChatFolders.hasUnread(row), row.kind != .channel else { return false }
+        let inTab = all.filter { row in
+            guard ChatFolders.hasUnread(row) else { return false }
             guard let folder else { return true }
             return ChatFolders.matches(folder, row)
         }
+        feedReading.markChannelsRead(ChatListScreen.channelIdsToMarkRead(inTab))
+        let targets = inTab.filter { $0.kind != .channel }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         for row in targets {
             guard let groupId = Self.hexToBytes(row.id) else { continue }
@@ -938,11 +958,10 @@ public struct ChatListScreen: View {
     /// The row's own actions, rendered both as a trailing swipe and as the
     /// long-press menu (spec section 2.1).
     ///
-    /// Pin / mute / archive are keyed on a conversation id a channel does not
-    /// carry, so in All chats a channel row offers none of them rather than
-    /// offering one that could not be honoured. Inside a folder, Pin acts on
-    /// that folder's own pin list (`docs/ux/chat-folders.md` 2.3), which does
-    /// name channels.
+    /// A channel's row offers the same pin / mute / archive as a group's (UX
+    /// group-and-channel-privacy 12), keyed on the channel id
+    /// (``ChannelFlags``). Inside a folder, Pin acts on that folder's own pin
+    /// list (`docs/ux/chat-folders.md` 2.3).
     @ViewBuilder
     private func rowActions(
         row: ConversationListRow, folder: FolderView?, inMenu: Bool = false
@@ -960,7 +979,7 @@ public struct ChatListScreen: View {
             if atLimit && inMenu {
                 Text(ChatFolders.pinLimitLine)
             }
-        } else if row.kind != .channel {
+        } else {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
@@ -968,22 +987,20 @@ public struct ChatListScreen: View {
             }
             .tint(Color.lakkoAccent)
         }
-        if row.kind != .channel {
-            Button {
-                Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
-            } label: {
-                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), icon: row.muted ? .bell : .bellSlash)
-            }
-            .tint(.gray)
-            Button {
-                Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
-            } label: {
-                Label(
-                    l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
-                    icon: row.archived ? .unarchive : .archive)
-            }
-            .tint(Color.lakkoTextMuted)
+        Button {
+            Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
+        } label: {
+            Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), icon: row.muted ? .bell : .bellSlash)
         }
+        .tint(.gray)
+        Button {
+            Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
+        } label: {
+            Label(
+                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+                icon: row.archived ? .unarchive : .archive)
+        }
+        .tint(Color.lakkoTextMuted)
     }
 
     private enum FlagField {
@@ -992,8 +1009,10 @@ public struct ChatListScreen: View {
 
     @MainActor
     private func toggleFlag(groupIdHex: String, field: FlagField) async {
+        // A chat's or group's conversation id (32 bytes), or a channel's id
+        // (16 bytes, ``ChannelFlags``): the synced flags take either.
         guard let groupId = Self.hexToBytes(groupIdHex) else { return }
-        let cur = deviceGroupSync.flags[groupIdHex]
+        let cur = deviceGroupSync.flags[groupIdHex.lowercased()]
         var pinned = cur?.pinned ?? false
         var muted = cur?.muted ?? false
         var archived = cur?.archived ?? false
@@ -1341,10 +1360,14 @@ public final class ChatListViewModel: ObservableObject {
         // them from (the conversation's current group).
         var text = last.text
         if let channel = last.channelInvite(conversationIdHex: thread.groupIdHex) {
-            text = ChatListFormatting.channelInvitePreview(channelName: channel.name, publisher: false)
+            text = ChatListFormatting.channelInvitePreview(channelName: channel.displayName, publisher: false)
         } else if let publisher = last.coPublisherInvite(conversationIdHex: thread.groupIdHex) {
             text = ChatListFormatting.channelInvitePreview(
-                channelName: publisher.channelName, publisher: true)
+                channelName: publisher.displayName, publisher: true)
+        } else if !last.deleted, let link = BareGroupLink.link(of: text) {
+            // A bare `/g/` link with no card (an older message): never its
+            // secret (``BareGroupLink``; seen live 2026-11-13).
+            text = BareGroupLink.rowLine(text: text, opening: BareGroupLinks.shared.opening(link)) ?? text
         }
         return ChatListFormatting.preview(
             text: text,

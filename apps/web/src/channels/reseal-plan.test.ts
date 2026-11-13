@@ -31,6 +31,11 @@ describe("resealPlan (ADR-0087 sections 6 and 7)", () => {
     expect(plan.perKeyThroughSeq).toBe(5);
   });
 
+  it("a private channel on a device holding no admission seed reseals only to its readers, never every row", () => {
+    channelsActions.updateAccess(ID, (r) => ({ ...r, visibility: "private", admittedThroughSeq: 7, admissionSeeds: [] }));
+    expect(resealPlan(ID)).toEqual({ readKey: null, perKeyThroughSeq: 7 });
+  });
+
   it("a device that checks no tickets (a channel from before phase B) reseals to every row", () => {
     channelsActions.updateAccess(ID, (r) => ({ ...r, visibility: null, admittedThroughSeq: 3 }));
     expect(resealPlan(ID).perKeyThroughSeq).toBe("all");

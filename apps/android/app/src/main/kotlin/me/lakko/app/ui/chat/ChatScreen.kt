@@ -2108,6 +2108,15 @@ internal fun Bubble(
     }
     var linkCardResolved by remember(msg.messageId, msg.text) { mutableStateOf(false) }
     val textHidden = cardReplacesText || (channelPost == null && linkCardResolved)
+    // A bare `/g/` link with no card (`BareGroupLink.kt`): Copy takes the
+    // words the bubble shows in its place, never the secret.
+    val bareCopyLink = remember(msg.text, msg.channelInvite) {
+        if (channelPost == null && msg.channelInvite?.isEmpty() != false) {
+            me.lakko.app.ui.channels.bareGroupLinkOf(msg.text, me.lakko.app.config.ApiEndpoints.webOrigin)
+        } else {
+            null
+        }
+    }
 
     // docs/ux/text-size.md — the message's text, its meta line, the quote,
     // the forwarded line, link previews and the reaction chips follow the
@@ -2315,10 +2324,37 @@ internal fun Bubble(
                                 lineHeight = largeEmojiSize(emojiOnly) * 1.15f,
                             )
                         } else if (msg.text.isNotEmpty()) {
+                            // A bare `/g/` link with no card (an older message,
+                            // `BareGroupLink.kt`): until it is drawn as its card,
+                            // or opened as a group's live link, the words in
+                            // its place, never its secret.
+                            val bareLink = remember(msg.text, msg.channelInvite) {
+                                if (channelPost == null && msg.channelInvite?.isEmpty() != false) {
+                                    me.lakko.app.ui.channels.bareGroupLinkOf(
+                                        msg.text,
+                                        me.lakko.app.config.ApiEndpoints.webOrigin,
+                                    )
+                                } else {
+                                    null
+                                }
+                            }
+                            val bareOpenings = me.lakko.app.ui.channels.BareGroupLinks.openings
+                                .collectAsStateWithLifecycle().value
+                            LaunchedEffect(bareLink) { bareLink?.let(me.lakko.app.ui.channels.BareGroupLinks::start) }
+                            val bareWords = bareLink?.let {
+                                me.lakko.app.ui.channels.bareGroupLinkBubbleWords(it, bareOpenings[it])
+                            }
                             // ADR-0087 section 14.1 — a bubble whose channel
                             // invitation card is drawn shows the card alone:
                             // the text is the `/g/` link with its secret.
-                            if (me.lakko.app.ui.channels.bubbleDrawsMessageText(
+                            if (bareWords != null && me.lakko.app.ui.channels.bubbleDrawsMessageText(
+                                    cardDrawn = channelPost == null,
+                                    cardOpens = cardReplacesText,
+                                    linkCardResolved = linkCardResolved,
+                                )
+                            ) {
+                                Text(text = bareWords, style = MaterialTheme.typography.bodyMedium)
+                            } else if (me.lakko.app.ui.channels.bubbleDrawsMessageText(
                                     cardDrawn = channelPost == null,
                                     cardOpens = cardReplacesText,
                                     linkCardResolved = linkCardResolved,
@@ -2471,7 +2507,16 @@ internal fun Bubble(
                             deleted = msg.deleted,
                             // Translation UX 3.2 — Copy copies the text shown;
                             // an invitation card shows none.
-                            text = if (textHidden) "" else tr.copyText,
+                            text = if (textHidden) {
+                                ""
+                            } else {
+                                bareCopyLink?.let {
+                                    me.lakko.app.ui.channels.bareGroupLinkBubbleWords(
+                                        it,
+                                        me.lakko.app.ui.channels.BareGroupLinks.openings.value[it],
+                                    )
+                                } ?: tr.copyText
+                            },
                             menuAvailable = menuAvailable,
                             // UX 5.1 — no Forward on a row still sending or
                             // one that failed.

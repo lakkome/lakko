@@ -14,7 +14,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { MemoryRouter, Route } from "@solidjs/router";
 
-import { all, initWasm, renderUi, settle } from "../test/ui";
+import { all, initWasm, one, renderUi, settle } from "../test/ui";
 import type { ConversationRow } from "./conversation-list";
 
 let ChannelRow: typeof import("./ChannelRow")["ChannelRow"];
@@ -38,12 +38,30 @@ const row: ConversationRow = {
   archived: false,
 };
 
-function mount(time: string): void {
+type Field = "pinned" | "muted" | "archived";
+
+function mount(
+  time: string,
+  flags: { pinned?: boolean; muted?: boolean; archived?: boolean } = {},
+  onToggle: (field: Field) => void = () => {},
+): void {
   renderUi(() => (
     <MemoryRouter>
       <Route
         path="/"
-        component={() => <ChannelRow row={row} time={time} pinned={false} selected={false} onMenu={() => {}} />}
+        component={() => (
+          <ChannelRow
+            row={{ ...row, unread: 3 }}
+            time={time}
+            pinned={flags.pinned === true}
+            muted={flags.muted === true}
+            archived={flags.archived === true}
+            pinBlocked={false}
+            selected={false}
+            onMenu={() => {}}
+            onToggle={onToggle}
+          />
+        )}
       />
     </MemoryRouter>
   ));
@@ -59,5 +77,25 @@ describe("a channel row", () => {
   it("draws no time slot while nothing has been posted", () => {
     mount("");
     expect(all(".lk-row .lk-row-time")).toEqual([]);
+  });
+
+  // Base scenario 29 (2026-11-13): a channel row offered only "Add to
+  // folder". Section 12 - the row behaves as a group's: the same pin, mute
+  // and archive glyphs and actions.
+  it("draws the mute, pin and archive glyphs a group row draws", () => {
+    mount("22:39", { pinned: true, muted: true, archived: true });
+    expect(all(".lk-row .lk-row-trail > svg")).toHaveLength(3);
+    expect(one(".lk-row").classList.contains("archived")).toBe(true);
+    expect(one(".lk-row .lk-badge").classList.contains("muted")).toBe(true);
+    const labels = all(".lk-row .lk-row-actions button").map((b) => b.getAttribute("aria-label"));
+    expect(labels).toHaveLength(3);
+  });
+
+  it("toggles pin, mute and archive from its own actions", () => {
+    const seen: Field[] = [];
+    mount("22:39", {}, (f) => seen.push(f));
+    expect(all(".lk-row .lk-row-trail > svg")).toHaveLength(0);
+    for (const b of all<HTMLButtonElement>(".lk-row .lk-row-actions button")) b.click();
+    expect(seen).toEqual(["pinned", "muted", "archived"]);
   });
 });

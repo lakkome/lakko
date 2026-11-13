@@ -73,7 +73,8 @@ public class FolderActions(
      * Mark all as read (UX spec 2.2): for each unread conversation, the path
      * opening it takes - the local count cleared as if it had been on screen,
      * and the read cursor moved to its newest message for the other devices -
-     * plus clearing a manual "mark as unread". Channels have no unread state.
+     * plus clearing a manual "mark as unread". Channel rows are marked read by
+     * the Chats screen through the feed's channel read state.
      */
     public suspend fun markAllRead(rows: List<ConversationListRow>) {
         val threads = chats.state.value.threads.associateBy { it.groupIdHex }

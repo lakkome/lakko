@@ -41,6 +41,8 @@ public object GroupLinkRegister {
         revocationSeed: ByteArray,
         capability: ByteArray,
         maxUses: Long,
+        /** When the link stops working (unix ms), `0` never. */
+        expiryMs: Long = 0L,
     ) {
         val sync = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active ?: return
         try {
@@ -52,7 +54,7 @@ public object GroupLinkRegister {
                     kind = entry.kind,
                     ledgerId = ledgerId.copyOf(),
                     revocationSeed = revocationSeed.copyOf(),
-                    expiryMs = 0uL,
+                    expiryMs = expiryMs.coerceAtLeast(0L).toULong(),
                     maxUses = maxUses.coerceIn(0L, 0xFFFFFFFFL).toUInt(),
                     uses = 0u,
                     revoked = false,

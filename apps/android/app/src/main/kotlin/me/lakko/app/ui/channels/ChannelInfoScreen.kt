@@ -117,7 +117,6 @@ public fun ChannelInfoScreen(
     val public = knownPublic ?: false
     val handle = record?.handle?.handle ?: channel?.handle?.takeIf { it.isNotBlank() }
     var page by remember(channelId) { mutableStateOf(InfoPage.Info) }
-    var membersOpen by remember { mutableStateOf(false) }
     var confirmUnsubscribe by remember { mutableStateOf(false) }
     /** Section 14.1 / 15.2 — the contact picker: subscribers or a publisher. */
     var inviting by remember { mutableStateOf<Boolean?>(null) }
@@ -257,7 +256,7 @@ public fun ChannelInfoScreen(
                             InfoSection.SUBSCRIBERS -> InfoRow(
                                 t("channels.subscribers.title"),
                                 trailing = count?.let { if (publisher) it.toString() else subscriberBand(it) },
-                            ) { if (publisher && !public) page = InfoPage.Subscribers else membersOpen = true }
+                            ) { page = InfoPage.Subscribers }
                             InfoSection.REACTIONS -> InfoRow(t("group_reactions.title")) { page = InfoPage.Reactions }
                             InfoSection.ADMINS -> InfoRow(t("channels.info.publishers")) { page = InfoPage.Publishers }
                             InfoSection.GROUP_TYPE -> InfoRow(t("channel_type.title"), trailing = if (public) t("group_type.public") else t("group_type.private")) {
@@ -332,7 +331,8 @@ public fun ChannelInfoScreen(
                     channelId = channelId,
                     state = state,
                     client = client,
-                    onOpenNames = { membersOpen = true },
+                    count = count,
+                    canRemove = publisher && !public,
                 )
                 InfoPage.Reactions -> Unit
                 InfoPage.InviteLink -> InviteLinkPage(
@@ -345,9 +345,6 @@ public fun ChannelInfoScreen(
         }
     }
 
-    if (membersOpen) {
-        ChannelMembersSheet(channelId = channelId, state = state, client = client, onDismiss = { membersOpen = false })
-    }
     val picking = inviting
     // Sections 14.1 and 15.2 — the people known to be in the channel are not
     // offered: the owner and the publishers, and for `Invite people` the
@@ -591,6 +588,7 @@ private fun ChannelTypePage(
     client: ChannelsClient,
     onDone: () -> Unit,
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var wantPublic by remember { mutableStateOf(public) }
     var name by remember { mutableStateOf(handle) }
@@ -661,7 +659,7 @@ private fun ChannelTypePage(
                 error = null
                 scope.launch {
                     try {
-                        saveChannelType(state, client, channel, wantPublic, handle, canonical, topic, language)
+                        saveChannelType(context, state, client, channel, public, wantPublic, handle, canonical, topic, language)
                         onDone()
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
@@ -682,9 +680,11 @@ private fun ChannelTypePage(
 }
 
 private suspend fun saveChannelType(
+    context: android.content.Context,
     state: ChannelsUiState,
     client: ChannelsClient,
     channel: ChannelHandle,
+    wasPublic: Boolean,
     public: Boolean,
     oldHandle: String,
     newHandle: String,
@@ -699,6 +699,12 @@ private suspend fun saveChannelType(
     // subscribe without an invitation.
     publisher.withIdentity(persist = false) { ChannelsClient.ownerSigner(it, channel.id) }.use {
         client.setAccess(channel.id, it, private = !public)
+    }
+    // Section 4.1 — going private: "Everyone subscribed stays". The rows of
+    // today are readers on this device's mark (the web type change), so the
+    // let-in pass never removes them for having no ticket.
+    if (wasPublic && !public) {
+        me.lakko.app.channels.ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channel.id)
     }
     val signed = publisher.withIdentity(persist = false) { identity ->
         ChannelDiscovery.writeHandle(
@@ -917,37 +923,186 @@ private fun PublishersPage(
 private fun InviteLinkPage(channel: ChannelHandle, public: Boolean, state: ChannelsUiState, client: ChannelsClient) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var link by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
-    val current = link
-    if (current == null) {
-        Button(
-            enabled = !busy,
-            onClick = {
+    var notice by remember { mutableStateOf<UiText?>(null) }
+    // Section 14.2 — the group's screen: an optional label (a subscriber who
+    // came by the link reads `From link "<label>"`, section 15.1), an expiry
+    // and a use limit, then the channel's links with Copy and Revoke.
+    var label by remember { mutableStateOf("") }
+    var expiry by remember { mutableStateOf(me.lakko.app.channels.ChannelLinkTerms.Expiry.NEVER) }
+    var uses by remember { mutableStateOf(me.lakko.app.channels.ChannelLinkTerms.Uses.UNLIMITED) }
+    var revoking by remember { mutableStateOf<uniffi.lakko_ffi_uniffi.LinkRecord?>(null) }
+    var usedByKey by remember(channel.id) { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    val registry = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+    val records by (registry?.linkRecords ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())).collectAsState()
+    val links = remember(records, channel.id) { me.lakko.app.channels.ChannelLinkTerms.linksOf(records, channel.id) }
+    LaunchedEffect(channel.id, links.size) {
+        val pub = state.publisher ?: return@LaunchedEffect
+        usedByKey = try {
+            me.lakko.app.channels.ChannelPublisherSigners.derive(pub, channel.id).use { client.listInviteKeyUses(channel.id, it) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            usedByKey
+        }
+    }
+    OutlinedTextField(
+        value = label,
+        onValueChange = { label = me.lakko.app.ui.contacts.clampInviteLabel(it) },
+        label = { Text(t("invite.links.label_field")) },
+        singleLine = true,
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(t("invite.links.expires_field"), style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        for (choice in me.lakko.app.channels.ChannelLinkTerms.Expiry.entries) {
+            androidx.compose.material3.FilterChip(
+                selected = expiry == choice,
+                enabled = !busy,
+                onClick = { expiry = choice },
+                label = {
+                    Text(
+                        if (choice == me.lakko.app.channels.ChannelLinkTerms.Expiry.NEVER) {
+                            t("invite.links.expires_option_never")
+                        } else {
+                            t("invite.links.expires_option_days", emptyMap(), mapOf("count" to choice.days.toULong()))
+                        },
+                    )
+                },
+            )
+        }
+    }
+    Text(t("invite.links.uses_field"), style = MaterialTheme.typography.labelLarge)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        for (choice in me.lakko.app.channels.ChannelLinkTerms.Uses.entries) {
+            androidx.compose.material3.FilterChip(
+                selected = uses == choice,
+                enabled = !busy,
+                onClick = { uses = choice },
+                label = {
+                    Text(
+                        if (choice == me.lakko.app.channels.ChannelLinkTerms.Uses.ONE) {
+                            t("invite.links.uses_option_one")
+                        } else {
+                            t("invite.links.uses_option_unlimited")
+                        },
+                    )
+                },
+            )
+        }
+    }
+    Button(
+        enabled = !busy,
+        onClick = {
+            busy = true
+            error = null
+            notice = null
+            scope.launch {
+                try {
+                    val url = me.lakko.app.channels.ChannelInviteLinks.mint(
+                        context, state, client, channel, public,
+                        label = label.trim(),
+                        expiryMs = me.lakko.app.channels.ChannelLinkTerms.expiryMs(expiry, System.currentTimeMillis()),
+                        maxUses = me.lakko.app.channels.ChannelLinkTerms.maxUses(uses),
+                    )
+                    label = ""
+                    copyToClipboard(context, url)
+                    notice = UiText("chat.invite_link.copied")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.w(INFO_TAG, "channel invite link failed", e)
+                    error = UiText(me.lakko.app.channels.channelLinkErrorKey(e))
+                } finally {
+                    busy = false
+                }
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(t("chat.invite_link.create")) }
+    notice?.let { Text(it.text(), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
+    error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+
+    HorizontalDivider()
+    Text(t("invite.links.list"), style = MaterialTheme.typography.titleMedium)
+    if (links.isEmpty()) {
+        Text(t("invite.links.empty"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    for (record in links) {
+        val inviteKey = remember(record.linkId) { inviteKeyHexOf(record) }
+        val terms = me.lakko.app.channels.ChannelLinkTerms.termsOf(
+            expiryMs = record.expiryMs.toLong(),
+            maxUses = record.maxUses.toLong(),
+            used = inviteKey?.let { usedByKey[it] } ?: record.uses.toLong(),
+            nowMs = System.currentTimeMillis(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(record.label.ifBlank { t("chat.invite_link.label") }, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    terms.map { it.text() }.joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = {
+                copyToClipboard(
+                    context,
+                    me.lakko.app.discovery.composeSealedInviteUrl(
+                        origin = me.lakko.app.channels.CoPublisher.DEFAULT_ORIGIN,
+                        prefix = me.lakko.app.channels.CoPublisher.URL_PREFIX,
+                        blobId = record.ledgerId,
+                        linkSecret = record.linkSecret,
+                    ),
+                )
+                notice = UiText("chat.invite_link.copied")
+            }) { Text(t("chat.invite_link.copy")) }
+            TextButton(enabled = !busy, onClick = { revoking = record }) {
+                Text(t("chat.invite_link.revoke"), color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+    revoking?.let { record ->
+        LakkoDialog(
+            onDismissRequest = { revoking = null },
+            title = t("invite.links.delete_confirm_title"),
+            body = t("invite.links.delete_confirm_body"),
+            confirm = LakkoDialogAction(t("chat.invite_link.revoke"), LakkoDialogTone.Danger) {
+                revoking = null
                 busy = true
+                error = null
                 scope.launch {
                     try {
-                        link = me.lakko.app.channels.ChannelInviteLinks.mint(context, state, client, channel, public)
+                        me.lakko.app.channels.GroupLinkRegister.revoke(record, state, client)
+                        notice = UiText("chat.invite_link.revoked")
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Throwable) {
-                        Log.w(INFO_TAG, "channel invite link failed", e)
-                        error = UiText(me.lakko.app.channels.channelLinkErrorKey(e))
+                        Log.w(INFO_TAG, "channel invite link not revoked", e)
+                        error = UiText(me.lakko.app.channels.channelLinkErrorKey(e, "channels.links.revoke_failed"))
                     } finally {
                         busy = false
                     }
                 }
             },
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text(t("chat.invite_link.create")) }
-    } else {
-        Text(current, style = MaterialTheme.typography.bodyMedium)
-        OutlinedButton(onClick = { copyToClipboard(context, current) }, modifier = Modifier.fillMaxWidth()) {
-            Text(t("chat.invite_link.copy"))
-        }
+        )
     }
-    error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+}
+
+/** The invite key (lower-case hex) a private link's seed names, or `null`. */
+private fun inviteKeyHexOf(record: uniffi.lakko_ffi_uniffi.LinkRecord): String? {
+    if (record.inviteSeed.size != 32) return null
+    return try {
+        uniffi.lakko_ffi_uniffi.ChannelInviteSigner.fromInviteSeed(record.inviteSeed).use { signer ->
+            signer.verifyingKey().joinToString("") { "%02x".format(it) }
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Throwable) {
+        null
+    }
 }
 
 
@@ -1026,58 +1181,117 @@ private suspend fun postChannelPhoto(
 }
 
 /**
- * Section 15.1 — a private channel's subscribers, for the owner and
- * publishers: the names people share (the member list), then one row per
- * subscriber labelled by how they came, with `Remove` (section 7.3: the row
- * goes and a rotation follows). Nothing about seed delivery is shown.
+ * Section 15.1 — a channel's subscribers: one row per person who shares a
+ * name, then "{n} others.". In a private channel the owner and publishers
+ * ([canRemove]) also see the others, one row each, and `Remove` on every row,
+ * named rows included (section 7.3: the key goes and a rotation follows).
+ * Built by the shared rule ([me.lakko.app.channels.ChannelSubscriberListView]),
+ * so a person shown by name is never listed again among the others. Nothing
+ * about seed delivery is shown.
  */
 @Composable
 private fun SubscribersPage(
     channelId: String,
     state: ChannelsUiState,
     client: ChannelsClient,
-    onOpenNames: () -> Unit,
+    count: Long?,
+    canRemove: Boolean,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var rows by remember(channelId) { mutableStateOf<List<me.lakko.app.channels.ChannelSubscriberRows.Row>?>(null) }
+    var members by remember(channelId) { mutableStateOf<List<me.lakko.app.channels.ChannelMemberRow>?>(null) }
+    var rows by remember(channelId) { mutableStateOf<List<me.lakko.app.channels.ChannelSubscriberRows.Row>>(emptyList()) }
+    var labels by remember(channelId) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var failed by remember(channelId) { mutableStateOf(false) }
     var attempt by remember(channelId) { mutableStateOf(0) }
-    var removing by remember { mutableStateOf<String?>(null) }
+    var removing by remember { mutableStateOf<List<String>?>(null) }
     var error by remember { mutableStateOf<UiText?>(null) }
     LaunchedEffect(channelId, attempt) {
         failed = false
-        rows = try {
-            me.lakko.app.channels.ChannelSubscriberRows.read(context, state, client, channelId)
+        try {
+            val reach = ReachManager.get(context)
+            members = loadChannelMembers(
+                channelIdHex = channelId,
+                seedForEpoch = { epoch -> me.lakko.app.channels.ChannelMemberCards.seedForEpoch(state, channelId, epoch) },
+                ownSubscriberPkHex = state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(::reachHex),
+                ports = me.lakko.app.channels.ChannelMemberCards.ports(reach, client),
+            ).rows
+            if (canRemove) {
+                rows = me.lakko.app.channels.ChannelSubscriberRows.read(context, state, client, channelId)
+                labels = me.lakko.app.channels.ChannelSubscriberRows.linkLabels(channelId)
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
-            Log.w(INFO_TAG, "subscriber rows not read", e)
+            Log.w(INFO_TAG, "subscribers not read", e)
             failed = true
-            null
         }
     }
-    InfoRow(t("channels.members.title")) { onOpenNames() }
-    val current = rows
+    val loaded = members
     when {
         failed -> {
             Text(t("channels.subscribers.load_failed"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             TextButton(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
         }
-        current == null -> androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-        current.isEmpty() -> Text(t("channels.subscribers.none"), style = MaterialTheme.typography.bodyMedium)
-        else -> for (row in current) {
-            HorizontalDivider()
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                Text(t("channels.subscribers.from_invitation"), modifier = Modifier.weight(1f))
-                TextButton(onClick = { removing = row.pubkeyHex }) {
-                    Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+        loaded == null -> androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+        else -> {
+            val list = remember(loaded, rows, count, canRemove) {
+                me.lakko.app.channels.ChannelSubscriberListView.build(
+                    loaded,
+                    rows,
+                    count,
+                    canRemove,
+                    state.subscriberKeysByChannel.value[channelId]?.publicKey?.let(::reachHex),
+                )
+            }
+            if (list.people.isEmpty() && list.others.isEmpty() && (count ?: 0L) == 0L) {
+                Text(t("channels.subscribers.none"), style = MaterialTheme.typography.bodyMedium)
+            }
+            for (person in list.people) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    LakkoAvatar(name = person.row.name, seed = person.row.key, size = 40.dp, avatar = person.row.avatar)
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(start = 12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(if (person.row.isSelf) t("channels.members.you") else person.row.name, style = MaterialTheme.typography.bodyLarge)
+                        person.row.username?.takeIf { !person.row.name.startsWith("@") }?.let {
+                            Text("@$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (person.removable) {
+                        TextButton(onClick = { removing = person.pubkeysHex }) {
+                            Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+            if (list.othersCount > 0L) {
+                Text(
+                    t("channels.subscribers.others", emptyMap(), mapOf("count" to list.othersCount.toULong())),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            for (row in list.others) {
+                HorizontalDivider()
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    val label = me.lakko.app.channels.ChannelSubscriberRows.linkLabelOf(row.inviteKeyHex, labels)
+                    Text(
+                        if (label != null) {
+                            t("channels.subscribers.from_link", mapOf("label" to label))
+                        } else {
+                            t("channels.subscribers.from_invitation")
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { removing = listOf(row.pubkeyHex) }) {
+                        Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }
     }
     error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-    removing?.let { key ->
+    removing?.let { keys ->
         LakkoDialog(
             onDismissRequest = { removing = null },
             title = t("channels.subscribers.remove_title"),
@@ -1085,14 +1299,27 @@ private fun SubscribersPage(
             confirm = LakkoDialogAction(t("common.remove"), LakkoDialogTone.Danger) {
                 removing = null
                 scope.launch {
+                    // Every key of the person (one per device), each with the
+                    // rotation the removal asks for.
+                    val gone = HashSet<String>()
                     try {
-                        me.lakko.app.channels.ChannelSubscriberRows.remove(state, client, channelId, key)
-                        rows = rows?.filterNot { it.pubkeyHex == key }
+                        for (key in keys) {
+                            me.lakko.app.channels.ChannelSubscriberRows.remove(state, client, channelId, key)
+                            gone += key.lowercase()
+                        }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Throwable) {
                         Log.w(INFO_TAG, "subscriber not removed", e)
                         error = UiText("group_handle.error.failed")
+                    } finally {
+                        if (gone.isNotEmpty()) {
+                            rows = rows.filterNot { it.pubkeyHex.lowercase() in gone }
+                            members = members?.mapNotNull { m ->
+                                val kept = m.subscriberPksHex.filterNot { it.lowercase() in gone }
+                                if (kept.isEmpty() && !m.isSelf) null else m.copy(subscriberPksHex = kept)
+                            }
+                        }
                     }
                 }
             },

@@ -95,6 +95,64 @@ final class FeedTests: XCTestCase {
         XCTAssertTrue(mine.candidates[0].fromSelf)
     }
 
+    /// Base scenario 32 (2026-11-13): a channel's photo, file, GIF, voice and
+    /// video messages showed as a word line with no media, unlike a group's.
+    func testChannelMediaPostsCarryTheirAttachmentsAsAGroupsMediaMessage() {
+        func stored(_ mime: String, _ kind: String?, _ fill: UInt8) -> PersistedAttachment {
+            PersistedAttachment(
+                blobIdB64: Data(repeating: fill, count: 32).base64EncodedString(),
+                keyB64: Data(repeating: 7, count: 32).base64EncodedString(),
+                nonceB64: Data(repeating: 9, count: 12).base64EncodedString(),
+                mime: mime, size: 1234, name: kind == nil && mime == "text/plain" ? "notes.txt" : nil,
+                kind: kind)
+        }
+        let photo = stored("image/jpeg", nil, 1)
+        let voice = stored("audio/mp4", "voice", 2)
+        let note = stored("video/mp4", "video_note", 3)
+        let file = stored("text/plain", nil, 4)
+        let gif = stored("image/gif", "gif", 5)
+        let posts = [
+            PersistedChannelPost(cursor: 1, serverTsMs: now - 10, text: "Photo", caption: "", attachments: [photo]),
+            PersistedChannelPost(cursor: 2, serverTsMs: now - 10, text: "Voice message", caption: "", attachments: [voice]),
+            PersistedChannelPost(cursor: 3, serverTsMs: now - 10, text: "Video message", caption: "", attachments: [note]),
+            PersistedChannelPost(cursor: 4, serverTsMs: now - 10, text: "notes.txt", caption: "", attachments: [file]),
+            PersistedChannelPost(cursor: 5, serverTsMs: now - 10, text: "GIF", caption: "", attachments: [gif]),
+            PersistedChannelPost(cursor: 6, serverTsMs: now - 10, text: "caption", caption: "caption", attachments: [photo]),
+        ]
+        let input = FeedModel.buildInput(context(groupMessages: [], posts: posts))
+        XCTAssertEqual(input.candidates.map(\.messageId), [1, 2, 3, 4, 5, 6])
+        XCTAssertTrue(input.candidates.allSatisfy(\.hasMedia))
+        let byId = Dictionary(uniqueKeysWithValues: input.refs.map { ($0.message.messageId, $0.message) })
+        XCTAssertEqual(byId[1]?.attachments, [photo.toAttachmentRef()!])
+        XCTAssertEqual(byId[1]?.text, "", "the bubble says it is a photo, not a word line")
+        XCTAssertEqual(byId[2]?.attachments.first?.kind, "voice")
+        XCTAssertEqual(byId[3]?.attachments.first?.kind, "video_note")
+        XCTAssertEqual(byId[4]?.attachments.first?.mime, "text/plain")
+        XCTAssertEqual(byId[5]?.attachments.first?.kind, "gif")
+        XCTAssertEqual(byId[6]?.text, "caption")
+        XCTAssertEqual(byId[6]?.attachments.count, 1)
+        // The photo draws as a bubble; the file stays the text line.
+        XCTAssertEqual(FeedCopy.mediaRefs(byId[1]!).count, 1)
+        XCTAssertTrue(FeedCopy.mediaRefs(byId[4]!).isEmpty)
+        XCTAssertFalse(FeedCopy.itemBody(byId[4]!).isEmpty)
+    }
+
+    func testAStoredChannelPostKeepsItsAttachmentsAndAnOlderLogIsRefused() throws {
+        let photo = PersistedAttachment(
+            blobIdB64: "AAEC", keyB64: "AwQF", nonceB64: "BgcI", mime: "image/jpeg", size: 99, name: nil,
+            width: 640, height: 480)
+        let payload = ChannelPostLogPayload(channels: [
+            channelHex: ChannelPostSlot(cursor: 2, posts: [
+                PersistedChannelPost(cursor: 1, serverTsMs: now, text: "hello"),
+                PersistedChannelPost(cursor: 2, serverTsMs: now, text: "Photo", caption: "", attachments: [photo]),
+            ]),
+        ])
+        let data = try JSONEncoder().encode(payload)
+        XCTAssertEqual(try JSONDecoder().decode(ChannelPostLogPayload.self, from: data), payload)
+        let v1 = Data(#"{"version":1,"channels":{}}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(ChannelPostLogPayload.self, from: v1))
+    }
+
     func testLatestRanksNewestFirstAndFoldsReplies() {
         let input = FeedModel.buildInput(context(
             groupMessages: [msg(1, ageMs: 3000), msg(2, ageMs: 2000, reply: 1), msg(3, ageMs: 1000)],
@@ -211,9 +269,9 @@ final class FeedTests: XCTestCase {
         let round = try JSONDecoder().decode(
             ChannelPostLogPayload.self, from: JSONEncoder().encode(payload))
         XCTAssertEqual(round, payload)
-        let bad = #"{"version":1,"channels":{"xyz":{"cursor":1,"posts":[]}}}"#.data(using: .utf8)!
+        let bad = #"{"version":2,"channels":{"xyz":{"cursor":1,"posts":[]}}}"#.data(using: .utf8)!
         XCTAssertEqual(try JSONDecoder().decode(ChannelPostLogPayload.self, from: bad).channels.count, 0)
-        let future = #"{"version":2,"channels":{}}"#.data(using: .utf8)!
+        let future = #"{"version":3,"channels":{}}"#.data(using: .utf8)!
         XCTAssertThrowsError(try JSONDecoder().decode(ChannelPostLogPayload.self, from: future))
     }
 

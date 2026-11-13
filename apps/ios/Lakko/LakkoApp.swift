@@ -1954,6 +1954,9 @@ private struct SessionRoot: View, Equatable {
                     channelsState.channels.contains { $0.id == id }
                         && (channelsState.subscriberKeysByChannel[id] != nil || channelsState.keysByChannel[id] != nil)
                 }
+                // An invitation that carries no channel name reads by the
+                // name this device holds for it (``HeldChannelNames``).
+                HeldChannelNames.shared.follow(channelsState.$channels.eraseToAnyPublisher())
                 ChannelInviteActions.shared.subscribe = { channel in
                     openChannelInvitation(channel, on: selectedTab)
                 }

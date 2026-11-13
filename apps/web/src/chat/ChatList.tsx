@@ -100,6 +100,11 @@ import { displayLocale } from "../l10n/display-locale";
 import { channelsState } from "../state/channels-state";
 import { channelRowTime } from "../channels/channel-row";
 import { ChannelRow } from "./ChannelRow";
+import { channelFlagsKey, channelFlagsOf } from "../channels/channel-flags";
+import { getDeviceKey } from "../auth/key-store";
+import { loadChannelPostLog } from "../feed/channel-post-log-store";
+import { updateFeedMarks } from "../feed/feed-marks-store";
+import { markChannelsRead } from "../feed/feed-marks";
 import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 type Flag = "pinned" | "muted" | "archived";
@@ -273,6 +278,22 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     const folder = folders().find((f) => f.idHex === tabId) ?? null;
     const rows =
       folder === null || rules === null ? orderedRows() : folderRowsOrdered(orderedRows(), folder, rules);
+    // Channels with new posts: read through the newest post this device
+    // holds, as opening one does (the feed's channel read state).
+    const channelIds = rows.filter((r) => r.kind === "channel" && r.unread > 0).map((r) => r.id);
+    const account = accountId();
+    if (channelIds.length > 0 && account !== null) {
+      try {
+        const key = await getDeviceKey(account);
+        const log = key === null ? null : await loadChannelPostLog(account, key);
+        if (log !== null) {
+          await updateFeedMarks(account, (m) => markChannelsRead(m, channelIds, log.channels));
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("mark all as read: channels failed", err);
+      }
+    }
     for (const row of rows) {
       if (row.kind === "channel" || !rowHasUnread(row)) continue;
       const g = groupById().get(row.id);
@@ -378,12 +399,22 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const synchronizing = (): boolean =>
     showsSynchronizing(chats.groups().map((g) => g.groupIdB64));
 
-  async function toggleFlag(g: ActiveGroup, field: Flag): Promise<void> {
+  /**
+   * The synced flags register a row is keyed on: the conversation's group id
+   * for a chat or a group, the channel id for a channel
+   * (`channels/channel-flags.ts`); `null` when there is none.
+   */
+  function flagsKeyOf(row: ConversationRow, g: ActiveGroup | null): Uint8Array | null {
+    if (g !== null) return conversationIdOf(g);
+    return row.kind === "channel" ? channelFlagsKey(row.id) : null;
+  }
+
+  async function toggleFlag(row: ConversationRow, g: ActiveGroup | null, field: Flag): Promise<void> {
     // Inside a folder, Pin acts on the folder's own pins (UX 2.3); the
     // All-chats pin is untouched.
     const folder = currentFolder();
     if (field === "pinned" && folder !== null) {
-      const ref = refOfRow(kindOf(g), conversationIdB64Of(g));
+      const ref = refOfRow(row.kind, row.id);
       if (ref === null) return;
       try {
         await togglePinInFolder(sync, folder, ref);
@@ -393,7 +424,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       }
       return;
     }
-    const groupId = conversationIdOf(g);
+    const groupId = flagsKeyOf(row, g);
+    if (groupId === null) return;
     const key = syncGroupIdHex(groupId);
     const cur = sync.flags()[key];
     const next = {
@@ -620,17 +652,22 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           <For each={visibleRows()}>
             {(row) => {
               // A channel is not the MLS-group shape the rest of this row is
-              // written against - no roster, no unread summary, no flags
-              // keyed on a conversation id - so it draws its own short row
-              // and the group row below is untouched.
+              // written against - no roster, no unread summary - so it draws
+              // its own short row; its pin, mute and archive are the synced
+              // flags keyed on the channel id (`channels/channel-flags.ts`).
               if (row.kind === "channel") {
+                const cf = () => channelFlagsOf(sync.flags(), row.id);
                 return (
                   <ChannelRow
                     row={row}
                     time={channelRowTime(row.postedAtMs, clock(), displayLocale())}
-                    pinned={currentFolder() !== null && pinnedHere(row)}
+                    pinned={pinnedHere(row)}
+                    muted={cf().muted}
+                    archived={cf().archived}
+                    pinBlocked={pinBlocked(row)}
                     selected={props.activeGroupIdB64 === row.id}
                     onMenu={(x, y) => setMenu({ row, g: null, x, y })}
+                    onToggle={(field) => void toggleFlag(row, null, field)}
                   />
                 );
               }
@@ -746,7 +783,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           disabled={pinBlocked(row)}
                           onClick={(e) => {
                             e.preventDefault();
-                            void toggleFlag(g, "pinned");
+                            void toggleFlag(row, g, "pinned");
                           }}
                         >
                           <Icon name={pinnedHere(row) ? "pin-slash" : "pin"} size={20} />
@@ -758,7 +795,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           aria-pressed={flags().muted}
                           onClick={(e) => {
                             e.preventDefault();
-                            void toggleFlag(g, "muted");
+                            void toggleFlag(row, g, "muted");
                           }}
                         >
                           <Icon name={flags().muted ? "bell" : "bell-slash"} size={20} />
@@ -770,7 +807,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           aria-pressed={flags().archived}
                           onClick={(e) => {
                             e.preventDefault();
-                            void toggleFlag(g, "archived");
+                            void toggleFlag(row, g, "archived");
                           }}
                         >
                           <Icon name={flags().archived ? "unarchive" : "archive"} size={20} />
@@ -877,24 +914,21 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         {(m) => {
           const g = (): ActiveGroup | null => m().g;
           const f = (): { muted: boolean; archived: boolean } => {
-            const grp = g();
-            const cur = grp === null ? undefined : sync.flags()[syncGroupIdHex(conversationIdOf(grp))];
+            const key = flagsKeyOf(m().row, g());
+            const cur = key === null ? undefined : sync.flags()[syncGroupIdHex(key)];
             return { muted: cur?.muted === true, archived: cur?.archived === true };
           };
+          // A channel's row offers what a group's does (UX
+          // group-and-channel-privacy 12), keyed on the channel id.
+          const hasFlags = (): boolean => flagsKeyOf(m().row, g()) !== null;
           const act = (field: Flag): void => {
+            const row = m().row;
             const grp = g();
             setMenu(null);
-            if (grp !== null) void toggleFlag(grp, field);
+            void toggleFlag(row, grp, field);
           };
           const ref = () => refOfRow(m().row.kind, m().row.id);
-          /** Pin on a channel: only a folder's own pin exists for it. */
-          const pinChannel = (): void => {
-            const folder = currentFolder();
-            const r = ref();
-            setMenu(null);
-            if (folder !== null && r !== null) void togglePinInFolder(sync, folder, r);
-          };
-          const canPin = (): boolean => m().row.kind !== "channel" || currentFolder() !== null;
+          const canPin = (): boolean => hasFlags() || currentFolder() !== null;
           // Every read of `m()` happens BEFORE `setMenu(null)`: the accessor is
           // stale once the menu's `<Show>` closes.
           const removeFromFolder = (): void => {
@@ -921,11 +955,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     type="button"
                     role="menuitem"
                     disabled={pinBlocked(m().row)}
-                    onClick={() => {
-                      const grp = g();
-                      if (grp === null) pinChannel();
-                      else act("pinned");
-                    }}
+                    onClick={() => act("pinned")}
                   >
                     <Icon name={pinnedHere(m().row) ? "pin-slash" : "pin"} size={20} />
                     {pinnedHere(m().row) ? t("chats.action.unpin") : t("chats.action.pin")}
@@ -934,7 +964,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     <p class="lk-menu-note">{t("folders.pin_limit", { count: MAX_FOLDER_PINS })}</p>
                   </Show>
                 </Show>
-                <Show when={g() !== null}>
+                <Show when={hasFlags()}>
                   <button type="button" role="menuitem" onClick={() => act("muted")}>
                     <Icon name={f().muted ? "bell" : "bell-slash"} size={20} />
                     {f().muted ? t("chats.action.unmute") : t("chats.action.mute")}

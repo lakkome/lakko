@@ -203,6 +203,8 @@ public object CoPublisher {
          *  publisher link ([LinkRecordKind.PUBLISHER]) is always one use,
          *  whatever is passed: it names one person (UX 15.2). */
         maxUses: Long = 0L,
+        /** Section 14.2 — when the link stops working (unix ms), `0` never. */
+        expiryMs: Long = 0L,
         /** Phase B (item 8) — how the link is filed in the account's synced
          *  link register, so every device of the account lists and revokes
          *  it; `null` files nothing there. */
@@ -218,7 +220,7 @@ public object CoPublisher {
                 me.lakko.app.discovery.SealedInviteUpload(
                     sealed = sealed,
                     revocationPubkey = revocationPubkey,
-                    expiryMs = 0L,
+                    expiryMs = expiryMs.coerceAtLeast(0L),
                     maxUses = maxUses,
                 ),
             )
@@ -242,6 +244,7 @@ public object CoPublisher {
                     revocationSeed = seed,
                     capability = sealed,
                     maxUses = maxUses,
+                    expiryMs = expiryMs,
                 )
             }
             return me.lakko.app.discovery.composeSealedInviteUrl(
@@ -701,7 +704,14 @@ public object CoPublisher {
         override suspend fun serverEpoch(): Long = channelsClient.fetchEpoch(channelIdHex).toLong()
 
         override suspend fun reseal(targetEpoch: Long) {
-            resealToSubscribers(channelsClient, identity, publisherGroup, channelIdHex, targetEpoch)
+            resealToSubscribers(
+                channelsClient,
+                identity,
+                publisherGroup,
+                channelIdHex,
+                targetEpoch,
+                ChannelReseal.throughFor(accountIdB64, channelIdHex),
+            )
         }
 
         override suspend fun appoint(joinerKey: ByteArray) {

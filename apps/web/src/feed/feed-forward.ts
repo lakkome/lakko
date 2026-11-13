@@ -11,7 +11,8 @@
  * log keeps the current, edited text), its attachments (re-encrypted by the
  * sender), the original author's name, and the origin reference — or, when
  * it is itself a forward, the attribution it already carries. A channel post
- * carries its text and the channel's name and no origin: the origin
+ * carries its text, its attachments (re-encrypted the same way) and the
+ * channel's name and no origin: the origin
  * reference names a conversation by its group id, and a channel is not one.
  *
  * Pure: the send is the caller's.
@@ -42,7 +43,7 @@ export function feedForwardPayload(
     const author = item.channelTitle.trim();
     return {
       text: item.message.text,
-      attachments: [],
+      attachments: item.message.attachments,
       forward: author === "" ? {} : { author },
     };
   }

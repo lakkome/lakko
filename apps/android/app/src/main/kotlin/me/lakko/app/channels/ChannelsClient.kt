@@ -870,7 +870,7 @@ public class ChannelsClient(
     }
 
     @Serializable
-    private data class InviteKeyJson(val invite_pk_hex: String)
+    private data class InviteKeyJson(val invite_pk_hex: String, val used_count: Long = 0)
 
     @Serializable
     private data class InviteKeysResp(val invite_keys: List<InviteKeyJson> = emptyList())
@@ -888,6 +888,21 @@ public class ChannelsClient(
             "list invite keys",
         )
         return response.body<InviteKeysResp>().invite_keys.map { it.invite_pk_hex.lowercase() }
+    }
+
+    /** The channel's registered invite keys (hex) with the uses each has
+     *  taken (section 14.2: the uses left of a link). */
+    public suspend fun listInviteKeyUses(channelIdHex: String, proofs: ChannelPublisherProofs): Map<String, Long> {
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Get,
+            "/v1/channels/$channelIdHex/invite-keys",
+            "",
+            ByteArray(0),
+            null,
+            "list invite keys",
+        )
+        return response.body<InviteKeysResp>().invite_keys.associate { it.invite_pk_hex.lowercase() to it.used_count }
     }
 
     @Serializable

@@ -1914,12 +1914,58 @@ private fun SessionRoot(
                 if (!card.valid) return null
                 return me.lakko.app.ui.channels.ChannelInviteFacts(
                     channelIdHex = me.lakko.app.channels.ChannelsComposer.bytesToHex(id),
-                    // A nameless channel reads by the catalog word, never "?".
-                    name = preview.groupName?.takeIf { it.isNotBlank() }
-                        ?: me.lakko.app.l10n.Localization.strings.value["channels.fallback_name"],
+                    // A nameless invitation reads by the name this device
+                    // holds for the channel, else the catalog word, never "?".
+                    name = me.lakko.app.ui.channels.inviteChannelName(
+                        preview.groupName,
+                        me.lakko.app.channels.ChannelsComposer.bytesToHex(id),
+                    ),
                     preview = preview,
                 )
             }
+
+            // A bare `/g/` link with no card (`BareGroupLink.kt`): which of the
+            // four it is, exactly (a gone link is not a group's live one).
+            override suspend fun openBareLink(
+                link: me.lakko.app.contacts.LakkoLink.Group,
+            ): me.lakko.app.ui.channels.BareLinkOpening {
+                val sealed = try {
+                    chatRepository.resolveGroupInviteSlug(link.slug).first
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    return if (me.lakko.app.ui.channels.inviteLinkUnreachable(e)) {
+                        me.lakko.app.ui.channels.BareLinkOpening.Offline
+                    } else {
+                        me.lakko.app.ui.channels.BareLinkOpening.Dead
+                    }
+                }
+                val card = try {
+                    chatRepository.inspectGroupInvite(
+                        sealed,
+                        me.lakko.app.chat.parseGroupInviteFragment(link.fragment),
+                        System.currentTimeMillis().toULong(),
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    return me.lakko.app.ui.channels.BareLinkOpening.Dead
+                }
+                if (!card.valid) return me.lakko.app.ui.channels.BareLinkOpening.Dead
+                val preview = card.preview ?: return me.lakko.app.ui.channels.BareLinkOpening.NotChannel
+                val channelId = preview.channelId ?: return me.lakko.app.ui.channels.BareLinkOpening.NotChannel
+                val name = me.lakko.app.ui.channels.inviteChannelName(
+                    preview.groupName,
+                    me.lakko.app.channels.ChannelsComposer.bytesToHex(channelId),
+                )
+                return me.lakko.app.ui.channels.BareLinkOpening.Channel(
+                    me.lakko.app.ui.channels.ChannelInviteSummary(name, preview.coPublisher),
+                )
+            }
+
+            override fun heldChannelName(channelIdHex: String): String? =
+                channelsState.channels.value.firstOrNull { it.id.equals(channelIdHex, ignoreCase = true) }
+                    ?.let { me.lakko.app.ui.channels.channelTitle(it, me.lakko.app.l10n.Localization.strings.value) }
 
             override fun isFollowed(channelIdHex: String): Boolean =
                 channelsState.channels.value.any { it.id == channelIdHex }

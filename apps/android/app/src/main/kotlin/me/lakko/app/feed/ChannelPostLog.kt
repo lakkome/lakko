@@ -21,11 +21,18 @@ import kotlinx.serialization.Serializable
  * file or GIF as a group's row does; a version-1 log (which passed those
  * posts over) is dropped and fetched again. As web.
  *
+ * Version 3 also keeps each attachment's reference (blob id, content key,
+ * media metadata), so the feed draws a channel's photo, GIF, voice or video
+ * message in place as it draws a group's (`docs/ux/feed.md` section 3, base
+ * scenario 32). The log is sealed under a Keystore key ([FeedSealedStore]),
+ * as the group message log that holds the same references is. A version-2
+ * log (names only) is dropped and fetched again.
+ *
  * Bounds, both chosen: posts older than the server's 30-day retention are
  * dropped, and at most [CHANNEL_POST_CAP] posts are kept per channel, newest
  * kept.
  */
-public const val CHANNEL_POST_LOG_VERSION: Int = 2
+public const val CHANNEL_POST_LOG_VERSION: Int = 3
 
 /** Most posts kept per channel (chosen, ADR-0063 open question 1). */
 public const val CHANNEL_POST_CAP: Int = 500
@@ -44,10 +51,15 @@ public const val CHANNEL_POST_MAX_PAGES: Int = 5
  *  the rest (chosen, as web). */
 public const val CHANNEL_POST_MEDIA_CAP: Int = 16
 
-/** What the log keeps of one attachment: only what names its kind on a list
- *  row ("Photo", "GIF", "File"), never its key or blob id. */
+/** What the log keeps of one attachment: what names its kind on a list row
+ *  ("Photo", "GIF", "File"), and the reference the feed downloads and opens
+ *  it by (`null` when it was not kept, or for a test row). */
 @Serializable
-public data class PersistedChannelPostMedia(val mime: String? = null, val kind: String? = null)
+public data class PersistedChannelPostMedia(
+    val mime: String? = null,
+    val kind: String? = null,
+    val ref: me.lakko.app.chat.PersistedAttachment? = null,
+)
 
 /** One decrypted post: its text, its attachments, or both. */
 @Serializable

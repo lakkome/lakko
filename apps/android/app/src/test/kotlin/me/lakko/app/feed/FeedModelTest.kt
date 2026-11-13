@@ -97,6 +97,56 @@ class FeedModelTest {
         assertEquals("outgoing", own.refs.single().message.direction)
     }
 
+    private fun persistedRef(mime: String, kind: String?, fill: Byte) = me.lakko.app.chat.PersistedAttachment(
+        blobIdB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { fill }),
+        keyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 7 }),
+        nonceB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(12) { 9 }),
+        mime = mime,
+        size = 1234uL,
+        name = null,
+        kind = kind,
+    )
+
+    @Test
+    fun channelMediaPostsAreCandidatesWithTheirAttachmentsAsAGroupsMediaMessage() {
+        // Base scenario 32 (2026-11-13): a channel's video and voice messages,
+        // photo, file and GIF posted without a caption never reached the feed,
+        // and a captioned one lost its media.
+        val photo = PersistedChannelPostMedia("image/jpeg", null, persistedRef("image/jpeg", null, 1))
+        val voice = PersistedChannelPostMedia("audio/mp4", "voice", persistedRef("audio/mp4", "voice", 2))
+        val note = PersistedChannelPostMedia("video/mp4", "video_note", persistedRef("video/mp4", "video_note", 3))
+        val file = PersistedChannelPostMedia("text/plain", null, persistedRef("text/plain", null, 4))
+        val gif = PersistedChannelPostMedia("image/gif", "gif", persistedRef("image/gif", "gif", 5))
+        val input = buildFeedInput(
+            ctx(
+                emptyList(),
+                posts = listOf(
+                    PersistedChannelPost(1, now, "", listOf(photo)),
+                    PersistedChannelPost(2, now, "", listOf(voice)),
+                    PersistedChannelPost(3, now, "", listOf(note)),
+                    PersistedChannelPost(4, now, "", listOf(file)),
+                    PersistedChannelPost(5, now, "", listOf(gif)),
+                    PersistedChannelPost(6, now, "caption", listOf(photo)),
+                    // Nothing to show: still left out.
+                    PersistedChannelPost(7, now, "  "),
+                ),
+            ),
+        )
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L, 6L), input.candidates.map { it.messageId })
+        assertTrue(input.candidates.all { it.hasMedia })
+        val byId = input.refs.associateBy { it.message.messageId }
+        val photoAttachment = byId.getValue(1).message.attachments.single()
+        assertEquals("image/jpeg", photoAttachment.mime)
+        assertEquals(1234uL, photoAttachment.ref!!.size)
+        assertTrue(photoAttachment.ref!!.blobId.all { it == 1.toByte() })
+        assertEquals("voice", byId.getValue(2).message.attachments.single().ref!!.kind)
+        assertEquals("video_note", byId.getValue(3).message.attachments.single().kind)
+        assertEquals("text/plain", byId.getValue(4).message.attachments.single().ref!!.mime)
+        assertEquals("gif", byId.getValue(5).message.attachments.single().kind)
+        assertEquals("caption", byId.getValue(6).message.text)
+        assertEquals(1, byId.getValue(6).message.attachments.size)
+    }
+
     private class FakeCore(val entries: List<FeedEntry>) : FeedCore {
         var lastConversations: List<FeedConversation> = emptyList()
         var lastCandidates: List<FeedCandidate> = emptyList()

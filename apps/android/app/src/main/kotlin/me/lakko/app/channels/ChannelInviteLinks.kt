@@ -29,7 +29,14 @@ public object ChannelInviteLinks {
         public: Boolean,
         /** Section 14.1 — a private channel's per-person invitation. */
         oneUse: Boolean = false,
-    ): String = mintFull(context, state, client, channel, public, oneUse).url
+        /** Section 14.2 — the owner's label for the link, or empty. */
+        label: String = "",
+        /** Section 14.2 — when the link stops working (unix ms), `0` never. */
+        expiryMs: Long = 0L,
+        /** Section 14.2 — the use limit (`0` one use, `0xFFFFFFFF` none);
+         *  `null` follows [oneUse]. */
+        maxUses: Long? = null,
+    ): String = mintFull(context, state, client, channel, public, oneUse, label, expiryMs, maxUses).url
 
     /** [mint], and the invitation card that carries the same link in a chat
      *  (section 14). */
@@ -40,7 +47,17 @@ public object ChannelInviteLinks {
         channel: ChannelHandle,
         public: Boolean,
         oneUse: Boolean = false,
+        /** Section 14.2 — the owner's label for a link; empty for an
+         *  invitation card (section 15.1 then reads `From an invitation`). */
+        label: String = "",
+        /** Section 14.2 — when the link stops working (unix ms), `0` never. */
+        expiryMs: Long = 0L,
+        /** Section 14.2 — the use limit (`0` one use, `0xFFFFFFFF` none);
+         *  `null` follows [oneUse]. */
+        maxUses: Long? = null,
     ): ChannelLinkMint {
+        val uses = maxUses ?: if (oneUse && !public) 0L else UNLIMITED_USES
+        val expiry = expiryMs.coerceAtLeast(0L)
         val publisher = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
         val account = state.boundAccount ?: throw IllegalStateException("no account bound")
         val shared = channel.sharedMeta()
@@ -66,6 +83,11 @@ public object ChannelInviteLinks {
                 // of its own under the same version would be overwritten by
                 // the owner's and orphan every ticket sealed to it.
                 val (version, admissionSeed) = if (state.joinedGroupIdOf(channel.id) == null) {
+                    // The first seed: the rows of today stay readers (the
+                    // web repair), before any ticket can name it.
+                    if (ChannelAdmissionKeys.all(context, account, channel.id).also { l -> l.forEach { it.second.fill(0) } }.isEmpty()) {
+                        ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channel.id)
+                    }
                     ChannelAdmissionKeys.currentOrMint(context, account, channel.id)
                 } else {
                     ChannelAdmissionKeys.current(context, account, channel.id)
@@ -78,7 +100,7 @@ public object ChannelInviteLinks {
                     // use limit (the ledger row carries the same rule).
                     ChannelInviteSigner.fromInviteSeed(inviteSeed).use { signer ->
                         ChannelPublisherSigners.derive(publisher, channel.id).use {
-                            client.putInviteKey(channel.id, hex(signer.verifyingKey()), 0L, if (oneUse) 0L else UNLIMITED_USES, it)
+                            client.putInviteKey(channel.id, hex(signer.verifyingKey()), expiry, uses, it)
                         }
                     }
                     FfiChannelAccess.Private(
@@ -94,7 +116,7 @@ public object ChannelInviteLinks {
                 uniffi.lakko_ffi_uniffi.composeChannelSubscriberInviteCapability(
                     identity.ed25519Seed(),
                     channelId,
-                    0uL,
+                    expiry.toULong(),
                     name,
                     description,
                     access,
@@ -110,13 +132,16 @@ public object ChannelInviteLinks {
                     mint.linkSecret,
                     it,
                     account,
-                    maxUses = if (oneUse && !public) 0L else UNLIMITED_USES,
+                    maxUses = uses,
+                    expiryMs = expiry,
                     register = LinkRegisterEntry(
                         kind = uniffi.lakko_ffi_uniffi.LinkRecordKind.CHANNEL,
                         targetId = channelId,
                         inviteSeed = inviteSeed ?: ByteArray(0),
                         admissionVersion = admissionVersionUsed,
-                        label = name,
+                        // The owner's label, never the channel's name: every
+                        // device labels a subscriber by it (`From link "..."`).
+                        label = label.trim(),
                     ),
                     onUploaded = { ledger = it },
                 )
@@ -179,9 +204,41 @@ public object ChannelInviteLinks {
     }
 
     /** The discovery ledger's "no use limit". */
-    private const val UNLIMITED_USES: Long = 0xFFFFFFFFL
+    public const val UNLIMITED_USES: Long = 0xFFFFFFFFL
 
     private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * ADR-0087 section 7 / UX 4.1 — this device's admission mark of a private
+ * channel, the web access record's `admittedThroughSeq` and
+ * `admissionMarkSet`: the service row number through which rows are readers
+ * (they came in before the channel went private, or a let-in pass let them
+ * in; 0 when none), and whether this device set it itself (it made the
+ * channel private or minted its first admission seed). A device that did not
+ * removes nobody and moves its mark only past rows it let in
+ * ([ChannelSubscriberRows.letInVerdict]). A rotation reseals per key to the
+ * rows at or below the mark ([ChannelReseal]). Only ever raised.
+ */
+public object ChannelAdmissionMark {
+    private fun key(account: String, channelId: String): String = "admitted-through|$account|$channelId"
+    private fun setKey(account: String, channelId: String): String = "admitted-mark-set|$account|$channelId"
+
+    public fun get(context: Context, account: String, channelId: String): Long =
+        ChannelKeyStore.encryptedPrefs(context).getLong(key(account, channelId), 0L)
+
+    public fun isSet(context: Context, account: String, channelId: String): Boolean =
+        ChannelKeyStore.encryptedPrefs(context).getBoolean(setKey(account, channelId), false)
+
+    /** Raise the mark to [through]; [markSet] records that this device set
+     *  it itself (never cleared). */
+    public fun raise(context: Context, account: String, channelId: String, through: Long, markSet: Boolean = false) {
+        val current = get(context, account, channelId)
+        val edit = ChannelKeyStore.encryptedPrefs(context).edit()
+        if (through > current) edit.putLong(key(account, channelId), through)
+        if (markSet) edit.putBoolean(setKey(account, channelId), true)
+        edit.commit()
+    }
 }
 
 /**

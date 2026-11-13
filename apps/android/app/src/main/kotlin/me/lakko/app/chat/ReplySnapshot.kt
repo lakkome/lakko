@@ -55,11 +55,15 @@ public fun replySnapshotFor(
      *  ([me.lakko.app.ui.channels.channelInviteLine]); injected for tests,
      *  which have no native core to open a card with. */
     inviteLine: (ByteArray?) -> String? = { me.lakko.app.ui.channels.channelInviteLine(it) },
+    /** A bare `/g/` link with no card: the row's line, never its secret
+     *  ([me.lakko.app.ui.channels.bareGroupLinkSnapshotLine]). */
+    bareLinkLine: (String) -> String? = { me.lakko.app.ui.channels.bareGroupLinkSnapshotLine(it) },
 ): ReplyRef {
     val oneLine = message.text.trim().replace(Regex("\\s+"), " ")
     // A message carrying a channel invitation card is quoted as its card's
     // line, never as its text: the text is the `/g/` link with its secret.
-    val cardLine = if (message.deleted) null else inviteLine(message.channelInvite)
+    // A bare link with no card is quoted as the row says it.
+    val cardLine = if (message.deleted) null else inviteLine(message.channelInvite) ?: bareLinkLine(message.text)
     val excerpt = when {
         cardLine != null -> cardLine
         oneLine.isNotEmpty() -> oneLine

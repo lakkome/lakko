@@ -50,6 +50,24 @@ public interface ChannelInviteActions {
      *  for the channel was sent, `null` when none waits for the owner's
      *  device (a pending one lands by itself). */
     public fun publisherRequestSentAtMs(channelIdHex: String): Long? = null
+    /**
+     * Open a bare `/g/` link (a message with no card, [BareGroupLink]) through
+     * the ledger: a channel's invitation, a group's live link, a link that is
+     * gone, or no answer. The default reads [inspect], which cannot tell a
+     * link that is gone from a group's; the session's own answers exactly.
+     */
+    public suspend fun openBareLink(link: me.lakko.app.contacts.LakkoLink.Group): BareLinkOpening = try {
+        inspect(link)?.let { BareLinkOpening.Channel(ChannelInviteSummary(it.name, it.publisherInvite)) }
+            ?: BareLinkOpening.NotChannel
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        if (inviteLinkUnreachable(e)) BareLinkOpening.Offline else BareLinkOpening.Dead
+    }
+    /** The name this device holds for the channel (shared name, local name,
+     *  handle), for an invitation that carries none; `null` when it holds
+     *  none. */
+    public fun heldChannelName(channelIdHex: String): String? = null
     public suspend fun subscribe(facts: ChannelInviteFacts)
     public fun openChannel(channelIdHex: String)
     /** A publisher invitation's `Accept` (UX section 15.2): asks to join and
@@ -106,7 +124,7 @@ private fun openCard(card: ByteArray): OpenedCard? {
         channelId = channelId,
         subscriber = preview.subscriber,
     )
-    val name = preview.groupName?.takeIf { it.isNotBlank() } ?: me.lakko.app.l10n.Localization.strings.value["channels.fallback_name"]
+    val name = inviteChannelName(preview.groupName, ChannelsComposerHex.hex(channelId))
     return OpenedCard(
         ChannelInviteFacts(
             ChannelsComposerHex.hex(channelId),
@@ -120,7 +138,7 @@ private fun openCard(card: ByteArray): OpenedCard? {
 
 /** What a chat-list row says for a message carrying a channel invitation
  *  card: the channel's name and whether it invites to publish. */
-internal data class ChannelInviteSummary(val channelName: String, val publisher: Boolean)
+public data class ChannelInviteSummary(val channelName: String, val publisher: Boolean)
 
 /** The card's summary, opened offline; `null` when it does not open. */
 internal fun channelInviteSummary(card: ByteArray): ChannelInviteSummary? = try {
@@ -156,7 +174,10 @@ internal fun invitationAwarePreviewText(
     strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
     summarize: (ByteArray) -> ChannelInviteSummary? = ::channelInviteSummary,
 ): String {
-    if (card == null || card.isEmpty()) return text
+    // A bare `/g/` link with no card (an older message): the link without its
+    // secret (`BareGroupLink.kt`; seen live 2026-11-13). Any origin: a
+    // notification opens no ledger and only hides the secret.
+    if (card == null || card.isEmpty()) return bareGroupLinkOf(text, ownOrigin = null)?.let(::linkWithoutSecret) ?: text
     return summarize(card)?.let { channelInvitePreviewText(it, strings) } ?: strings["notification.message.new"]
 }
 
@@ -255,13 +276,10 @@ internal fun ChannelInviteBubbleCard(
     var facts by remember(key) { mutableStateOf(fromCard?.facts ?: inspected[key]) }
     LaunchedEffect(key) {
         if (fromCard == null && textLink != null && !inspected.containsKey(key)) {
-            val f = try {
-                actions.inspect(textLink)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                null
-            }
+            // A ledger that does not answer is asked again (and never
+            // remembered); only an answer is kept for the run. The bubble
+            // shows the link without its secret meanwhile (`BareGroupLink.kt`).
+            val f = inspectUntilAnswered({ actions.inspect(textLink) })
             inspected[key] = f
             facts = f
         }
@@ -422,4 +440,64 @@ private fun CardButton(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
     }
+}
+
+/** Whether [e] (from opening a link) is the ledger not answering rather than
+ *  the link being gone: [me.lakko.app.chat.InviteLinkUnreachable] anywhere in
+ *  its causes. */
+internal fun inviteLinkUnreachable(e: Throwable): Boolean {
+    var cur: Throwable? = e
+    var depth = 0
+    while (cur != null && depth < 8) {
+        if (cur is me.lakko.app.chat.InviteLinkUnreachable) return true
+        cur = cur.cause
+        depth += 1
+    }
+    return false
+}
+
+/** How long to wait before asking the ledger again after attempt [attempt]
+ *  (0-based) did not reach it: 5 s, doubling, at most 60 s (chosen). */
+internal fun inspectRetryDelayMs(attempt: Int): Long = minOf(5_000L shl minOf(attempt, 4), 60_000L)
+
+/**
+ * Look a bare link's card up until the ledger answers: a failure to reach it
+ * ([inviteLinkUnreachable]) is retried after [wait], never taken as the
+ * answer; any other failure means the link is gone or not a channel's
+ * (`null`). Before this (found 2026-11-13) a single network failure was kept
+ * for the rest of the run and the card never came.
+ */
+internal suspend fun inspectUntilAnswered(
+    inspect: suspend () -> ChannelInviteFacts?,
+    wait: suspend (attempt: Int) -> Unit = { kotlinx.coroutines.delay(inspectRetryDelayMs(it)) },
+): ChannelInviteFacts? {
+    var attempt = 0
+    while (true) {
+        try {
+            return inspect()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (!inviteLinkUnreachable(e)) return null
+        }
+        wait(attempt)
+        attempt += 1
+    }
+}
+
+/**
+ * The channel's name as an invitation shows it: the name it carries, else the
+ * name this device holds for the channel, else "Channel" (web `cardTitle`).
+ * Seen live 2026-11-13: an old publisher link carrying no name read
+ * "Invitation to publish in " while the device held the channel.
+ */
+internal fun inviteChannelName(
+    carried: String?,
+    channelIdHex: String,
+    held: (String) -> String? = { ChannelInviteActionsHolder.actions?.heldChannelName(it) },
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String {
+    carried?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    held(channelIdHex)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    return strings["channels.fallback_name"]
 }

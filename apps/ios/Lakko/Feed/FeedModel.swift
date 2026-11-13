@@ -70,8 +70,8 @@ struct FeedMessage: Equatable {
     let replyTarget: Int64?
     /// One label per attachment ("Photo", "Voice message", ...).
     let attachmentLabels: [String]
-    /// The attachments themselves, for the media bubbles. Empty for a channel
-    /// post, which carries none yet.
+    /// The attachments themselves, for the media bubbles (a channel post's
+    /// from the references its log entry keeps).
     let attachments: [AttachmentRef]
     let edited: Bool
     let deleted: Bool
@@ -240,7 +240,13 @@ enum FeedModel {
                 continue
             }
             let id = Int64(p.cursor)
-            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(p.text, $0) } == true
+            // A post shows its words and its attachments, as a group's
+            // message does (`docs/ux/feed.md` section 3, base scenario 32).
+            // Its stored line names a caption-less photo for the Chats row;
+            // here the bubble says it, so the text is the caption alone.
+            let attachments = (p.attachments ?? []).compactMap { $0.toAttachmentRef() }
+            let text = attachments.isEmpty ? p.text : (p.caption ?? "")
+            let mentionsMe = !fromSelf && ctx.ownUsername.map { ctx.mentions(text, $0) } == true
             candidates.append(
                 FeedCandidate(
                     conversation: conversation,
@@ -252,8 +258,8 @@ enum FeedModel {
                     mentionsMe: mentionsMe,
                     repliesToMe: false,
                     reactionsDistinct: 0,
-                    hasMedia: false,
-                    text: p.text
+                    hasMedia: !attachments.isEmpty,
+                    text: text
                 ))
             refs.append(
                 FeedCandidateRef(
@@ -261,8 +267,12 @@ enum FeedModel {
                     message: FeedMessage(
                         messageId: id,
                         direction: fromSelf ? .outgoing : .incoming,
-                        text: p.text,
-                        timeMs: p.serverTsMs),
+                        text: text,
+                        timeMs: p.serverTsMs,
+                        attachmentLabels: attachments.map {
+                            ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
+                        },
+                        attachments: attachments),
                     mentionsMe: mentionsMe,
                     repliesToMe: false))
         }

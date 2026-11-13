@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import LakkoCore
 import SwiftUI
@@ -108,10 +109,10 @@ extension ChatMessage {
     /// secret, which no surface shows.
     func invitationLine(conversationIdHex: String?) -> String? {
         if let channel = channelInvite(conversationIdHex: conversationIdHex) {
-            return ChatListFormatting.channelInvitePreview(channelName: channel.name, publisher: false)
+            return ChatListFormatting.channelInvitePreview(channelName: channel.displayName, publisher: false)
         }
         if let publisher = coPublisherInvite(conversationIdHex: conversationIdHex) {
-            return ChatListFormatting.channelInvitePreview(channelName: publisher.channelName, publisher: true)
+            return ChatListFormatting.channelInvitePreview(channelName: publisher.displayName, publisher: true)
         }
         return nil
     }
@@ -140,8 +141,7 @@ struct CoPublisherCardFacts: Equatable {
 
     /// The channel's name, "Channel" when the invitation names none.
     var displayName: String {
-        let name = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? Localization.text("channels.fallback_name") : name
+        HeldChannelNames.title(carried: channelName, channelIdHex: channelIdHex)
     }
 
     /// UX 15.2 — "{name} invites you to be a publisher of {channel}." when
@@ -303,10 +303,10 @@ struct ChannelInvitationCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             InitialsAvatar(
-                name: facts.name, identity: facts.channelIdHex, size: 40,
+                name: facts.displayName, identity: facts.channelIdHex, size: 40,
                 placeholderIcon: .megaphoneFill, photo: facts.avatar.map(AvatarPhoto.avatar))
             VStack(alignment: .leading, spacing: 4) {
-                Text(facts.name)
+                Text(facts.displayName)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
                 Text(l10n.t(facts.isPublic ? "channels.header.public" : "channels.header.private"))
@@ -330,5 +330,62 @@ struct ChannelInvitationCard: View {
         }
         .frame(minWidth: 220, alignment: .leading)
         .accessibilityElement(children: .contain)
+    }
+}
+
+extension ChannelLinkFacts {
+    /// The channel's name as an invitation shows it (``HeldChannelNames``).
+    var displayName: String { HeldChannelNames.title(carried: name, channelIdHex: channelIdHex) }
+}
+
+/// The names of the channels this device holds, for an invitation that
+/// carries none (an older `/g/` link): web `cardTitle`. Seen live 2026-11-13,
+/// a row read "Invitation to publish in " with no name while the iPhone was
+/// subscribed to the channel. Kept current by the signed-in shell; read from
+/// any thread.
+final class HeldChannelNames: @unchecked Sendable {
+    static let shared = HeldChannelNames()
+    private let lock = NSLock()
+    private var names: [String: String] = [:]
+
+    /// Replace the held names with `channels`' titles (shared name, local
+    /// name, handle).
+    func set(_ channels: [ChannelHandle]) {
+        var next: [String: String] = [:]
+        for c in channels { next[c.id.lowercased()] = c.title }
+        lock.lock()
+        names = next
+        lock.unlock()
+    }
+
+    private var following: AnyCancellable?
+
+    /// Keep the held names current from the channel store (the latest value
+    /// first, then every change); a new store replaces the last one.
+    func follow(_ channels: AnyPublisher<[ChannelHandle], Never>) {
+        let sink = channels.sink { [weak self] in self?.set($0) }
+        lock.lock()
+        following = sink
+        lock.unlock()
+    }
+
+    func name(channelIdHex: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return names[channelIdHex.lowercased()]
+    }
+
+    /// The name the invitation carries, else the name this device holds for
+    /// the channel, else "Channel".
+    static func title(
+        carried: String?, channelIdHex: String,
+        held: (String) -> String? = { HeldChannelNames.shared.name(channelIdHex: $0) }
+    ) -> String {
+        let name = carried?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !name.isEmpty { return name }
+        if let known = held(channelIdHex)?.trimmingCharacters(in: .whitespacesAndNewlines), !known.isEmpty {
+            return known
+        }
+        return Localization.text("channels.fallback_name")
     }
 }

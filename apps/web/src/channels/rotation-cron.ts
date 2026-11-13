@@ -410,10 +410,14 @@ export function resealPlan(channelIdHex: string): {
   const visibility =
     access.visibility ?? (meta?.listed === undefined ? null : meta.listed ? "public" : "private");
   // Only a device that set the flag and runs the ticket check knows which
-  // rows it let in; any other (a channel from before phase B, a co-publisher
-  // that holds no admission seed) reseals per key to every row, as before.
+  // rows it let in. A private channel never reseals to every row, even on a
+  // device holding no admission seed: that device let nobody in, so it
+  // reseals to the readers at or below its mark only, never to a row with
+  // no valid ticket a server could have added. Every row only for a channel
+  // of unknown type (from before phase B).
   const checks =
-    access.visibility !== null && (access.visibility === "public" || access.admissionSeeds.length > 0);
+    visibility === "private" ||
+    (access.visibility !== null && (access.visibility === "public" || access.admissionSeeds.length > 0));
   const perKeyThroughSeq: number | "all" = checks ? access.admittedThroughSeq : "all";
   if (visibility !== "public") return { readKey: null, perKeyThroughSeq };
   const readKey = access.readKeyB64 === null ? null : b64ToBytesStd(access.readKeyB64);

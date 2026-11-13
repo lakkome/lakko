@@ -2454,6 +2454,14 @@ struct MessageRow: View {
         // ADR-0087 section 14 — a bubble drawn as a channel invitation card
         // shows no text; its text is the `/g/` link with its secret.
         let cardDrawn = message.invitationLine(conversationIdHex: conversationIdHex) != nil
+        // A bare `/g/` link (``BareGroupLink``): the card, or the words the
+        // bubble shows in place of the link; never the secret.
+        if !cardDrawn, let link = BareGroupLink.link(of: message.text) {
+            switch BareGroupLinks.shared.openings[link] {
+            case .channel?, .publisher?: return nil
+            case let opening: if let words = BareGroupLink.bubbleWords(link: link, opening: opening) { return words }
+            }
+        }
         guard let conversation = translationConversation else {
             return InvitationCopy.copyText(message.text, cardDrawn: cardDrawn)
         }
@@ -2690,6 +2698,14 @@ struct MessageRow: View {
                     } else if let publisher = message.coPublisherInvite(conversationIdHex: conversationIdHex) {
                         // Section 15.2 — an invitation to publish.
                         CoPublisherInvitationCard(facts: publisher, outgoing: isOutgoing)
+                    } else if let link = BareGroupLink.link(of: message.text) {
+                        // A bare `/g/` link with no card (an older message):
+                        // the card once the ledger says it is a channel's,
+                        // never the link's secret otherwise (``BareGroupLink``).
+                        BareGroupLinkBubble(
+                            link: link, outgoing: isOutgoing,
+                            linkColor: isOutgoing ? Color.lakkoAccentForeground : Color.lakkoAccent,
+                            onOwnLink: onOpenOwnLink)
                     } else if let invite = CallInviteLink.callInviteOf(
                         message.text, ownOrigin: CallInviteUrl.defaultOrigin) {
                         // `docs/ux/call-links.md` section 3 — a message whose

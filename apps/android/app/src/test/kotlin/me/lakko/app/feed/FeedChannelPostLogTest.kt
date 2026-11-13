@@ -37,9 +37,12 @@ class FeedChannelPostLogTest {
 
     @Test
     fun sanitizeRefusesAnUnknownVersionAndDropsBadChannelsAlone() {
-        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 3)))
+        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 4)))
         // Version 1 passed caption-less attachment posts over: refetched.
         assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 1)))
+        // Version 2 kept no attachment references, so the feed could not draw
+        // a channel's media (base scenario 32): refetched.
+        assertNull(sanitizeChannelPostLog(ChannelPostLog(version = 2)))
         val log = sanitizeChannelPostLog(
             ChannelPostLog(
                 channels = mapOf(
@@ -112,8 +115,33 @@ class FeedChannelPostLogTest {
         val log = ChannelPostLog(
             channels = mapOf(
                 id to ChannelPostSlot(
-                    2,
-                    listOf(post(1), PersistedChannelPost(2, now, "", listOf(PersistedChannelPostMedia("image/gif", "gif")))),
+                    3,
+                    listOf(
+                        post(1),
+                        PersistedChannelPost(2, now, "", listOf(PersistedChannelPostMedia("image/gif", "gif"))),
+                        // Version 3: the reference the feed draws the photo by.
+                        PersistedChannelPost(
+                            3,
+                            now,
+                            "",
+                            listOf(
+                                PersistedChannelPostMedia(
+                                    "image/jpeg",
+                                    null,
+                                    me.lakko.app.chat.PersistedAttachment(
+                                        blobIdB64 = "AAEC",
+                                        keyB64 = "AwQF",
+                                        nonceB64 = "BgcI",
+                                        mime = "image/jpeg",
+                                        size = 99uL,
+                                        name = "p.jpg",
+                                        width = 640u,
+                                        height = 480u,
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
                 ),
             ),
         )
