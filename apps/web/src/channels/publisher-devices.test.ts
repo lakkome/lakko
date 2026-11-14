@@ -29,6 +29,9 @@ import {
   publisherWelcomeTargetsOf,
   mayActOnResetSignal,
   joinReplacingHeldGroup,
+  heldGroupStateFor,
+  welcomeCameEarly,
+  inactivePublisherGroupVerdict,
   replaceHeldGroupFor,
   refoundVerdict,
   returningDeviceVerdict,
@@ -47,6 +50,7 @@ import {
 } from "./channel-access-record";
 import { epochStartMsOf, rebuiltRotationState } from "./rotation-state-store";
 import { keepsEpochSeeds } from "./publisher-handover";
+import { heldChannelWelcomeAction } from "./held-channel-welcomes";
 import { rotationJitterMs, ROTATION_JITTER_MAX_MS } from "./ChannelPublisherLoops";
 
 beforeAll(async () => {
@@ -286,13 +290,24 @@ describe("a co-publisher device joins only with the owner key the register recor
       { channelIdHex: "03".repeat(16), subscribed: true, role: "co-publisher" as const, publisherGroupIdHex: "cd".repeat(32), ownerAccountKey: new Uint8Array(32).fill(4) },
       { channelIdHex: "04".repeat(16), subscribed: false, role: "owner" as const, publisherGroupIdHex: "", ownerAccountKey: new Uint8Array(0) },
     ];
-    const targets = publisherWelcomeTargetsOf(wasm, owner.ed25519Seed, regs, () => false);
+    const targets = publisherWelcomeTargetsOf(wasm, owner.ed25519Seed, regs);
     expect(targets.map((t) => [t.channelIdHex.slice(0, 2), t.role])).toEqual([
       ["01", "owner"],
       ["03", "co-publisher"],
     ]);
     expect(Array.from(targets[1]?.ownerKey ?? [])).toEqual(Array.from(new Uint8Array(32).fill(4)));
-    expect(publisherWelcomeTargetsOf(wasm, owner.ed25519Seed, regs, () => true)).toEqual([]);
+  });
+
+  it("a channel this device still holds a group and keys for is a target too (walk of 2026-11-14)", () => {
+    // The returning owner device holds its old group and old keys; the
+    // owner device's Welcome that admits it again must reach the replace
+    // rule, which alone decides.
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x7a));
+    const regs = [
+      { channelIdHex: "05".repeat(16), subscribed: true, role: "owner" as const, publisherGroupIdHex: "", ownerAccountKey: new Uint8Array(0) },
+    ];
+    const targets = publisherWelcomeTargetsOf(wasm, owner.ed25519Seed, regs);
+    expect(targets.map((t) => t.channelIdHex)).toEqual(["05".repeat(16)]);
   });
 
   it("a Welcome from a device of another account is refused; one from the recorded owner lands", () => {
@@ -327,7 +342,6 @@ describe("a co-publisher device joins only with the owner key the register recor
             ownerAccountKey: owner.signaturePublicKey,
           },
         ],
-        () => false,
       );
       if (target === undefined) throw new Error("no target");
       // The stranger's group, under the stranger's own id and the register's
@@ -394,15 +408,15 @@ describe("a suspected reset never deletes a group on a DS signal alone (security
         added.free();
         return w;
       })();
-      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, strangerWelcome)).toBeNull();
+      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, strangerWelcome, true)).toBeNull();
       expect(wasm.PublisherGroup.load(oldDevice, owner.ed25519Seed, channelId)).toBeDefined();
       // Garbage: stays too.
-      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, new Uint8Array([1, 2, 3]))).toBeNull();
+      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, new Uint8Array([1, 2, 3]), true)).toBeNull();
       expect(wasm.PublisherGroup.load(oldDevice, owner.ed25519Seed, channelId)).toBeDefined();
       // The owner's other device admits it: replaced, then joined.
       const welcome = admit(refounded, newDevice);
       refounded.mergeStagedCommit(newDevice);
-      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, welcome)).not.toBeNull();
+      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, welcome, true)).not.toBeNull();
       const joined = wasm.PublisherGroup.joinFromWelcome(oldDevice, welcome, target.groupId, channelId, target.ownerKey);
       expect(Array.from(joined.channelSeed(oldDevice))).toEqual(Array.from(refounded.channelSeed(newDevice)));
       joined.free();
@@ -441,7 +455,7 @@ describe("a replacing Welcome whose join fails (security pass follow-up)", () =>
       // the core then refuses the join itself (here: asked for another group
       // id, which the join checks against the Welcome after staging it).
       const otherId = new Uint8Array(32).fill(0x07);
-      const joined = joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, () =>
+      const joined = joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, true, () =>
         wasm.PublisherGroup.joinFromWelcome(oldDevice, welcome, otherId, channelId, target.ownerKey),
       );
       expect(joined).toBeNull();
@@ -451,7 +465,7 @@ describe("a replacing Welcome whose join fails (security pass follow-up)", () =>
       expect(Array.from(kept?.channelSeed(oldDevice) ?? [])).toEqual(seedBefore);
       kept?.free();
       // And the same Welcome, joined as it is, replaces it.
-      const replaced = joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome);
+      const replaced = joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, true);
       expect(replaced).not.toBeNull();
       expect(Array.from(replaced?.channelSeed(oldDevice) ?? [])).toEqual(Array.from(refounded.channelSeed(newDevice)));
       replaced?.free();
@@ -537,6 +551,261 @@ describe("through the real core", () => {
       copGroup.free();
     } finally {
       g.free();
+    }
+  });
+});
+
+describe("a device whose own leaf was retired (walk of 2026-11-14)", () => {
+  it("waits for a Welcome as an owner device with siblings, reads alone, ends only when the account was removed", () => {
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: true, otherOwnDevices: true })).toBe(
+      "wait-for-welcome",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: null, otherOwnDevices: false })).toBe(
+      "reader",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: true, otherOwnDevices: true })).toBe(
+      "wait-for-welcome",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: false, otherOwnDevices: true })).toBe(
+      "removed",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: null, otherOwnDevices: true })).toBe(
+      "removed",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: true, otherOwnDevices: false })).toBe(
+      "removed",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: true, otherOwnDevices: null })).toBe(
+      "undecided",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: false, otherOwnDevices: null })).toBe(
+      "undecided",
+    );
+  });
+
+  it("through the real core: retired by the other owner device, admitted again, the held group is replaced and it publishes", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x9a));
+    const a = deviceOf(owner, 0xc1);
+    const b = deviceOf(owner, 0xc2);
+    const channelId = new Uint8Array(16).fill(0x9b);
+    const ga = new wasm.PublisherGroup(a, owner.ed25519Seed, channelId);
+    const groupId = ga.groupId();
+    const ownerKey = wasm.publisherOwnerAccountKey(owner.ed25519Seed);
+    // A admits B.
+    const c1 = ga.stageCommit(a, [b.createKeyPackage()], new Uint8Array(), false);
+    const w1 = c1.welcome ?? new Uint8Array();
+    c1.free();
+    ga.mergeStagedCommit(a);
+    const gb = wasm.PublisherGroup.joinFromWelcome(b, w1, groupId, channelId, ownerKey);
+    try {
+      // B retires A (A was not in B's DeviceGroup); A applies it.
+      const retire = gb.stageRetireDevices(b, a.signaturePublicKey);
+      gb.mergeStagedCommit(b);
+      ga.processIncomingVerifyingRoles(a, retire).free?.();
+      expect(ga.isActive()).toBe(false);
+      const ownHex = hex(owner.signaturePublicKey);
+      expect(
+        inactivePublisherGroupVerdict({
+          ownerDevice: true,
+          ownAccountHasLeaf: publisherLeaves(ga).some((l) => l.accountKeyHex === ownHex),
+          otherOwnDevices: true,
+        }),
+      ).toBe("wait-for-welcome");
+      ga.free();
+      // A still holds its (inactive) group: the channel is a target anyway.
+      const [target] = publisherWelcomeTargetsOf(wasm, owner.ed25519Seed, [
+        { channelIdHex: hex(channelId), subscribed: true, role: "owner", publisherGroupIdHex: "", ownerAccountKey: new Uint8Array(0) },
+      ]);
+      if (target === undefined) throw new Error("no target");
+      // B admits A again.
+      const c2 = gb.stageCommit(b, [a.createKeyPackage()], new Uint8Array(), false);
+      const w2 = c2.welcome ?? new Uint8Array();
+      c2.free();
+      gb.mergeStagedCommit(b);
+      const joined = joinReplacingHeldGroup(wasm, a, owner, target, channelId, w2, false);
+      expect(joined).not.toBeNull();
+      expect(joined?.isActive()).toBe(true);
+      expect(Array.from(joined?.channelSeed(a) ?? [])).toEqual(Array.from(gb.channelSeed(b)));
+      joined?.free();
+      const reloaded = wasm.PublisherGroup.load(a, owner.ed25519Seed, channelId);
+      expect(reloaded?.isActive()).toBe(true);
+      expect(reloaded?.epoch()).toBe(gb.epoch());
+      reloaded?.free();
+    } finally {
+      gb.free();
+    }
+  });
+});
+
+describe("a replayed old Welcome never replaces a newer held group", () => {
+  const ownerTarget = (owner: wasm.Identity, channelId: Uint8Array) => ({
+    channelIdHex: hex(channelId),
+    groupId: wasm.publisherGroupIdForSeed(owner.ed25519Seed, channelId),
+    ownerKey: wasm.publisherOwnerAccountKey(owner.ed25519Seed),
+    role: "owner" as const,
+  });
+
+  it("an active, unsuspected held group is not replaced, even by an owner device's newer Welcome", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xd1));
+    const oldDevice = deviceOf(owner, 0xd2);
+    const newDevice = deviceOf(owner, 0xd3);
+    const channelId = new Uint8Array(16).fill(0xd4);
+    const old = new wasm.PublisherGroup(oldDevice, owner.ed25519Seed, channelId);
+    const epochBefore = old.epoch();
+    old.free();
+    const refounded = new wasm.PublisherGroup(newDevice, owner.ed25519Seed, channelId);
+    try {
+      const c = refounded.stageCommit(newDevice, [oldDevice.createKeyPackage()], new Uint8Array(), false);
+      const welcome = c.welcome ?? new Uint8Array();
+      c.free();
+      refounded.mergeStagedCommit(newDevice);
+      const target = ownerTarget(owner, channelId);
+      expect(replaceHeldGroupFor(wasm, oldDevice, owner, target, channelId, welcome, false)).toBeNull();
+      expect(joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, false)).toBeNull();
+      const kept = wasm.PublisherGroup.load(oldDevice, owner.ed25519Seed, channelId);
+      expect(kept?.isActive()).toBe(true);
+      expect(kept?.epoch()).toBe(epochBefore);
+      kept?.free();
+    } finally {
+      refounded.free();
+    }
+  });
+
+  it("an INACTIVE held group: a Welcome that joins at an epoch not above it restores the held group", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xe1));
+    const oldDevice = deviceOf(owner, 0xe2);
+    const newDevice = deviceOf(owner, 0xe3);
+    const sibling = deviceOf(owner, 0xe5);
+    const channelId = new Uint8Array(16).fill(0xe4);
+    // The held group: the sibling was admitted, then retired this device.
+    const old = new wasm.PublisherGroup(oldDevice, owner.ed25519Seed, channelId);
+    const c0 = old.stageCommit(oldDevice, [sibling.createKeyPackage()], new Uint8Array(), false);
+    const w0 = c0.welcome ?? new Uint8Array();
+    c0.free();
+    old.mergeStagedCommit(oldDevice);
+    const gs = wasm.PublisherGroup.joinFromWelcome(sibling, w0, old.groupId(), channelId, wasm.publisherOwnerAccountKey(owner.ed25519Seed));
+    const retire = gs.stageRetireDevices(sibling, oldDevice.signaturePublicKey);
+    gs.mergeStagedCommit(sibling);
+    gs.free();
+    old.processIncomingVerifyingRoles(oldDevice, retire).free();
+    expect(old.isActive()).toBe(false);
+    const heldEpoch = old.epoch();
+    old.free();
+    expect(heldEpoch >= 1n).toBe(true);
+    // An owner device's Welcome for the same group at epoch 1: not above it.
+    const refounded = new wasm.PublisherGroup(newDevice, owner.ed25519Seed, channelId);
+    try {
+      const c = refounded.stageCommit(newDevice, [oldDevice.createKeyPackage()], new Uint8Array(), false);
+      const welcome = c.welcome ?? new Uint8Array();
+      c.free();
+      refounded.mergeStagedCommit(newDevice);
+      expect(refounded.epoch() <= heldEpoch).toBe(true);
+      const target = ownerTarget(owner, channelId);
+      expect(joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, false)).toBeNull();
+      const kept = wasm.PublisherGroup.load(oldDevice, owner.ed25519Seed, channelId);
+      expect(kept?.isActive()).toBe(false);
+      expect(kept?.epoch()).toBe(heldEpoch);
+      kept?.free();
+    } finally {
+      refounded.free();
+    }
+  });
+
+  it("an ACTIVE held group under reset suspicion is replaced by a lower-epoch group (founded again, decision A)", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xf1));
+    const oldDevice = deviceOf(owner, 0xf2);
+    const newDevice = deviceOf(owner, 0xf3);
+    const channelId = new Uint8Array(16).fill(0xf4);
+    // The held group moved on to epoch 3 on the old chain.
+    const old = new wasm.PublisherGroup(oldDevice, owner.ed25519Seed, channelId);
+    for (let i = 0; i < 3; i += 1) {
+      old.stageRotate(oldDevice);
+      old.mergeStagedCommit(oldDevice);
+    }
+    expect(old.epoch()).toBe(3n);
+    old.free();
+    // The channel founded again elsewhere: its Welcome lands at epoch 1.
+    const refounded = new wasm.PublisherGroup(newDevice, owner.ed25519Seed, channelId);
+    try {
+      const c = refounded.stageCommit(newDevice, [oldDevice.createKeyPackage()], new Uint8Array(), false);
+      const welcome = c.welcome ?? new Uint8Array();
+      c.free();
+      refounded.mergeStagedCommit(newDevice);
+      expect(refounded.epoch()).toBe(1n);
+      const target = ownerTarget(owner, channelId);
+      const joined = joinReplacingHeldGroup(wasm, oldDevice, owner, target, channelId, welcome, true);
+      expect(joined).not.toBeNull();
+      expect(joined?.epoch()).toBe(1n);
+      expect(Array.from(joined?.channelSeed(oldDevice) ?? [])).toEqual(Array.from(refounded.channelSeed(newDevice)));
+      joined?.free();
+    } finally {
+      refounded.free();
+    }
+  });
+});
+
+describe("a Welcome that comes before the removal is applied (walk follow-up)", () => {
+  it("through the real core: Welcome first, removal second -> held, then joined and publishing", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x5a));
+    const a = deviceOf(owner, 0x5b);
+    const b = deviceOf(owner, 0x5c);
+    const channelId = new Uint8Array(16).fill(0x5d);
+    const ga = new wasm.PublisherGroup(a, owner.ed25519Seed, channelId);
+    const groupId = ga.groupId();
+    const ownerKey = wasm.publisherOwnerAccountKey(owner.ed25519Seed);
+    const c1 = ga.stageCommit(a, [b.createKeyPackage()], new Uint8Array(), false);
+    const w1 = c1.welcome ?? new Uint8Array();
+    c1.free();
+    ga.mergeStagedCommit(a);
+    const gb = wasm.PublisherGroup.joinFromWelcome(b, w1, groupId, channelId, ownerKey);
+    const target = {
+      channelIdHex: hex(channelId),
+      groupId: wasm.publisherGroupIdForSeed(owner.ed25519Seed, channelId),
+      ownerKey,
+      role: "owner" as const,
+    };
+    try {
+      // B retires A, then admits it again; the Welcome reaches A first.
+      const retire = gb.stageRetireDevices(b, a.signaturePublicKey);
+      gb.mergeStagedCommit(b);
+      const c2 = gb.stageCommit(b, [a.createKeyPackage()], new Uint8Array(), false);
+      const welcome = c2.welcome ?? new Uint8Array();
+      c2.free();
+      gb.mergeStagedCommit(b);
+
+      // The Welcome first: A's group is still active and unsuspected.
+      expect(heldGroupStateFor(wasm, a, owner, target, channelId)).toBe("active");
+      expect(welcomeCameEarly(wasm, a, welcome, target, "active", false)).toBe(true);
+      expect(joinReplacingHeldGroup(wasm, a, owner, target, channelId, welcome, false)).toBeNull();
+      expect(
+        heldChannelWelcomeAction({ channelStillOurs: true, heldGroup: "active", suspected: false, expired: false }),
+      ).toBe("keep");
+
+      // The removal second: A's journal poll applies it.
+      ga.processIncomingVerifyingRoles(a, retire).free();
+      ga.free();
+      const state = heldGroupStateFor(wasm, a, owner, target, channelId);
+      expect(state).toBe("inactive");
+      expect(heldChannelWelcomeAction({ channelStillOurs: true, heldGroup: state, suspected: false, expired: false })).toBe(
+        "try",
+      );
+      expect(welcomeCameEarly(wasm, a, welcome, target, state, false)).toBe(false);
+
+      // The held Welcome now replaces the group: joined, and A publishes
+      // under B's current seed.
+      const joined = joinReplacingHeldGroup(wasm, a, owner, target, channelId, welcome, false);
+      expect(joined).not.toBeNull();
+      expect(joined?.isActive()).toBe(true);
+      expect(Array.from(joined?.channelSeed(a) ?? [])).toEqual(Array.from(gb.channelSeed(b)));
+      joined?.free();
+    } finally {
+      gb.free();
     }
   });
 });

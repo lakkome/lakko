@@ -279,6 +279,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.channel-subscriptions.unsent.v1.${acct}`, "1");
   put(`lakko.channel-admission-seeds.unsent.v1.${acct}`, "1");
   put(`lakko.channels.founded-alone.v1.${acct}`, "1");
+  put(`lakko.channels.held-welcomes.v1.${acct}`, "[]");
   put(`lakko.unseen-reactions.v1:${acct}`, "{}");
   put(`lakko.emoji.recent-reactions:${acct}`, "[]");
   put(`lakko.device-cards.v1.${acct}`, "{}");
@@ -712,6 +713,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.channel-subscriptions.unsent.v1.": "account",
   "lakko.channel-admission-seeds.unsent.v1.": "account",
   "lakko.channels.founded-alone.v1.": "account",
+  "lakko.channels.held-welcomes.v1.": "account",
   "lakko.channels.orphan-removed.v1": "account",
   "lakko.unseen-reactions.v1:": "account",
   "lakko-account-kv": "account",

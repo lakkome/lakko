@@ -38,7 +38,7 @@ import {
   type ChannelHeadStore,
   type ReentryEpoch,
 } from "./channel-vault-head";
-import { enterOwnedChannel, entryVerdict, type EntryPorts } from "./channel-entry";
+import { clearInactiveHeldGroup, enterOwnedChannel, entryVerdict, type EntryPorts } from "./channel-entry";
 import { afterPeerCommitsApplied, newOwnLeaves, publisherLeaves } from "./publisher-devices";
 import { runPublisherCommit, type PublisherCommitEntry, type PublisherCommitPorts } from "./publisher-commit-outbox";
 import { VaultClient, decodeVersioned, STORAGE_PROOF_HEADER } from "../storage/vault-client";
@@ -554,6 +554,87 @@ describe("through the real core", () => {
       otherStore.release();
     } finally {
       store.release();
+    }
+  });
+});
+
+describe("an evicted owner group no longer blocks the entry (walk of 2026-11-14)", () => {
+  it("through the real core: the inactive group is deleted right before the entry, an active one never", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xb1));
+    const a = deviceOf(owner, 0xb2);
+    const b = deviceOf(owner, 0xb3);
+    const channelId = new Uint8Array(16).fill(0xb4);
+    const ga = new wasm.PublisherGroup(a, owner.ed25519Seed, channelId);
+    const groupId = ga.groupId();
+    const c1 = ga.stageCommit(a, [b.createKeyPackage()], new Uint8Array(), false);
+    const w1 = c1.welcome ?? new Uint8Array();
+    c1.free();
+    ga.mergeStagedCommit(a);
+    const gb = wasm.PublisherGroup.joinFromWelcome(b, w1, groupId, channelId, wasm.publisherOwnerAccountKey(owner.ed25519Seed));
+    try {
+      // An ACTIVE held group on B: never deleted, no entry.
+      expect(clearInactiveHeldGroup(wasm, b, owner.ed25519Seed, channelId)).toBeNull();
+      expect(wasm.PublisherGroup.load(b, owner.ed25519Seed, channelId)?.isActive()).toBe(true);
+      // B retires A; A applies it and is evicted.
+      const retire = gb.stageRetireDevices(b, a.signaturePublicKey);
+      gb.mergeStagedCommit(b);
+      ga.processIncomingVerifyingRoles(a, retire).free();
+      expect(ga.isActive()).toBe(false);
+      ga.free();
+      const savedInfo = gb.groupInfo(b);
+      const savedSeed = gb.dsAccessSeed(b);
+      const enter = (): wasm.PublisherGroupEntry =>
+        wasm.PublisherGroup.enter(a, savedInfo, owner.ed25519Seed, channelId, savedSeed);
+      // While the evicted group is stored the core refuses the entry.
+      expect(enter).toThrow();
+      const cleared = clearInactiveHeldGroup(wasm, a, owner.ed25519Seed, channelId);
+      expect(cleared).not.toBeNull();
+      expect(wasm.PublisherGroup.load(a, owner.ed25519Seed, channelId)).toBeUndefined();
+      const entry = enter();
+      const entered = entry.takeGroup();
+      const commit = entry.commit;
+      entry.free();
+      try {
+        expect(entered.mergeStagedCommit(a)).toBe(true);
+        gb.processIncomingVerifyingRoles(b, commit).free();
+        expect(Array.from(entered.channelSeed(a))).toEqual(Array.from(gb.channelSeed(b)));
+      } finally {
+        entered.free();
+      }
+    } finally {
+      gb.free();
+    }
+  });
+
+  it("nothing stored: a no-op handle; a failed build puts the evicted group back", () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xc1));
+    const a = deviceOf(owner, 0xc2);
+    const b = deviceOf(owner, 0xc3);
+    const channelId = new Uint8Array(16).fill(0xc4);
+    expect(clearInactiveHeldGroup(wasm, a, owner.ed25519Seed, new Uint8Array(16).fill(0xc5))).not.toBeNull();
+    const ga = new wasm.PublisherGroup(a, owner.ed25519Seed, channelId);
+    const c1 = ga.stageCommit(a, [b.createKeyPackage()], new Uint8Array(), false);
+    const w1 = c1.welcome ?? new Uint8Array();
+    c1.free();
+    ga.mergeStagedCommit(a);
+    const gb = wasm.PublisherGroup.joinFromWelcome(b, w1, ga.groupId(), channelId, wasm.publisherOwnerAccountKey(owner.ed25519Seed));
+    try {
+      const retire = gb.stageRetireDevices(b, a.signaturePublicKey);
+      gb.mergeStagedCommit(b);
+      ga.processIncomingVerifyingRoles(a, retire).free();
+      const epochBefore = ga.epoch();
+      ga.free();
+      const cleared = clearInactiveHeldGroup(wasm, a, owner.ed25519Seed, channelId);
+      expect(cleared).not.toBeNull();
+      cleared?.restore();
+      const back = wasm.PublisherGroup.load(a, owner.ed25519Seed, channelId);
+      expect(back?.isActive()).toBe(false);
+      expect(back?.epoch()).toBe(epochBefore);
+      back?.free();
+    } finally {
+      gb.free();
     }
   });
 });

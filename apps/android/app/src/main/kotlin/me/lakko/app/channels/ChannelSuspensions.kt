@@ -71,6 +71,35 @@ public fun welcomeReplacesHeldGroup(
         welcomeGroupId.contentEquals(expectedGroupId) &&
         founderAccountKey.contentEquals(expectedOwnerKey)
 
+/**
+ * Replay guard (2026-11-14), rule 1 - whether a Welcome may replace the
+ * PublisherGroup this device holds for a channel at all: only when that group
+ * is no longer active (this device's leaf was removed) or the channel is
+ * under reset suspicion ([ChannelSuspensions]). An active, unsuspected held
+ * group is never replaced: a device's KeyPackage is last-resort (ADR-0050
+ * 2.6), so the Delivery Service could replay an OLD owner-signed Welcome for
+ * the same group. Pure.
+ */
+public fun heldGroupReplaceable(heldActive: Boolean, resetSuspected: Boolean): Boolean =
+    !heldActive || resetSuspected
+
+/**
+ * Replay guard, rule 2 - after the join, whether the joined group replaces
+ * the held one: its epoch must be strictly above the held group's. Applied
+ * when the held group is inactive: it is then the same chain (this device
+ * applied the commit that removed its leaf), so a Welcome at or below that
+ * epoch is an old one. For an ACTIVE held group under reset suspicion the
+ * epochs are not compared: a channel founded again elsewhere (decision A)
+ * starts a new chain at a low epoch, and comparing would keep this device a
+ * reader for ever. Pure.
+ */
+public fun joinedGroupReplacesHeld(joinedEpoch: ULong, heldEpoch: ULong, heldActive: Boolean): Boolean =
+    heldActive || joinedEpoch > heldEpoch
+
+/** The joined group was refused by [joinedGroupReplacesHeld]: the held group
+ *  is restored. */
+public class StaleWelcomeRefused : IllegalStateException("a Welcome older than the held group was not joined")
+
 /** Signed reads in a row that must succeed at the held group's epoch before a
  *  suspension is lifted (chosen, not measured). */
 public const val SUSPENSION_LIFT_READS: Int = 2

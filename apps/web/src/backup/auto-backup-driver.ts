@@ -3,6 +3,7 @@
 
 import type { DeviceCipher } from "../auth/device-cipher";
 import { subscribeAcceptedChanged } from "../contacts/local-store";
+import { currentSyncedStateBytes } from "../devices/sync/synced-state-source";
 import { BackupClient } from "./client";
 import { isBackupRestoreOwed } from "./restore-owed";
 import {
@@ -10,6 +11,7 @@ import {
   markBackupDirty,
   ownStateChanged,
   runDueBackup,
+  syncedStateChanged,
   type AutoBackupDeps,
   type AutoBackupOutcome,
 } from "./auto-backup";
@@ -26,7 +28,13 @@ import {
  *     fires for every accept, removal and rename;
  *   * group membership, compared at each tick against the set last reported;
  *   * the person's own name, photo and "who can find me" setting, compared at
- *     each tick by their stamps, the same way.
+ *     each tick by their stamps, the same way;
+ *   * the account's synced state (folders, pins, saved messages, channel
+ *     subscriptions, channel admission seeds, ...), compared at each tick by
+ *     a key over `SyncedState.toBytes()`. Before this, creating a channel
+ *     never made the backup due: the register was written, but nothing told
+ *     the backup, and a device restored from the phrase did not know the
+ *     channel until some unrelated change sent a backup out.
  *
  * Membership is checked HERE rather than hooked into the chat layer's snapshot
  * write, which is where it first went. That hook only fires after an MLS
@@ -56,6 +64,10 @@ export interface AutoBackupDriverInputs {
    *  they are loaded (asked again at the next tick). */
   readonly ownStateKey?: (accountIdB64: string) => string | null;
   readonly accountIdB64: () => string | null;
+  /** `SyncedState.toBytes()` of the running session, `null` before the sync
+   *  runtime has started (asked again at the next tick). Production reads
+   *  `currentSyncedStateBytes`; tests inject it. */
+  readonly syncedStateBytes?: () => Uint8Array | null;
   readonly ed25519Seed: () => Uint8Array | null;
   readonly deviceKey: () => Promise<DeviceCipher | null>;
   readonly sessionToken: () => string | null;
@@ -113,6 +125,11 @@ export function startAutoBackup(inputs: AutoBackupDriverInputs): () => void {
     }
     const own = accountIdB64 === null ? null : (inputs.ownStateKey?.(accountIdB64) ?? null);
     if (accountIdB64 !== null && own !== null && ownStateChanged(accountIdB64, own)) {
+      markBackupDirty(accountIdB64);
+    }
+    const synced =
+      accountIdB64 === null ? null : (inputs.syncedStateBytes ?? currentSyncedStateBytes)();
+    if (accountIdB64 !== null && synced !== null && syncedStateChanged(accountIdB64, synced)) {
       markBackupDirty(accountIdB64);
     }
     running = true;

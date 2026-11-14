@@ -219,3 +219,98 @@ public fun refoundResealPlan(admitted: List<String>?, public: Boolean, ownKeys: 
     public -> RefoundReseal.EveryRow
     else -> RefoundReseal.Keys(ownKeys.map { it.lowercase() }.distinct())
 }
+
+/**
+ * Section 2.3 / 2.5 (walk of 2026-11-14) - the channels a PublisherGroup
+ * Welcome from the account mailbox is offered to: every channel the account
+ * owns or co-publishes (its subscription register) that this device lists,
+ * INCLUDING one whose PublisherGroup or publisher keys this device still
+ * holds. A device that returns after another device of the account retired
+ * its leaf still holds its old group and keys; it is exactly the device the
+ * replace rule ([welcomeReplacesHeldGroup]) was written for, so holding keys
+ * must never take a channel off this list. The replace rule decides.
+ */
+public fun publisherWelcomeTargets(
+    registers: List<ChannelRegisterView>,
+    listedChannelIds: Set<String>,
+): List<ChannelRegisterView> {
+    val listed = listedChannelIds.map { it.lowercase() }.toSet()
+    return registers.filter { r ->
+        r.subscribed && r.role != ChannelAccountRole.SUBSCRIBER && r.channelIdHex.lowercase() in listed
+    }
+}
+
+/**
+ * The one target of [targets] a Welcome for [welcomeGroupId] (read off the
+ * Welcome without joining) can land in: the channel whose PublisherGroup id
+ * ([expectedGroupIdOf]: the owner-seed derivation for an owned channel, the
+ * register's id for a co-published one) is that id; `null` when none is, or
+ * the Welcome could not be read. Only that channel's held group is touched.
+ */
+public fun publisherWelcomeTarget(
+    targets: List<ChannelRegisterView>,
+    welcomeGroupId: ByteArray?,
+    expectedGroupIdOf: (ChannelRegisterView) -> ByteArray?,
+): ChannelRegisterView? {
+    val id = welcomeGroupId?.takeIf { it.size == 32 } ?: return null
+    return targets.firstOrNull { t ->
+        runCatching { expectedGroupIdOf(t) }.getOrNull()?.contentEquals(id) == true
+    }
+}
+
+/**
+ * What a device does once the channel's PublisherGroup it holds is no longer
+ * active: its own leaf was removed by a commit it applied (walk of
+ * 2026-11-14). Mirror of the web `inactivePublisherGroupVerdict`.
+ */
+public enum class InactiveGroupVerdict {
+    /** The leaf was this DEVICE's, not the account's role (an owner device
+     *  with other devices of the account, or a co-publisher's device whose
+     *  account still holds a leaf): it stops publishing, shows the reader
+     *  line, keeps the old group and waits for the owner device's Welcome
+     *  that admits it again ([welcomeReplacesHeldGroup]). */
+    WAIT_FOR_WELCOME,
+
+    /** An owner device that is the account's only device: nobody can admit
+     *  it, so it stops publishing and the reader-device settle takes the
+     *  channel (entry from the saved copy, else decision A); it never waits
+     *  for ever. */
+    READER,
+
+    /** The account itself was removed as a publisher (or nothing says
+     *  otherwise): the existing removal path (UX 15.2). */
+    REMOVED,
+
+    /** The account's device roster is not loaded: nothing changes this pass
+     *  (an owner device must not take the channel alone on a roster it has
+     *  not read). */
+    UNDECIDED,
+}
+
+/**
+ * The verdict for an inactive held PublisherGroup. [ownAccountHasLeaf]:
+ * whether the inactive group's roster still holds a leaf of this account
+ * (`null` when it could not be read; OpenMLS merges the removing commit's
+ * tree before it marks the group inactive, so the roster is the one after
+ * the removal). [otherOwnDevices]: whether the account's DeviceGroup roster
+ * names a device besides this one (`null` when not loaded).
+ */
+public fun inactivePublisherGroupVerdict(
+    ownerDevice: Boolean,
+    ownAccountHasLeaf: Boolean?,
+    otherOwnDevices: Boolean?,
+): InactiveGroupVerdict = when {
+    otherOwnDevices == null -> InactiveGroupVerdict.UNDECIDED
+    ownerDevice -> if (otherOwnDevices) InactiveGroupVerdict.WAIT_FOR_WELCOME else InactiveGroupVerdict.READER
+    ownAccountHasLeaf == true && otherOwnDevices -> InactiveGroupVerdict.WAIT_FOR_WELCOME
+    else -> InactiveGroupVerdict.REMOVED
+}
+
+/**
+ * ADR-0064 section 7 / decision A on a device whose held PublisherGroup is
+ * inactive (its leaf was removed; it can never read or commit again): such a
+ * group does not count as held, so the entry from the saved copy and the
+ * re-founding are not blocked by it (each deletes it first: the core refuses
+ * an entry over a group it still holds). An active group counts.
+ */
+public fun holdsLiveGroup(groupHeld: Boolean, groupActive: Boolean): Boolean = groupHeld && groupActive

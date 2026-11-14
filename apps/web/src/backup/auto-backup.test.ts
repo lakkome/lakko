@@ -20,6 +20,8 @@ import {
   saveAutoBackupState,
   type AutoBackupDeps,
   ownStateChanged,
+  syncedStateChanged,
+  syncedStateKeyOf,
 } from "./auto-backup";
 
 const ACCOUNT = "YWNjb3VudC1pZA==";
@@ -42,27 +44,27 @@ beforeEach(() => {
 
 describe("backupVerdict", () => {
   it("is clean while nothing has changed", () => {
-    expect(backupVerdict({ lastUploadAtMs: 1000, dirtySinceMs: null, lastGroupsKey: null, lastOwnStateKey: null }, 9e9)).toBe("clean");
+    expect(backupVerdict({ lastUploadAtMs: 1000, dirtySinceMs: null, lastGroupsKey: null, lastOwnStateKey: null, lastSyncedStateKey: null }, 9e9)).toBe("clean");
   });
 
   it("is due the first time, however recently the account was created", () => {
-    expect(backupVerdict({ lastUploadAtMs: 0, dirtySinceMs: 10, lastGroupsKey: null, lastOwnStateKey: null }, 20)).toBe("due");
+    expect(backupVerdict({ lastUploadAtMs: 0, dirtySinceMs: 10, lastGroupsKey: null, lastOwnStateKey: null, lastSyncedStateKey: null }, 20)).toBe("due");
   });
 
   it("throttles a second upload inside the interval", () => {
-    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null };
+    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null, lastSyncedStateKey: null };
     expect(backupVerdict(state, 1_000_000 + MIN_BACKUP_INTERVAL_MS - 1)).toBe("throttled");
   });
 
   it("is due once the interval has passed", () => {
-    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null };
+    const state = { lastUploadAtMs: 1_000_000, dirtySinceMs: 1_000_001, lastGroupsKey: null, lastOwnStateKey: null, lastSyncedStateKey: null };
     expect(backupVerdict(state, 1_000_000 + MIN_BACKUP_INTERVAL_MS)).toBe("due");
   });
 
   it("is due when the clock has moved backwards, rather than wedging off forever", () => {
     // A `lastUploadAtMs` in the future would make every later `now - last`
     // negative, so a naive comparison would suppress backups permanently.
-    const state = { lastUploadAtMs: 9_000_000, dirtySinceMs: 1_000, lastGroupsKey: null, lastOwnStateKey: null };
+    const state = { lastUploadAtMs: 9_000_000, dirtySinceMs: 1_000, lastGroupsKey: null, lastOwnStateKey: null, lastSyncedStateKey: null };
     expect(backupVerdict(state, 1_000_000)).toBe("due");
   });
 });
@@ -87,14 +89,15 @@ describe("markedUploaded", () => {
       dirtySinceMs: null,
       lastGroupsKey: null,
       lastOwnStateKey: null,
+      lastSyncedStateKey: null,
     });
   });
 });
 
 describe("persistence", () => {
   it("round-trips through localStorage", () => {
-    saveAutoBackupState(ACCOUNT, { lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null });
-    expect(loadAutoBackupState(ACCOUNT)).toEqual({ lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null });
+    saveAutoBackupState(ACCOUNT, { lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null, lastSyncedStateKey: null });
+    expect(loadAutoBackupState(ACCOUNT)).toEqual({ lastUploadAtMs: 5, dirtySinceMs: 7, lastGroupsKey: "g1", lastOwnStateKey: null, lastSyncedStateKey: null });
   });
 
   it("answers clean for an unknown account", () => {
@@ -169,6 +172,7 @@ describe("runDueBackup", () => {
       dirtySinceMs: null,
       lastGroupsKey: null,
       lastOwnStateKey: null,
+      lastSyncedStateKey: null,
     });
   });
 
@@ -383,5 +387,97 @@ describe("the own profile and setting", () => {
     expect(ownStateChanged(ACCOUNT, "5:7")).toBe(false);
     expect(ownStateChanged(ACCOUNT, "6:7")).toBe(true);
     expect(ownStateChanged(ACCOUNT, "6:8")).toBe(true);
+  });
+});
+
+describe("the synced state", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the first report counts as a change, the same bytes do not, other bytes do", () => {
+    expect(syncedStateChanged(ACCOUNT, new Uint8Array([1, 2, 3]))).toBe(true);
+    expect(syncedStateChanged(ACCOUNT, new Uint8Array([1, 2, 3]))).toBe(false);
+    expect(syncedStateChanged(ACCOUNT, new Uint8Array([1, 2, 4]))).toBe(true);
+    expect(syncedStateChanged(ACCOUNT, new Uint8Array([1, 2, 4, 0]))).toBe(true);
+  });
+
+  it("does not disturb the dirty mark it did not set", () => {
+    syncedStateChanged(ACCOUNT, new Uint8Array([9]));
+    expect(loadAutoBackupState(ACCOUNT).dirtySinceMs).toBeNull();
+  });
+
+  it("a change to the synced state alone makes a clean, long-uploaded backup due", async () => {
+    const before = new Uint8Array([1, 1, 1]);
+    const after = new Uint8Array([1, 1, 2]);
+    // Clean, uploaded long ago, every other key already reported: only the
+    // synced state can make this run due.
+    saveAutoBackupState(ACCOUNT, {
+      lastUploadAtMs: 1,
+      dirtySinceMs: null,
+      lastGroupsKey: "ZzEtZ3JvdXAtaWQ=",
+      lastOwnStateKey: null,
+      lastSyncedStateKey: syncedStateKeyOf(before),
+    });
+    let bytes = before;
+    vi.useFakeTimers();
+    const outcomes: string[] = [];
+    const warn = console.warn;
+    console.warn = (): void => {};
+    const stop = startAutoBackup({
+      accountId: () => new Uint8Array(16),
+      knownGroupIds: () => ["ZzEtZ3JvdXAtaWQ="],
+      accountIdB64: () => ACCOUNT,
+      syncedStateBytes: () => bytes,
+      ed25519Seed: () => new Uint8Array(32),
+      deviceKey: async () => ({}) as unknown as DeviceCipher,
+      sessionToken: () => "token",
+      tickMs: 1000,
+      onOutcome: (o) => outcomes.push(o),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      bytes = after;
+      await vi.advanceTimersByTimeAsync(1000);
+    } finally {
+      stop();
+      console.warn = warn;
+    }
+    // The first tick finds nothing new; the second finds the synced state
+    // moved and attempts the upload (no phrase cache here, so it fails, which
+    // leaves the mark for the next tick).
+    expect(outcomes).toEqual(["clean", "failed"]);
+    expect(loadAutoBackupState(ACCOUNT).dirtySinceMs).not.toBeNull();
+    expect(loadAutoBackupState(ACCOUNT).lastSyncedStateKey).toBe(syncedStateKeyOf(after));
+  });
+
+  it("a session whose sync runtime has not started yet reports nothing", async () => {
+    saveAutoBackupState(ACCOUNT, {
+      lastUploadAtMs: 1,
+      dirtySinceMs: null,
+      lastGroupsKey: "ZzEtZ3JvdXAtaWQ=",
+      lastOwnStateKey: null,
+      lastSyncedStateKey: null,
+    });
+    vi.useFakeTimers();
+    const outcomes: string[] = [];
+    const stop = startAutoBackup({
+      accountId: () => new Uint8Array(16),
+      knownGroupIds: () => ["ZzEtZ3JvdXAtaWQ="],
+      accountIdB64: () => ACCOUNT,
+      syncedStateBytes: () => null,
+      ed25519Seed: () => new Uint8Array(32),
+      deviceKey: async () => ({}) as unknown as DeviceCipher,
+      sessionToken: () => "token",
+      tickMs: 1000,
+      onOutcome: (o) => outcomes.push(o),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+    } finally {
+      stop();
+    }
+    expect(outcomes).toEqual(["clean"]);
+    expect(loadAutoBackupState(ACCOUNT).lastSyncedStateKey).toBeNull();
   });
 });

@@ -145,10 +145,11 @@ public final class ContactsRepository: ObservableObject {
     /// publisher Welcome by kind), else reads as `false` (a plain Welcome
     /// row goes on to the chat join).
     func landPublisherWelcome(_ welcome: Data, accountIdB64: String, holdWhenNotReady: Bool) throws -> Bool {
-        // ADR-0090 — a device that waits to be admitted to a channel's
-        // PublisherGroup takes its Welcome here too.
+        // ADR-0090 — a device of an account that owns or co-publishes a
+        // channel takes a PublisherGroup Welcome here too, whether it waits
+        // for its first admission or holds an old group the Welcome replaces.
         guard !PendingPublisherRequests.load(accountIdB64: accountIdB64).isEmpty
-                || ChannelDeviceAdmission.hasWaitingChannels else { return false }
+                || ChannelDeviceAdmission.hasWelcomeTargets else { return false }
         do {
             guard let lander = publisherWelcomeLander else { throw PublisherWelcomeNotReady() }
             return try lander(welcome, accountIdB64)
@@ -598,6 +599,36 @@ public final class ContactsRepository: ObservableObject {
     /// The catalog key (ADR-0061) for a Welcome this device could not join.
     static let welcomeJoinFailureMessage = "contacts.mailbox.join_failed"
 
+    /// Why an account-mailbox Welcome did not open as a chat.
+    enum MailboxWelcomeRefusal: Equatable {
+        /// The core refused it as not a conversation (`NoRoleTable`, C-86): a
+        /// PublisherGroup or DeviceGroup Welcome, which the channel and
+        /// device paths take; never a failed chat join.
+        case notAConversation
+        /// A Welcome for a group this device still holds as active
+        /// (ADR-0087 section 9): kept and joined once the end lands.
+        case groupStillActive(String)
+        /// Anything else: most are Welcomes sealed to another of this
+        /// account's devices (ADR-0060 section 6), which this one cannot open.
+        case notOpenedHere
+
+        /// Whether the poll raises ``welcomeJoinFailureMessage`` for it. None
+        /// does: every Welcome of the account lands in one mailbox, so a
+        /// refusal here is the ordinary case, not a lost invitation (walk of
+        /// 2026-11-14: a PublisherGroup Welcome raised the banner on web).
+        var raisesJoinFailureBanner: Bool { false }
+    }
+
+    /// The typed reading of a failed `joinGroupFromWelcome`.
+    nonisolated static func mailboxWelcomeRefusal(_ error: Error) -> MailboxWelcomeRefusal {
+        if case ChatError.wrapped(_, let underlying) = error {
+            return mailboxWelcomeRefusal(underlying)
+        }
+        if case FfiError.MembershipNoRoleTable = error { return .notAConversation }
+        if let held = MembershipEndRules.stillActiveGroupIdHex(error) { return .groupStillActive(held) }
+        return .notOpenedHere
+    }
+
     /// Poll the stranger inbox for new ContactRequest / Welcome
     /// envelopes. Updates ``ContactsState/pending`` with any new
     /// requests + bumps the cursor.
@@ -643,7 +674,7 @@ public final class ContactsRepository: ObservableObject {
         // already moved past it, so it is never retried and the chat simply
         // never appears. Remember the failure so this poll's final state can
         // say so.
-        let welcomeJoinFailure: String? = nil
+        var welcomeJoinFailure: String?
         // ADR-0060 section 6 — one inbound mailbox per person: every Welcome,
         // for any of this account's devices, lands in the ACCOUNT mailbox.
         // ADR-0078 — device mailboxes are gone (none is claimed or read).
@@ -763,18 +794,25 @@ public final class ContactsRepository: ObservableObject {
                             // them goes out now, in order.
                             handOverJoinedPendingContacts()
                         } catch {
-                            // ADR-0087 section 9 — a Welcome for a group this
-                            // device still holds as active: the removal it
-                            // answers may still be in that group's journal.
-                            // The cursor moves past this row, so it is kept.
-                            if let held = MembershipEndRules.stillActiveGroupIdHex(error) {
+                            let refusal = Self.mailboxWelcomeRefusal(error)
+                            if refusal.raisesJoinFailureBanner {
+                                welcomeJoinFailure = Self.welcomeJoinFailureMessage
+                            }
+                            switch refusal {
+                            case .groupStillActive(let held):
+                                // ADR-0087 section 9 — a Welcome for a group this
+                                // device still holds as active: the removal it
+                                // answers may still be in that group's journal.
+                                // The cursor moves past this row, so it is kept.
                                 chatRepository.holdWelcomeForActiveGroup(
                                     groupIdHex: held, welcome: welcomeBytes)
                                 Task { @MainActor [weak chatRepository] in
                                     await chatRepository?.resolveHeldWelcomes()
                                 }
-                            } else {
-                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
+                            case .notAConversation:
+                                NSLog("contacts inbox: an account-mailbox Welcome is not a conversation (a publisher or device group); not a chat")
+                            case .notOpenedHere:
+                                NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for another device's Welcome): \(error)")
                             }
                         }
                     }

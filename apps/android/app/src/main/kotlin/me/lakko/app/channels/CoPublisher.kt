@@ -1495,6 +1495,10 @@ public object CoPublisher {
         } catch (_: Throwable) {
             null
         }
+        val suspected = SubscriberAdmission.appContext?.let { ctx ->
+            ChannelEpochOffsets.boundAccount?.let { acct -> ChannelSuspensions.isSuspended(ctx, acct, channelIdHex) }
+        } ?: false
+        var holdForLater = false
         val epoch = try {
             ids.mls { device ->
                 val join = {
@@ -1502,19 +1506,35 @@ public object CoPublisher {
                         .use { it.epoch() }
                 }
                 if (held == null) return@mls join()
+                // Replay guard, rule 1: an active, unsuspected held group is
+                // never replaced; the Welcome is ignored for this channel.
+                val heldActive = held.isActive()
                 // Verified first: a Welcome that is not an owner device's for
-                // this group deletes nothing.
+                // this group deletes nothing (and is not held).
                 val founder = uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcome, device)
                 if (!welcomeReplacesHeldGroup(founder.groupId, groupId, founder.founderAccountKey, ownerKey)) {
                     return@mls null
                 }
+                if (!heldGroupReplaceable(heldActive, suspected)) {
+                    // Part B: this group's removal may be behind it in the
+                    // journal; kept and tried again by the publisher pass.
+                    holdForLater = true
+                    return@mls null
+                }
+                val heldEpoch = held.epoch()
                 // The held group comes back if the join fails: the provider
                 // is snapshotted first and restored on a failed join, all in
                 // this one provider-lock region (nothing else ran between).
+                // Replay guard, rule 2: a joined group not newer than the held
+                // one counts as a failed join (restored).
                 replaceHeldThenJoin(
                     snapshot = { device.snapshotStorage() },
                     delete = { held.delete(device) },
-                    join = join,
+                    join = {
+                        val joined = join()
+                        if (!joinedGroupReplacesHeld(joined, heldEpoch, heldActive)) throw StaleWelcomeRefused()
+                        joined
+                    },
                     restore = { before -> device.restoreStorage(before) },
                     wipe = { before -> before.fill(0) },
                 )
@@ -1529,12 +1549,42 @@ public object CoPublisher {
         // Persisted only after a join that landed: a failed one restored the
         // held group in memory, and the disk still holds it.
         if (epoch != null) ids.persist()
-        if (epoch != null) {
-            val context = SubscriberAdmission.appContext
-            val account = ChannelEpochOffsets.boundAccount
-            if (context != null && account != null) ChannelSuspensions.clear(context, account, channelIdHex)
+        val context = SubscriberAdmission.appContext
+        val account = ChannelEpochOffsets.boundAccount
+        if (epoch != null && context != null && account != null) {
+            ChannelSuspensions.clear(context, account, channelIdHex)
+            HeldPublisherWelcomes.clear(context, account, channelIdHex)
+        }
+        if (holdForLater && context != null && account != null) {
+            if (!HeldPublisherWelcomes.hold(context, account, channelIdHex, welcome)) {
+                android.util.Log.w("CoPublisher", "a publisher Welcome for a held group was not kept")
+            }
         }
         return epoch
+    }
+
+    /**
+     * Part B - whether the PublisherGroup this device holds for
+     * [channelIdHex] is still active and unsuspected (the removal of this
+     * device's leaf is not applied yet), so a held Welcome waits. `false`
+     * when no group is held.
+     */
+    public suspend fun heldGroupWaitsForRemoval(ids: ChannelIdentity, channelIdHex: String, joinedGroupId: ByteArray?): Boolean {
+        val suspected = SubscriberAdmission.appContext?.let { ctx ->
+            ChannelEpochOffsets.boundAccount?.let { acct -> ChannelSuspensions.isSuspended(ctx, acct, channelIdHex) }
+        } ?: false
+        val held = try {
+            openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound = false)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+        return try {
+            !heldGroupReplaceable(ids.mls { held.isActive() }, suspected)
+        } finally {
+            held.close()
+        }
     }
 
     /** ADR-0090 decision A — the committing device resealed before it sent
@@ -1549,6 +1599,45 @@ public object CoPublisher {
             throw e
         } catch (e: Throwable) {
             android.util.Log.w("CoPublisher", "ADR-0090: the channel epoch offset was not learned: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * The MLS group id a [welcome] from the account mailbox is for, read
+     * without joining (`peekWelcomeFounder` writes nothing); `null` when this
+     * device cannot read it (sealed to another device of the account, or not
+     * a Welcome). Lets the mailbox loop pick the one channel a PublisherGroup
+     * Welcome is for before touching any held group.
+     */
+    public suspend fun welcomeGroupId(ids: ChannelIdentity, welcome: ByteArray): ByteArray? =
+        try {
+            ids.mls { device -> uniffi.lakko_ffi_uniffi.peekWelcomeFounder(welcome, device).groupId }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+
+    /**
+     * The PublisherGroup id of [channelIdHex] for this account: the owner-seed
+     * derivation for an [owned] channel, [joinedGroupId] (the register's) for
+     * a co-published one; `null` when none can be named.
+     */
+    public fun expectedPublisherGroupId(
+        ids: ChannelIdentity,
+        channelIdHex: String,
+        owned: Boolean,
+        joinedGroupId: ByteArray?,
+    ): ByteArray? {
+        if (!owned) return joinedGroupId?.takeIf { it.size == 32 }
+        val channelId = hexToBytes(channelIdHex) ?: return null
+        val seed = ids.ownerAccountSeed()
+        return try {
+            uniffi.lakko_ffi_uniffi.publisherGroupIdForSeed(seed, channelId)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            seed.fill(0)
         }
     }
 

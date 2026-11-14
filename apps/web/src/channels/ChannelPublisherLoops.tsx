@@ -76,6 +76,8 @@ import {
 import type { PublisherGroupHandle } from "./publisher-group-handle";
 import {
   applyQueuedDeviceRequests,
+  inactivePublisherGroupVerdict,
+  retryHeldChannelWelcomes,
   mayActOnResetSignal,
   suspectForeignChain,
   hexOf as devHexOf,
@@ -1225,6 +1227,53 @@ export const ChannelPublisherLoops: Component = () => {
     if (foundedAloneDone(owned, (id) => channelsState.keysByChannel().has(id))) clearFoundedAlone(account);
   }
 
+  /**
+   * The channel's PublisherGroup this device holds is no longer active (its
+   * own leaf was removed by a commit it applied): `true` when this device
+   * stopped publishing here and waits (or reads) as
+   * {@link inactivePublisherGroupVerdict} says (or, roster not read yet, was
+   * left as it is for this pass), `false` when the account itself was
+   * removed (the caller's removal path) or the group is active.
+   */
+  async function settleInactiveGroup(lineage: WasmIdentity, idHex: string, ownerDevice: boolean): Promise<boolean> {
+    const ownHex = devHexOf(lineage.signaturePublicKey);
+    const state = await withPublisherGroup(lineage, idHex, async (g) => {
+      notePublisherGroupMembers(idHex, g);
+      if (g.isActive()) return null;
+      try {
+        return { ownAccountHasLeaf: publisherLeaves(g).some((l) => l.accountKeyHex === ownHex) as boolean | null };
+      } catch {
+        return { ownAccountHasLeaf: null };
+      }
+    });
+    if (state === null) return false;
+    const account = boundContactsAccount();
+    const roster = account === null ? null : ownDeviceRoster(account);
+    const verdict = inactivePublisherGroupVerdict({
+      ownerDevice,
+      ownAccountHasLeaf: state.ownAccountHasLeaf,
+      otherOwnDevices: roster === null ? null : [...roster.keysHex].length > 1,
+    });
+    if (verdict === "removed") return false;
+    // The group signs nothing any more; decided once the roster is read.
+    if (verdict === "undecided") return true;
+    stopped.delete(idHex);
+    forgetPublisherGroupMembers(idHex);
+    if (verdict === "wait-for-welcome") {
+      // The old group stays until an owner device's Welcome replaces it
+      // (`landPublisherDeviceWelcome`); the reader line shows meanwhile.
+      await suspectForeignChain(idHex);
+    } else {
+      releasePublisherGroup(idHex);
+      channelsActions.dropPublisherRole(idHex);
+    }
+    // eslint-disable-next-line no-console
+    console.info(`[channels] this device's leaf left the channel's group; it publishes again once admitted (${verdict})`);
+    // The Welcome that admits it again may already have come (held early).
+    await retryHeldChannelWelcomes(lineage);
+    return true;
+  }
+
   async function pass(): Promise<void> {
     const lineage = chats.conversationAccountIdentity();
     const current = chats.accountIdentity();
@@ -1266,6 +1315,8 @@ export const ChannelPublisherLoops: Component = () => {
       (idHex) => enterOwnedChannelFromSaved(lineage, idHex),
     );
     settleFoundedAlone();
+    // A channel Welcome that came before this device applied its removal.
+    await retryHeldChannelWelcomes(lineage);
     const orphaned = channelsState.orphanedByKeyReset();
     for (const idHex of [...channelsState.keysByChannel().keys()]) {
       if (orphaned.has(idHex) || stopped.has(idHex)) continue;
@@ -1276,6 +1327,10 @@ export const ChannelPublisherLoops: Component = () => {
       // owner DEVICE holding the group is an owner here.
       const owner = channelRotatesHere(idHex);
       try {
+        // A group whose own leaf a commit removed (applied in an earlier pass
+        // whose remaining steps then failed on it) reads and signs nothing
+        // more: settled before anything below touches it.
+        if (await settleInactiveGroup(lineage, idHex, owner)) continue;
         if (owner && channelsActions.accessOf(idHex).owedType !== null) {
           await runOwedChannelType(lineage, current, idHex).catch(() => undefined);
         }
@@ -1382,6 +1437,9 @@ export const ChannelPublisherLoops: Component = () => {
           }
           throw err;
         }
+        // Walk of 2026-11-14: an owner device whose leaf another owner device
+        // retired (it applied that commit just now) no longer publishes here.
+        if (owner && (await settleInactiveGroup(lineage, idHex, true))) continue;
         if (owner) {
           for (const key of stepDowns.get(idHex) ?? []) {
             await removePublisherNow(lineage, idHex, b64ToBytes(key));
@@ -1416,6 +1474,10 @@ export const ChannelPublisherLoops: Component = () => {
           await sendOwnBinding(wasm, lineage, idHex);
           // Removed by the owner (or after stepping down): this device can
           // no longer post or read past the removal, so the channel ends here.
+          // Only this DEVICE's leaf retired while the account still publishes
+          // (another of its devices holds a leaf): it waits to be admitted
+          // again instead (walk of 2026-11-14).
+          if (await settleInactiveGroup(lineage, idHex, false)) continue;
           const active = await withPublisherGroup(lineage, idHex, async (g) => {
             notePublisherGroupMembers(idHex, g);
             return g.isActive();

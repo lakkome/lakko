@@ -131,6 +131,12 @@ enum ChannelEntry {
         }
         let target = current &+ 1
         guard target > current else { return .unfinished }
+        // The core refuses an entry while a group is stored under the id: an
+        // inactive one (this device's leaf was removed) is deleted right
+        // before; an active one means this device does not enter.
+        guard ChannelDeviceAdmission.deleteInactiveGroup(identity: identity, channelId: channelId) else {
+            return .unfinished
+        }
         let entered: FfiPublisherGroupEntry
         do {
             // G-55: the commit comes back wrapped under the saved epoch's

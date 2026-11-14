@@ -794,9 +794,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     public func savedBlobIds() -> [Data] { (try? syncedState.savedBlobIds()) ?? [] }
 
     /// ADR-0058 section 5.2 — the backup carries this state, so a person's
-    /// own folder or flag edit is a change worth backing up. Read cursors and
-    /// drafts move too often to count on their own; they ride along with the
-    /// next upload.
+    /// own folder or flag edit is a change worth backing up. Marked at once
+    /// here; every other register (channel subscriptions, admission seeds,
+    /// read cursors, drafts) is caught by the backup driver's digest of the
+    /// persisted state at its next tick (``AutoBackupStore/syncedStateChanged(accountIdB64:bytes:defaults:)``).
     private func markBackupDirty() {
         guard let account = activeAccountIdB64 else { return }
         AutoBackupStore.markDirty(

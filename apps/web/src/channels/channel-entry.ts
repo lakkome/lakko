@@ -162,6 +162,44 @@ export async function finishEntry(lineage: WasmIdentity, idHex: string, serverTa
 }
 
 /**
+ * Before an entry: the group this device still stores under the channel's
+ * id, when it is INACTIVE (its own leaf was retired by another owner device,
+ * ADR-0090), is deleted, because the core refuses an entry while any group is
+ * stored under that id. Returns a handle whose `restore` puts the provider
+ * back as it was (the entry was then not built), or `null` when an ACTIVE
+ * group (or one holding a staged commit) is stored: that one is never
+ * deleted, and no entry is built. Nothing stored: a no-op handle.
+ * Synchronous, so nothing else writes the provider between the snapshot and
+ * a restore. Never throws.
+ */
+export function clearInactiveHeldGroup(
+  wasm: Pick<Wasm, "PublisherGroup">,
+  device: WasmIdentity,
+  ownerSeed: Uint8Array,
+  channelId: Uint8Array,
+): { restore(): void } | null {
+  let held: PublisherGroup | undefined;
+  try {
+    held = wasm.PublisherGroup.load(device, ownerSeed, channelId);
+  } catch {
+    held = undefined;
+  }
+  if (held === undefined) return { restore: () => undefined };
+  try {
+    if (held.isActive() || held.hasStagedCommit()) return null;
+    const before = device.snapshotStorage();
+    held.deleteLocally(device);
+    // eslint-disable-next-line no-console
+    console.info("[channels] this device's inactive PublisherGroup is deleted before the entry");
+    return { restore: () => device.restoreStorage(before) };
+  } catch {
+    return null;
+  } finally {
+    held.free();
+  }
+}
+
+/**
  * One entry at saved epoch `r` over wasm, the DS and the channels service.
  * The channels service epoch is read first (a failure: `"owed"`, nothing
  * built). A refused build: `"refused"`. A record that could not be written:
@@ -184,6 +222,11 @@ async function attemptEntry(
   const wasm = await loadWasm();
   let group: PublisherGroup;
   let commit: Uint8Array;
+  const cid = channelIdFromHex(idHex);
+  // An evicted group of this device would make the core refuse the entry;
+  // an active one is never deleted (and the entry is not attempted).
+  const cleared = clearInactiveHeldGroup(wasm, device, lineage.ed25519Seed, cid);
+  if (cleared === null) return "refused";
   try {
     // G-55: the commit comes back wrapped under the saved epoch's access seed,
     // so the Delivery Service never reads the entering leaf's account binding.
@@ -191,7 +234,7 @@ async function attemptEntry(
       device,
       r.groupInfo,
       lineage.ed25519Seed,
-      channelIdFromHex(idHex),
+      cid,
       r.dsAccessSeed,
     );
     try {
@@ -201,6 +244,11 @@ async function attemptEntry(
       entry.free();
     }
   } catch {
+    try {
+      cleared.restore();
+    } catch {
+      /* the inactive group stays deleted; it served nothing */
+    }
     return "refused";
   }
   ensureEntryOwnerSource();

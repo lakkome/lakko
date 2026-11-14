@@ -362,6 +362,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     // ADR-0090 decision A: the "founded the DeviceGroup alone" marker.
     { name: "channels-founded-alone", run: () => removeLocal(`lakko.channels.founded-alone.v1.${accountIdB64}`) },
+    // ADR-0090 walk follow-up: channel Welcomes held because they came before
+    // this device applied its removal.
+    { name: "channels-held-welcomes", run: () => removeLocal(`lakko.channels.held-welcomes.v1.${accountIdB64}`) },
     // ADR-0090 open question 4: admission seeds not yet sent to the
     // account's other devices.
     {

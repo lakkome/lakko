@@ -163,6 +163,15 @@ public class ChannelPublisherLoop private constructor(
                     dropGroup(id)
                 }
             }
+            // Part B — a Welcome held because it came before this device
+            // applied its own removal: tried again after the journal reads.
+            try {
+                retryHeldWelcomesLocked()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "held publisher Welcomes not retried: ${e.javaClass.simpleName}")
+            }
         }
         // ADR-0090 section 4 — a due rotation waits a random 0 to 60 s outside
         // the pass lock, then re-reads the journal head and re-evaluates
@@ -196,6 +205,7 @@ public class ChannelPublisherLoop private constructor(
         val name = state.channels.value.firstOrNull { it.id == channelId }
             ?.let { it.sharedName.ifBlank { it.localName } }.orEmpty()
         dropGroup(channelId)
+        state.boundAccount?.let { HeldPublisherWelcomes.clear(context, it, channelId) }
         rotateRequestOwed.clear(channelId)
         _publishers.update { it - channelId }
         _pending.update { it - channelId }
@@ -252,6 +262,20 @@ public class ChannelPublisherLoop private constructor(
         return opened
     }
 
+    /**
+     * Run [block] (a Welcome replacing this device's PublisherGroup of
+     * [channelId]) with the pass lock held and the loop's open handle of that
+     * group closed first: the handle holds the group's old in-memory state,
+     * and a pass using it after the replacement would act on the old group
+     * (an inactive one would make this device a reader again). The next pass
+     * reopens the group from the provider.
+     */
+    public suspend fun <T> releasingGroup(channelId: String, block: suspend () -> T): T =
+        mutex.withLock {
+            dropGroup(channelId)
+            block()
+        }
+
     private fun dropGroup(channelId: String) {
         groups.remove(channelId)?.close()
         // A reopened group reads its journal again from the start (rows it
@@ -293,10 +317,7 @@ public class ChannelPublisherLoop private constructor(
         // Section 15 (phase B) — a co-publisher the owner removed (or that
         // stepped down) is no longer in the group: the channel ends here.
         val active = pub.withChannel { ids -> ids.mls { pg.isActive() } }
-        if (!owner && !active) {
-            endHere(channelId)
-            return null
-        }
+        if (!active && settleInactiveGroup(pub, channelId, pg, owner)) return null
         // ADR-0057 — an owner device claims the journal (an idempotent
         // re-send); a co-publisher never does.
         if (owner && claimed.add(channelId)) {
@@ -617,6 +638,132 @@ public class ChannelPublisherLoop private constructor(
         return poll
     }
 
+    /**
+     * The channel's PublisherGroup this device holds is no longer active (its
+     * own leaf was removed by a commit it applied; walk of 2026-11-14): what
+     * [inactivePublisherGroupVerdict] says. `true` when the pass stops here
+     * (this device now waits for a Welcome, reads, or ended the channel; or
+     * the roster is not read yet and nothing changes this pass).
+     */
+    private suspend fun settleInactiveGroup(
+        pub: ChannelPublisherIdentity,
+        channelId: String,
+        pg: PublisherGroup,
+        owner: Boolean,
+    ): Boolean {
+        val ownAccountKey = pub.withIdentity(persist = false) { it.signaturePublicKey() }
+        // OpenMLS merges the removing commit's tree before it marks the group
+        // inactive: the roster read here is the one after the removal.
+        val ownAccountHasLeaf: Boolean? = try {
+            pub.withChannel { ids -> ids.mls { pg.members().any { it.accountKey.contentEquals(ownAccountKey) } } }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        val roster = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.rosterSignatureKeys()
+        val verdict = inactivePublisherGroupVerdict(
+            ownerDevice = owner,
+            ownAccountHasLeaf = ownAccountHasLeaf,
+            otherOwnDevices = roster?.let { it.size > 1 },
+        )
+        when (verdict) {
+            InactiveGroupVerdict.UNDECIDED -> return true
+            InactiveGroupVerdict.REMOVED -> endHere(channelId)
+            // The old group stays until an owner device's Welcome replaces it
+            // ([CoPublisher.joinReplacingHeld]); the reader line shows.
+            InactiveGroupVerdict.WAIT_FOR_WELCOME -> becomeReader(pub, channelId)
+            // Nobody can admit this device: it reads, and the next pass's
+            // entry from the saved copy (else decision A) takes the channel
+            // ([holdsLiveGroup]: the evicted group does not block either).
+            InactiveGroupVerdict.READER -> {
+                dropGroup(channelId)
+                state.dropPublisherKeys(channelId)
+            }
+        }
+        Log.i(TAG, "ADR-0090: this device's leaf left the channel's publisher group ($verdict)")
+        return true
+    }
+
+    /**
+     * Part B (2026-11-14) — each held PublisherGroup Welcome
+     * ([HeldPublisherWelcomes]) is tried through the normal replace rule
+     * ([CoPublisher.joinAdmissionWelcome]); kept while the held group is
+     * still active and unsuspected, dropped when the rule ran and refused,
+     * when it is too old, or when the channel is no longer one the account
+     * owns or co-publishes. A join that lands makes this device a publisher
+     * again. Runs under the pass lock.
+     */
+    private suspend fun retryHeldWelcomesLocked() {
+        val account = state.boundAccount ?: return
+        val pub = state.publisher ?: return
+        if (!pub.hasDevice()) return
+        val channels = HeldPublisherWelcomes.channels(context, account)
+        if (channels.isEmpty()) return
+        val registers = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.channelSubscriptions?.value ?: return
+        val targets = publisherWelcomeTargets(registers.map { viewOf(it) }, state.channels.value.map { it.id }.toSet())
+        val coPublished = state.coPublished
+        for (channel in channels) {
+            val target = targets.firstOrNull { it.channelIdHex.equals(channel, ignoreCase = true) }
+            if (target == null) {
+                HeldPublisherWelcomes.clear(context, account, channel)
+                continue
+            }
+            val channelId = state.channels.value.firstOrNull { it.id.equals(channel, ignoreCase = true) }?.id ?: continue
+            val owned = target.role == ChannelAccountRole.OWNER
+            val joinedGroupId = if (owned) null else target.publisherGroupId.takeIf { it.size == 32 }
+            for (held in HeldPublisherWelcomes.heldFor(context, account, channelId)) {
+                val welcome = try {
+                    java.util.Base64.getDecoder().decode(held.welcomeB64)
+                } catch (_: IllegalArgumentException) {
+                    HeldPublisherWelcomes.drop(context, account, channelId, held.welcomeB64)
+                    continue
+                }
+                // The removal is not applied yet: nothing is tried (no handle
+                // closed, no journal re-read), only the age bound applies.
+                if (pub.withChannel { ids -> CoPublisher.heldGroupWaitsForRemoval(ids, channelId, joinedGroupId) }) {
+                    if (heldWelcomeStep(false, true, held.heldAtMs, System.currentTimeMillis()) == HeldWelcomeStep.DROP) {
+                        HeldPublisherWelcomes.drop(context, account, channelId, held.welcomeB64)
+                    }
+                    continue
+                }
+                dropGroup(channelId)
+                val keys = try {
+                    pub.withChannel { ids ->
+                        CoPublisher.joinAdmissionWelcome(
+                            ids,
+                            welcome,
+                            channelId,
+                            owned = owned,
+                            joinedGroupId = joinedGroupId,
+                            ownerAccountKey = if (owned) {
+                                null
+                            } else {
+                                coPublisherWelcomeOwnerKey(target.ownerAccountKey, coPublished?.ownerKeyOf(channelId))
+                            },
+                            coPublished = coPublished,
+                            existingSigningSeed = state.persistedPublisherSigningSeed(channelId),
+                        )
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    null
+                }
+                when (heldWelcomeStep(keys != null, stillWaiting = false, held.heldAtMs, System.currentTimeMillis())) {
+                    HeldWelcomeStep.JOINED_CLEAR_CHANNEL -> {
+                        HeldPublisherWelcomes.clear(context, account, channelId)
+                        keys?.let { state.setKeys(channelId, it) }
+                        Log.i(TAG, "ADR-0090: a held Welcome admitted this device to post again")
+                        break
+                    }
+                    HeldWelcomeStep.KEEP -> Unit
+                    HeldWelcomeStep.DROP -> HeldPublisherWelcomes.drop(context, account, channelId, held.welcomeB64)
+                }
+            }
+        }
+    }
+
     /** ADR-0090 section 2.5 — the journal was reset under this device: drop
      *  its PublisherGroup state and its composer; it reads until another
      *  device of the account admits it again (the waiting line shows). */
@@ -791,16 +938,23 @@ public class ChannelPublisherLoop private constructor(
                 if (channelId in finished) postFromEntered(pub, channelId)
                 continue
             }
-            val holdsGroup = pub.withChannel { ids -> CoPublisher.loadPublisherGroup(ids, channelId, state.coPublished) }
-                ?.let {
-                    it.close()
-                    true
-                } ?: false
+            // A held group whose leaf was removed (inactive) is not held: it
+            // can never read or commit again, and it is deleted before the
+            // entry below (the core refuses an entry over a group it holds).
+            val heldActive = pub.withChannel { ids ->
+                CoPublisher.loadPublisherGroup(ids, channelId, state.coPublished)?.let { g ->
+                    try {
+                        ids.mls { g.isActive() }
+                    } finally {
+                        g.close()
+                    }
+                }
+            }
             val wanted = entryWanted(
                 ownerRole = true,
                 subscribed = r.subscribed,
                 holdsKeys = false,
-                holdsGroup = holdsGroup,
+                holdsGroup = holdsLiveGroup(heldActive != null, heldActive == true),
                 suspended = ChannelSuspensions.isSuspended(context, account, channelId),
                 orphaned = channelId in state.orphaned.value,
             )
@@ -812,6 +966,10 @@ public class ChannelPublisherLoop private constructor(
             }
             lastEntryMs[channelId] = now
             val channelBytes = ChannelsComposer.channelIdFromHex(channelId)
+            if (heldActive == false) {
+                dropGroup(channelId)
+                pub.withChannel { ids -> CoPublisher.deleteLocalPublisherGroup(ids, channelId, joinedGroupId = null) }
+            }
             val entered = try {
                 val saved = pub.withChannel { ids -> ChannelVaultHeads.readReentry(ids, channelBytes) }
                 try {
@@ -906,11 +1064,18 @@ public class ChannelPublisherLoop private constructor(
     private suspend fun refoundLocked(pub: ChannelPublisherIdentity, channelId: String) {
         // A device that still holds the group publishes it already: nothing
         // to found again (the journal is not reset under anyone).
-        val held = pub.withChannel { ids -> CoPublisher.loadPublisherGroup(ids, channelId, state.coPublished) }
-        if (held != null) {
-            held.close()
-            return
+        // An inactive one (its leaf was removed) is founded again over: the
+        // re-founding deletes it first ([holdsLiveGroup]).
+        val heldActive = pub.withChannel { ids ->
+            CoPublisher.loadPublisherGroup(ids, channelId, state.coPublished)?.let { g ->
+                try {
+                    ids.mls { g.isActive() }
+                } finally {
+                    g.close()
+                }
+            }
         }
+        if (holdsLiveGroup(heldActive != null, heldActive == true)) return
         dropGroup(channelId)
         pub.withChannel { ids -> CoPublisher.foundAndClaimAtCreation(ds, ids, channelId, refound = true) }
         val keys = pub.withChannel { ids ->

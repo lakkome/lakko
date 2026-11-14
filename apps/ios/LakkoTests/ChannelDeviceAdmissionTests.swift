@@ -233,6 +233,386 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
         XCTAssertEqual(try joined.channelSeed(identity: old), try refounded.channelSeed(identity: restored))
     }
 
+    // MARK: walk of 2026-11-14 — a returning old owner device
+
+    /// A channel whose keys this device still holds is a Welcome target; a
+    /// subscriber's channel is not.
+    func testTheWelcomeTargetsIncludeAChannelThisDeviceHoldsKeysFor() {
+        let state = ChannelsUiState(accountIdB64: "targets-\(UUID().uuidString)")
+        let held = String(repeating: "a1", count: 16)
+        let waiting = String(repeating: "a2", count: 16)
+        let subscribed = String(repeating: "a3", count: 16)
+        for id in [held, waiting, subscribed] {
+            state.addChannel(ChannelHandle(id: id, localName: "c", localDescription: "", addedAtMs: 1))
+        }
+        state.updateExtras(held) { $0.accountRole = ChannelAccountRole.owner }
+        state.updateExtras(waiting) { $0.accountRole = ChannelAccountRole.coPublisher }
+        state.setKeys(channelId: held, keys: ChannelPublisherKeys(
+            seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32)))
+        XCTAssertEqual(Set(ChannelDeviceAdmission.welcomeTargets(state)), [held, waiting])
+        XCTAssertEqual(ChannelDeviceAdmission.waitingChannels(state), [waiting],
+                       "the waiting line is still only for a device with no keys")
+    }
+
+    /// The verdict for an inactive held group, the same table as web and
+    /// Android `inactivePublisherGroupVerdict`.
+    func testTheInactiveGroupVerdictMatchesWebAndAndroid() {
+        typealias V = ChannelDeviceAdmission.InactiveGroupVerdict
+        func v(_ owner: Bool, _ leaf: Bool?, _ other: Bool?) -> V {
+            ChannelDeviceAdmission.inactiveGroupVerdict(ownerDevice: owner, ownAccountHasLeaf: leaf, otherOwnDevices: other)
+        }
+        XCTAssertEqual(v(true, true, nil), .undecided, "roster not loaded")
+        XCTAssertEqual(v(false, true, nil), .undecided)
+        XCTAssertEqual(v(true, nil, true), .waitForWelcome, "another owner device admits it")
+        XCTAssertEqual(v(true, nil, false), .reader, "the account's only device takes the channel")
+        XCTAssertEqual(v(false, true, true), .waitForWelcome, "a co-publisher's device retired")
+        XCTAssertEqual(v(false, true, false), .removed)
+        XCTAssertEqual(v(false, false, true), .removed, "the co-publisher account was removed")
+        XCTAssertEqual(v(false, nil, true), .removed)
+    }
+
+    /// Replay guard — only a group this device can no longer use is replaced,
+    /// and only by a Welcome that joins above its epoch.
+    func testTheReplaceRuleNeedsAnUnusableGroupAndANewerEpoch() {
+        XCTAssertFalse(ChannelDeviceAdmission.mayReplaceHeldGroup(isActive: true, resetSuspected: false))
+        XCTAssertFalse(ChannelDeviceAdmission.mayReplaceHeldGroup(isActive: nil, resetSuspected: false))
+        XCTAssertTrue(ChannelDeviceAdmission.mayReplaceHeldGroup(isActive: false, resetSuspected: false))
+        XCTAssertTrue(ChannelDeviceAdmission.mayReplaceHeldGroup(isActive: true, resetSuspected: true))
+        XCTAssertTrue(ChannelDeviceAdmission.joinedReplacesHeld(joined: 4, held: 3, heldActive: false))
+        XCTAssertFalse(ChannelDeviceAdmission.joinedReplacesHeld(joined: 3, held: 3, heldActive: false))
+        XCTAssertFalse(ChannelDeviceAdmission.joinedReplacesHeld(joined: 2, held: 3, heldActive: false))
+        XCTAssertTrue(ChannelDeviceAdmission.joinedReplacesHeld(joined: 1, held: 9, heldActive: true),
+                      "an active held group (reset suspected) is replaced without the epoch check")
+    }
+
+    /// Replay guard on the real core — for an INACTIVE held group, a Welcome
+    /// that joins at an epoch not above the held group's puts it back.
+    func testAWelcomeThatJoinsNoHigherThanAnInactiveHeldGroupRestoresIt() throws {
+        try withWalkDevices { ctx in
+            let ownerKey = try publisherOwnerAccountKey(ownerAccountSeed: ctx.accountSeed)
+            // The held group moved on (three rotations), then A was retired.
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            for _ in 0..<3 {
+                _ = try held.stageCommit(identity: ctx.a, admit: [], retire: [], rotate: true)
+                XCTAssertTrue(try held.mergeStagedCommit(identity: ctx.a))
+            }
+            try ctx.retireA(held)
+            XCTAssertFalse(try held.isActive())
+            let heldEpoch = try held.epoch()
+            // An older Welcome for the same group id: founded and admitting at once.
+            let restored = try Identity.fromSeedBound(
+                seed: Data(repeating: 0x5B, count: 32), accountSeed: ctx.accountSeed, issuedAtUnixSecs: 1_700_000_000)
+            let other = try PublisherGroup.create(identity: restored, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let groupId = try other.groupId()
+            let staged = try other.stageCommit(
+                identity: restored, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try other.mergeStagedCommit(identity: restored))
+            XCTAssertLessThanOrEqual(try other.epoch(), heldEpoch)
+            let welcome = try XCTUnwrap(staged.welcome)
+
+            let result = ChannelDeviceAdmission.replaceHeldGroup(held, identity: ctx.a) {
+                try publisherGroupJoinFromWelcome(
+                    identity: ctx.a, welcome: welcome, groupId: groupId, channelId: self.channel, ownerAccountKey: ownerKey)
+            }
+            XCTAssertNil(result, "not joined")
+            let back = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try back.epoch(), heldEpoch)
+            XCTAssertFalse(try back.isActive(), "the held group is back as it was")
+        }
+    }
+
+    /// Replay guard — an ACTIVE held group under reset suspicion is replaced
+    /// by a re-founded group (decision A) at a LOWER epoch: no epoch check.
+    func testASuspectedActiveHeldGroupIsReplacedByALowerEpochRefoundedGroup() throws {
+        try withWalkDevices { ctx in
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            for _ in 0..<3 {
+                _ = try held.stageCommit(identity: ctx.a, admit: [], retire: [], rotate: true)
+                XCTAssertTrue(try held.mergeStagedCommit(identity: ctx.a))
+            }
+            XCTAssertTrue(try held.isActive())
+            let heldEpoch = try held.epoch()
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) {
+                $0.accountRole = ChannelAccountRole.owner
+                $0.resetSuspected = true
+            }
+            // B founded the channel again and admits A.
+            let refounded = try PublisherGroup.create(
+                identity: ctx.b, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let staged = try refounded.stageCommit(
+                identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try refounded.mergeStagedCommit(identity: ctx.b))
+            XCTAssertLessThan(try refounded.epoch(), heldEpoch)
+
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(try XCTUnwrap(staged.welcome)), ctx.id)
+            let joined = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try joined.epoch(), try refounded.epoch())
+            XCTAssertEqual(ctx.state.keysByChannel[ctx.id]?.seed, try refounded.channelSeed(identity: ctx.b))
+            XCTAssertNil(ctx.state.extras(ctx.id).resetSuspected)
+        }
+    }
+
+    /// An inactive stored group is deleted before an entry; an active one
+    /// stops it.
+    func testOnlyAnInactiveGroupIsDeletedBeforeAnEntry() throws {
+        try withWalkDevices { ctx in
+            XCTAssertTrue(ChannelDeviceAdmission.deleteInactiveGroup(identity: ctx.a, channelId: ctx.id),
+                          "nothing stored")
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            XCTAssertFalse(ChannelDeviceAdmission.deleteInactiveGroup(identity: ctx.a, channelId: ctx.id),
+                           "an active group is kept")
+            XCTAssertNotNil(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            try ctx.retireA(held)
+            XCTAssertFalse(try held.isActive())
+            XCTAssertTrue(ChannelDeviceAdmission.deleteInactiveGroup(identity: ctx.a, channelId: ctx.id))
+            XCTAssertNil(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            // The core takes an entry now.
+            XCTAssertNoThrow(try publisherGroupEnter(
+                identity: ctx.a, groupInfo: try ctx.bGroup().groupInfo(identity: ctx.b),
+                ownerAccountSeed: ctx.accountSeed, channelId: self.channel,
+                dsAccessSeed: try ctx.bGroup().dsAccessSeed(identity: ctx.b)))
+        }
+    }
+
+    /// Two devices A and B of one owner account, A bound as this device.
+    private final class WalkDevices {
+        let accountSeed: Data
+        let a: Identity
+        let b: Identity
+        let id: String
+        let state: ChannelsUiState
+        let channel: Data
+        var store: ChannelDeviceAdmissionStore {
+            ChannelDeviceAdmissionStore(accountIdB64: AcceptedContactsStore.boundAccountIdB64 ?? "")
+        }
+        private var entered: PublisherGroup?
+
+        init(accountSeed: Data, a: Identity, b: Identity, id: String, state: ChannelsUiState, channel: Data) {
+            self.accountSeed = accountSeed; self.a = a; self.b = b; self.id = id; self.state = state
+            self.channel = channel
+        }
+
+        func bGroup() throws -> PublisherGroup { try XCTUnwrap(entered) }
+
+        /// B enters from `held`'s GroupInfo and retires A (rotating); A
+        /// applies both commits, so its `held` group goes inactive.
+        func retireA(_ held: PublisherGroup) throws {
+            let entry = try publisherGroupEnter(
+                identity: b, groupInfo: try held.groupInfo(identity: a), ownerAccountSeed: accountSeed,
+                channelId: channel, dsAccessSeed: try held.dsAccessSeed(identity: a))
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: b))
+            _ = try held.processIncomingVerifyingRoles(identity: a, bytes: entry.commit)
+            let retire = try entry.group.stageCommit(identity: b, admit: [], retire: [a.signaturePublicKey()], rotate: true)
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: b))
+            _ = try held.processIncomingVerifyingRoles(identity: a, bytes: retire.commit)
+            entered = entry.group
+        }
+    }
+
+    private func withWalkDevices(_ body: (WalkDevices) throws -> Void) throws {
+        let account = "walk-\(UUID().uuidString)"
+        let accountSeed = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        let a = try Identity.fromSeedBound(
+            seed: Data((0..<32).map { _ in UInt8.random(in: 0...255) }), accountSeed: accountSeed,
+            issuedAtUnixSecs: 1_700_000_000)
+        let b = try Identity.fromSeedBound(
+            seed: Data((0..<32).map { _ in UInt8.random(in: 0...255) }), accountSeed: accountSeed,
+            issuedAtUnixSecs: 1_700_000_000)
+        let previousBound = AcceptedContactsStore.boundAccountIdB64
+        let previousProvider = ChannelPublisherIdentity.shared.deviceIdentityProvider
+        let previousPersister = ChannelPublisherIdentity.shared.devicePersister
+        let previousState = ChannelDeviceAdmission.waitingState
+        let previousSeed = ChannelDeviceAdmission.currentSeed
+        AcceptedContactsStore.bind(accountIdB64: account)
+        ChannelPublisherIdentity.shared.unbind()
+        ChannelPublisherIdentity.shared.deviceIdentityProvider = { a }
+        ChannelPublisherIdentity.shared.devicePersister = {}
+        let state = ChannelsUiState(accountIdB64: account)
+        ChannelDeviceAdmission.waitingState = state
+        ChannelDeviceAdmission.currentSeed = { accountSeed }
+        defer {
+            ChannelDeviceAdmissionStore.clear(accountIdB64: account)
+            ChannelDeviceAdmission.waitingState = previousState
+            ChannelDeviceAdmission.currentSeed = previousSeed
+            ChannelPublisherIdentity.shared.deviceIdentityProvider = previousProvider
+            ChannelPublisherIdentity.shared.devicePersister = previousPersister
+            ChannelPublisherIdentity.shared.unbind()
+            AcceptedContactsStore.bind(accountIdB64: previousBound)
+        }
+        // Notes the owner seed (``ChannelPublisherIdentity/ownerAccountSeed``).
+        _ = try ChannelPublisherIdentity.shared.identity(currentSeed: accountSeed)
+        let id = channel.map { String(format: "%02x", $0) }.joined()
+        try body(WalkDevices(accountSeed: accountSeed, a: a, b: b, id: id, state: state, channel: channel))
+    }
+
+    /// The scenario of the walk, on the real core: device A holds the
+    /// channel's group and its keys; device B (same account) entered from the
+    /// saved GroupInfo, retired A's leaf, and admitted A's new KeyPackage. The
+    /// chat intake refuses that Welcome as not a conversation without the
+    /// join-failed banner, and the channel side replaces A's held group with
+    /// it: A publishes again under the joined group's seed.
+    func testAnOwnerDeviceWelcomeForAHeldChannelReplacesTheOldGroupAndTheDevicePublishesAgain() throws {
+        try withWalkDevices { ctx in
+            // A founded the channel and holds its keys.
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let oldSeed = try held.channelSeed(identity: ctx.a)
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) { $0.accountRole = ChannelAccountRole.owner }
+            ctx.state.setKeys(channelId: ctx.id, keys: ChannelPublisherKeys(
+                seed: oldSeed, signingKeySeed: Data(repeating: 2, count: 32)))
+
+            // B enters and retires A; A applied both (its group is inactive).
+            try ctx.retireA(held)
+            let bGroup = try ctx.bGroup()
+            XCTAssertFalse(try held.isActive())
+            // B admits A again.
+            let admit = try bGroup.stageCommit(
+                identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try bGroup.mergeStagedCommit(identity: ctx.b))
+            let welcome = try XCTUnwrap(admit.welcome)
+            let newSeed = try bGroup.channelSeed(identity: ctx.b)
+            XCTAssertNotEqual(newSeed, oldSeed)
+
+            // The chat intake: refused as not a conversation, no banner.
+            do {
+                _ = try Group.joinFromWelcome(welcome: welcome, identity: ctx.a)
+                XCTFail("a PublisherGroup Welcome is not a conversation")
+            } catch {
+                let refusal = ContactsRepository.mailboxWelcomeRefusal(
+                    ChatError.wrapped("joinFromWelcome failed", underlying: error))
+                XCTAssertEqual(refusal, .notAConversation)
+                XCTAssertFalse(refusal.raisesJoinFailureBanner)
+            }
+
+            // The channel side takes it although this device holds the channel.
+            XCTAssertTrue(ChannelDeviceAdmission.hasWelcomeTargets)
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(welcome), ctx.id)
+            let joined = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertTrue(try joined.isActive())
+            XCTAssertEqual(try joined.channelSeed(identity: ctx.a), newSeed)
+            XCTAssertEqual(ctx.state.keysByChannel[ctx.id]?.seed, newSeed, "A publishes under the joined group's seed")
+            XCTAssertNil(ctx.state.extras(ctx.id).resetSuspected)
+        }
+    }
+
+    /// The early Welcome — the re-admission Welcome arrives before this
+    /// device applied the commit that removed its leaf: it is held, and once
+    /// the removal is applied the retry joins it and the device publishes.
+    func testAWelcomeThatArrivesBeforeTheRemovalIsHeldAndJoinedAfterIt() throws {
+        try withWalkDevices { ctx in
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) { $0.accountRole = ChannelAccountRole.owner }
+            ctx.state.setKeys(channelId: ctx.id, keys: ChannelPublisherKeys(
+                seed: try held.channelSeed(identity: ctx.a), signingKeySeed: Data(repeating: 2, count: 32)))
+            let entry = try publisherGroupEnter(
+                identity: ctx.b, groupInfo: try held.groupInfo(identity: ctx.a), ownerAccountSeed: ctx.accountSeed,
+                channelId: self.channel, dsAccessSeed: try held.dsAccessSeed(identity: ctx.a))
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            let retire = try entry.group.stageCommit(
+                identity: ctx.b, admit: [], retire: [ctx.a.signaturePublicKey()], rotate: true)
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            let admit = try entry.group.stageCommit(
+                identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            let welcome = try XCTUnwrap(admit.welcome)
+
+            // The mailbox first: the group is still active here.
+            XCTAssertNil(ChannelDeviceAdmission.landWelcome(welcome))
+            XCTAssertEqual(ctx.store.heldWelcomes()[ctx.id]?.count, 1)
+            ChannelDeviceAdmission.retryHeldWelcomes()
+            XCTAssertEqual(ctx.store.heldWelcomes()[ctx.id]?.count, 1, "still active: it waits")
+
+            // The journal second: the removal is applied.
+            _ = try held.processIncomingVerifyingRoles(identity: ctx.a, bytes: entry.commit)
+            _ = try held.processIncomingVerifyingRoles(identity: ctx.a, bytes: retire.commit)
+            XCTAssertFalse(try held.isActive())
+            ChannelDeviceAdmission.retryHeldWelcomes()
+
+            XCTAssertNil(ctx.store.heldWelcomes()[ctx.id], "the hold is gone")
+            let joined = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertTrue(try joined.isActive())
+            let newSeed = try entry.group.channelSeed(identity: ctx.b)
+            XCTAssertEqual(try joined.channelSeed(identity: ctx.a), newSeed)
+            XCTAssertEqual(ctx.state.keysByChannel[ctx.id]?.seed, newSeed, "A publishes again")
+        }
+    }
+
+    /// Held Welcomes are bounded per channel (newest kept), dropped when old,
+    /// and dropped for a channel the account no longer publishes.
+    func testHeldWelcomesAreBoundedAgedAndDroppedForAChannelLeft() throws {
+        XCTAssertFalse(ChannelDeviceAdmission.heldWelcomeExpired(heldAtMs: 1_000, nowMs: 2_000))
+        XCTAssertTrue(ChannelDeviceAdmission.heldWelcomeExpired(
+            heldAtMs: 1_000, nowMs: 1_001 + ChannelDeviceAdmission.heldWelcomeMaxAgeMs))
+        XCTAssertFalse(ChannelDeviceAdmission.heldWelcomeExpired(heldAtMs: 5_000, nowMs: 1_000),
+                       "a clock moved back keeps it")
+        try withWalkDevices { ctx in
+            for i in 0..<5 { ctx.store.holdWelcome(Data([UInt8(i)]), channelId: ctx.id, nowMs: UInt64(i)) }
+            let kept = try XCTUnwrap(ctx.store.heldWelcomes()[ctx.id])
+            XCTAssertEqual(kept.count, ChannelDeviceAdmissionStore.maxHeldWelcomesPerChannel)
+            XCTAssertEqual(kept.last?.welcomeB64, Data([4]).base64EncodedString(), "the newest wins")
+            // Not a channel the account owns or co-publishes: dropped.
+            ChannelDeviceAdmission.retryHeldWelcomes(nowMs: 10)
+            XCTAssertNil(ctx.store.heldWelcomes()[ctx.id])
+            // An aged one on an owned channel is dropped too.
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) { $0.accountRole = ChannelAccountRole.owner }
+            _ = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            ctx.store.holdWelcome(Data([9]), channelId: ctx.id, nowMs: 1)
+            ChannelDeviceAdmission.retryHeldWelcomes(nowMs: 2 + ChannelDeviceAdmission.heldWelcomeMaxAgeMs)
+            XCTAssertNil(ctx.store.heldWelcomes()[ctx.id])
+        }
+    }
+
+    /// Replay guard — an owner-signed Welcome for the same group does not
+    /// replace an ACTIVE, unsuspected held group; the Welcome is ignored.
+    func testAnActiveUnsuspectedHeldGroupIsNotReplaced() throws {
+        try withWalkDevices { ctx in
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let heldEpoch = try held.epoch()
+            let heldSeed = try held.channelSeed(identity: ctx.a)
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) { $0.accountRole = ChannelAccountRole.owner }
+            // B entered and admitted a fresh KeyPackage of A; A applied nothing.
+            let entry = try publisherGroupEnter(
+                identity: ctx.b, groupInfo: try held.groupInfo(identity: ctx.a), ownerAccountSeed: ctx.accountSeed,
+                channelId: self.channel, dsAccessSeed: try held.dsAccessSeed(identity: ctx.a))
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            _ = try entry.group.stageCommit(
+                identity: ctx.b, admit: [], retire: [ctx.a.signaturePublicKey()], rotate: true)
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            let admit = try entry.group.stageCommit(
+                identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try entry.group.mergeStagedCommit(identity: ctx.b))
+            let welcome = try XCTUnwrap(admit.welcome)
+
+            XCTAssertNil(ChannelDeviceAdmission.landWelcome(welcome))
+            XCTAssertEqual(ctx.store.heldWelcomes()[ctx.id]?.count, 1, "held, not dropped")
+            let still = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try still.epoch(), heldEpoch)
+            XCTAssertEqual(try still.channelSeed(identity: ctx.a), heldSeed)
+
+            // Under a reset suspicion the same Welcome replaces it.
+            ctx.state.updateExtras(ctx.id) { $0.resetSuspected = true }
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(welcome), ctx.id)
+            XCTAssertEqual(try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+                .channelSeed(identity: ctx.a), try entry.group.channelSeed(identity: ctx.b))
+        }
+    }
+
+    /// No refusal of an account-mailbox Welcome raises the join-failed banner.
+    func testNoMailboxWelcomeRefusalRaisesTheBanner() {
+        struct Other: Error {}
+        XCTAssertEqual(ContactsRepository.mailboxWelcomeRefusal(
+            FfiError.MembershipNoRoleTable(message: "welcome refused")), .notAConversation)
+        XCTAssertEqual(ContactsRepository.mailboxWelcomeRefusal(Other()), .notOpenedHere)
+        for refusal in [ContactsRepository.MailboxWelcomeRefusal.notAConversation, .notOpenedHere,
+                        .groupStillActive("ab")] {
+            XCTAssertFalse(refusal.raisesJoinFailureBanner)
+        }
+    }
+
     /// A replacing join that fails puts the held group back (real core): the
     /// delete is undone from the snapshot taken before it.
     func testAFailedReplacingJoinPutsTheHeldGroupBack() throws {

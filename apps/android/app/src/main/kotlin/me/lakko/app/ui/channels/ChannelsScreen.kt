@@ -877,26 +877,45 @@ public suspend fun landPendingPublisherWelcome(
         }
         // ADR-0090 section 2.3 — an owner device admitted this device to a
         // channel the account owns or co-publishes (the subscription
-        // register), and this device holds no group for it yet.
+        // register). Offered to every such channel, a channel whose group or
+        // keys this device still holds included (walk of 2026-11-14): a device
+        // that returns after another device retired its leaf holds its old
+        // group, and the replace rule ([CoPublisher.joinAdmissionWelcome]:
+        // same group id, signed by a device of the owner account, the held
+        // group restored if the join fails) decides.
         val registers = me.lakko.app.devices.sync.DeviceGroupSyncRepository.active?.channelSubscriptions?.value.orEmpty()
-        for (reg in registers) {
-            if (!reg.subscribed || reg.role == uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.SUBSCRIBER) continue
-            val channelIdHex = ChannelsComposer.bytesToHex(reg.channelId)
-            if (state.keysByChannel.value.containsKey(channelIdHex)) continue
-            if (state.channels.value.none { it.id == channelIdHex }) continue
-            val owned = reg.role == uniffi.lakko_ffi_uniffi.ChannelSubscriptionRole.OWNER
-            val keys = try {
+        val targets = me.lakko.app.channels.publisherWelcomeTargets(
+            registers.map { me.lakko.app.channels.viewOf(it) },
+            state.channels.value.map { it.id }.toSet(),
+        )
+        if (targets.isEmpty()) return@withLock false
+        val target = publisher.withChannel { ids ->
+            val welcomeGroupId = CoPublisher.welcomeGroupId(ids, welcome)
+            me.lakko.app.channels.publisherWelcomeTarget(targets, welcomeGroupId) { t ->
+                CoPublisher.expectedPublisherGroupId(
+                    ids,
+                    t.channelIdHex,
+                    owned = t.role == me.lakko.app.channels.ChannelAccountRole.OWNER,
+                    joinedGroupId = t.publisherGroupId,
+                )
+            }
+        } ?: return@withLock false
+        val channelIdHex = state.channels.value.firstOrNull { it.id.equals(target.channelIdHex, ignoreCase = true) }?.id
+            ?: return@withLock false
+        val owned = target.role == me.lakko.app.channels.ChannelAccountRole.OWNER
+        val join: suspend () -> me.lakko.app.channels.ChannelPublisherKeys? = {
+            try {
                 publisher.withChannel { ids ->
                     CoPublisher.joinAdmissionWelcome(
                         ids,
                         welcome,
                         channelIdHex,
                         owned = owned,
-                        joinedGroupId = if (owned) null else reg.publisherGroupId.takeIf { it.size == 32 },
+                        joinedGroupId = if (owned) null else target.publisherGroupId.takeIf { it.size == 32 },
                         ownerAccountKey = if (owned) {
                             null
                         } else {
-                            me.lakko.app.channels.coPublisherWelcomeOwnerKey(reg.ownerAccountKey, coPublished.ownerKeyOf(channelIdHex))
+                            me.lakko.app.channels.coPublisherWelcomeOwnerKey(target.ownerAccountKey, coPublished.ownerKeyOf(channelIdHex))
                         },
                         coPublished = coPublished,
                         existingSigningSeed = state.persistedPublisherSigningSeed(channelIdHex),
@@ -906,12 +925,16 @@ public suspend fun landPendingPublisherWelcome(
                 throw e
             } catch (_: Throwable) {
                 null
-            } ?: continue
-            state.setKeys(channelIdHex, keys)
-            Log.i(TAG, "ADR-0090: admitted to post in a channel of the account")
-            return@withLock true
+            }
         }
-        false
+        // The publisher loop's open handle of a held group is closed first,
+        // under its lock, so no pass acts on the replaced group's old state.
+        val loop = me.lakko.app.channels.ChannelPublisherLoop.peek(state)
+        val keys = (if (loop != null) loop.releasingGroup(channelIdHex) { join() } else join())
+            ?: return@withLock false
+        state.setKeys(channelIdHex, keys)
+        Log.i(TAG, "ADR-0090: admitted to post in a channel of the account")
+        true
     }
 }
 

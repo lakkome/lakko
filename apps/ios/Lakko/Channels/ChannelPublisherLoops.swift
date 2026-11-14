@@ -52,6 +52,16 @@ final class ChannelPublisherLoops {
     /// A channel created on this device: its group is open and claimed.
     func markOpened(_ channelId: String) { opened.insert(channelId) }
 
+    /// The group of `channelId` was replaced (an owner-signed Welcome joined
+    /// this device again): the next pass opens it and reads its journal from
+    /// a fresh cursor.
+    func readAgain(_ channelId: String) {
+        opened.remove(channelId)
+        journalCursor[channelId] = nil
+        knockCursor[channelId] = nil
+        publicSeedEpoch[channelId] = nil
+    }
+
     func reset() {
         opened = []
         publicSeedEpoch = [:]
@@ -122,6 +132,9 @@ final class ChannelPublisherLoops {
             await deviceAdmissionPass(
                 channelId: channelId, channels: channels, client: client, seed: seed, accountIdB64: accountIdB64)
         }
+        // A Welcome held while its group was still active here (it came
+        // before the commit that removes this device's leaf) is tried again.
+        ChannelDeviceAdmission.retryHeldWelcomes()
         // ADR-0090 section 8 / decision A — the channels this device reads
         // while the account publishes them.
         await ChannelDeviceAdmission.passWaiting(
@@ -670,9 +683,22 @@ final class ChannelPublisherLoops {
             }
         }
         // ADR-0087 section 15 — removed (or stepped down and applied): this
-        // device publishes no more.
-        if !owner, (try? group.isActive()) == false {
+        // device publishes no more. ADR-0090 — when only this device's leaf
+        // went (another device of the account retired it), the account keeps
+        // its role and this device waits to be admitted again.
+        switch ChannelDeviceAdmission.inactiveVerdict(group: group, identity: identity, ownerDevice: owner) {
+        case nil:
+            break
+        case .waitForWelcome?, .reader?:
+            // Waits for the Welcome, or (the account's only device) the
+            // waiting pass takes the channel from the saved copy.
+            waitForAdmission(channelId: channelId)
+            return
+        case .removed?:
             endPublishing(channelId: channelId)
+            return
+        case .undecided?:
+            // The device roster is not loaded: nothing changes this pass.
             return
         }
         // Reopened: a step-down applied above moved the group.
@@ -768,6 +794,20 @@ final class ChannelPublisherLoops {
     nonisolated static func headOwed(before: UInt64?, after: UInt64?) -> Bool {
         guard let before, let after else { return false }
         return after > before
+    }
+
+    /// This device's leaf was retired while its account still owns or
+    /// co-publishes `channelId`: the publisher keys go (the composer gives
+    /// way to the waiting line), the role and the held group stay, and an
+    /// owner-signed Welcome that admits it again replaces the group
+    /// (``ChannelDeviceAdmission/landWelcome(_:)``).
+    private func waitForAdmission(channelId: String) {
+        guard let channels = channelsRef else { return }
+        NSLog("[channels] this device's leaf was removed from a channel's publisher group; it waits to be admitted again")
+        readAgain(channelId)
+        channels.dropPublisherKeysKeepingRole(channelId)
+        // The Welcome that admits it again may have come first and be held.
+        ChannelDeviceAdmission.retryHeldWelcomes()
     }
 
     private func endPublishing(channelId: String) {

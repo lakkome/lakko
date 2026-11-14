@@ -557,11 +557,22 @@ enum ChannelDeviceAdmission {
         }
     }
 
+    /// The channels a mailbox Welcome may admit this device to: every channel
+    /// the account owns or co-publishes, INCLUDING one whose PublisherGroup
+    /// (and publisher keys) this device still holds. A device that returns
+    /// after another owner device took the channel over (its leaf retired)
+    /// still holds its old group, and the owner-signed Welcome that admits
+    /// it again is for exactly that group; the replace rule of
+    /// ``landWelcome(_:)`` decides (walk of 2026-11-14).
+    static func welcomeTargets(_ state: ChannelsUiState) -> [String] {
+        state.channels.map(\.id).filter { state.extras($0).accountRole != nil }
+    }
+
     /// Whether a mailbox Welcome may be an admission into one of `state`'s
-    /// waiting channels.
-    static var hasWaitingChannels: Bool {
+    /// channels (``welcomeTargets(_:)``).
+    static var hasWelcomeTargets: Bool {
         guard let state = waitingState else { return false }
-        return !waitingChannels(state).isEmpty
+        return !welcomeTargets(state).isEmpty
     }
 
     static weak var waitingState: ChannelsUiState?
@@ -578,7 +589,11 @@ enum ChannelDeviceAdmission {
         guard let state = waitingState, let seed = currentSeed(),
               let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
               let ownerSeed = ChannelPublisherIdentity.ownerAccountSeed else { return nil }
-        for channelId in waitingChannels(state) {
+        // Peeked once, and only when a held group needs it: the founder of a
+        // Welcome does not depend on the channel it is tried against.
+        var founderRead = false
+        var founder: FfiWelcomeFounder?
+        for channelId in welcomeTargets(state) {
             guard let channelBytes = ChannelsClient.hexToData(channelId) else { continue }
             let groupId: Data
             let ownerKey: Data
@@ -595,32 +610,112 @@ enum ChannelDeviceAdmission {
                 ownerKey = key
             }
             // Security pass — a group this device still holds (a reset was
-            // suspected) is deleted only for a Welcome to the same group whose
-            // sender verifies as a device of the owner, right before joining.
+            // suspected, or its leaf was retired while it was away and another
+            // owner device admits it again) is deleted only for a Welcome to
+            // the same group whose sender verifies as a device of the owner,
+            // right before joining.
             let joined: PublisherGroup?
+            let replaced: Bool
             if let held = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil {
-                guard welcomeReplaces(
-                    founder: try? peekWelcomeFounder(welcome: welcome, identity: identity),
-                    groupId: groupId, ownerAccountKey: ownerKey) else { continue }
+                if !founderRead {
+                    founder = try? peekWelcomeFounder(welcome: welcome, identity: identity)
+                    founderRead = true
+                }
+                guard welcomeReplaces(founder: founder, groupId: groupId, ownerAccountKey: ownerKey) else { continue }
+                // Replay guard: a device's KeyPackage is last-resort, so the
+                // Delivery Service can serve an OLD owner-signed Welcome for
+                // this group again. A held group is replaced only when this
+                // device can no longer use it: its leaf was removed, or a
+                // reset is suspected. An owner-signed Welcome for a group
+                // still active here may have come before the commit that
+                // removes this device's leaf was applied: it is held and
+                // tried again (``retryHeldWelcomes(nowMs:)``), never dropped.
+                guard mayReplaceHeldGroup(
+                    isActive: try? held.isActive(),
+                    resetSuspected: state.extras(channelId).resetSuspected == true) else {
+                    store?.holdWelcome(welcome, channelId: channelId, nowMs: nowMs())
+                    continue
+                }
                 NSLog("ADR-0090: an owner-signed Welcome replaces this device's publisher group")
                 joined = replaceHeldGroup(held, identity: identity) {
                     try publisherGroupJoinFromWelcome(
                         identity: identity, welcome: welcome, groupId: groupId, channelId: channelBytes,
                         ownerAccountKey: ownerKey)
                 }
+                replaced = true
             } else {
+                replaced = false
                 joined = try? publisherGroupJoinFromWelcome(
                     identity: identity, welcome: welcome, groupId: groupId, channelId: channelBytes,
                     ownerAccountKey: ownerKey)
             }
             guard joined != nil else { continue }
+            store?.dropHeldWelcomes(channelId: channelId)
             state.updateExtras(channelId) { $0.resetSuspected = nil }
             NSLog("ADR-0090: this device was admitted to a channel's publisher group")
             ChannelPublisherIdentity.shared.persist()
+            // The old group's keys serve an epoch this device no longer
+            // publishes in: they go (the signing seed stays, it is per
+            // device), and the keys of the joined group take their place.
+            if replaced { state.dropPublisherKeysKeepingRole(channelId) }
             _ = becomePublisher(channelId: channelId, state: state, identity: identity)
+            // The publisher loops open the joined group afresh: claim, cursors.
+            ChannelPublisherLoops.shared.readAgain(channelId)
             return channelId
         }
         return nil
+    }
+
+    /// Held Welcomes older than this are dropped: the device stayed active in
+    /// the group that long, so the removal they answered never came here.
+    /// Chosen, not measured.
+    nonisolated static let heldWelcomeMaxAgeMs: UInt64 = 7 * 24 * 60 * 60 * 1000
+
+    nonisolated static func heldWelcomeExpired(heldAtMs: UInt64, nowMs: UInt64) -> Bool {
+        nowMs > heldAtMs && nowMs - heldAtMs > heldWelcomeMaxAgeMs
+    }
+
+    /// Try every held Welcome again (each publisher pass and after a journal
+    /// poll found this device's leaf removed). A Welcome whose group is still
+    /// active and unsuspected here stays held; any other runs the normal
+    /// replace rule and leaves the hold whatever it came to. A Welcome for a
+    /// channel the account no longer owns or co-publishes, or older than
+    /// ``heldWelcomeMaxAgeMs``, is dropped.
+    static func retryHeldWelcomes(nowMs now: UInt64? = nil) {
+        guard let store, let state = waitingState else { return }
+        let now = now ?? nowMs()
+        let targets = Set(welcomeTargets(state).map { $0.lowercased() })
+        for (channelId, held) in store.heldWelcomes() {
+            guard targets.contains(channelId) else {
+                store.dropHeldWelcomes(channelId: channelId)
+                continue
+            }
+            // Newest first: one landed Welcome ends the channel's holds.
+            for entry in held.reversed() {
+                guard let welcome = Data(base64Encoded: entry.welcomeB64) else {
+                    store.dropHeldWelcome(entry, channelId: channelId)
+                    continue
+                }
+                if heldWelcomeExpired(heldAtMs: entry.heldAtMs, nowMs: now) {
+                    store.dropHeldWelcome(entry, channelId: channelId)
+                    continue
+                }
+                if stillUsable(channelId: channelId, state: state) { break }
+                store.dropHeldWelcome(entry, channelId: channelId)
+                if landWelcome(welcome) != nil { break }
+            }
+        }
+    }
+
+    /// The group this device holds for `channelId` is active and not under
+    /// reset suspicion: a held Welcome for it waits.
+    private static func stillUsable(channelId: String, state: ChannelsUiState) -> Bool {
+        guard let seed = currentSeed(),
+              let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
+              let held = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil
+        else { return false }
+        return !mayReplaceHeldGroup(
+            isActive: try? held.isActive(), resetSuspected: state.extras(channelId).resetSuspected == true)
     }
 
     /// Delete `held` and run `join`; if the join throws, the provider is put
@@ -631,10 +726,19 @@ enum ChannelDeviceAdmission {
     static func replaceHeldGroup(
         _ held: PublisherGroup, identity: Identity, join: () throws -> PublisherGroup
     ) -> PublisherGroup? {
-        guard let before = try? identity.snapshotStorage(), !before.isEmpty else { return nil }
+        guard let before = try? identity.snapshotStorage(), !before.isEmpty,
+              let heldEpoch = try? held.epoch() else { return nil }
+        // Unreadable reads as inactive: the epochs are then compared.
+        let heldActive = (try? held.isActive()) == true
+        struct NotNewer: Error {}
         do {
             try held.delete(identity: identity)
-            return try join()
+            let joined = try join()
+            // Replay guard: for an inactive held group, a Welcome that lands
+            // at or below its epoch is an old one; the held group is put back.
+            guard joinedReplacesHeld(joined: try joined.epoch(), held: heldEpoch, heldActive: heldActive)
+            else { throw NotNewer() }
+            return joined
         } catch {
             NSLog("ADR-0090: the replacing join failed; the held publisher group is put back")
             do {
@@ -644,6 +748,100 @@ enum ChannelDeviceAdmission {
             }
             return nil
         }
+    }
+
+    /// What a device does once the channel's PublisherGroup it holds is no
+    /// longer active (a commit it applied removed its own leaf). The same
+    /// verdict as web and Android `inactivePublisherGroupVerdict`.
+    enum InactiveGroupVerdict: Equatable {
+        /// Only this DEVICE's leaf went (an owner device with other devices of
+        /// the account, or a co-publisher's device whose account still holds a
+        /// leaf): it stops publishing, keeps the old group and waits for the
+        /// owner device's Welcome that admits it again (``landWelcome(_:)``).
+        case waitForWelcome
+        /// An owner device that is the account's only device: nobody is left
+        /// to admit it. It stops publishing and the waiting pass takes the
+        /// channel (entry from the saved copy, else decision A); the inactive
+        /// group is deleted right before (``deleteInactiveGroup(identity:channelId:)``).
+        case reader
+        /// The account itself was removed as a publisher (or nothing says
+        /// otherwise): the existing removal path (UX 15.2).
+        case removed
+        /// The account's device roster is not loaded: nothing changes this
+        /// pass (an owner device must not take the channel alone on a roster
+        /// it has not read).
+        case undecided
+    }
+
+    /// The verdict for an inactive held group. `ownAccountHasLeaf`: whether
+    /// the inactive group's roster (the one after the removal: OpenMLS merges
+    /// the removing commit's tree before it marks the group inactive) still
+    /// holds a leaf of this account, `nil` when unread. `otherOwnDevices`:
+    /// whether the DeviceGroup roster names a device besides this one, `nil`
+    /// when not loaded.
+    nonisolated static func inactiveGroupVerdict(
+        ownerDevice: Bool, ownAccountHasLeaf: Bool?, otherOwnDevices: Bool?
+    ) -> InactiveGroupVerdict {
+        guard let otherOwnDevices else { return .undecided }
+        if ownerDevice { return otherOwnDevices ? .waitForWelcome : .reader }
+        return ownAccountHasLeaf == true && otherOwnDevices ? .waitForWelcome : .removed
+    }
+
+    /// Whether the DeviceGroup roster names a device besides `selfLeaf`;
+    /// `nil` when the roster is not loaded.
+    static func otherOwnDevices(selfLeaf: Data) -> Bool? {
+        guard let roster = deviceGroupRoster(), !roster.isEmpty else { return nil }
+        return roster.contains { $0 != selfLeaf }
+    }
+
+    /// The verdict for `group` held by `identity`, or `nil` when the group is
+    /// active (or its state is unreadable).
+    static func inactiveVerdict(group: PublisherGroup, identity: Identity, ownerDevice: Bool) -> InactiveGroupVerdict? {
+        guard (try? group.isActive()) == false else { return nil }
+        return inactiveGroupVerdict(
+            ownerDevice: ownerDevice,
+            ownAccountHasLeaf: identity.accountPublicKey().map { key in leaves(group).contains { $0.account == key } },
+            otherOwnDevices: otherOwnDevices(selfLeaf: identity.signaturePublicKey()))
+    }
+
+    /// Delete `channelId`'s stored group when it is inactive, right before an
+    /// entry or a re-founding (the core refuses an entry while a group is
+    /// stored under that id). `true` when no group is stored now; `false`
+    /// when an active one is (or the delete failed): nothing may be entered.
+    @discardableResult
+    static func deleteInactiveGroup(identity: Identity, channelId: String) -> Bool {
+        guard let stored = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil
+        else { return true }
+        guard (try? stored.isActive()) == false else { return false }
+        do {
+            try stored.delete(identity: identity)
+            ChannelPublisherIdentity.shared.persist()
+            NSLog("ADR-0090: the inactive publisher group is deleted before this device takes the channel")
+            return true
+        } catch {
+            NSLog("ADR-0090: the inactive publisher group could not be deleted")
+            return false
+        }
+    }
+
+    /// Replay guard — whether a held group may be replaced by a Welcome at
+    /// all: only one this device can no longer use (its own leaf removed, or a
+    /// reset suspected). An active, unsuspected group is never replaced; the
+    /// Welcome is ignored for that channel.
+    nonisolated static func mayReplaceHeldGroup(isActive: Bool?, resetSuspected: Bool) -> Bool {
+        resetSuspected || isActive == false
+    }
+
+    /// Replay guard — whether a replacing join is kept. For an INACTIVE held
+    /// group (the same chain: this device applied the commit that removed its
+    /// leaf) the joined group's epoch must be strictly above the held one's.
+    /// An ACTIVE held group is replaced only under reset suspicion, and then
+    /// the epochs are not compared: a channel founded again elsewhere
+    /// (decision A) starts a new chain at a low epoch, and comparing would
+    /// keep this device a reader for ever. The same rule as Android
+    /// `joinedGroupReplacesHeld`.
+    nonisolated static func joinedReplacesHeld(joined: UInt64, held: UInt64, heldActive: Bool) -> Bool {
+        heldActive || joined > held
     }
 
     /// Security pass — whether a Welcome replaces a group this device holds:
@@ -689,7 +887,18 @@ enum ChannelDeviceAdmission {
     static func passWaiting(state: ChannelsUiState, client: ChannelsClient, seed: Data, accountIdB64: String) async {
         guard let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed) else { return }
         for channelId in waitingChannels(state) {
-            let held = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil
+            var held = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil
+            if let stored = held, let verdict = inactiveVerdict(
+                group: stored, identity: identity,
+                ownerDevice: state.extras(channelId).accountRole == ChannelAccountRole.owner) {
+                // This device's leaf was removed from the group. With another
+                // device of the account to admit it, it waits for that
+                // device's Welcome (``landWelcome(_:)``); as the account's
+                // only device it takes the channel below (the inactive group
+                // counts as not held and is deleted right before).
+                guard verdict == .reader else { continue }
+                held = nil
+            }
             if let held {
                 // A commit of this group still owed (an entry whose DS verdict
                 // or reseal has not landed) finishes first (``ChannelPublisherCommits/replayAll``).
@@ -741,6 +950,9 @@ enum ChannelDeviceAdmission {
     ) async {
         do {
             let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: seed)
+            // An inactive group under the id would be reopened as the
+            // "founded" one: it goes first. An active one is never re-founded.
+            guard deleteInactiveGroup(identity: identity, channelId: channelId) else { return }
             NSLog("ADR-0090: decision A, this device founds an owned channel's publisher group again")
             let group = try CoPublisher.foundPublisherGroup(
                 identity: identity, accountIdB64: accountIdB64, channelIdHex: channelId)
@@ -897,10 +1109,23 @@ struct ChannelDeviceAdmissionStore {
         let senderB64: String
     }
 
+    /// An owner-signed Welcome held for a channel whose group is still active
+    /// here (``ChannelDeviceAdmission/retryHeldWelcomes(nowMs:)``).
+    struct HeldWelcome: Codable, Equatable {
+        let welcomeB64: String
+        let heldAtMs: UInt64
+    }
+
     struct Record: Codable, Equatable {
         var handoverOwed: [String] = []
         var queued: [String: [Queued]] = [:]
+        /// Optional so a record written before it decodes.
+        var heldWelcomes: [String: [HeldWelcome]]?
     }
+
+    /// Welcomes held per channel at most, oldest dropped first (the newest
+    /// wins). Chosen, not measured.
+    static let maxHeldWelcomesPerChannel = 3
 
     /// Requests kept per channel at most (the oldest dropped first; a
     /// requester asks again). Chosen, not measured.
@@ -959,6 +1184,41 @@ struct ChannelDeviceAdmissionStore {
     func dropQueued(channelId: String) {
         var record = load()
         guard record.queued.removeValue(forKey: channelId.lowercased()) != nil else { return }
+        save(record)
+    }
+
+    func holdWelcome(_ welcome: Data, channelId: String, nowMs: UInt64) {
+        var record = load()
+        var all = record.heldWelcomes ?? [:]
+        var list = all[channelId.lowercased()] ?? []
+        let b64 = welcome.base64EncodedString()
+        guard !list.contains(where: { $0.welcomeB64 == b64 }) else { return }
+        list.append(HeldWelcome(welcomeB64: b64, heldAtMs: nowMs))
+        if list.count > Self.maxHeldWelcomesPerChannel {
+            list.removeFirst(list.count - Self.maxHeldWelcomesPerChannel)
+        }
+        all[channelId.lowercased()] = list
+        record.heldWelcomes = all
+        save(record)
+        NSLog("ADR-0090: an owner-signed Welcome for a group still active here is held")
+    }
+
+    /// The held Welcomes by channel, each list oldest first.
+    func heldWelcomes() -> [String: [HeldWelcome]] { load().heldWelcomes ?? [:] }
+
+    func dropHeldWelcome(_ entry: HeldWelcome, channelId: String) {
+        var record = load()
+        guard var all = record.heldWelcomes, var list = all[channelId.lowercased()] else { return }
+        list.removeAll { $0 == entry }
+        all[channelId.lowercased()] = list.isEmpty ? nil : list
+        record.heldWelcomes = all.isEmpty ? nil : all
+        save(record)
+    }
+
+    func dropHeldWelcomes(channelId: String) {
+        var record = load()
+        guard var all = record.heldWelcomes, all.removeValue(forKey: channelId.lowercased()) != nil else { return }
+        record.heldWelcomes = all.isEmpty ? nil : all
         save(record)
     }
 

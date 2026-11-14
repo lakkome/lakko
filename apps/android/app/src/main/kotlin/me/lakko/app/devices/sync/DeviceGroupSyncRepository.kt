@@ -248,11 +248,7 @@ public class DeviceGroupSyncRepository(
             )
         },
         onChanged = { accountIdB64 ->
-            me.lakko.app.backup.AutoBackupStore.markDirty(
-                applicationContext,
-                accountIdB64,
-                System.currentTimeMillis(),
-            )
+            me.lakko.app.backup.markBackupDueForSyncedState(applicationContext, accountIdB64)
         },
     )
 
@@ -1409,6 +1405,9 @@ public class DeviceGroupSyncRepository(
             if (!written) return false
             runCatching { state.channelAdmissionSeedEnvelopeFor(channelId, version, seed) }.getOrNull()
         }
+        // The register is part of the persisted synced state and the backup:
+        // the version bump persists it and marks the backup due.
+        republish()
         if (envelope != null) {
             scope.launchBound(sessionBinding) {
                 try {
@@ -1436,14 +1435,17 @@ public class DeviceGroupSyncRepository(
 
     /** A received admission seed envelope, folded by its own stamp. */
     private fun applyChannelAdmissionSeed(envelope: ByteArray) {
-        synchronized(stateLock) {
+        val changed = synchronized(stateLock) {
             val state = syncedState ?: return
             try {
                 state.applyChannelAdmissionSeedEnvelope(envelope)
             } catch (cause: Throwable) {
                 Log.w(LOG_TAG, "channel admission seed envelope refused (${cause.javaClass.simpleName})")
+                false
             }
         }
+        // Persisted and in the backup like every other register.
+        if (changed) republish()
     }
 
     /** ADR-0090 section 2.1 - the signature keys of the account's DeviceGroup
@@ -3895,6 +3897,11 @@ internal object CoreSyncedStateBytes : SyncedStateBytes {
                 restored.quickReactionEnvelope()?.let { state.applyQuickReactionEnvelope(it) }
                 // UX 17.6 - and the device acknowledgements.
                 for (envelope in restored.deviceAckEnvelopes()) state.applyDeviceAckEnvelope(envelope)
+                // ADR-0090 - and the channel subscriptions and admission
+                // seeds, so a restore onto a device that kept its synced
+                // state still learns the account's channels.
+                for (envelope in restored.channelSubscriptionEnvelopes()) state.applyChannelSubscriptionEnvelope(envelope)
+                for (envelope in restored.channelAdmissionSeedEnvelopes()) state.applyChannelAdmissionSeedEnvelope(envelope)
             }
             state.toBytes()
         }
