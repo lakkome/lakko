@@ -327,10 +327,13 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
 
     func testOpeningAChannelWithNoGroupHereNeverFoundsOne() throws {
         // ADR-0090 — a bound DEVICE identity and the owner account seed.
-        let accountSeed = Data(repeating: 0x6C, count: 32)
+        // As in the app: the noted owner seed is the 64-byte account identity
+        // seed; the core and the device binding take its 32-byte Ed25519 seed.
+        let identitySeed = Data(repeating: 0x6C, count: 64)
+        let accountSeed = try Identity.fromSeed(seed: identitySeed).ed25519Seed()
         let identity = try Identity.fromSeedBound(
             seed: Data(repeating: 0x6D, count: 32), accountSeed: accountSeed, issuedAtUnixSecs: 1_700_000_000)
-        ChannelPublisherIdentity.noteOwnerSeed(accountSeed)
+        ChannelPublisherIdentity.noteOwnerSeed(identitySeed)
         defer { ChannelPublisherIdentity.noteOwnerSeed(nil) }
         let channelHex = hex(idA)
         XCTAssertThrowsError(try CoPublisher.openPublisherGroup(
@@ -529,6 +532,59 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         await ChannelAccountReaderKey.ensure(
             channelId: id, state: channels, keyHex: other, ports: calls.ports(), nowMs: later + 2)
         XCTAssertEqual(calls.publicCalls, [other], "a public channel: the plain subscribe")
+    }
+
+    /// A channel whose flag is not known yet registers nothing this pass (a
+    /// public subscribe of a private channel would only fail).
+    func testAnUnknownFlagWaitsForTheNextPass() async {
+        ChannelAccountReaderKey.reset()
+        let channels = ChannelsUiState()
+        let id = hex(idA)
+        channels.addChannel(ChannelHandle(id: id, localName: "News", localDescription: "", addedAtMs: 1))
+        channels.setKeys(channelId: id, keys: ChannelPublisherKeys(
+            seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32)))
+        XCTAssertNil(channels.extras(id).isPublic)
+        let calls = ReaderKeyCalls()
+        await ChannelAccountReaderKey.ensure(
+            channelId: id, state: channels, keyHex: String(repeating: "ab", count: 32), ports: calls.ports())
+        XCTAssertEqual(calls.privateCalls + calls.publicCalls, [])
+        XCTAssertNil(channels.extras(id).readerKeyRegisteredHex)
+    }
+
+    /// Live iPhone walk (2026-11-14) — a new private channel has no admission
+    /// seed until its first invite link: the owner's device mints version 0
+    /// for the reader key's ticket; a co-publisher's device never mints.
+    func testTheOwnersDeviceMintsTheFirstAdmissionSeedForTheReaderKey() {
+        let account = "reader-\(UUID().uuidString)"
+        let previousBound = AcceptedContactsStore.boundAccountIdB64
+        AcceptedContactsStore.bind(accountIdB64: account)
+        defer {
+            ChannelAdmissionKeyStore.delete(accountIdB64: account)
+            AcceptedContactsStore.bind(accountIdB64: previousBound)
+        }
+        let channels = ChannelsUiState(accountIdB64: account)
+        defer { ChannelsUiState.forget(accountIdB64: account) }
+        let owned = hex(idA)
+        let copublished = hex(idB)
+        for id in [owned, copublished] {
+            channels.addChannel(ChannelHandle(id: id, localName: "News", localDescription: "", addedAtMs: 1))
+            channels.setKeys(channelId: id, keys: ChannelPublisherKeys(
+                seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32)))
+        }
+        channels.updateExtras(copublished) { $0.accountRole = ChannelAccountRole.coPublisher }
+        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: owned).isEmpty, "none before")
+
+        let minted = ChannelAccountReaderKey.admissionForReaderKey(channelId: owned, state: channels)
+        XCTAssertEqual(minted?.version, 0)
+        XCTAssertEqual(minted?.seed.count, 32)
+        XCTAssertEqual(ChannelInvites.admissionSeeds(channelIdHex: owned).map(\.seed), minted.map { [$0.seed] })
+        // The same seed the next time: minted once.
+        XCTAssertEqual(ChannelAccountReaderKey.admissionForReaderKey(channelId: owned, state: channels)?.seed,
+                       minted?.seed)
+
+        XCTAssertNil(ChannelAccountReaderKey.admissionForReaderKey(channelId: copublished, state: channels),
+                     "a co-publisher waits for the owner's seed")
+        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: copublished).isEmpty)
     }
 
     // MARK: - Follow-up decision 2: orphans of a key reset are left alone

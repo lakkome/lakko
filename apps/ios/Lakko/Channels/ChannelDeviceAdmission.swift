@@ -588,7 +588,7 @@ enum ChannelDeviceAdmission {
     static func landWelcome(_ welcome: Data) -> String? {
         guard let state = waitingState, let seed = currentSeed(),
               let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
-              let ownerSeed = ChannelPublisherIdentity.ownerAccountSeed else { return nil }
+              let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed else { return nil }
         // Peeked once, and only when a held group needs it: the founder of a
         // Welcome does not depend on the channel it is tried against.
         var founderRead = false

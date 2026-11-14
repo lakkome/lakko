@@ -376,6 +376,8 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
     }
 
     /// Two devices A and B of one owner account, A bound as this device.
+    /// `accountSeed` is the owner account's 32-byte Ed25519 seed (what the
+    /// core and the device bindings take).
     private final class WalkDevices {
         let accountSeed: Data
         let a: Identity
@@ -412,7 +414,11 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
 
     private func withWalkDevices(_ body: (WalkDevices) throws -> Void) throws {
         let account = "walk-\(UUID().uuidString)"
-        let accountSeed = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        // As in the app: the account's current seed is the 64-byte identity
+        // seed; the owner seed the core takes and the device binding names is
+        // that identity's 32-byte Ed25519 seed.
+        let identitySeed = Data((0..<64).map { _ in UInt8.random(in: 0...255) })
+        let accountSeed = try Identity.fromSeed(seed: identitySeed).ed25519Seed()
         let a = try Identity.fromSeedBound(
             seed: Data((0..<32).map { _ in UInt8.random(in: 0...255) }), accountSeed: accountSeed,
             issuedAtUnixSecs: 1_700_000_000)
@@ -430,7 +436,7 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
         ChannelPublisherIdentity.shared.devicePersister = {}
         let state = ChannelsUiState(accountIdB64: account)
         ChannelDeviceAdmission.waitingState = state
-        ChannelDeviceAdmission.currentSeed = { accountSeed }
+        ChannelDeviceAdmission.currentSeed = { identitySeed }
         defer {
             ChannelDeviceAdmissionStore.clear(accountIdB64: account)
             ChannelDeviceAdmission.waitingState = previousState
@@ -441,7 +447,8 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
             AcceptedContactsStore.bind(accountIdB64: previousBound)
         }
         // Notes the owner seed (``ChannelPublisherIdentity/ownerAccountSeed``).
-        _ = try ChannelPublisherIdentity.shared.identity(currentSeed: accountSeed)
+        _ = try ChannelPublisherIdentity.shared.identity(currentSeed: identitySeed)
+        XCTAssertEqual(ChannelPublisherIdentity.ownerAccountEd25519Seed, accountSeed)
         let id = channel.map { String(format: "%02x", $0) }.joined()
         try body(WalkDevices(accountSeed: accountSeed, a: a, b: b, id: id, state: state, channel: channel))
     }

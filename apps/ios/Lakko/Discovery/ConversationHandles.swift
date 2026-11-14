@@ -110,6 +110,33 @@ enum ConversationHandles {
             handle: typed, isPublic: isPublic, facts: facts)
     }
 
+    /// Claim a name for a journal, taking back one this key already holds.
+    ///
+    /// The claim route is not idempotent: a second claim of a name answers
+    /// `409 name-taken` even when the claimant's key holds it. A create that
+    /// failed after its claim landed (New channel retries under the same
+    /// channel id, so the same journal and the same write key) therefore
+    /// answers `name-taken` to its own name. With `reclaim` (a retry of such a
+    /// create), that answer is followed by the update route under the same key:
+    /// it lands only when this key holds the row, and gives the certificate and
+    /// the lease. A row held by another key is refused there (`401
+    /// statement-refused`, or `404 no-such-handle`) and the name is held.
+    static func claimOrReclaim(
+        reclaim: Bool,
+        claim: () async throws -> Written,
+        update: () async throws -> Written
+    ) async throws -> Written {
+        do {
+            return try await claim()
+        } catch let taken as DiscoveryClient.HandleWriteError where taken.code == "name-taken" && reclaim {
+            do {
+                return try await update()
+            } catch let refused as DiscoveryClient.HandleWriteError where refused.status == 401 || refused.status == 404 {
+                throw taken
+            }
+        }
+    }
+
     /// Flip public / private, or republish the record and renew the lease.
     static func update(
         discovery: DiscoveryClient, accountSeed: Data, journalId: Data,

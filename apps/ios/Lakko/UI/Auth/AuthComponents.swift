@@ -23,6 +23,13 @@ struct AuthScreen<Content: View>: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(Color.lakkoBackground.ignoresSafeArea())
+        // A pushed screen's round Back button floats over the scroll view;
+        // without a bar background the title ran under it once the form
+        // scrolled (seen on an iPhone, 2026-11-14). The bar is drawn in the
+        // page colour, so what scrolls stays below the button. Welcome hides
+        // its bar, so this changes nothing there.
+        .toolbarBackground(Color.lakkoBackground, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
     }
 }
 

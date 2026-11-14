@@ -283,11 +283,20 @@ final class ChannelEntryTests: XCTestCase {
 
     // MARK: the order inside a staged commit
 
+    /// The 64-byte current seed `withBoundOwner` bound (the app's
+    /// `currentSeed`); the body's `seed` is its 32-byte owner seed.
+    private var currentIdentitySeed = Data()
+
     private func withBoundOwner(
         _ body: (_ account: String, _ seed: Data, _ device: Identity) async throws -> Void
     ) async throws {
         let account = "entry-\(UUID().uuidString)"
-        let accountSeed = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        // As in the app: the account's current seed is the 64-byte identity
+        // seed, and the owner seed the core takes (and the device binding
+        // names) is that identity's 32-byte Ed25519 seed.
+        let identitySeed = Data((0..<64).map { _ in UInt8.random(in: 0...255) })
+        currentIdentitySeed = identitySeed
+        let accountSeed = try Identity.fromSeed(seed: identitySeed).ed25519Seed()
         let device = try Identity.fromSeedBound(
             seed: Data((0..<32).map { _ in UInt8.random(in: 0...255) }), accountSeed: accountSeed,
             issuedAtUnixSecs: 1_700_000_000)
@@ -312,7 +321,7 @@ final class ChannelEntryTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [EntryDsConflictURLProtocol.self]
         return ChannelPublisherCommits.Context(
-            channelIdHex: channelHex, currentSeed: seed, accountIdB64: account,
+            channelIdHex: channelHex, currentSeed: currentIdentitySeed, accountIdB64: account,
             ds: DsClient(baseURL: "https://ds.entry.test", session: URLSession(configuration: config)))
     }
 
@@ -395,7 +404,7 @@ final class ChannelEntryTests: XCTestCase {
             ChannelEntry.dsClient = { DsClient(baseURL: "https://ds.entry.test", session: URLSession(configuration: config)) }
             defer { ChannelEntry.dsClient = previous }
             let result = await ChannelEntry.enterIfPossible(
-                channelId: self.channelHex, state: state, client: channels, seed: seed, accountIdB64: account)
+                channelId: self.channelHex, state: state, client: channels, seed: self.currentIdentitySeed, accountIdB64: account)
             XCTAssertFalse(result.entered)
             XCTAssertTrue(result.fallBack, "every saved epoch refused: the device waits (or decision A)")
             XCTAssertEqual(EntryEventLog.shared.all().filter { $0 == "commit" }.count, 4,
@@ -406,7 +415,7 @@ final class ChannelEntryTests: XCTestCase {
             XCTAssertNil(state.keysByChannel[self.channelHex])
             // Backed off: the next pass does not read the head again at once.
             let again = await ChannelEntry.enterIfPossible(
-                channelId: self.channelHex, state: state, client: channels, seed: seed, accountIdB64: account)
+                channelId: self.channelHex, state: state, client: channels, seed: self.currentIdentitySeed, accountIdB64: account)
             XCTAssertTrue(again.fallBack)
             XCTAssertEqual(EntryEventLog.shared.all().filter { $0 == "commit" }.count, 4)
         }
@@ -577,5 +586,67 @@ final class ChannelEntryTests: XCTestCase {
         XCTAssertEqual(split?.sealed, Data([0xaa, 0xbb]))
         XCTAssertNil(VaultClient.splitObject(Data(count: 8)))
         XCTAssertEqual(VaultClient.headPath("ab"), "/vault/ab/head")
+    }
+
+    /// Seen live on an iPhone (2026-11-14): New channel failed with
+    /// "ownerAccountSeed must be 32 bytes" because the 64-byte account
+    /// identity seed went to the core. The core takes the owner account's
+    /// 32-byte Ed25519 seed (`Identity.fromSeed(identitySeed).ed25519Seed()`).
+    func testTheOwnerSeedGivenToTheCoreIsTheAccountsEd25519Seed() throws {
+        let identitySeed = Data(repeating: 0x5a, count: 64)
+        ChannelPublisherIdentity.noteOwnerSeed(identitySeed)
+        defer { ChannelPublisherIdentity.noteOwnerSeed(nil) }
+        let ownerSeed = try XCTUnwrap(ChannelPublisherIdentity.ownerAccountEd25519Seed)
+        XCTAssertEqual(ownerSeed.count, 32)
+        XCTAssertEqual(ownerSeed, try Identity.fromSeed(seed: identitySeed).ed25519Seed())
+        let device = try Identity.fromSeedBound(
+            seed: Data(repeating: 0x63, count: 32), accountSeed: ownerSeed, issuedAtUnixSecs: 1_700_000_000)
+        let channel = Data((0..<16).map { UInt8($0) })
+        XCTAssertThrowsError(try PublisherGroup.create(identity: device, ownerAccountSeed: identitySeed, channelId: channel))
+        XCTAssertNoThrow(try PublisherGroup.create(identity: device, ownerAccountSeed: ownerSeed, channelId: channel))
+    }
+    // MARK: New channel retry (live iPhone walk, 2026-11-14)
+
+    /// A retry of a New channel whose first attempt claimed the @name: the
+    /// claim route answers `name-taken`, and the update under the same key
+    /// takes the name back. Another key's row stays held.
+    func testARetryTakesBackTheNameItsFirstAttemptClaimed() async throws {
+        let written = ConversationHandles.Written(
+            handle: "news", isPublic: false, certificate: Data([1]), leaseUntilMs: 9)
+        let taken = DiscoveryClient.HandleWriteError(status: 409, code: "name-taken")
+        var updates = 0
+
+        let reclaimed = try await ConversationHandles.claimOrReclaim(
+            reclaim: true, claim: { throw taken }, update: { updates += 1; return written })
+        XCTAssertEqual(reclaimed.handle, "news")
+        XCTAssertEqual(updates, 1)
+
+        // Not a retry: name-taken is the answer, no update is tried.
+        do {
+            _ = try await ConversationHandles.claimOrReclaim(
+                reclaim: false, claim: { throw taken }, update: { updates += 1; return written })
+            XCTFail("held")
+        } catch let error as DiscoveryClient.HandleWriteError {
+            XCTAssertEqual(error.code, "name-taken")
+        }
+        XCTAssertEqual(updates, 1)
+
+        // Another key holds it: the update is refused and the name is held.
+        for refusal in [DiscoveryClient.HandleWriteError(status: 401, code: "statement-refused"),
+                        DiscoveryClient.HandleWriteError(status: 404, code: "no-such-handle")] {
+            do {
+                _ = try await ConversationHandles.claimOrReclaim(
+                    reclaim: true, claim: { throw taken }, update: { throw refusal })
+                XCTFail("held by another key")
+            } catch let error as DiscoveryClient.HandleWriteError {
+                XCTAssertEqual(error.code, "name-taken")
+            }
+        }
+
+        // A claim that lands is the answer, with no update.
+        let first = try await ConversationHandles.claimOrReclaim(
+            reclaim: true, claim: { written }, update: { updates += 1; return written })
+        XCTAssertEqual(first.leaseUntilMs, 9)
+        XCTAssertEqual(updates, 1)
     }
 }

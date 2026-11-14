@@ -121,7 +121,7 @@ enum ChannelEntry {
         seed: Data, accountIdB64: String
     ) async -> Attempt {
         guard let identity = try? ChannelPublisherIdentity.shared.identity(currentSeed: seed),
-              let ownerSeed = ChannelPublisherIdentity.ownerAccountSeed,
+              let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed,
               let channelBytes = ChannelsClient.hexToData(channelId) else { return .unfinished }
         let current: UInt32
         do {

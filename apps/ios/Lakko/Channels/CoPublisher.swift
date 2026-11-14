@@ -94,7 +94,7 @@ public enum CoPublisher {
             }
             // ADR-0090 — founded with this DEVICE's bound identity under the
             // owner account seed the group id derives from.
-            guard let ownerSeed = ChannelPublisherIdentity.ownerAccountSeed else {
+            guard let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed else {
                 throw ChannelPublisherIdentity.NotBound()
             }
             let created = try PublisherGroup.create(
@@ -125,7 +125,7 @@ public enum CoPublisher {
         }
         // ADR-0090 — an owned channel: `nil` is a device with no leaf yet,
         // which reads and waits to be admitted; it never founds.
-        guard let ownerSeed = ChannelPublisherIdentity.ownerAccountSeed else {
+        guard let ownerSeed = ChannelPublisherIdentity.ownerAccountEd25519Seed else {
             throw ChannelPublisherIdentity.NotBound()
         }
         return try publisherGroupLoad(identity: identity, ownerAccountSeed: ownerSeed, channelId: channelId)

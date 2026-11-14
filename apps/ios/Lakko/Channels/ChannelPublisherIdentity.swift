@@ -172,6 +172,15 @@ public final class ChannelPublisherIdentity {
         return currentOwnerSeed
     }
 
+    /// The 32-byte Ed25519 seed of the owner account (the account identity
+    /// of ``ownerAccountSeed``): what the core's PublisherGroup calls take
+    /// as `ownerAccountSeed` (create, load, enter, the group id). The
+    /// identity seed above is 64 bytes and the core refuses it.
+    public nonisolated static var ownerAccountEd25519Seed: Data? {
+        guard let seed = ownerAccountSeed, let identity = try? Identity.fromSeed(seed: seed) else { return nil }
+        return identity.ed25519Seed()
+    }
+
     /// The account identity of ``ownerAccountSeed``, or throws.
     public nonisolated static func ownerAccountIdentity() throws -> Identity {
         guard let seed = ownerAccountSeed else { throw NotBound() }

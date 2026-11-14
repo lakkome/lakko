@@ -144,6 +144,9 @@ struct NewChannelScreen: View {
         handleRateLimited = false
         let typed = ConversationHandles.canonical(handle)
         guard isPublic, typed.count >= 3, ConversationHandles.wellFormed(typed) else { return }
+        // A name a failed create of this account claimed is this account's
+        // (a retry takes it back): the lookup answering it is not "taken".
+        if claimedHere(typed) { return }
         if let held = HandleTakenCheck.held(typed) {
             handleTaken = held == .taken
             return
@@ -158,6 +161,13 @@ struct NewChannelScreen: View {
         }
     }
 
+    /// Whether a failed create on this account claimed `typed` (its channel
+    /// id is kept for the retry).
+    private func claimedHere(_ typed: String) -> Bool {
+        guard let account = AcceptedContactsStore.boundAccountIdB64 else { return false }
+        return PendingChannelHandleStore.channelId(forHandle: typed, accountIdB64: account) != nil
+    }
+
     private func deleteUploaded(_ avatar: ProfileAvatar?) {
         guard let avatar else { return }
         BlobLifecycle.shared.delete([avatar.still.blobId] + (avatar.video.map { [$0.blobId] } ?? []))
@@ -166,7 +176,7 @@ struct NewChannelScreen: View {
     private func create() async {
         guard canCreate else { return }
         let wanted = ConversationHandles.canonical(handle)
-        if isPublic, HandleTakenCheck.held(wanted) == .taken {
+        if isPublic, HandleTakenCheck.held(wanted) == .taken, !claimedHere(wanted) {
             handleTaken = true
             return
         }
@@ -192,8 +202,8 @@ struct NewChannelScreen: View {
         }
         // A create that failed after claiming this name: the same channel id,
         // which the claim answers as already this channel's.
-        let id = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
-            ?? ChannelsComposer.freshChannelIdHex()
+        let pendingId = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
+        let id = pendingId ?? ChannelsComposer.freshChannelIdHex()
         let channelName = trimmedName
         let channelDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         // 1. The `@name`, before the channel exists: a held name aborts with
@@ -208,9 +218,23 @@ struct NewChannelScreen: View {
                 lineageIdentity: lineage, channelId: try ChannelsComposer.channelIdFromHex(id),
                 name: channelName, description: channelDescription, avatar: avatar?.ffi)
             PendingChannelHandleStore.keep(handle: wanted, channelIdHex: id, accountIdB64: accountIdB64)
-            written = try await ConversationHandles.claim(
-                discovery: DiscoveryClient(), accountSeed: owner.ed25519Seed(), journalId: journal,
-                handle: wanted, isPublic: isPublic, facts: isPublic ? facts : nil)
+            // A retry under the kept id takes back a name the first attempt
+            // claimed (the claim route answers it as taken).
+            let discovery = DiscoveryClient()
+            let accountSeed = owner.ed25519Seed()
+            let published = isPublic ? facts : nil
+            written = try await ConversationHandles.claimOrReclaim(
+                reclaim: pendingId != nil,
+                claim: {
+                    try await ConversationHandles.claim(
+                        discovery: discovery, accountSeed: accountSeed, journalId: journal,
+                        handle: wanted, isPublic: isPublic, facts: published)
+                },
+                update: {
+                    try await ConversationHandles.update(
+                        discovery: discovery, accountSeed: accountSeed, journalId: journal,
+                        handle: wanted, isPublic: isPublic, facts: published)
+                })
         } catch let refusal as DiscoveryClient.HandleWriteError where refusal.code == "name-taken" {
             HandleTakenCheck.note(wanted, .taken)
             PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
@@ -305,7 +329,7 @@ struct NewChannelScreen: View {
             NSLog("[channels] create refused: %@", err.message)
             errorKey = "channels.new.failed"
         } catch {
-            NSLog("[channels] create failed")
+            NSLog("[channels] create failed: %@", String(describing: error))
             errorKey = "channels.new.failed"
         }
     }

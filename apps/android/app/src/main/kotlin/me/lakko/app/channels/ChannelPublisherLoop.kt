@@ -1046,9 +1046,9 @@ public class ChannelPublisherLoop private constructor(
                 continue
             }
             try {
-                refoundLocked(pub, channelId)
+                val refounded = refoundLocked(pub, channelId)
                 ChannelRefounding.markDone(context, account, channelId)
-                Log.i(TAG, "ADR-0090: an owned channel was founded again on this device")
+                if (refounded) Log.i(TAG, "ADR-0090: an owned channel was founded again on this device")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -1061,7 +1061,7 @@ public class ChannelPublisherLoop private constructor(
         if (seen && !left) ChannelRefounding.finish(context, account)
     }
 
-    private suspend fun refoundLocked(pub: ChannelPublisherIdentity, channelId: String) {
+    private suspend fun refoundLocked(pub: ChannelPublisherIdentity, channelId: String): Boolean {
         // A device that still holds the group publishes it already: nothing
         // to found again (the journal is not reset under anyone).
         // An inactive one (its leaf was removed) is founded again over: the
@@ -1075,7 +1075,7 @@ public class ChannelPublisherLoop private constructor(
                 }
             }
         }
-        if (holdsLiveGroup(heldActive != null, heldActive == true)) return
+        if (holdsLiveGroup(heldActive != null, heldActive == true)) return false
         dropGroup(channelId)
         pub.withChannel { ids -> CoPublisher.foundAndClaimAtCreation(ds, ids, channelId, refound = true) }
         val keys = pub.withChannel { ids ->
@@ -1083,7 +1083,7 @@ public class ChannelPublisherLoop private constructor(
         }
         state.setKeys(channelId, keys)
         // The commit records of the old chain will never land.
-        val account = state.boundAccount ?: return
+        val account = state.boundAccount ?: return true
         state.commitStore?.let { store ->
             store.entries(account).filter { it.channelIdHex == channelId.lowercase() }.forEach { store.remove(account, it.id) }
         }
@@ -1110,6 +1110,7 @@ public class ChannelPublisherLoop private constructor(
             }
         }
         afterRotation(channelId)
+        return true
     }
 
     /** ADR-0090 section 2.1 — an owner device admits the account's devices

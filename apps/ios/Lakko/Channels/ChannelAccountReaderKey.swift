@@ -65,8 +65,12 @@ enum ChannelAccountReaderKey {
             registeredHex: state.extras(channelId).readerKeyRegisteredHex,
             lastFailureMs: lastFailure[channelId], nowMs: nowMs)
         guard decision == .register, let keyHex = keyHex?.lowercased() else { return }
+        // The flag is not known yet (the creating screen writes the first
+        // record just after the keys): a public subscribe of a private
+        // channel would only fail. The next pass decides.
+        guard let isPublic = state.extras(channelId).isPublic else { return }
         do {
-            if state.extras(channelId).isPublic == false {
+            if !isPublic {
                 try await ports.subscribePrivate(channelId, keyHex)
             } else {
                 try await ports.subscribePublic(channelId, keyHex)
@@ -98,8 +102,17 @@ enum ChannelAccountReaderKey {
                 _ = try await client.subscribe(channelIdHex: channelId, subscriberPubkeyHex: keyHex)
             },
             subscribePrivate: { channelId, keyHex in
+                // The first seed: the rows of today stay readers (as at the
+                // first link, ``ChannelInvites``), before a ticket names it.
+                if ChannelOwnership.isOwner(channelId: channelId, state: state),
+                   ChannelInvites.admissionSeeds(channelIdHex: channelId).isEmpty {
+                    try await SubscriberAdmission.markCurrentRowsAsReaders(
+                        channelId: channelId, state: state, client: client,
+                        accountIdentity: try Identity.fromSeed(seed: currentSeed))
+                }
                 try await subscribePrivate(
-                    channelId: channelId, keyHex: keyHex, client: client, currentSeed: currentSeed)
+                    channelId: channelId, keyHex: keyHex, client: client, currentSeed: currentSeed,
+                    admission: admissionForReaderKey(channelId: channelId, state: state))
             },
             handCurrentSeed: { channelId, keyHex in
                 try await SubscriberAdmission.shared.admit(
@@ -110,15 +123,26 @@ enum ChannelAccountReaderKey {
 
     struct NoAdmissionSeed: Error {}
 
+    /// The admission seed the reader key's ticket is sealed to. The OWNER's
+    /// device mints version 0 when the channel has none yet: before this, a
+    /// new private channel had no admission seed until its first invite link
+    /// (seeds are minted on first need), so the registration failed every
+    /// ten minutes and the account's other devices could not read the
+    /// channel (live iPhone walk, 2026-11-14). Web mints it at creation. A
+    /// co-publisher never mints (``ChannelInvites/admissionSeed(channelIdHex:mintIfMissing:)``).
+    static func admissionForReaderKey(channelId: String, state: ChannelsUiState) -> (seed: Data, version: UInt16)? {
+        ChannelInvites.admissionSeed(
+            channelIdHex: channelId, mintIfMissing: ChannelOwnership.isOwner(channelId: channelId, state: state))
+    }
+
     /// A private channel: a one-use invite key that never expires (kept
     /// registered, never deleted), an admission ticket sealed to the newest
     /// admission seed, and the invite proof.
     private static func subscribePrivate(
-        channelId: String, keyHex: String, client: ChannelsClient, currentSeed: Data
+        channelId: String, keyHex: String, client: ChannelsClient, currentSeed: Data,
+        admission: (seed: Data, version: UInt16)?
     ) async throws {
-        guard let admission = ChannelInvites.admissionSeeds(channelIdHex: channelId).last else {
-            throw NoAdmissionSeed()
-        }
+        guard let admission else { throw NoAdmissionSeed() }
         guard let channelBytes = ChannelsClient.hexToData(channelId),
               let subscriber = ChannelsClient.hexToData(keyHex) else { throw NoAdmissionSeed() }
         let identity = try Identity.fromSeed(seed: currentSeed)
