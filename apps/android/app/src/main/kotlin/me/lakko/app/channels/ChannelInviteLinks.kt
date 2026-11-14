@@ -77,22 +77,21 @@ public object ChannelInviteLinks {
                 }
                 FfiChannelAccess.Public(readKey)
             } else {
-                // A channel made before phase B holds no admission seed: its
-                // owner mints version 0 here (the repair). A co-publisher never
-                // mints one: the owner seals each version to it, and a seed
-                // of its own under the same version would be overwritten by
-                // the owner's and orphan every ticket sealed to it.
-                val (version, admissionSeed) = if (state.joinedGroupIdOf(channel.id) == null) {
-                    // The first seed: the rows of today stay readers (the
-                    // web repair), before any ticket can name it.
-                    if (ChannelAdmissionKeys.all(context, account, channel.id).also { l -> l.forEach { it.second.fill(0) } }.isEmpty()) {
-                        ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channel.id)
-                    }
-                    ChannelAdmissionKeys.currentOrMint(context, account, channel.id)
-                } else {
-                    ChannelAdmissionKeys.current(context, account, channel.id)
-                        ?: throw ChannelLinkNeedsOwner()
-                }
+                // Security pass F1 (2026-11-15) - the seed this device holds.
+                // Version 0 is minted by New channel (or a switch to private
+                // made on this device). A device without one, owner or
+                // co-publisher, waits for the owner account's register: it
+                // never mints (a second owner device's seed would orphan
+                // tickets sealed to the register's) and never marks the
+                // service's rows as readers (any of them could be planted).
+                // The pre-phase-B repair that minted here is gone (no channel
+                // of that age is kept: nothing is deployed).
+                val (version, admissionSeed) = admissionSeedFor(
+                    reason = AdmissionSeedReason.USE,
+                    held = { ChannelAdmissionKeys.current(context, account, channel.id) },
+                    mint = { error("a use never mints") },
+                    markRowsAsReaders = {},
+                ) ?: throw ChannelLinkNeedsOwner()
                 admissionVersionUsed = version
                 try {
                     // The door (after the seed is known, so a refusal above

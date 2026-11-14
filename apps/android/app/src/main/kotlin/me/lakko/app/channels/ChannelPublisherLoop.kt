@@ -205,7 +205,12 @@ public class ChannelPublisherLoop private constructor(
         val name = state.channels.value.firstOrNull { it.id == channelId }
             ?.let { it.sharedName.ifBlank { it.localName } }.orEmpty()
         dropGroup(channelId)
-        state.boundAccount?.let { HeldPublisherWelcomes.clear(context, it, channelId) }
+        state.boundAccount?.let {
+            HeldPublisherWelcomes.clear(context, it, channelId)
+            // Security pass F2/F3 - the replay records go with the channel.
+            JoinedPublisherWelcomes.clear(context, it, channelId)
+            DeletedPublisherGroupEpochs.clear(context, it, channelId)
+        }
         rotateRequestOwed.clear(channelId)
         _publishers.update { it - channelId }
         _pending.update { it - channelId }

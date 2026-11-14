@@ -962,12 +962,18 @@ public enum CoPublisher {
         guard let channelId = Self.hexToData(channelIdHex) else {
             throw CoPublisherError.badChannelId(channelIdHex)
         }
+        // Security pass 2026-11-15 (F2) — a Welcome this device already
+        // joined for the channel is an old one served again: not joined.
+        let replay = accountIdB64.map { ChannelDeviceAdmissionStore(accountIdB64: $0) }
+        let welcomeHash = ChannelDeviceAdmission.welcomeReplayHash(welcome)
+        if replay?.hasJoinedWelcome(welcomeHash, channelId: channelIdHex) == true { return nil }
         // ADR-0090 — refused unless the Welcome's sender is a device of the
         // owner account the capability named.
         guard (try? publisherGroupJoinFromWelcome(
             identity: identity, welcome: welcome, groupId: groupId, channelId: channelId,
             ownerAccountKey: ownerAccountKey)) != nil
         else { return nil }
+        replay?.recordJoinedWelcome(welcomeHash, channelId: channelIdHex)
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         CoPublishedJournals.shared.mark(

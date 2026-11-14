@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "ساخت این کانال ممکن نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
+      "text": "ساخت این کانال ممکن نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "این گروه ساخته نشد. چیزی ساخته نشد. دوباره امتحان کنید.",
+      "text": "این گروه ساخته نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

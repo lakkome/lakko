@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "无法创建此频道。未创建任何内容。请重试。",
+      "text": "无法创建此频道。请重试。",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "无法创建此群组。未创建任何内容。请重试。",
+      "text": "无法创建此群组。请重试。",
       "status": "machine"
     },
     "new_group.error.sign_in": {

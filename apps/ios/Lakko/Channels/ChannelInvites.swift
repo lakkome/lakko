@@ -43,12 +43,17 @@ enum ChannelInvites {
 
     // MARK: - The admission key (section 7, decided 2026-11-02)
 
-    /// The channel's newest admission seed and its version. The OWNER mints
-    /// version 0 on first need (`mintIfMissing`); a co-publisher never mints
-    /// (it would collide with the owner's version 0 and orphan the tickets
-    /// sealed to it) and holds only the versions the owner sealed to it.
-    /// Kept in the Keychain. SECRET: whoever holds it opens the channel's
-    /// tickets.
+    /// The channel's newest admission seed and its version. Version 0 is
+    /// minted (`mintIfMissing`) only at the two moments of
+    /// ``AdmissionSeedMoment``: the creation of a private channel on this
+    /// device, and a public-to-private switch made on this device. Everywhere
+    /// else a device without a seed waits for the account's admission-seed
+    /// register (security pass 2026-11-15, F1): an owner device that holds
+    /// none for an existing private channel is a second owner device the
+    /// register has not reached yet, and a co-publisher never mints (it would
+    /// collide with the owner's version 0 and orphan the tickets sealed to
+    /// it). Kept in the Keychain. SECRET: whoever holds it opens the
+    /// channel's tickets.
     static func admissionSeed(channelIdHex: String, mintIfMissing: Bool) -> (seed: Data, version: UInt16)? {
         if let newest = admissionSeeds(channelIdHex: channelIdHex).last { return newest }
         guard mintIfMissing, let account = AcceptedContactsStore.boundAccountIdB64 else { return nil }
@@ -60,6 +65,49 @@ enum ChannelInvites {
         // owner device (and a restored one) checks the tickets of this seed.
         ChannelDeviceAdmission.syncAdmissionSeeds(channelId: channelIdHex)
         return (entry.seed, entry.version)
+    }
+
+    /// Security pass 2026-11-15 (F1) — the moments a device may mint a
+    /// private channel's first admission seed, and whether it then makes the
+    /// service's current subscriber rows readers (its admission mark).
+    enum AdmissionSeedMoment: Equatable {
+        /// New channel on this device: no genuine row exists yet, so any row
+        /// the service lists was planted by it. Mint, mark nothing.
+        case creation
+        /// The owner switched the channel from public to private on this
+        /// device: the rows of today are its subscribers (UX 4.1, "Everyone
+        /// subscribed stays"). Mark them, and mint if no seed is held.
+        case switchedToPrivateHere
+        /// Anything else (a link, the account's reader key, a pass): a
+        /// device without a seed waits for the register; it never mints and
+        /// never marks.
+        case later
+    }
+
+    struct AdmissionSeedAction: Equatable {
+        let mint: Bool
+        let markCurrentRows: Bool
+    }
+
+    nonisolated static func admissionSeedAction(
+        _ moment: AdmissionSeedMoment, holdsSeed: Bool
+    ) -> AdmissionSeedAction {
+        switch moment {
+        case .creation: return AdmissionSeedAction(mint: !holdsSeed, markCurrentRows: false)
+        case .switchedToPrivateHere: return AdmissionSeedAction(mint: !holdsSeed, markCurrentRows: true)
+        case .later: return AdmissionSeedAction(mint: false, markCurrentRows: false)
+        }
+    }
+
+    /// New channel (private) — mint version 0 now, before anything can ask
+    /// for it, and mark no row (the web creation). `nil` without a bound
+    /// account.
+    @discardableResult
+    static func mintAtCreation(channelIdHex: String) -> (seed: Data, version: UInt16)? {
+        let holds = !admissionSeeds(channelIdHex: channelIdHex).isEmpty
+        return admissionSeed(
+            channelIdHex: channelIdHex,
+            mintIfMissing: admissionSeedAction(.creation, holdsSeed: holds).mint)
     }
 
     /// Every admission seed held for a channel, oldest version first: older
@@ -130,20 +178,18 @@ enum ChannelInvites {
         var inviteSeedKept = Data()
         var admissionVersion: UInt16 = 0
         if extras.isPublic == false {
-            // Only the owner mints the admission seed; a co-publisher uses
-            // the versions the owner sealed to it and, until one arrives,
-            // mints no private link (the invite key is registered only once
-            // the seed is known, below).
-            let isOwner = ChannelOwnership.isOwner(channelId: channelIdHex, state: state)
-            // The first seed: the rows of today stay readers (the web
-            // repair), before any ticket can name it.
-            if isOwner, admissionSeeds(channelIdHex: channelIdHex).isEmpty {
-                try await SubscriberAdmission.markCurrentRowsAsReaders(
-                    channelId: channelIdHex, state: state, client: client, accountIdentity: identity)
-            }
-            guard let admission = admissionSeed(channelIdHex: channelIdHex, mintIfMissing: isOwner) else {
-                throw isOwner ? InviteError.noAccess : InviteError.noAdmissionSeedYet
-            }
+            // A co-publisher uses the versions the owner sealed to it and,
+            // until one arrives, mints no private link (the invite key is
+            // registered only once the seed is known, below).
+            // Security pass 2026-11-15 (F1) — no seed here is a seed not
+            // here YET (the creation and the switch mint one): the owner's
+            // device waits for the register like a co-publisher, and marks
+            // no row.
+            guard let admission = admissionSeed(
+                channelIdHex: channelIdHex,
+                mintIfMissing: admissionSeedAction(
+                    .later, holdsSeed: !admissionSeeds(channelIdHex: channelIdHex).isEmpty).mint)
+            else { throw InviteError.noAdmissionSeedYet }
             let inviteSeed = generateChannelInviteSeed()
             let signer = try ChannelInviteSigner.fromInviteSeed(inviteSeed: inviteSeed)
             invitePk = signer.verifyingKey()

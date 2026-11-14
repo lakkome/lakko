@@ -79,6 +79,7 @@ entry's status line, not a mechanical fact.
 | [G-53](./known-gaps.md#g-53) | A person re-added by someone holding only rotated reach keys gets no Welcome | Open | needs a decision on the key rotation or a grant channel; see the entry |
 | [G-54](./known-gaps.md#g-54) | An owner's or publisher's second device cannot post; a lost publishing device orphans the channel | Closed in code (2026-11-14) | per-device PublisherGroup leaves (ADR-0090) on web, iOS and Android; walked on web only; an owner's channels from before the flag day stay read-only on its own device and show no line; see the entry |
 | [G-55](./known-gaps.md#g-55) | An owner-device channel entry and the DeviceGroup rejoin knock show the account key to the Delivery Service | Closed in code (2026-11-14), host-tested only | both rows wrapped under keys every member holds (ADR-0078 section 4); see the entry |
+| [G-56](./known-gaps.md#g-56) | A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it | Open (2026-11-15) | channels on web, iOS, Android |
 
 ## MLS state machine
 
@@ -3361,3 +3362,25 @@ account's lineage seed, which every device of the account holds.
   (compile-checked; not run, no cargo-fuzz here).
 - Residual: the DS still sees that a row of entry or knock shape arrived and
   when, and the epoch of an entry.
+
+### G-56: A device bound under the current key after a rotation derives another PublisherGroup id than its siblings, and the clients disagree on it
+
+- Status: open (2026-11-15), found by the lakko-security pass on the
+  ADR-0090 follow-ups (F6); no change made.
+- A PublisherGroup id is derived from the owner account seed (ADR-0078
+  phase 6) and must stay the same on every device of the account,
+  including across an ADR-0074 rotation (the lineage seed).
+- Web (`AuthContext.tsx` ~2380-2409, `conversationAccountIdentity`) and
+  iOS (`ChannelPublisherIdentity.ownerSeed`) use the CURRENT seed when the
+  device binding names the current key (the keep-under-current-key
+  state), because the core refuses a PublisherGroup for a device bound to
+  another account than the seed's; such a device opens a group under a
+  different id than its siblings that kept the lineage binding, a split.
+- Android (`conversationAccountSeedOf`, `KeyRotationKept.kt` ~602) always
+  uses the lineage seed; on such a device the core refuses the
+  PublisherGroup, so it cannot publish rather than splitting.
+- The divergence comes from the binding state itself, not from one
+  client. The likely fix is to re-bind such a device under the lineage
+  key so that every device opens the same group; it needs a decision
+  (ADR-0074 / ADR-0090) before any client changes.
+

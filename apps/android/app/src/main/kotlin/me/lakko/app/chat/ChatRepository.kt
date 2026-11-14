@@ -7716,7 +7716,34 @@ public class ChatRepository(
         facts: PublicGroupFacts?,
     ): SignedGroupHandle {
         val account = rootAccountIdentity() ?: throw IllegalStateException("no account")
-        return claimGroupHandle(discovery, account.ed25519Seed(), groupId, handle, public, facts)
+        // ADR-0087 section 3 (note of 2026-11-14): this attempt's group id is
+        // kept before any request about the name, so a retry after a failed
+        // step or a lost answer moves the name from an earlier attempt.
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no bound account")
+        val earlier = GroupHandleClaims.on(applicationContext)
+            .keep(accountIdB64, handle, DsClient.pseudonymHex(groupId))
+            .mapNotNull { hexToBytes(it) }
+        val seed = account.ed25519Seed()
+        return claimOrTakeBackGroupHandle(
+            earlier,
+            claim = { claimGroupHandle(discovery, seed, groupId, handle, public, facts) },
+            rekeyFrom = { earlierId -> moveGroupHandle(discovery, seed, earlierId, groupId, handle) },
+            update = { updateGroupHandle(discovery, seed, groupId, handle, public, facts) },
+        )
+    }
+
+    /** ADR-0087 section 3 — the New group of [handle] exists, or the name is
+     *  someone else's: the earlier attempts are no longer needed. */
+    public fun forgetNewGroupHandle(handle: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        GroupHandleClaims.on(applicationContext).forget(accountIdB64, handle)
+    }
+
+    /** Whether a New group on this account claimed [handle] and has not
+     *  finished: the name is this account's to take back, not "taken". */
+    public fun isNewGroupHandleKept(handle: String): Boolean {
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        return GroupHandleClaims.on(applicationContext).isClaimed(accountIdB64, handle)
     }
 
     /** Store a handle this owner just wrote and send it into the group. */

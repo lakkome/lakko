@@ -141,6 +141,14 @@ export interface ChannelAccessRecord {
    *  stopped publishing and rotating and waits as a reader; the group state
    *  is KEPT until an owner-signed Welcome for the same group replaces it. */
   readonly resetSuspected?: true;
+  /** lakko-security F2 (2026-11-15): lower-case hex SHA-256 of the newest
+   *  PublisherGroup Welcomes this device JOINED for the channel (bounded,
+   *  `welcome-replay.ts`); such a Welcome is never joined again. */
+  readonly joinedWelcomeHashes?: readonly string[];
+  /** lakko-security F3: the epoch of the last inactive PublisherGroup this
+   *  device deleted for the channel; a join with no held group must land
+   *  above it unless the channel is under reset suspicion. */
+  readonly deletedGroupEpoch?: number;
 }
 
 /**
@@ -393,6 +401,20 @@ export function decodeAccessRecord(raw: unknown): ChannelAccessRecord | null {
       ? { rowsReadThroughSeq: r.rowsReadThroughSeq }
       : {}),
     ...(r.resetSuspected === true ? { resetSuspected: true as const } : {}),
+    ...(Array.isArray(r.joinedWelcomeHashes)
+      ? {
+          joinedWelcomeHashes: [
+            ...new Set(
+              (r.joinedWelcomeHashes as unknown[]).filter(
+                (h: unknown): h is string => typeof h === "string" && /^[0-9a-f]{64}$/.test(h),
+              ),
+            ),
+          ].slice(-16),
+        }
+      : {}),
+    ...(typeof r.deletedGroupEpoch === "number" && Number.isSafeInteger(r.deletedGroupEpoch) && r.deletedGroupEpoch >= 0
+      ? { deletedGroupEpoch: r.deletedGroupEpoch }
+      : {}),
     ...(isB64(r.ownerAccountKeyB64) && r.ownerAccountKeyB64.length === KEY_B64_LEN
       ? { ownerAccountKeyB64: r.ownerAccountKeyB64 }
       : {}),

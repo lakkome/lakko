@@ -47,13 +47,13 @@ import { avatarFromWasm, avatarToWasm, b64ToBytes, bytesToB64, type AvatarData }
 import { channelsActions, channelsState } from "../state/channels-state";
 import { deleteInviteKey, listInviteKeys, putInviteKey } from "./api";
 import { bytesToHex, channelIdFromHex, type WasmIdentity } from "./composer";
-import { newestAdmissionSeed, type ChannelInviteLinkRecord } from "./channel-access-record";
+import type { ChannelInviteLinkRecord } from "./channel-access-record";
 import {
   ChannelError,
   channelAvatarOf,
   channelReadKeyHere,
   channelVisibilityOf,
-  repairPrivateChannelAccess,
+  privateChannelAdmissionSeed,
   serviceErrorCode,
   type ChannelAccessKey,
   type ChannelVisibility,
@@ -211,9 +211,9 @@ async function mint(
     if (readKey === null) throw new ChannelError("needs-owner");
     access = wasm.ChannelAccess.publicChannel(readKey);
   } else {
-    // A private channel from before phase B has no admission seed yet; the
-    // owner's device mints it now (`repairPrivateChannelAccess`).
-    const adm = newestAdmissionSeed(channelsActions.accessOf(idHex)) ?? (await repairPrivateChannelAccess(identity, idHex));
+    // A device that holds no admission seed waits for the account's register
+    // (or the owner's hand-over); it never mints one here (F1).
+    const adm = privateChannelAdmissionSeed(idHex);
     admissionVersion = adm.version;
     inviteSeed = wasm.generateChannelInviteSeed();
     const signer = wasm.ChannelInviteSigner.fromInviteSeed(inviteSeed);

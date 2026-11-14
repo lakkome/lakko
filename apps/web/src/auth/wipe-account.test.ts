@@ -303,6 +303,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
   put(`lakko.channels.orphan-removed.v1.${acct}`, JSON.stringify(["ch2"]));
   put(`lakko.channels.claimed-handles.v1.${acct}`, JSON.stringify({ news: "ch2" }));
+  put(`lakko.groups.claimed-handles.v1.${acct}`, JSON.stringify({ team: ["g1"] }));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -681,6 +682,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.reset-continuity.v1.": "account",
   "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.channels.claimed-handles.v1.": "account",
+  "lakko.groups.claimed-handles.v1.": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",

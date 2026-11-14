@@ -2078,8 +2078,8 @@
       "comment": "A channel cannot be created because this session holds no keys."
     },
     "channels.new.failed": {
-      "text": "Couldn't create this channel. Nothing was created. Try again.",
-      "comment": "New channel: setting the channel up failed; nothing was created."
+      "text": "Couldn't create this channel. Try again.",
+      "comment": "New channel: creating the channel failed. The @name may already be claimed for this channel; a retry takes it back."
     },
     "channels.new.handle_hint": {
       "text": "Others can find and subscribe to the channel by it.",
@@ -7676,8 +7676,8 @@
       "comment": "Web: back button to the groups list on a narrow screen."
     },
     "new_group.error.secure_setup": {
-      "text": "Couldn't create this group. Nothing was created. Try again.",
-      "comment": "New group form: creating the group failed for another reason."
+      "text": "Couldn't create this group. Try again.",
+      "comment": "New group form: creating the group failed for another reason. The @name may already be claimed when this shows."
     },
     "new_group.error.sign_in": {
       "text": "Sign in again to create a group.",

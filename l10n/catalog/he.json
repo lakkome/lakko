@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "לא ניתן ליצור את הערוץ. שום דבר לא נוצר. נסה שוב.",
+      "text": "לא ניתן ליצור את הערוץ. נסה שוב.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "לא ניתן ליצור את הקבוצה. שום דבר לא נוצר. נסו שוב.",
+      "text": "לא ניתן ליצור את הקבוצה. נסו שוב.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

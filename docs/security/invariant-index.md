@@ -15,7 +15,7 @@ section that describes it.
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 90  | C-1..C-80, C-82..C-91  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
-| **G-** | 55  | G-1..G-55 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
+| **G-** | 56  | G-1..G-56 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
 | Total invariants  | 111 | (I + C + T) | live properties |
 | Total open gaps   | 23  | (G)         | tracked + scoped |
 
@@ -569,6 +569,7 @@ should not re-discover them.
 | G-53 | **Open (minted 2026-10-31):** a person re-added by a member who is not their contact and shares no other group with them: the removed person rotated their `group` and `member` reach keys, so the Welcome stays owed and nothing says so. Needs a decision on the rotation or a grant channel. |
 | G-54 | **CLOSED in code 2026-11-14 by [ADR-0090](../adr/0090-publisher-group-device-leaves.md)** (per-device PublisherGroup leaves on web, iOS and Android, C-90 / C-91; walked on web only: an owner's second web device was admitted and posted). Open: nothing native walked; decision A, a co-publisher's device request and a second owner device's rotation not walked; an owner's channels from before the flag day are read-only on its own device and show neither a composer nor the waiting line. As minted, **open (accepted for now, 2026-11-13):** a channel has one publishing device per owner or publisher: the PublisherGroup leaf is the account key, so other devices of the account are readers (the `lakko-sync` channel-subscription register carries the channel and the shared subscriber key), and a lost publishing device leaves the channel with nobody who can post, approve, admit or rotate. No client may found a PublisherGroup or reset a channel journal outside create-channel. Closing needs per-device PublisherGroup leaves (invariant #3). |
 | G-55 | **CLOSED in code 2026-11-14** (host-tested only, not walked, not deployed): the owner-device channel entry reaches the PublisherGroup journal wrapped under a key derived from the epoch-N Delivery Service access seed (`lakko-mls` `entry_wrap`, C-91), and the DeviceGroup rejoin knock is sealed under the lineage seed and padded (`pairing::encode_rejoin_knock`, C-85), so neither shows the account key to the Delivery Service ([ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 4). As minted (2026-11-14): an external commit is a `PublicMessage`, so the entering leaf's binding named the owner's account key beside the hidden journal id, and the rejoin knock posted the pairing payload (login handle, KeyPackage with its binding) in the clear. |
+| G-56 | **Open 2026-11-15** (lakko-security F6 on the ADR-0090 follow-ups): a device bound under the current key after an ADR-0074 rotation derives another PublisherGroup id than its siblings that kept the lineage binding; web and iOS use the current seed there (split), Android the lineage seed (the core refuses the group, the device cannot publish). Needs a decision, likely a re-bind under the lineage key. Full entry: [`known-gaps.md` G-56](./known-gaps.md#g-56). |
 
 ## How to add a new invariant
 

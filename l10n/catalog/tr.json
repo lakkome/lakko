@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Bu kanal oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "text": "Bu kanal oluşturulamadı. Tekrar deneyin.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Bu grup oluşturulamadı. Hiçbir şey oluşturulmadı. Tekrar deneyin.",
+      "text": "Bu grup oluşturulamadı. Tekrar deneyin.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

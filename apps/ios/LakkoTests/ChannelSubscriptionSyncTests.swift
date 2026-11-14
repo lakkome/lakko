@@ -551,10 +551,14 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         XCTAssertNil(channels.extras(id).readerKeyRegisteredHex)
     }
 
-    /// Live iPhone walk (2026-11-14) — a new private channel has no admission
-    /// seed until its first invite link: the owner's device mints version 0
-    /// for the reader key's ticket; a co-publisher's device never mints.
-    func testTheOwnersDeviceMintsTheFirstAdmissionSeedForTheReaderKey() {
+    /// Security pass 2026-11-15 (F1) — a private channel's first admission
+    /// seed is minted at its creation and marks no row; an owner device that
+    /// holds no seed for an existing private channel neither mints nor marks
+    /// (it waits for the account's register, like a co-publisher); links
+    /// and the account's reader key never mint. The rows the service lists
+    /// are present throughout: the only call that would read them is the
+    /// mark, and no request is sent.
+    func testOnlyCreationMintsTheFirstAdmissionSeedAndNothingMarksPlantedRows() async throws {
         let account = "reader-\(UUID().uuidString)"
         let previousBound = AcceptedContactsStore.boundAccountIdB64
         AcceptedContactsStore.bind(accountIdB64: account)
@@ -564,27 +568,79 @@ final class ChannelSubscriptionSyncTests: XCTestCase {
         }
         let channels = ChannelsUiState(accountIdB64: account)
         defer { ChannelsUiState.forget(accountIdB64: account) }
-        let owned = hex(idA)
-        let copublished = hex(idB)
-        for id in [owned, copublished] {
+        let existing = hex(idA)
+        let created = hex(idB)
+        for id in [existing, created] {
             channels.addChannel(ChannelHandle(id: id, localName: "News", localDescription: "", addedAtMs: 1))
             channels.setKeys(channelId: id, keys: ChannelPublisherKeys(
                 seed: Data(repeating: 1, count: 32), signingKeySeed: Data(repeating: 2, count: 32)))
+            channels.updateExtras(id) {
+                $0.accountRole = ChannelAccountRole.owner
+                $0.recordPublic = false
+            }
         }
-        channels.updateExtras(copublished) { $0.accountRole = ChannelAccountRole.coPublisher }
-        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: owned).isEmpty, "none before")
+        XCTAssertTrue(ChannelOwnership.isOwner(channelId: existing, state: channels))
+        // The service would list two (planted) rows if asked.
+        let sent = SentRequests()
+        let rowsPage = #"{"subscribers":[{"seq":1,"subscriber_pubkey_hex":"\#(String(repeating: "aa", count: 32))"},{"seq":2,"subscriber_pubkey_hex":"\#(String(repeating: "bb", count: 32))"}],"next_after":2}"#
+        let client = ChannelsClient(
+            baseURL: "https://api.example/channels", roles: ChannelPublisherRoleCache(),
+            transport: { request in
+                sent.requests.append(request)
+                return (Data(rowsPage.utf8), HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            })
+        let seed = Data(repeating: 7, count: 64)
 
-        let minted = ChannelAccountReaderKey.admissionForReaderKey(channelId: owned, state: channels)
+        // An existing private channel with no seed here: nothing minted.
+        XCTAssertNil(ChannelAccountReaderKey.admissionForReaderKey(channelId: existing, state: channels))
+        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: existing).isEmpty, "never minted")
+        let ports = ChannelAccountReaderKey.livePorts(state: channels, client: client, currentSeed: seed)
+        do {
+            try await ports.subscribePrivate(existing, String(repeating: "cd", count: 32))
+            XCTFail("no seed: the registration waits")
+        } catch is ChannelAccountReaderKey.NoAdmissionSeed {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        do {
+            _ = try await ChannelInvites.mintLink(
+                channelIdHex: existing, state: channels, client: client, currentSeed: seed)
+            XCTFail("no seed: no private link")
+        } catch ChannelInvites.InviteError.noAdmissionSeedYet {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: existing).isEmpty)
+        XCTAssertNil(channels.extras(existing).admittedThroughSeq, "no row was made a reader")
+        XCTAssertNil(channels.extras(existing).admissionMarkSet)
+        XCTAssertEqual(sent.requests.count, 0, "the subscriber rows were never read")
+
+        // Creation: version 0 minted, no row marked.
+        let minted = ChannelInvites.mintAtCreation(channelIdHex: created)
         XCTAssertEqual(minted?.version, 0)
         XCTAssertEqual(minted?.seed.count, 32)
-        XCTAssertEqual(ChannelInvites.admissionSeeds(channelIdHex: owned).map(\.seed), minted.map { [$0.seed] })
-        // The same seed the next time: minted once.
-        XCTAssertEqual(ChannelAccountReaderKey.admissionForReaderKey(channelId: owned, state: channels)?.seed,
-                       minted?.seed)
+        XCTAssertEqual(ChannelInvites.mintAtCreation(channelIdHex: created)?.seed, minted?.seed, "minted once")
+        XCTAssertEqual(ChannelAccountReaderKey.admissionForReaderKey(channelId: created, state: channels)?.seed,
+                       minted?.seed, "the reader key's ticket is sealed to it")
+        XCTAssertNil(channels.extras(created).admittedThroughSeq)
+        XCTAssertNil(channels.extras(created).admissionMarkSet)
+        XCTAssertEqual(sent.requests.count, 0)
+    }
 
-        XCTAssertNil(ChannelAccountReaderKey.admissionForReaderKey(channelId: copublished, state: channels),
-                     "a co-publisher waits for the owner's seed")
-        XCTAssertTrue(ChannelInvites.admissionSeeds(channelIdHex: copublished).isEmpty)
+    func testTheAdmissionSeedMomentsMintAndMarkAsDecided() {
+        typealias A = ChannelInvites.AdmissionSeedAction
+        let f = ChannelInvites.admissionSeedAction
+        XCTAssertEqual(f(.creation, false), A(mint: true, markCurrentRows: false))
+        XCTAssertEqual(f(.creation, true), A(mint: false, markCurrentRows: false))
+        XCTAssertEqual(f(.switchedToPrivateHere, false), A(mint: true, markCurrentRows: true))
+        XCTAssertEqual(f(.switchedToPrivateHere, true), A(mint: false, markCurrentRows: true))
+        XCTAssertEqual(f(.later, false), A(mint: false, markCurrentRows: false))
+        XCTAssertEqual(f(.later, true), A(mint: false, markCurrentRows: false))
+    }
+
+    private final class SentRequests: @unchecked Sendable {
+        var requests: [URLRequest] = []
     }
 
     // MARK: - Follow-up decision 2: orphans of a key reset are left alone

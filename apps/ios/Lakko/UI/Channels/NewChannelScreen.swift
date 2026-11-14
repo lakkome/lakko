@@ -201,8 +201,17 @@ struct NewChannelScreen: View {
             }
         }
         // A create that failed after claiming this name: the same channel id,
-        // which the claim answers as already this channel's.
-        let pendingId = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
+        // hence the same write key, which the claim answers as the first time.
+        var pendingId = PendingChannelHandleStore.channelId(forHandle: wanted, accountIdB64: accountIdB64)
+        // Security pass 2026-11-15 (F5) — a kept id whose create finished is
+        // never founded over (another owner device may hold its group): it is
+        // forgotten and this create takes a fresh id.
+        if let kept = pendingId, !PendingChannelHandleStore.keptIdUsable(
+            listedHere: state.channels.contains { $0.id.lowercased() == kept.lowercased() },
+            inRegister: ChannelSubscriptionSync.shared.registeredKeys(channelId: kept) != nil) {
+            PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
+            pendingId = nil
+        }
         let id = pendingId ?? ChannelsComposer.freshChannelIdHex()
         let channelName = trimmedName
         let channelDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -218,23 +227,11 @@ struct NewChannelScreen: View {
                 lineageIdentity: lineage, channelId: try ChannelsComposer.channelIdFromHex(id),
                 name: channelName, description: channelDescription, avatar: avatar?.ffi)
             PendingChannelHandleStore.keep(handle: wanted, channelIdHex: id, accountIdB64: accountIdB64)
-            // A retry under the kept id takes back a name the first attempt
-            // claimed (the claim route answers it as taken).
-            let discovery = DiscoveryClient()
-            let accountSeed = owner.ed25519Seed()
-            let published = isPublic ? facts : nil
-            written = try await ConversationHandles.claimOrReclaim(
-                reclaim: pendingId != nil,
-                claim: {
-                    try await ConversationHandles.claim(
-                        discovery: discovery, accountSeed: accountSeed, journalId: journal,
-                        handle: wanted, isPublic: isPublic, facts: published)
-                },
-                update: {
-                    try await ConversationHandles.update(
-                        discovery: discovery, accountSeed: accountSeed, journalId: journal,
-                        handle: wanted, isPublic: isPublic, facts: published)
-                })
+            // A retry under the kept id is the same key: the claim answers it
+            // as the first one did.
+            written = try await ConversationHandles.claim(
+                discovery: DiscoveryClient(), accountSeed: owner.ed25519Seed(), journalId: journal,
+                handle: wanted, isPublic: isPublic, facts: isPublic ? facts : nil)
         } catch let refusal as DiscoveryClient.HandleWriteError where refusal.code == "name-taken" {
             HandleTakenCheck.note(wanted, .taken)
             PendingChannelHandleStore.forget(handle: wanted, accountIdB64: accountIdB64)
@@ -254,6 +251,10 @@ struct NewChannelScreen: View {
         do {
             let owner = try Identity.fromSeed(seed: accountIdentitySeed)
             _ = try await client.createChannel(channelIdHex: id, accountIdentity: owner, isPrivate: !isPublic)
+            // Security pass 2026-11-15 (F1) — a private channel gets its first
+            // admission seed now and marks no row: no genuine subscriber
+            // exists yet, so any row the service lists was planted there.
+            if !isPublic { ChannelInvites.mintAtCreation(channelIdHex: id) }
             let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
             // New channel is the one place a PublisherGroup is founded.
             let keys = try ChannelsComposer.freshPublisherKeys(

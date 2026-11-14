@@ -87,8 +87,23 @@ class PublisherWelcomeTargetsTest {
         assertEquals(InactiveGroupVerdict.REMOVED, v(owner = false, leaf = false, others = true))
         assertEquals(InactiveGroupVerdict.REMOVED, v(owner = false, leaf = null, others = true))
         assertEquals(InactiveGroupVerdict.REMOVED, v(owner = false, leaf = true, others = false))
-        assertEquals(InactiveGroupVerdict.UNDECIDED, v(owner = true, leaf = true, others = null))
+        assertEquals(InactiveGroupVerdict.UNDECIDED, v(owner = true, leaf = null, others = null))
+        assertEquals(InactiveGroupVerdict.UNDECIDED, v(owner = true, leaf = false, others = null))
         assertEquals(InactiveGroupVerdict.UNDECIDED, v(owner = false, leaf = false, others = null))
+    }
+
+    @Test
+    fun `an owner device whose account still holds a leaf waits even when its own roster shows it alone`() {
+        // Security pass F4 (2026-11-15) - the commit that removed this owner
+        // device's leaf came from another device of the account (peer gate
+        // C-90): a leaf of the owner account left in the group is another own
+        // device, whatever a stale DeviceGroup roster (a re-founded one) says.
+        // It waits for that device's Welcome; it never takes the channel alone.
+        fun v(leaf: Boolean?, others: Boolean?) = inactivePublisherGroupVerdict(ownerDevice = true, ownAccountHasLeaf = leaf, otherOwnDevices = others)
+        assertEquals(InactiveGroupVerdict.WAIT_FOR_WELCOME, v(leaf = true, others = false))
+        assertEquals(InactiveGroupVerdict.WAIT_FOR_WELCOME, v(leaf = true, others = null))
+        // No leaf of the account left and the roster alone: it reads.
+        assertEquals(InactiveGroupVerdict.READER, v(leaf = false, others = false))
     }
 
     @Test

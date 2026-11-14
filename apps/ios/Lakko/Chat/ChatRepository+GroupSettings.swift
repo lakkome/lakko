@@ -329,16 +329,36 @@ extension ChatRepository {
     /// Section 3.1 — claim `handle` for a group being founded, BEFORE
     /// anything about it leaves the device: a held name throws and nothing is
     /// created. Returns the signed in-group value to adopt once registered.
+    ///
+    /// `earlier`: the group ids of earlier New group attempts at this name,
+    /// newest first (``PendingGroupHandleStore``); a retry moves the name from
+    /// one of them to this group instead of claiming it.
     func claimHandleBeforeFounding(
-        groupId: Data, handle: String, isPublic: Bool, name: String, avatar: ProfileAvatar?
+        groupId: Data, handle: String, isPublic: Bool, name: String, avatar: ProfileAvatar?,
+        earlier: [Data] = []
     ) async throws -> (value: FfiConversationHandle, leaseUntilMs: UInt64) {
         guard let accountIdentity else { throw ChatError.argument("no account identity") }
         let facts = isPublic ? newGroupFacts(groupId: groupId, name: name, avatar: avatar) : nil
         if isPublic && facts == nil { throw ChatError.argument("a public group needs a name") }
         let accountSeed = accountIdentity.ed25519Seed()
-        let written = try await ConversationHandles.claim(
-            discovery: DiscoveryClient(), accountSeed: accountSeed, journalId: groupId,
-            handle: handle, isPublic: isPublic, facts: facts)
+        let discovery = DiscoveryClient()
+        let written = try await ConversationHandles.claimOrTakeBack(
+            earlier: earlier,
+            claim: {
+                try await ConversationHandles.claim(
+                    discovery: discovery, accountSeed: accountSeed, journalId: groupId,
+                    handle: handle, isPublic: isPublic, facts: facts)
+            },
+            rekeyFrom: { earlierId in
+                try await ConversationHandles.move(
+                    discovery: discovery, accountSeed: accountSeed, fromJournalId: earlierId,
+                    toJournalId: groupId, handle: handle)
+            },
+            update: {
+                try await ConversationHandles.update(
+                    discovery: discovery, accountSeed: accountSeed, journalId: groupId,
+                    handle: handle, isPublic: isPublic, facts: facts)
+            })
         var seed = try ConversationHandles.seed(accountSeed: accountSeed, journalId: groupId)
         defer { RootHandover.wipe(&seed) }
         let value = try signConversationHandle(

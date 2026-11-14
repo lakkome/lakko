@@ -15,7 +15,9 @@ import uniffi.lakko_ffi_uniffi.ChannelInviteSigner
  * ([ChannelReseal.resealKeys], whatever the admission mark says).
  *
  * A public channel takes the plain subscribe. A private one needs an
- * admission ticket and an invite proof: this device puts a one-use invite
+ * admission ticket and an invite proof, so it waits until this device holds an
+ * admission seed (minted by New channel, or sent through the account's
+ * register); then this device puts a one-use invite
  * key of its own (it is a publisher) with no expiry, seals the ticket under
  * the channel's current admission key and subscribes. The invite key is kept,
  * so the row's ticket stays valid for every let-in pass.
@@ -89,17 +91,19 @@ public object ChannelAccountReaderKey {
     ): Boolean {
         val account = state.boundAccount ?: return false
         val publisher = state.publisher ?: return false
-        // The owner mints the first admission seed if the channel has none
-        // (the rows of today stay readers, as a first link does); a
-        // co-publisher waits for the owner's.
-        val (version, admissionSeed) = if (state.joinedGroupIdOf(channelId) == null) {
-            if (ChannelAdmissionKeys.all(context, account, channelId).also { l -> l.forEach { it.second.fill(0) } }.isEmpty()) {
-                ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channelId)
-            }
-            ChannelAdmissionKeys.currentOrMint(context, account, channelId)
-        } else {
-            ChannelAdmissionKeys.current(context, account, channelId) ?: return false
-        }
+        // Security pass F1 (2026-11-15) - the seed this device holds, owner
+        // and co-publisher alike. A private channel's version 0 is minted by
+        // New channel (or a switch to private made here); a device without a
+        // seed waits for the owner account's register: it never mints one and
+        // never marks the service's rows as readers (a planted row would get
+        // the channel's seed, and the raised mark would spread to the
+        // account's other devices). The reconcile registers again later.
+        val (version, admissionSeed) = admissionSeedFor(
+            reason = AdmissionSeedReason.USE,
+            held = { ChannelAdmissionKeys.current(context, account, channelId) },
+            mint = { error("a use never mints") },
+            markRowsAsReaders = {},
+        ) ?: return false
         val inviteSeed = uniffi.lakko_ffi_uniffi.generateChannelInviteSeed()
         try {
             val channelBytes = ChannelsComposer.channelIdFromHex(channelId)

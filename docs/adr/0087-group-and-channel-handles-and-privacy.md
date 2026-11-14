@@ -170,6 +170,18 @@ the account.**
   table. `usernames` and `handles` (section 2) each insert into it in the
   transaction that takes a name, so a person and a group can never hold one name.
   A refused claim is `409 name-taken` on every path.
+  *Note, 2026-11-14:* a claim of a current row by the write key that holds it is
+  not refused: `POST /discovery/handle/claim` answers it as the first claim (a
+  fresh certificate, the lease renewed, the visibility and the public content
+  replaced). A New channel that failed after its claim landed retries under the
+  same kept channel id, hence the same key, and so takes its own name back. A
+  claim by another key, of a username, or of a retired row stays `409 name-taken`;
+  the claim route does not take back a retired name. A New group founds a new group,
+  hence a new key, on every attempt, so its clients keep the group ids of earlier
+  attempts at a name and a retry moves the name with `POST /discovery/handle/rekey`
+  signed by an earlier attempt's key, then writes the new group's content with
+  `PUT /discovery/handle`. A rekey answered `404` (no earlier claim landed) is
+  followed by a plain claim; `401` from every earlier key means the name is held.
 - `POST /discovery/lookup` answers for either kind. `POST /discovery/channel/*`
   goes.
 - A retired name, of any kind, is held 30 days as ADR-0076 holds a username, and

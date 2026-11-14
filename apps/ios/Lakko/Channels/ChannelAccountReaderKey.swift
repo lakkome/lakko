@@ -102,14 +102,8 @@ enum ChannelAccountReaderKey {
                 _ = try await client.subscribe(channelIdHex: channelId, subscriberPubkeyHex: keyHex)
             },
             subscribePrivate: { channelId, keyHex in
-                // The first seed: the rows of today stay readers (as at the
-                // first link, ``ChannelInvites``), before a ticket names it.
-                if ChannelOwnership.isOwner(channelId: channelId, state: state),
-                   ChannelInvites.admissionSeeds(channelIdHex: channelId).isEmpty {
-                    try await SubscriberAdmission.markCurrentRowsAsReaders(
-                        channelId: channelId, state: state, client: client,
-                        accountIdentity: try Identity.fromSeed(seed: currentSeed))
-                }
+                // Security pass 2026-11-15 (F1) — never a mark here: with no
+                // seed held, the registration waits (``admissionForReaderKey``).
                 try await subscribePrivate(
                     channelId: channelId, keyHex: keyHex, client: client, currentSeed: currentSeed,
                     admission: admissionForReaderKey(channelId: channelId, state: state))
@@ -123,16 +117,20 @@ enum ChannelAccountReaderKey {
 
     struct NoAdmissionSeed: Error {}
 
-    /// The admission seed the reader key's ticket is sealed to. The OWNER's
-    /// device mints version 0 when the channel has none yet: before this, a
-    /// new private channel had no admission seed until its first invite link
-    /// (seeds are minted on first need), so the registration failed every
-    /// ten minutes and the account's other devices could not read the
-    /// channel (live iPhone walk, 2026-11-14). Web mints it at creation. A
-    /// co-publisher never mints (``ChannelInvites/admissionSeed(channelIdHex:mintIfMissing:)``).
+    /// The admission seed the reader key's ticket is sealed to, or `nil`.
+    /// Never minted here (security pass 2026-11-15, F1): a new private
+    /// channel gets version 0 at creation (``ChannelInvites/mintAtCreation(channelIdHex:)``)
+    /// and a public-to-private switch mints it on the switching device; a
+    /// device that holds none for an existing private channel (an owner
+    /// device the account's admission-seed register has not reached yet, or
+    /// a co-publisher) waits for the register, and this registration is
+    /// tried again after ``retryAfterMs``. Minting here used to mark every
+    /// row the service listed as a reader, so planted rows got the seed.
     static func admissionForReaderKey(channelId: String, state: ChannelsUiState) -> (seed: Data, version: UInt16)? {
-        ChannelInvites.admissionSeed(
-            channelIdHex: channelId, mintIfMissing: ChannelOwnership.isOwner(channelId: channelId, state: state))
+        let holds = !ChannelInvites.admissionSeeds(channelIdHex: channelId).isEmpty
+        return ChannelInvites.admissionSeed(
+            channelIdHex: channelId,
+            mintIfMissing: ChannelInvites.admissionSeedAction(.later, holdsSeed: holds).mint)
     }
 
     /// A private channel: a one-use invite key that never expires (kept

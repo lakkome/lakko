@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "यह चैनल नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
+      "text": "यह चैनल नहीं बन सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "यह समूह नहीं बन सका। कुछ भी नहीं बना। फिर से कोशिश करें।",
+      "text": "यह समूह नहीं बन सका। फिर से कोशिश करें।",
       "status": "machine"
     },
     "new_group.error.sign_in": {

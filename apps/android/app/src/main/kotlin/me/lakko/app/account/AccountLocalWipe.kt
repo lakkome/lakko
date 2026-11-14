@@ -301,6 +301,7 @@ public object AccountLocalWipe {
         },
         Step("reach") { ctx, acct -> me.lakko.app.reach.EncryptedReachDocStore(ctx).delete(acct) },
         Step("channel-handle-claims") { ctx, acct -> me.lakko.app.channels.ChannelHandleClaims.forgetAccount(ctx, acct) },
+        Step("group-handle-claims") { ctx, acct -> me.lakko.app.chat.GroupHandleClaims.forgetAccount(ctx, acct) },
         Step("channel-read-keys") { ctx, acct -> me.lakko.app.channels.ChannelReadKeys.forgetAccount(ctx, acct) },
         Step("channel-own-feedback") { ctx, acct -> me.lakko.app.channels.OwnChannelFeedbackStore.forgetAccount(ctx, acct) },
         Step("channel-feedback-outbox") { ctx, acct -> me.lakko.app.channels.ChannelFeedbackOutbox.forgetAccount(ctx, acct) },
@@ -313,6 +314,9 @@ public object AccountLocalWipe {
         Step("channel-epoch-offsets") { ctx, acct -> me.lakko.app.channels.ChannelEpochOffsets.forgetAccount(ctx, acct) },
         Step("channel-suspensions") { ctx, acct -> me.lakko.app.channels.ChannelSuspensions.forgetAccount(ctx, acct) },
         Step("channel-held-welcomes") { ctx, acct -> me.lakko.app.channels.HeldPublisherWelcomes.forgetAccount(ctx, acct) },
+        Step("channel-joined-welcomes") { ctx, acct -> me.lakko.app.channels.JoinedPublisherWelcomes.forgetAccount(ctx, acct) },
+        Step("channel-deleted-group-epochs") { ctx, acct -> me.lakko.app.channels.DeletedPublisherGroupEpochs.forgetAccount(ctx, acct) },
+        Step("channel-create-pending") { ctx, acct -> me.lakko.app.channels.ChannelCreatePending.forgetAccount(ctx, acct) },
 
         // ---- contacts -------------------------------------------------------
         Step("accepted-contacts") { ctx, acct -> me.lakko.app.contacts.AcceptedContactsStore.delete(ctx, acct) },

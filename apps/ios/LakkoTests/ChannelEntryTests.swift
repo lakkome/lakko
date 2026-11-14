@@ -607,46 +607,128 @@ final class ChannelEntryTests: XCTestCase {
     }
     // MARK: New channel retry (live iPhone walk, 2026-11-14)
 
-    /// A retry of a New channel whose first attempt claimed the @name: the
-    /// claim route answers `name-taken`, and the update under the same key
-    /// takes the name back. Another key's row stays held.
-    func testARetryTakesBackTheNameItsFirstAttemptClaimed() async throws {
-        let written = ConversationHandles.Written(
-            handle: "news", isPublic: false, certificate: Data([1]), leaseUntilMs: 9)
-        let taken = DiscoveryClient.HandleWriteError(status: 409, code: "name-taken")
-        var updates = 0
+    /// A retry of a New channel whose first attempt claimed the @name runs
+    /// under the channel id kept for that name, so its claim is signed by the
+    /// same handle write key, which discovery answers as the first claim
+    /// (2026-11-14). A fresh id would be another key, answered `name-taken`.
+    func testARetryClaimsTheNameWithTheFirstAttemptsWriteKey() throws {
+        let suite = "pending-handles-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let account = "retry-account"
+        let owner = try Identity.fromSeed(seed: Data(repeating: 0x41, count: 64))
 
-        let reclaimed = try await ConversationHandles.claimOrReclaim(
-            reclaim: true, claim: { throw taken }, update: { updates += 1; return written })
-        XCTAssertEqual(reclaimed.handle, "news")
-        XCTAssertEqual(updates, 1)
+        func writeKey(_ idHex: String) throws -> Data {
+            let (journal, _) = try ConversationHandles.channelFacts(
+                lineageIdentity: owner, channelId: try ChannelsComposer.channelIdFromHex(idHex),
+                name: "News", description: "")
+            var seed = try ConversationHandles.seed(accountSeed: owner.ed25519Seed(), journalId: journal)
+            defer { RootHandover.wipe(&seed) }
+            return try handleWritePublicKey(handleSeed: seed)
+        }
 
-        // Not a retry: name-taken is the answer, no update is tried.
+        let first = ChannelsComposer.freshChannelIdHex()
+        PendingChannelHandleStore.keep(
+            handle: "@News", channelIdHex: first, accountIdB64: account, defaults: defaults)
+        let kept = try XCTUnwrap(
+            PendingChannelHandleStore.channelId(forHandle: "news", accountIdB64: account, defaults: defaults))
+        XCTAssertEqual(kept, first)
+        XCTAssertEqual(try writeKey(kept), try writeKey(first))
+        XCTAssertNotEqual(try writeKey(ChannelsComposer.freshChannelIdHex()), try writeKey(first))
+
+        // The channel exists: the name is no longer kept.
+        PendingChannelHandleStore.forget(handle: "news", accountIdB64: account, defaults: defaults)
+        XCTAssertNil(PendingChannelHandleStore.channelId(forHandle: "news", accountIdB64: account, defaults: defaults))
+    }
+
+    // MARK: New group retry (ADR-0087 section 3, note of 2026-11-14)
+
+    /// The group ids of New group attempts at one name, newest first: a retry
+    /// gets the earlier ones, the list is bounded, and success or a real
+    /// `name-taken` forgets it.
+    func testNewGroupAttemptsAreKeptNewestFirst() throws {
+        let suite = "pending-group-handles-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let account = "retry-account"
+        XCTAssertEqual(
+            PendingGroupHandleStore.keep(handle: "team", groupIdHex: "g1", accountIdB64: account, defaults: defaults), [])
+        XCTAssertEqual(
+            PendingGroupHandleStore.keep(handle: "@Team", groupIdHex: "g2", accountIdB64: account, defaults: defaults),
+            ["g1"])
+        XCTAssertEqual(
+            PendingGroupHandleStore.groupIds(forHandle: "team", accountIdB64: account, defaults: defaults), ["g2", "g1"])
+        XCTAssertEqual(
+            PendingGroupHandleStore.groupIds(forHandle: "team", accountIdB64: "other", defaults: defaults), [])
+        for i in 0..<(PendingGroupHandleStore.maxAttempts + 3) {
+            PendingGroupHandleStore.keep(handle: "team", groupIdHex: "x\(i)", accountIdB64: account, defaults: defaults)
+        }
+        let kept = PendingGroupHandleStore.groupIds(forHandle: "team", accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(kept.count, PendingGroupHandleStore.maxAttempts)
+        XCTAssertEqual(kept.first, "x\(PendingGroupHandleStore.maxAttempts + 2)")
+        PendingGroupHandleStore.forget(handle: "TEAM", accountIdB64: account, defaults: defaults)
+        XCTAssertEqual(
+            PendingGroupHandleStore.groupIds(forHandle: "team", accountIdB64: account, defaults: defaults), [])
+    }
+
+    /// A New group retry: with no earlier attempt a plain claim; otherwise a
+    /// rekey from the earlier attempt's key and an update under the new key;
+    /// `404` (the first claim never landed) a plain claim; `401` on every
+    /// earlier attempt (another key's row) the name is held.
+    func testANewGroupRetryRekeysThenUpdates() async throws {
+        let g1 = Data([1]), g2 = Data([2])
+        var calls: [String] = []
+        func run(_ earlier: [Data], rekey: @escaping (Data) throws -> Void) async throws -> String {
+            try await ConversationHandles.claimOrTakeBack(
+                earlier: earlier,
+                claim: { calls.append("claim"); return "claimed" },
+                rekeyFrom: { id in calls.append("rekey:\(id[0])"); try rekey(id) },
+                update: { calls.append("update"); return "updated" })
+        }
+        let refused = DiscoveryClient.HandleWriteError(status: 401, code: "statement-refused")
+        let missing = DiscoveryClient.HandleWriteError(status: 404, code: "no-such-handle")
+
+        let first = try await run([]) { _ in }
+        XCTAssertEqual(first, "claimed")
+        XCTAssertEqual(calls, ["claim"])
+
+        calls = []
+        let retried = try await run([g1]) { _ in }
+        XCTAssertEqual(retried, "updated")
+        XCTAssertEqual(calls, ["rekey:1", "update"])
+
+        calls = []
+        let neverLanded = try await run([g1]) { _ in throw missing }
+        XCTAssertEqual(neverLanded, "claimed")
+        XCTAssertEqual(calls, ["rekey:1", "claim"])
+
+        // A lost rekey answer: the newest earlier attempt already holds it.
+        calls = []
+        let lost = try await run([g2, g1]) { id in if id == g1 { throw refused } }
+        XCTAssertEqual(lost, "updated")
+        XCTAssertEqual(calls, ["rekey:2", "update"])
+
+        calls = []
         do {
-            _ = try await ConversationHandles.claimOrReclaim(
-                reclaim: false, claim: { throw taken }, update: { updates += 1; return written })
-            XCTFail("held")
+            _ = try await run([g2, g1]) { _ in throw refused }
+            XCTFail("held by another key")
         } catch let error as DiscoveryClient.HandleWriteError {
             XCTAssertEqual(error.code, "name-taken")
         }
-        XCTAssertEqual(updates, 1)
+        XCTAssertEqual(calls, ["rekey:2", "rekey:1"])
+    }
 
-        // Another key holds it: the update is refused and the name is held.
-        for refusal in [DiscoveryClient.HandleWriteError(status: 401, code: "statement-refused"),
-                        DiscoveryClient.HandleWriteError(status: 404, code: "no-such-handle")] {
-            do {
-                _ = try await ConversationHandles.claimOrReclaim(
-                    reclaim: true, claim: { throw taken }, update: { throw refusal })
-                XCTFail("held by another key")
-            } catch let error as DiscoveryClient.HandleWriteError {
-                XCTAssertEqual(error.code, "name-taken")
-            }
-        }
-
-        // A claim that lands is the answer, with no update.
-        let first = try await ConversationHandles.claimOrReclaim(
-            reclaim: true, claim: { written }, update: { updates += 1; return written })
-        XCTAssertEqual(first.leaseUntilMs, 9)
-        XCTAssertEqual(updates, 1)
+    /// The rekey a retry signs: by the earlier group's handle key, naming the
+    /// new group's key, so it moves the name between two groups of one account.
+    func testANewGroupRetryMovesTheNameBetweenTheTwoGroupsKeys() throws {
+        let accountSeed = try Identity.fromSeed(seed: Data(repeating: 0x42, count: 64)).ed25519Seed()
+        let g1 = Data(repeating: 1, count: 32), g2 = Data(repeating: 2, count: 32)
+        var s1 = try ConversationHandles.seed(accountSeed: accountSeed, journalId: g1)
+        var s2 = try ConversationHandles.seed(accountSeed: accountSeed, journalId: g2)
+        defer { RootHandover.wipe(&s1); RootHandover.wipe(&s2) }
+        XCTAssertNotEqual(try handleWritePublicKey(handleSeed: s1), try handleWritePublicKey(handleSeed: s2))
+        XCTAssertEqual(
+            try handleWritePublicKey(handleSeed: s1),
+            try handleWritePublicKey(handleSeed: try ConversationHandles.seed(accountSeed: accountSeed, journalId: g1)))
     }
 }

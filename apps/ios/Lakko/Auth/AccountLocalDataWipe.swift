@@ -218,6 +218,9 @@ enum AccountLocalDataWipe {
         step("channel-pending-handles") {
             PendingChannelHandleStore.clear(accountIdB64: accountIdB64)
         }
+        step("group-pending-handles") {
+            PendingGroupHandleStore.clear(accountIdB64: accountIdB64)
+        }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)

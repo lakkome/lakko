@@ -59,6 +59,14 @@ import {
 import { publisherDevice, publisherDeviceOrNull } from "./publisher-device";
 import { channelSubscriptionPort } from "./channel-subscription-register";
 import { effectiveAdmissionMark } from "./channel-access-record";
+import {
+  joinBelowDeletedGroup,
+  NO_REPLAY_GUARD,
+  replayGuardOf,
+  welcomeHashHex,
+  withJoinedWelcome,
+  type WelcomeReplayGuard,
+} from "./welcome-replay";
 import { channelIdFromHex, foundPublisherGroup, heldPublisherKeys, type WasmIdentity } from "./composer";
 import { fetchEpoch, rememberPublisherRole } from "./api";
 import { abandonUnrecordedEntry, entryPendingFor, entryVerdict } from "./channel-entry";
@@ -817,6 +825,8 @@ export async function landPublisherDeviceWelcomeOutcome(
   const device = publisherDeviceOrNull();
   if (device === null) return "not-taken";
   const wasm = await loadWasm();
+  // F2: a Welcome this device already joined is never joined again.
+  const hashHex = await welcomeHashHex(welcome);
   for (const t of await publisherWelcomeTargets(lineage)) {
     const channelId = channelIdFromHex(t.channelIdHex);
     // ADR-0090 section 2.5 (security pass): a group this device still holds
@@ -830,12 +840,14 @@ export async function landPublisherDeviceWelcomeOutcome(
       holdEarlyWelcome(t.channelIdHex, welcome);
       return "held";
     }
-    const group = joinReplacingHeldGroup(wasm, device, lineage, t, channelId, welcome, suspected);
+    const guard = replayGuardOf(channelsActions.accessOf(t.channelIdHex), hashHex);
+    const group = joinReplacingHeldGroup(wasm, device, lineage, t, channelId, welcome, suspected, undefined, guard);
     if (group === null) continue;
     dropHeld((e) => e.channelIdHex === t.channelIdHex);
     await channelsActions.updateAccessDurable(t.channelIdHex, (r) => {
-      if (r.resetSuspected !== true) return r;
-      const { resetSuspected: _gone, ...rest } = r;
+      const noted = withJoinedWelcome(r, hashHex);
+      if (noted.resetSuspected !== true) return noted;
+      const { resetSuspected: _gone, ...rest } = noted;
       void _gone;
       return rest;
     });
@@ -967,6 +979,9 @@ function withoutOffset<T extends { readonly epochOffset?: number }>(r: T): T {
  */
 export interface HeldGroupReplacement {
   restore(): void;
+  /** Nothing was held under the id (the join is a first one, or follows a
+   *  deletion: F3's floor applies). */
+  readonly heldNothing?: true;
   /** The deleted group's epoch when it was INACTIVE; `null` when nothing was
    *  held or the held group was active (replaced under reset suspicion,
    *  where no epoch is compared). A join must land strictly above it, else
@@ -1012,7 +1027,7 @@ export function replaceHeldGroupFor(
   } catch {
     held = undefined;
   }
-  if (held === undefined) return { restore: () => undefined, heldEpoch: null };
+  if (held === undefined) return { restore: () => undefined, heldEpoch: null, heldNothing: true };
   try {
     if (held.isActive() && !resetSuspected) return null;
     if (!welcomeIsOwnersFor(wasm, device, welcome, t.groupId, t.ownerKey)) return null;
@@ -1050,6 +1065,13 @@ export function replaceHeldGroupFor(
  * cases the held group is put back as it was (the device keeps the group it
  * had, and any reset suspicion on it stays). `join` is the core's join,
  * replaceable in tests. Never throws.
+ *
+ * Replayed Welcomes (lakko-security F2 / F3, `welcome-replay.ts`): a Welcome
+ * this device already joined (`guard.alreadyJoined`) is refused before
+ * anything is touched, also under reset suspicion; and a join that replaced
+ * NO held group is refused, its group deleted again, when it lands at an
+ * epoch not above the last inactive group this device deleted, unless the
+ * channel is under reset suspicion.
  */
 export function joinReplacingHeldGroup(
   wasm: Wasm,
@@ -1061,11 +1083,30 @@ export function joinReplacingHeldGroup(
   resetSuspected: boolean,
   join: () => PublisherGroup = () =>
     wasm.PublisherGroup.joinFromWelcome(device, welcome, t.groupId, channelId, t.ownerKey),
+  guard: WelcomeReplayGuard = NO_REPLAY_GUARD,
 ): PublisherGroup | null {
+  if (guard.alreadyJoined) {
+    // eslint-disable-next-line no-console
+    console.warn("[channels] a Welcome this device already joined was not taken again");
+    return null;
+  }
   const replacement = replaceHeldGroupFor(wasm, device, lineage, t, channelId, welcome, resetSuspected);
   if (replacement === null) return null;
   try {
     const joined = join();
+    if (
+      replacement.heldNothing === true &&
+      joinBelowDeletedGroup({ joinedEpoch: joined.epoch(), deletedGroupEpoch: guard.deletedGroupEpoch, resetSuspected })
+    ) {
+      try {
+        joined.deleteLocally(device);
+      } finally {
+        joined.free();
+      }
+      // eslint-disable-next-line no-console
+      console.warn("[channels] a Welcome at an epoch not above the last deleted group's was not taken");
+      return null;
+    }
     if (replacement.heldEpoch !== null && !(joined.epoch() > replacement.heldEpoch)) {
       joined.free();
       // eslint-disable-next-line no-console
@@ -1463,21 +1504,30 @@ export async function suspectForeignChain(idHex: string): Promise<void> {
  * - `reader`: an owner device with no other device of the account to admit
  *   it: it stops publishing and the reader-device settle takes the channel
  *   (entry from the saved copy, else decision A), never waiting forever.
+ *   A leaf of the owner's account still in the inactive group counts as such
+ *   a device (lakko-security F4, 2026-11-15): the commit that removed this
+ *   device's leaf came from a device of the owner's account (the peer gate
+ *   C-90), so another owner device exists even when this device's DeviceGroup
+ *   roster (stale after a DeviceGroup founded again) names only itself.
  * - `removed`: the account itself was removed as a publisher (or nothing
  *   says otherwise): the existing removal path (UX 15.2).
- * - `undecided`: the account's device roster is not loaded yet: nothing is
+ * - `undecided`: the account's device roster is not loaded yet (and, for an
+ *   owner device, no other leaf of the account is seen in the group): nothing is
  *   changed this pass (an owner device must not take the channel alone on a
  *   roster it has not read).
  */
 export function inactivePublisherGroupVerdict(input: {
   readonly ownerDevice: boolean;
-  /** Whether the inactive group's roster still holds a leaf of this account;
-   *  `null` when it could not be read. */
+  /** Whether the inactive group's roster still holds a leaf of this account
+   *  other than this device's own; `null` when it could not be read. */
   readonly ownAccountHasLeaf: boolean | null;
   /** Whether the account's DeviceGroup roster names a device besides this
    *  one; `null` when the roster is not loaded. */
   readonly otherOwnDevices: boolean | null;
 }): "wait-for-welcome" | "reader" | "removed" | "undecided" {
+  // F4: another leaf of the owner's account decides before the roster (it is
+  // the device that removed this one, and it can admit it again).
+  if (input.ownerDevice && input.ownAccountHasLeaf === true) return "wait-for-welcome";
   if (input.otherOwnDevices === null) return "undecided";
   if (input.ownerDevice) return input.otherOwnDevices ? "wait-for-welcome" : "reader";
   return input.ownAccountHasLeaf === true && input.otherOwnDevices ? "wait-for-welcome" : "removed";

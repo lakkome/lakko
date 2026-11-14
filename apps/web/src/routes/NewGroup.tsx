@@ -16,6 +16,8 @@ import { HANDLE_CHECK_DEBOUNCE_MS, handleTaken as askHandleTaken, isRateLimited 
 import {
   claimGroupHandle,
   handleRandom,
+  moveGroupHandle,
+  updateGroupHandle,
   handleWellFormed,
   suggestedHandle,
   type PublicGroupFacts,
@@ -32,7 +34,13 @@ import { loadWasm } from "../wasm";
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  claimOrTakeBackGroupHandle,
+  forgetGroupAttempts,
+  isClaimedGroupHandle,
+  keepGroupAttempt,
+} from "../chat/claimed-group-handles";
 import { useChats } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { setPendingGroupSetup } from "../chat/pending-group-setup";
@@ -104,6 +112,10 @@ export default function NewGroup(): JSX.Element {
     setHandleTaken(false);
     if (takenTimer !== null) clearTimeout(takenTimer);
     if (!pub || h.length < 3 || !handleWell()) return;
+    // A name a failed create of this account claimed is this account's (a
+    // retry takes it back): the lookup answering it is not "taken".
+    const acct = sessionAccountOf(auth.state());
+    if (acct !== null && isClaimedGroupHandle(acct, h)) return;
     // Asked as seldom as search asks (who-can-find-me 6.1): once typing
     // stops, never twice for one name within 60 s; Create reuses the name's
     // OPRF answer (`discovery/handle-check.ts`).
@@ -151,7 +163,10 @@ export default function NewGroup(): JSX.Element {
     e.preventDefault();
     setError(null);
     const secrets = auth.identitySecrets();
-    if (secrets === null) {
+    // The bound account keeps the ids of earlier attempts at this @name, so
+    // a retry takes the name back; no create without it.
+    const accountIdB64 = sessionAccountOf(auth.state());
+    if (secrets === null || accountIdB64 === null) {
       setError(() => t("new_group.error.sign_in"));
       return;
     }
@@ -198,15 +213,31 @@ export default function NewGroup(): JSX.Element {
             avatar,
           };
         }
-        claimed = await claimGroupHandle({
+        const args = {
           wasm,
           accountIdentity: account,
           groupId: group.groupId,
           handle: handle(),
           isPublic: isPublic(),
           facts,
+        };
+        // Kept before any request about the name, so a lost answer is
+        // covered too; a retry moves the name from an earlier attempt.
+        const earlier = keepGroupAttempt(accountIdB64, handle(), base64UrlEncodeNoPad(group.groupId));
+        claimed = await claimOrTakeBackGroupHandle(earlier, {
+          claim: () => claimGroupHandle(args),
+          rekeyFrom: (earlierId) =>
+            moveGroupHandle({
+              wasm,
+              accountIdentity: account,
+              fromGroupId: base64UrlDecodeNoPad(earlierId),
+              toGroupId: group.groupId,
+              handle: handle(),
+            }),
+          update: () => updateGroupHandle(args),
         });
       });
+      forgetGroupAttempts(accountIdB64, handle());
       const active = chats.add({
         label: name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL,
         group: result.group,
@@ -264,7 +295,10 @@ export default function NewGroup(): JSX.Element {
         setError(() => handleWriteErrorText(err));
       } else if (err instanceof HandleWriteError || err instanceof DiscoveryNetworkError) {
         const text = handleWriteErrorText(err);
-        if (err instanceof HandleWriteError && err.code === "name-taken") setHandleError(text);
+        if (err instanceof HandleWriteError && err.code === "name-taken") {
+          forgetGroupAttempts(accountIdB64, handle());
+          setHandleError(text);
+        }
         else setError(() => text);
       } else {
         setError(() => t("new_group.error.secure_setup"));

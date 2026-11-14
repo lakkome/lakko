@@ -271,6 +271,11 @@ public fun NewChannelScreen(
     LaunchedEffect(canonical, private) {
         taken = false
         if (private || canonical.length < 3 || !wellFormed) return@LaunchedEffect
+        // A name a failed create of this account claimed is this account's (a
+        // retry takes it back): the lookup answering it is not "taken".
+        // Read under the account the create keeps it under.
+        val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
+        if (claims.isClaimed(state.boundAccount.orEmpty(), canonical)) return@LaunchedEffect
         delay(500)
         taken = try {
             me.lakko.app.discovery.DiscoveryClient().use { it.lookupChannel(canonical) != null }
@@ -368,8 +373,12 @@ public fun NewChannelScreen(
                     val claims = me.lakko.app.channels.ChannelHandleClaims.on(context)
                     val claimAccount = state.boundAccount.orEmpty()
                     // A retry of a failed create reuses the id its name was
-                    // claimed for.
-                    val id = claims.idFor(claimAccount, wanted)
+                    // claimed for, only while that create is recorded as
+                    // unfinished (security pass F5): a finished create's id
+                    // may be a live channel, never founded over.
+                    val id = me.lakko.app.channels.newChannelCreateId(claims, claimAccount, wanted) { cid ->
+                        me.lakko.app.channels.ChannelCreatePending.isPending(context, claimAccount, cid)
+                    }
                     scope.launch {
                         try {
                             createChannel(
@@ -447,6 +456,15 @@ internal suspend fun createChannel(
     language: String,
 ) {
     val publisher = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
+    // Security pass F5 (2026-11-15) - this create is unfinished until the
+    // channel exists here: only then may a retry reuse [id]. Written before
+    // anything is founded or claimed under it.
+    val pendingContext = me.lakko.app.channels.SubscriberAdmission.appContext
+        ?: throw IllegalStateException("no context for the channel create")
+    val pendingAccount = state.boundAccount ?: throw IllegalStateException("no account bound")
+    if (!me.lakko.app.channels.ChannelCreatePending.mark(pendingContext, pendingAccount, id)) {
+        throw IllegalStateException("the channel create was not recorded")
+    }
     // ADR-0057 finding 3 — the PublisherGroup journal is claimed with the
     // owner's root BEFORE anything announces the channel.
     try {
@@ -472,6 +490,24 @@ internal suspend fun createChannel(
             description = description,
             route = me.lakko.app.discovery.HandleRoute.CLAIM,
         )
+    }
+    // Security pass F1 (2026-11-15) - a private channel's admission seed
+    // version 0 is minted here, before the service knows the channel, with
+    // the admission mark at 0 set by this device: no row can be genuine yet,
+    // so no row is listed or marked (a row the service lists now was planted
+    // by it, and a ticketless one is removed by the let-in pass). A retry
+    // finds the seed it minted.
+    if (private) {
+        val context = me.lakko.app.channels.SubscriberAdmission.appContext
+            ?: throw IllegalStateException("no context for the channel's admission seed")
+        val account = state.boundAccount ?: throw IllegalStateException("no account bound")
+        me.lakko.app.channels.admissionSeedFor(
+            reason = me.lakko.app.channels.AdmissionSeedReason.CREATE,
+            held = { me.lakko.app.channels.ChannelAdmissionKeys.current(context, account, id) },
+            mint = { me.lakko.app.channels.ChannelAdmissionKeys.currentOrMint(context, account, id) },
+            markRowsAsReaders = {},
+        )?.second?.fill(0)
+        me.lakko.app.channels.ChannelAdmissionMark.raise(context, account, id, 0L, markSet = true)
     }
     val owner = publisher.withIdentity(persist = false) { identity -> ChannelsClient.ownerSigner(identity, id) }
     owner.use { client.createChannel(id, it, private = private) }
@@ -501,6 +537,8 @@ internal suspend fun createChannel(
     state.boundAccount?.let { acct ->
         me.lakko.app.channels.ChannelRefounding.markDone(context = me.lakko.app.channels.SubscriberAdmission.appContext ?: return@let, account = acct, channelId = id)
     }
+    // F5 - the channel exists here: its id is never reused by a retry.
+    me.lakko.app.channels.ChannelCreatePending.clear(pendingContext, pendingAccount, id)
     // ADR-0051 §4 / ADR-0087 section 18.2 — the v3 record is the first post:
     // subscribers title the channel from it and read its @name and flag. It
     // is kept here before it is sent and owed until it lands, so a failed

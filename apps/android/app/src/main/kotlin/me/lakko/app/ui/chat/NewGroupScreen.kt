@@ -122,6 +122,9 @@ public fun NewGroupScreen(
     androidx.compose.runtime.LaunchedEffect(handle, public) {
         visiblyTaken = false
         if (!public || handle.length < 3 || !wellFormed) return@LaunchedEffect
+        // A name a failed create of this account claimed is this account's (a
+        // retry takes it back): the lookup answering it is not "taken".
+        if (chatRepository.isNewGroupHandleKept(handle)) return@LaunchedEffect
         kotlinx.coroutines.delay(500)
         visiblyTaken = chatRepository.handleVisiblyTaken(handle) == true
     }
@@ -365,7 +368,7 @@ public fun NewGroupScreen(
                                     null
                                 }
                                 claimed = chatRepository.claimHandleForNewGroup(groupId, handle, public, facts)
-                            }
+                            }.also { chatRepository.forgetNewGroupHandle(handle) }
                         } catch (cause: Throwable) {
                             me.lakko.app.rethrowIfCancelled(cause) {
                                 creating = false
@@ -373,6 +376,7 @@ public fun NewGroupScreen(
                             android.util.Log.w("NewGroupScreen", "group creation failed", cause)
                             val handleCopy = me.lakko.app.chat.handleWriteFailure(cause)
                             if (handleCopy.key == "group_handle.error.held") {
+                                chatRepository.forgetNewGroupHandle(handle)
                                 handleError = handleCopy
                             } else if (handleCopy.key != "group_handle.error.failed") {
                                 error = handleCopy

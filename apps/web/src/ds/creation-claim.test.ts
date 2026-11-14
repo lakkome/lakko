@@ -33,6 +33,8 @@ import type { DsClient } from "./client";
 import { dsAccess } from "./access";
 import { ensureDeviceGroup } from "../devices/lifecycle";
 import {
+  foundOrReuseForNewChannel,
+  KeptChannelIdLiveError,
   foundPublisherGroup,
   openHeldPublisherGroup,
   type UnconfirmedFoundingStorage,
@@ -394,6 +396,92 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
       (await foundPublisherGroup(wasm, owner, channelId, st, null)).free();
       (await openHeldPublisherGroup(wasm, owner, channelId, st, null)).free();
       expect(ok).toHaveBeenCalledTimes(2);
+      expect(st.data.size).toBe(0);
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("a New channel retry under the kept id reuses the group the first attempt founded", async () => {
+    // Seen live 2026-11-14: the first attempt founded the group, claimed the
+    // journal and the @name, then failed at the channels service; the retry
+    // under the same channel id refused to found again before any request.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x65);
+    const channelId = new Uint8Array(16).fill(0x66);
+    const st = mem();
+    try {
+      const first = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", first);
+      const founded = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      const groupId = founded.groupId();
+      const device = wasm.Identity.fromSeedBound(new Uint8Array(64).fill(0x65 + 0x80), owner.ed25519Seed, 1_700_000_000n);
+      const seed = founded.channelSeed(device);
+      founded.free();
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(st.data.size).toBe(0);
+
+      // The retry: the same group, no second founding, no second claim (the
+      // first was confirmed).
+      const retry = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", retry);
+      const reused = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      expect(reused.groupId()).toEqual(groupId);
+      expect(reused.channelSeed(device)).toEqual(seed);
+      expect(reused.isActive()).toBe(true);
+      reused.free();
+      device.free();
+      expect(retry).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("F5: a New channel retry never reuses or founds over a group whose channel the account knows", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x69);
+    const channelId = new Uint8Array(16).fill(0x6a);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+      const founded = await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT);
+      const groupId = founded.groupId();
+      founded.free();
+      // The create finished (the account's register names the channel): the
+      // retry under its id is refused, nothing is claimed or deleted.
+      const after = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", after);
+      await expect(
+        foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT, () => true),
+      ).rejects.toBeInstanceOf(KeptChannelIdLiveError);
+      expect(after).not.toHaveBeenCalled();
+      const still = await openHeldPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
+      expect(still.groupId()).toEqual(groupId);
+      still.free();
+    } finally {
+      uninstall();
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("a New channel retry whose first journal claim failed claims again on the reused group", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { owner, uninstall } = ownerWithDevice(0x67);
+    const channelId = new Uint8Array(16).fill(0x68);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+      await expect(foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
+      expect(st.data.size).toBe(1);
+      const ok = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", ok);
+      (await foundOrReuseForNewChannel(wasm, owner, channelId, st, ACCOUNT)).free();
+      expect(ok).toHaveBeenCalledTimes(1);
       expect(st.data.size).toBe(0);
     } finally {
       uninstall();

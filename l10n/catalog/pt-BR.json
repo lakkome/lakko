@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Não foi possível criar este canal. Nada foi criado. Tente de novo.",
+      "text": "Não foi possível criar este canal. Tente de novo.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Não foi possível criar este grupo. Nada foi criado. Tente de novo.",
+      "text": "Não foi possível criar este grupo. Tente de novo.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

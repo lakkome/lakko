@@ -33,6 +33,7 @@ import { channelsActions } from "../state/channels-state";
 import { fetchEpoch } from "./api";
 import { channelIdFromHex, heldPublisherKeys, type WasmIdentity } from "./composer";
 import { publisherDeviceOrNull } from "./publisher-device";
+import { withDeletedGroupEpoch } from "./welcome-replay";
 import { withPublisherGroup } from "./publisher-group-registry";
 import { newEntryId, type PublisherCommitEntry } from "./publisher-commit-outbox";
 import { runRecordedPublisherCommit } from "./rotation-cron";
@@ -177,21 +178,24 @@ export function clearInactiveHeldGroup(
   device: WasmIdentity,
   ownerSeed: Uint8Array,
   channelId: Uint8Array,
-): { restore(): void } | null {
+): { restore(): void; readonly deletedEpoch: bigint | null } | null {
   let held: PublisherGroup | undefined;
   try {
     held = wasm.PublisherGroup.load(device, ownerSeed, channelId);
   } catch {
     held = undefined;
   }
-  if (held === undefined) return { restore: () => undefined };
+  if (held === undefined) return { restore: () => undefined, deletedEpoch: null };
   try {
     if (held.isActive() || held.hasStagedCommit()) return null;
+    // F3: the deleted group's epoch, which a later join with no held group
+    // must land above (`welcome-replay.ts`).
+    const deletedEpoch = held.epoch();
     const before = device.snapshotStorage();
     held.deleteLocally(device);
     // eslint-disable-next-line no-console
     console.info("[channels] this device's inactive PublisherGroup is deleted before the entry");
-    return { restore: () => device.restoreStorage(before) };
+    return { restore: () => device.restoreStorage(before), deletedEpoch };
   } catch {
     return null;
   } finally {
@@ -249,8 +253,13 @@ async function attemptEntry(
     } catch {
       /* the inactive group stays deleted; it served nothing */
     }
+    await noteDeletedGroupEpoch(idHex, cleared.deletedEpoch);
     return "refused";
   }
+  // F3: recorded after the synchronous clear-and-enter, before anything of
+  // the entry leaves; an entry that then loses leaves no group held, and a
+  // replayed old Welcome must not take the device below this epoch.
+  await noteDeletedGroupEpoch(idHex, cleared.deletedEpoch);
   ensureEntryOwnerSource();
   const serverTargetEpoch = serverEpoch + 1;
   try {
@@ -293,6 +302,13 @@ async function attemptEntry(
       /* already freed */
     }
   }
+}
+
+/** Records the epoch of an inactive group this device deleted (F3). Never
+ *  throws: a failed write leaves the older floor. */
+async function noteDeletedGroupEpoch(idHex: string, epoch: bigint | null): Promise<void> {
+  if (epoch === null) return;
+  await channelsActions.updateAccessDurable(idHex, (r) => withDeletedGroupEpoch(r, epoch)).catch(() => undefined);
 }
 
 /** The entry ports of `idHex` over wasm and the services. */

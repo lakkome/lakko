@@ -575,11 +575,27 @@ describe("a device whose own leaf was retired (walk of 2026-11-14)", () => {
     expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: true, otherOwnDevices: false })).toBe(
       "removed",
     );
+    // F4: another owner leaf decides before the roster is loaded.
     expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: true, otherOwnDevices: null })).toBe(
+      "wait-for-welcome",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: false, otherOwnDevices: null })).toBe(
+      "undecided",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: null, otherOwnDevices: null })).toBe(
       "undecided",
     );
     expect(inactivePublisherGroupVerdict({ ownerDevice: false, ownAccountHasLeaf: false, otherOwnDevices: null })).toBe(
       "undecided",
+    );
+  });
+
+  it("F4: an owner device whose stale roster names only itself waits when another owner leaf remains", () => {
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: true, otherOwnDevices: false })).toBe(
+      "wait-for-welcome",
+    );
+    expect(inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: false, otherOwnDevices: false })).toBe(
+      "reader",
     );
   });
 
@@ -611,6 +627,14 @@ describe("a device whose own leaf was retired (walk of 2026-11-14)", () => {
           ownAccountHasLeaf: publisherLeaves(ga).some((l) => l.accountKeyHex === ownHex),
           otherOwnDevices: true,
         }),
+      ).toBe("wait-for-welcome");
+      // F4: B's leaf (the account's, not A's own) is what the inactive group
+      // still holds; with a roster that names A alone A still waits.
+      const selfHex = hex(a.signaturePublicKey);
+      const otherOwnLeaf = publisherLeaves(ga).some((l) => l.accountKeyHex === ownHex && l.leafKeyHex !== selfHex);
+      expect(otherOwnLeaf).toBe(true);
+      expect(
+        inactivePublisherGroupVerdict({ ownerDevice: true, ownAccountHasLeaf: otherOwnLeaf, otherOwnDevices: false }),
       ).toBe("wait-for-welcome");
       ga.free();
       // A still holds its (inactive) group: the channel is a target anyway.

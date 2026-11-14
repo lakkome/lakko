@@ -18,9 +18,10 @@ import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 vi.mock("../wasm", () => ({ loadWasm: async () => wasm, wasmSync: () => wasm }));
 
-const { setKeys, persisted } = vi.hoisted(() => ({
+const { setKeys, persisted, access } = vi.hoisted(() => ({
   setKeys: vi.fn(),
   persisted: vi.fn(async () => undefined),
+  access: new Map<string, unknown>(),
 }));
 vi.mock("../state/channels-state", async (importOriginal) => {
   const real = await importOriginal<typeof import("../state/channels-state")>();
@@ -32,7 +33,11 @@ vi.mock("../state/channels-state", async (importOriginal) => {
       addChannel: vi.fn(),
       setKeys,
       persistPublisherGroupDurable: persisted,
-      updateAccessDurable: vi.fn(async () => undefined),
+      // A map, so what a join notes (the joined Welcome's hash) is read back.
+      accessOf: (id: string) => access.get(id) ?? real.channelsActions.accessOf(id),
+      updateAccessDurable: vi.fn(async (id: string, f: (r: unknown) => unknown) => {
+        access.set(id, f(access.get(id) ?? real.channelsActions.accessOf(id)));
+      }),
     },
   };
 });
@@ -50,6 +55,7 @@ vi.mock("./api", async (importOriginal) => {
 });
 
 import { landPendingPublisherWelcome } from "./channel-publishers";
+import { joinCoPublishWelcome } from "./copublisher";
 import { loadPendingPublisherRequests, recordPendingPublisherRequest } from "./pending-publisher-requests";
 import { dispatchMailboxRows } from "../contacts/client";
 import { sealRowFor, type MailboxTarget } from "../contacts/mailbox-row";
@@ -69,6 +75,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", new MemoryStorage());
+  access.clear();
   setKeys.mockClear();
   persisted.mockClear();
 });
@@ -187,6 +194,36 @@ describe("a publisher request's Welcome lands whenever it arrives", () => {
       expect(setKeys).not.toHaveBeenCalled();
     } finally {
       joiner.free();
+    }
+  });
+
+  it("F2: a co-publisher Welcome this device already joined is not joined again", async () => {
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x57));
+    const joiner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x58));
+    const ownerDevice = deviceOf(owner, 0x67);
+    const joinerDevice = deviceOf(joiner, 0x68);
+    const uninstall = installPublisherDeviceSource(() => joinerDevice);
+    const channelId = new Uint8Array(16).fill(0x09);
+    const pg = new wasm.PublisherGroup(ownerDevice, owner.ed25519Seed, channelId);
+    try {
+      const req = pg.retainJoinRequest(ownerDevice, joinerDevice.createKeyPackage());
+      const added = pg.stageApproveExternalJoin(ownerDevice, req.joinerSignatureKey);
+      const welcome = added.welcome;
+      req.free();
+      added.free();
+      pg.mergeStagedCommit(ownerDevice);
+      const ownerKey = owner.signaturePublicKey;
+      expect(await joinCoPublishWelcome(joiner, welcome, pg.groupId(), hex(channelId), ownerKey)).not.toBeNull();
+      // The group goes (an inactive one deleted, say) and the DS replays the
+      // same Welcome: the core would join it again; this device does not.
+      const held = wasm.PublisherGroup.loadJoined(joinerDevice, pg.groupId(), channelId);
+      held?.deleteLocally(joinerDevice);
+      held?.free();
+      expect(await joinCoPublishWelcome(joiner, welcome, pg.groupId(), hex(channelId), ownerKey)).toBeNull();
+      expect(wasm.PublisherGroup.loadJoined(joinerDevice, pg.groupId(), channelId)).toBeUndefined();
+    } finally {
+      uninstall();
+      pg.free();
     }
   });
 });

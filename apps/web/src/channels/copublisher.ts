@@ -109,6 +109,7 @@ import {
   type ChannelPublisherKeys,
 } from "./composer";
 import { publisherDevice } from "./publisher-device";
+import { joinBelowDeletedGroup, welcomeAlreadyJoined, welcomeHashHex, withJoinedWelcome } from "./welcome-replay";
 import { LegacyChannelError, isLegacyV1PublisherGroupId } from "./legacy-v1";
 import {
   InviteLinkDamagedError,
@@ -1288,15 +1289,38 @@ export async function joinCoPublishWelcome(
   const wasm = await loadWasm();
   const channelId = hexToBytes(channelIdHex);
   if (channelId === null) throw new Error(`channel id hex is not valid: ${channelIdHex}`);
+  // lakko-security F2 / F3 (`welcome-replay.ts`): a Welcome this device
+  // already joined is not joined again, and a join below the last group this
+  // device deleted is undone (unless the channel is under reset suspicion).
+  const hashHex = await welcomeHashHex(welcome);
+  const access = channelsActions.accessOf(channelIdHex);
+  if (welcomeAlreadyJoined(access, hashHex)) return null;
+  const device = publisherDevice();
   let group: PublisherGroup;
   try {
     // ADR-0090: joined with this DEVICE; refused unless the Welcome's sender
     // is a device of `ownerKey` (the `/g/` capability's issuer).
-    group = wasm.PublisherGroup.joinFromWelcome(publisherDevice(), welcome, groupId, channelId, ownerKey);
+    group = wasm.PublisherGroup.joinFromWelcome(device, welcome, groupId, channelId, ownerKey);
   } catch {
     return null;
   }
-  group.free();
+  try {
+    if (
+      joinBelowDeletedGroup({
+        joinedEpoch: group.epoch(),
+        deletedGroupEpoch: access.deletedGroupEpoch,
+        resetSuspected: access.resetSuspected === true,
+      })
+    ) {
+      group.deleteLocally(device);
+      // eslint-disable-next-line no-console
+      console.warn("co-publish: a Welcome at an epoch not above the last deleted group's was not taken");
+      return null;
+    }
+  } finally {
+    group.free();
+  }
+  await channelsActions.updateAccessDurable(channelIdHex, (r) => withJoinedWelcome(r, hashHex));
   // The Welcome landed: the single-use reply key of this request goes.
   void reachSession()?.closeRepliesTo(journalHex(groupId));
   // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the

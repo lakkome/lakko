@@ -311,6 +311,67 @@ public suspend fun replaceGroupHandle(
     }
 }
 
+/**
+ * A retry of a New group: move the name from the key of an earlier attempt's
+ * group ([fromGroupId]) to this attempt's group (the `rekey` statement, signed
+ * by the earlier key). The caller then writes this group's content with
+ * [updateGroupHandle].
+ */
+public suspend fun moveGroupHandle(
+    discovery: DiscoveryClient,
+    accountSeed: ByteArray,
+    fromGroupId: ByteArray,
+    toGroupId: ByteArray,
+    handle: String,
+) {
+    val pair = discovery.oprfOwnName(canonicalHandleInput(handle))
+    val oldSeed = groupHandleSeed(accountSeed, fromGroupId)
+    val newSeed = groupHandleSeed(accountSeed, toGroupId)
+    try {
+        val statement = uniffi.lakko_ffi_uniffi.signHandleStatement(
+            oldSeed,
+            pair.lookupKey,
+            FfiHandleStatementBody.Rekey(uniffi.lakko_ffi_uniffi.handleWritePublicKey(newSeed)),
+        )
+        discovery.handleWrite(HandleRoute.REKEY, statement)
+            ?: throw IllegalStateException("handle rekey answered no certificate")
+    } finally {
+        oldSeed.fill(0)
+        newSeed.fill(0)
+    }
+}
+
+/**
+ * Take a New group's `@name` for the group this attempt founded (ADR-0087
+ * section 3, note of 2026-11-14). With no earlier attempt, a plain claim.
+ * Otherwise, for each earlier attempt newest first, move the name from that
+ * attempt's key ([rekeyFrom]) and write this group's content under the new
+ * key ([update]): `404` (no row: no earlier claim landed) is a plain claim;
+ * `401` (another key's row) tries the next earlier attempt; every one refused
+ * is `409 name-taken`.
+ */
+public suspend fun <T> claimOrTakeBackGroupHandle(
+    earlier: List<ByteArray>,
+    claim: suspend () -> T,
+    rekeyFrom: suspend (ByteArray) -> Unit,
+    update: suspend () -> T,
+): T {
+    if (earlier.isEmpty()) return claim()
+    for (id in earlier) {
+        try {
+            rekeyFrom(id)
+        } catch (refusal: HandleWriteError) {
+            when (refusal.status) {
+                404 -> return claim()
+                401 -> continue
+                else -> throw refusal
+            }
+        }
+        return update()
+    }
+    throw HandleWriteError(409, "name-taken")
+}
+
 /** Retire the name (Delete group, section 11). */
 public suspend fun retireGroupHandle(
     discovery: DiscoveryClient,

@@ -1990,7 +1990,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "Не удалось создать канал. Ничего не создано. Попробуйте ещё раз.",
+      "text": "Не удалось создать канал. Попробуйте ещё раз.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7414,7 +7414,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "Не удалось создать группу. Ничего не создано. Попробуйте ещё раз.",
+      "text": "Не удалось создать группу. Попробуйте ещё раз.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

@@ -1910,7 +1910,7 @@
       "status": "machine"
     },
     "channels.new.failed": {
-      "text": "تعذر إنشاء هذه القناة. لم يُنشأ أي شيء. حاول مرة أخرى.",
+      "text": "تعذر إنشاء هذه القناة. حاول مرة أخرى.",
       "status": "machine"
     },
     "channels.new.handle_hint": {
@@ -7294,7 +7294,7 @@
       "status": "machine"
     },
     "new_group.error.secure_setup": {
-      "text": "تعذّر إنشاء هذه المجموعة. لم يُنشأ شيء. حاول مرة أخرى.",
+      "text": "تعذّر إنشاء هذه المجموعة. حاول مرة أخرى.",
       "status": "machine"
     },
     "new_group.error.sign_in": {

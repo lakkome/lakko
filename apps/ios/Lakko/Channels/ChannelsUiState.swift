@@ -442,6 +442,11 @@ public final class ChannelsUiState: ObservableObject {
             persistExtras()
             publishChannelPhotos()
         }
+        // Security pass 2026-11-15 (F2/F3) — the channel's Welcome replay
+        // guard goes with it.
+        if let account = boundAccountIdB64 {
+            ChannelDeviceAdmissionStore(accountIdB64: account).forgetReplayGuard(channelId: channelId)
+        }
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
         // seed, so a re-add of the same channel_id re-derives the same content

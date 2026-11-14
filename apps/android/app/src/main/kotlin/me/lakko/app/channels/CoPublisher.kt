@@ -555,12 +555,25 @@ public object CoPublisher {
         joinedGroupId: ByteArray?,
     ): Boolean {
         val held = openPublisherGroupOn(ids, channelIdHex, joinedGroupId, allowFound = false) ?: return false
-        try {
-            ids.mls { device -> held.delete(device) }
+        val heldEpoch = try {
+            ids.mls { device ->
+                val e = held.epoch()
+                held.delete(device)
+                e
+            }
         } finally {
             held.close()
         }
         ids.persist()
+        // Security pass F3 (2026-11-15) - a later join with no group held is
+        // refused at or below this epoch outside a reset suspicion.
+        val context = SubscriberAdmission.appContext
+        val account = ChannelEpochOffsets.boundAccount
+        if (context != null && account != null &&
+            !DeletedPublisherGroupEpochs.save(context, account, channelIdHex, heldEpoch)
+        ) {
+            android.util.Log.w("CoPublisher", "the deleted publisher group's epoch was not kept")
+        }
         return true
     }
 
@@ -1495,9 +1508,26 @@ public object CoPublisher {
         } catch (_: Throwable) {
             null
         }
-        val suspected = SubscriberAdmission.appContext?.let { ctx ->
-            ChannelEpochOffsets.boundAccount?.let { acct -> ChannelSuspensions.isSuspended(ctx, acct, channelIdHex) }
-        } ?: false
+        // Security pass F2/F3 (2026-11-15) - the replay records live per
+        // account; without the session's context nothing is joined (fail
+        // closed: a join this device could not record could be replayed).
+        val replayContext = SubscriberAdmission.appContext
+        val replayAccount = ChannelEpochOffsets.boundAccount
+        if (replayContext == null || replayAccount == null) {
+            held?.close()
+            return null
+        }
+        // F2: a Welcome this device already joined for the channel is an old
+        // one replayed (the KeyPackage is last-resort): refused on every
+        // landing path, before anything is deleted or held.
+        if (JoinedPublisherWelcomes.contains(replayContext, replayAccount, channelIdHex, welcome)) {
+            held?.close()
+            android.util.Log.i("CoPublisher", "a publisher Welcome this device already joined was refused")
+            return null
+        }
+        val suspected = ChannelSuspensions.isSuspended(replayContext, replayAccount, channelIdHex)
+        // F3: the epoch of the group this device last deleted for the channel.
+        val deletedEpoch = DeletedPublisherGroupEpochs.get(replayContext, replayAccount, channelIdHex)
         var holdForLater = false
         val epoch = try {
             ids.mls { device ->
@@ -1505,7 +1535,23 @@ public object CoPublisher {
                     uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(device, welcome, groupId, channelId, ownerKey)
                         .use { it.epoch() }
                 }
-                if (held == null) return@mls join()
+                if (held == null) {
+                    if (deletedEpoch == null) return@mls join()
+                    // F3: no group held, but one was deleted: a joined group
+                    // not above its epoch (outside a reset suspicion) counts
+                    // as a failed join and is undone.
+                    return@mls replaceHeldThenJoin(
+                        snapshot = { device.snapshotStorage() },
+                        delete = {},
+                        join = {
+                            val joined = join()
+                            if (!joinWithoutHeldGroupAllowed(joined, deletedEpoch, suspected)) throw StaleWelcomeRefused()
+                            joined
+                        },
+                        restore = { before -> device.restoreStorage(before) },
+                        wipe = { before -> before.fill(0) },
+                    )
+                }
                 // Replay guard, rule 1: an active, unsuspected held group is
                 // never replaced; the Welcome is ignored for this channel.
                 val heldActive = held.isActive()
@@ -1549,13 +1595,18 @@ public object CoPublisher {
         // Persisted only after a join that landed: a failed one restored the
         // held group in memory, and the disk still holds it.
         if (epoch != null) ids.persist()
-        val context = SubscriberAdmission.appContext
-        val account = ChannelEpochOffsets.boundAccount
-        if (epoch != null && context != null && account != null) {
+        val context = replayContext
+        val account = replayAccount
+        if (epoch != null) {
+            // F2: this Welcome can never be joined again on this device.
+            if (!JoinedPublisherWelcomes.record(context, account, channelIdHex, welcome)) {
+                android.util.Log.w("CoPublisher", "a joined publisher Welcome was not recorded")
+            }
+            DeletedPublisherGroupEpochs.clear(context, account, channelIdHex)
             ChannelSuspensions.clear(context, account, channelIdHex)
             HeldPublisherWelcomes.clear(context, account, channelIdHex)
         }
-        if (holdForLater && context != null && account != null) {
+        if (holdForLater) {
             if (!HeldPublisherWelcomes.hold(context, account, channelIdHex, welcome)) {
                 android.util.Log.w("CoPublisher", "a publisher Welcome for a held group was not kept")
             }

@@ -261,14 +261,157 @@ final class ChannelDeviceAdmissionTests: XCTestCase {
         func v(_ owner: Bool, _ leaf: Bool?, _ other: Bool?) -> V {
             ChannelDeviceAdmission.inactiveGroupVerdict(ownerDevice: owner, ownAccountHasLeaf: leaf, otherOwnDevices: other)
         }
-        XCTAssertEqual(v(true, true, nil), .undecided, "roster not loaded")
-        XCTAssertEqual(v(false, true, nil), .undecided)
+        XCTAssertEqual(v(true, nil, nil), .undecided, "roster not loaded")
+        XCTAssertEqual(v(false, false, nil), .undecided)
         XCTAssertEqual(v(true, nil, true), .waitForWelcome, "another owner device admits it")
         XCTAssertEqual(v(true, nil, false), .reader, "the account's only device takes the channel")
+        XCTAssertEqual(v(true, false, false), .reader)
         XCTAssertEqual(v(false, true, true), .waitForWelcome, "a co-publisher's device retired")
-        XCTAssertEqual(v(false, true, false), .removed)
         XCTAssertEqual(v(false, false, true), .removed, "the co-publisher account was removed")
         XCTAssertEqual(v(false, nil, true), .removed)
+    }
+
+    /// Security pass 2026-11-15 (F4) — a leaf of this account left in the
+    /// inactive group is another own device (this device's leaf is gone):
+    /// wait for its Welcome, whatever a stale DeviceGroup roster says.
+    func testAnOwnAccountLeafLeftInTheGroupMeansWaitNotReader() {
+        typealias V = ChannelDeviceAdmission.InactiveGroupVerdict
+        func v(_ owner: Bool, _ leaf: Bool?, _ other: Bool?) -> V {
+            ChannelDeviceAdmission.inactiveGroupVerdict(ownerDevice: owner, ownAccountHasLeaf: leaf, otherOwnDevices: other)
+        }
+        XCTAssertEqual(v(true, true, false), .waitForWelcome, "a stale roster showing only this device")
+        XCTAssertEqual(v(true, true, nil), .waitForWelcome, "the group alone says another device is there")
+        XCTAssertEqual(v(false, true, false), .waitForWelcome, "a co-publisher's account still publishes")
+        XCTAssertEqual(v(false, true, nil), .waitForWelcome)
+    }
+
+    /// F4 on the real core: B (same account) retired A; A's inactive group
+    /// still holds B's leaf, so A waits even when its roster shows only A.
+    func testAnInactiveGroupHoldingAnotherOwnLeafIsNotAReaderOnAStaleRoster() throws {
+        try withWalkDevices { ctx in
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            try ctx.retireA(held)
+            XCTAssertFalse(try held.isActive())
+            let account = try XCTUnwrap(ctx.a.accountPublicKey())
+            let ownLeafLeft = ChannelDeviceAdmission.leaves(held).contains { $0.account == account }
+            XCTAssertTrue(ownLeafLeft, "B's leaf is the account's")
+            XCTAssertEqual(ChannelDeviceAdmission.inactiveGroupVerdict(
+                ownerDevice: true, ownAccountHasLeaf: ownLeafLeft, otherOwnDevices: false), .waitForWelcome)
+        }
+    }
+
+    /// Security pass 2026-11-15 (F5) — New channel founds under a kept id
+    /// only when that create never finished here.
+    func testAKeptChannelIdIsReusedOnlyForAnUnfinishedCreate() {
+        XCTAssertTrue(PendingChannelHandleStore.keptIdUsable(listedHere: false, inRegister: false))
+        XCTAssertFalse(PendingChannelHandleStore.keptIdUsable(listedHere: true, inRegister: false))
+        XCTAssertFalse(PendingChannelHandleStore.keptIdUsable(listedHere: false, inRegister: true))
+    }
+
+    /// Security pass 2026-11-15 (F2) — a Welcome this device already joined
+    /// is refused when served again under reset suspicion; a new re-founded
+    /// group's Welcome is still taken.
+    func testAReplayedJoinedWelcomeIsRefusedUnderSuspicionAndANewOneIsTaken() throws {
+        try withWalkDevices { ctx in
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) {
+                $0.accountRole = ChannelAccountRole.owner
+                $0.resetSuspected = true
+            }
+            XCTAssertTrue(try held.isActive())
+            // B founds again and admits A: joined (W1).
+            let first = try PublisherGroup.create(identity: ctx.b, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let s1 = try first.stageCommit(identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try first.mergeStagedCommit(identity: ctx.b))
+            let w1 = try XCTUnwrap(s1.welcome)
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(w1), ctx.id)
+            XCTAssertTrue(ctx.store.hasJoinedWelcome(ChannelDeviceAdmission.welcomeReplayHash(w1), channelId: ctx.id))
+            // The group moves on; A applies it.
+            let a1 = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            let rotate = try first.stageCommit(identity: ctx.b, admit: [], retire: [], rotate: true)
+            XCTAssertTrue(try first.mergeStagedCommit(identity: ctx.b))
+            _ = try a1.processIncomingVerifyingRoles(identity: ctx.a, bytes: rotate.commit)
+            let epochNow = try a1.epoch()
+
+            // The DS raises suspicion again and serves W1 once more.
+            ctx.state.updateExtras(ctx.id) { $0.resetSuspected = true }
+            XCTAssertNil(ChannelDeviceAdmission.landWelcome(w1), "an already-joined Welcome is old")
+            XCTAssertNil(ctx.store.heldWelcomes()[ctx.id], "and not held either")
+            let still = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try still.epoch(), epochNow, "not rolled back")
+
+            // A genuinely new re-founding (W2) is taken.
+            let c = try Identity.fromSeedBound(
+                seed: Data(repeating: 0x5C, count: 32), accountSeed: ctx.accountSeed, issuedAtUnixSecs: 1_700_000_000)
+            let second = try PublisherGroup.create(identity: c, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let s2 = try second.stageCommit(identity: c, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try second.mergeStagedCommit(identity: c))
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(try XCTUnwrap(s2.welcome)), ctx.id)
+            let joined = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try joined.channelSeed(identity: ctx.a), try second.channelSeed(identity: c))
+
+            // Without the replay set the core joins W1 again (the KeyPackage
+            // is last-resort) and the device would be rolled back: the set is
+            // the guard.
+            let rejoined = ChannelDeviceAdmission.replaceHeldGroup(joined, identity: ctx.a) {
+                try publisherGroupJoinFromWelcome(
+                    identity: ctx.a, welcome: w1, groupId: try first.groupId(), channelId: self.channel,
+                    ownerAccountKey: try publisherOwnerAccountKey(ownerAccountSeed: ctx.accountSeed))
+            }
+            XCTAssertNotNil(rejoined)
+        }
+    }
+
+    /// Security pass 2026-11-15 (F3) — after the device deleted its inactive
+    /// group, a Welcome that joins at an epoch not above the deleted one is
+    /// undone; one above it is taken.
+    func testAfterDeletingAnInactiveGroupAWelcomeNotAboveItsEpochIsRefused() throws {
+        try withWalkDevices { ctx in
+            let ownerKey = try publisherOwnerAccountKey(ownerAccountSeed: ctx.accountSeed)
+            let held = try PublisherGroup.create(identity: ctx.a, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            for _ in 0..<3 {
+                _ = try held.stageCommit(identity: ctx.a, admit: [], retire: [], rotate: true)
+                XCTAssertTrue(try held.mergeStagedCommit(identity: ctx.a))
+            }
+            try ctx.retireA(held)
+            XCTAssertFalse(try held.isActive())
+            let deletedEpoch = try held.epoch()
+            ctx.state.addChannel(ChannelHandle(id: ctx.id, localName: "News", localDescription: "", addedAtMs: 1))
+            ctx.state.updateExtras(ctx.id) { $0.accountRole = ChannelAccountRole.owner }
+            XCTAssertTrue(ChannelDeviceAdmission.deleteInactiveGroup(identity: ctx.a, channelId: ctx.id))
+            XCTAssertEqual(ctx.store.deletedGroupEpoch(channelId: ctx.id), deletedEpoch)
+
+            // An old Welcome for the same group id at a low epoch.
+            let restored = try Identity.fromSeedBound(
+                seed: Data(repeating: 0x5B, count: 32), accountSeed: ctx.accountSeed, issuedAtUnixSecs: 1_700_000_000)
+            let other = try PublisherGroup.create(identity: restored, ownerAccountSeed: ctx.accountSeed, channelId: self.channel)
+            let old = try other.stageCommit(
+                identity: restored, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try other.mergeStagedCommit(identity: restored))
+            XCTAssertLessThanOrEqual(try other.epoch(), deletedEpoch)
+            XCTAssertNil(ChannelDeviceAdmission.landWelcome(try XCTUnwrap(old.welcome)))
+            XCTAssertNil(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id), "nothing joined")
+
+            // B admits A in the live group (above the deleted epoch): taken.
+            let bGroup = try ctx.bGroup()
+            let admit = try bGroup.stageCommit(
+                identity: ctx.b, admit: [try ctx.a.createKeyPackage()], retire: [], rotate: false)
+            XCTAssertTrue(try bGroup.mergeStagedCommit(identity: ctx.b))
+            XCTAssertGreaterThan(try bGroup.epoch(), deletedEpoch)
+            XCTAssertEqual(ChannelDeviceAdmission.landWelcome(try XCTUnwrap(admit.welcome)), ctx.id)
+            let joined = try XCTUnwrap(try CoPublisher.loadPublisherGroup(identity: ctx.a, channelIdHex: ctx.id))
+            XCTAssertEqual(try joined.epoch(), try bGroup.epoch())
+            _ = ownerKey
+        }
+    }
+
+    func testTheDeletedEpochFloorRule() {
+        XCTAssertTrue(ChannelDeviceAdmission.joinAboveDeletedEpoch(joined: 1, floor: nil, resetSuspected: false))
+        XCTAssertFalse(ChannelDeviceAdmission.joinAboveDeletedEpoch(joined: 5, floor: 5, resetSuspected: false))
+        XCTAssertTrue(ChannelDeviceAdmission.joinAboveDeletedEpoch(joined: 6, floor: 5, resetSuspected: false))
+        XCTAssertTrue(ChannelDeviceAdmission.joinAboveDeletedEpoch(joined: 1, floor: 5, resetSuspected: true),
+                      "a re-founded chain restarts low")
     }
 
     /// Replay guard — only a group this device can no longer use is replaced,

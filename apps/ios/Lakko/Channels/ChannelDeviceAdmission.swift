@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CryptoKit
 import Foundation
 import LakkoCore
 
@@ -179,7 +180,7 @@ enum ChannelDeviceAdmission {
         AcceptedContactsStore.boundAccountIdB64.map { ChannelDeviceAdmissionStore(accountIdB64: $0) }
     }
 
-    private static func leaves(_ group: PublisherGroup) -> [(leaf: Data, account: Data)] {
+    static func leaves(_ group: PublisherGroup) -> [(leaf: Data, account: Data)] {
         ((try? group.members()) ?? []).map {
             (leaf: $0.signaturePublicKey, account: $0.accountKey.isEmpty ? $0.signaturePublicKey : $0.accountKey)
         }
@@ -593,7 +594,12 @@ enum ChannelDeviceAdmission {
         // Welcome does not depend on the channel it is tried against.
         var founderRead = false
         var founder: FfiWelcomeFounder?
+        let welcomeHash = welcomeReplayHash(welcome)
         for channelId in welcomeTargets(state) {
+            // Security pass 2026-11-15 (F2) — a Welcome this device already
+            // joined for this channel is an old one served again (the
+            // KeyPackage is last-resort): never joined again, never held.
+            if store?.hasJoinedWelcome(welcomeHash, channelId: channelId) == true { continue }
             guard let channelBytes = ChannelsClient.hexToData(channelId) else { continue }
             let groupId: Data
             let ownerKey: Data
@@ -645,11 +651,23 @@ enum ChannelDeviceAdmission {
                 replaced = true
             } else {
                 replaced = false
-                joined = try? publisherGroupJoinFromWelcome(
-                    identity: identity, welcome: welcome, groupId: groupId, channelId: channelBytes,
-                    ownerAccountKey: ownerKey)
+                // Security pass 2026-11-15 (F3) — no group held here: a group
+                // this device deleted (before an entry, or after one that
+                // lost) left its epoch, and a join not above it is an old
+                // Welcome, unless a reset is suspected (a re-founded channel
+                // restarts low).
+                joined = joinWithoutHeldGroup(
+                    identity: identity,
+                    floor: store?.deletedGroupEpoch(channelId: channelId),
+                    resetSuspected: state.extras(channelId).resetSuspected == true
+                ) {
+                    try publisherGroupJoinFromWelcome(
+                        identity: identity, welcome: welcome, groupId: groupId, channelId: channelBytes,
+                        ownerAccountKey: ownerKey)
+                }
             }
             guard joined != nil else { continue }
+            store?.recordJoinedWelcome(welcomeHash, channelId: channelId)
             store?.dropHeldWelcomes(channelId: channelId)
             state.updateExtras(channelId) { $0.resetSuspected = nil }
             NSLog("ADR-0090: this device was admitted to a channel's publisher group")
@@ -750,6 +768,47 @@ enum ChannelDeviceAdmission {
         }
     }
 
+    /// Security pass 2026-11-15 (F2) — the replay-set key of a PublisherGroup
+    /// Welcome: SHA-256 of its bytes.
+    nonisolated static func welcomeReplayHash(_ welcome: Data) -> Data {
+        Data(SHA256.hash(data: welcome))
+    }
+
+    /// Security pass 2026-11-15 (F3) — whether a join with no held group is
+    /// kept: above the epoch of the group this device last deleted for the
+    /// channel, or anything under reset suspicion (a re-founded chain starts
+    /// low), or anything when no group was ever deleted here.
+    nonisolated static func joinAboveDeletedEpoch(joined: UInt64, floor: UInt64?, resetSuspected: Bool) -> Bool {
+        guard let floor, !resetSuspected else { return true }
+        return joined > floor
+    }
+
+    /// Run `join` with no group held; a joined group not kept by
+    /// ``joinAboveDeletedEpoch(joined:floor:resetSuspected:)`` is undone (the
+    /// provider is put back as it was before the join). `nil` when nothing
+    /// was joined.
+    static func joinWithoutHeldGroup(
+        identity: Identity, floor: UInt64?, resetSuspected: Bool, join: () throws -> PublisherGroup
+    ) -> PublisherGroup? {
+        guard floor != nil, !resetSuspected else { return try? join() }
+        guard let before = try? identity.snapshotStorage(), !before.isEmpty else { return nil }
+        do {
+            let joined = try join()
+            if joinAboveDeletedEpoch(joined: try joined.epoch(), floor: floor, resetSuspected: resetSuspected) {
+                return joined
+            }
+            NSLog("ADR-0090: a Welcome joined no higher than the group this device deleted; undone")
+        } catch {
+            return nil
+        }
+        do {
+            try identity.restoreStorage(snapshot: before)
+        } catch {
+            NSLog("ADR-0090: the provider could not be put back after an old Welcome")
+        }
+        return nil
+    }
+
     /// What a device does once the channel's PublisherGroup it holds is no
     /// longer active (a commit it applied removed its own leaf). The same
     /// verdict as web and Android `inactivePublisherGroupVerdict`.
@@ -779,12 +838,22 @@ enum ChannelDeviceAdmission {
     /// holds a leaf of this account, `nil` when unread. `otherOwnDevices`:
     /// whether the DeviceGroup roster names a device besides this one, `nil`
     /// when not loaded.
+    ///
+    /// Security pass 2026-11-15 (F4) — a leaf of this account still in the
+    /// inactive group is another device of the account (this device's own
+    /// leaf is gone): it waits for that device's Welcome whatever the
+    /// DeviceGroup roster says. For an owner device the removing commit came
+    /// from a device of its own account (the peer gate, C-90), and a roster
+    /// left stale by a re-founded DeviceGroup can show this device alone;
+    /// reading that as "the account's only device" would make it a reader
+    /// that takes the channel from a sibling that still publishes.
     nonisolated static func inactiveGroupVerdict(
         ownerDevice: Bool, ownAccountHasLeaf: Bool?, otherOwnDevices: Bool?
     ) -> InactiveGroupVerdict {
+        if ownAccountHasLeaf == true { return .waitForWelcome }
         guard let otherOwnDevices else { return .undecided }
         if ownerDevice { return otherOwnDevices ? .waitForWelcome : .reader }
-        return ownAccountHasLeaf == true && otherOwnDevices ? .waitForWelcome : .removed
+        return .removed
     }
 
     /// Whether the DeviceGroup roster names a device besides `selfLeaf`;
@@ -813,6 +882,11 @@ enum ChannelDeviceAdmission {
         guard let stored = (try? CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId)) ?? nil
         else { return true }
         guard (try? stored.isActive()) == false else { return false }
+        // Security pass 2026-11-15 (F3) — the floor a later Welcome must
+        // join above (``joinAboveDeletedEpoch(joined:floor:resetSuspected:)``).
+        if let epoch = try? stored.epoch() {
+            store?.recordDeletedGroupEpoch(epoch, channelId: channelId)
+        }
         do {
             try stored.delete(identity: identity)
             ChannelPublisherIdentity.shared.persist()
@@ -1121,7 +1195,17 @@ struct ChannelDeviceAdmissionStore {
         var queued: [String: [Queued]] = [:]
         /// Optional so a record written before it decodes.
         var heldWelcomes: [String: [HeldWelcome]]?
+        /// Security pass 2026-11-15 (F2) — SHA-256 (hex) of the PublisherGroup
+        /// Welcomes this device joined, per channel, newest last.
+        var joinedWelcomes: [String: [String]]?
+        /// Security pass 2026-11-15 (F3) — the epoch of the group this device
+        /// last deleted for a channel.
+        var deletedGroupEpochs: [String: UInt64]?
     }
+
+    /// Joined Welcome hashes kept per channel, oldest dropped first. Chosen,
+    /// not measured.
+    static let maxJoinedWelcomesPerChannel = 16
 
     /// Welcomes held per channel at most, oldest dropped first (the newest
     /// wins). Chosen, not measured.
@@ -1219,6 +1303,51 @@ struct ChannelDeviceAdmissionStore {
         var record = load()
         guard var all = record.heldWelcomes, all.removeValue(forKey: channelId.lowercased()) != nil else { return }
         record.heldWelcomes = all.isEmpty ? nil : all
+        save(record)
+    }
+
+    func hasJoinedWelcome(_ hash: Data, channelId: String) -> Bool {
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+        return load().joinedWelcomes?[channelId.lowercased()]?.contains(hex) == true
+    }
+
+    func recordJoinedWelcome(_ hash: Data, channelId: String) {
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+        var record = load()
+        var all = record.joinedWelcomes ?? [:]
+        var list = all[channelId.lowercased()] ?? []
+        guard !list.contains(hex) else { return }
+        list.append(hex)
+        if list.count > Self.maxJoinedWelcomesPerChannel {
+            list.removeFirst(list.count - Self.maxJoinedWelcomesPerChannel)
+        }
+        all[channelId.lowercased()] = list
+        record.joinedWelcomes = all
+        save(record)
+    }
+
+    func deletedGroupEpoch(channelId: String) -> UInt64? {
+        load().deletedGroupEpochs?[channelId.lowercased()]
+    }
+
+    func recordDeletedGroupEpoch(_ epoch: UInt64, channelId: String) {
+        var record = load()
+        var all = record.deletedGroupEpochs ?? [:]
+        guard all[channelId.lowercased()] != epoch else { return }
+        all[channelId.lowercased()] = epoch
+        record.deletedGroupEpochs = all
+        save(record)
+    }
+
+    /// The channel left this device: its replay guard goes with it.
+    func forgetReplayGuard(channelId: String) {
+        var record = load()
+        let id = channelId.lowercased()
+        let hadJoined = record.joinedWelcomes?.removeValue(forKey: id) != nil
+        let hadEpoch = record.deletedGroupEpochs?.removeValue(forKey: id) != nil
+        guard hadJoined || hadEpoch else { return }
+        if record.joinedWelcomes?.isEmpty == true { record.joinedWelcomes = nil }
+        if record.deletedGroupEpochs?.isEmpty == true { record.deletedGroupEpochs = nil }
         save(record)
     }
 

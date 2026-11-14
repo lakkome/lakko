@@ -1237,11 +1237,18 @@ export const ChannelPublisherLoops: Component = () => {
    */
   async function settleInactiveGroup(lineage: WasmIdentity, idHex: string, ownerDevice: boolean): Promise<boolean> {
     const ownHex = devHexOf(lineage.signaturePublicKey);
-    const state = await withPublisherGroup(lineage, idHex, async (g) => {
+    const state = await withPublisherGroup(lineage, idHex, async (g, device) => {
       notePublisherGroupMembers(idHex, g);
       if (g.isActive()) return null;
       try {
-        return { ownAccountHasLeaf: publisherLeaves(g).some((l) => l.accountKeyHex === ownHex) as boolean | null };
+        // F4: another leaf of the account (never this device's own) means
+        // another device of the account removed this one and can admit it.
+        const selfLeafHex = devHexOf(device.signaturePublicKey);
+        return {
+          ownAccountHasLeaf: publisherLeaves(g).some(
+            (l) => l.accountKeyHex === ownHex && l.leafKeyHex !== selfLeafHex,
+          ) as boolean | null,
+        };
       } catch {
         return { ownAccountHasLeaf: null };
       }

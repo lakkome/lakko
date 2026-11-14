@@ -99,6 +99,7 @@ import { deleteBackgroundPhotos } from "../calls/background-photos";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearClaimedHandles } from "../channels/claimed-handles";
+import { clearClaimedGroupHandles } from "../chat/claimed-group-handles";
 import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
 import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
@@ -221,6 +222,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // whether or not the channel log's IndexedDB delete did.
     { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
     { name: "channels-claimed-handles", run: () => clearClaimedHandles(accountIdB64) },
+    { name: "groups-claimed-handles", run: () => clearClaimedGroupHandles(accountIdB64) },
     // ADR-0074 section 3.5: which channels' owner key moved to the key of a
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },

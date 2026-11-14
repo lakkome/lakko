@@ -293,13 +293,20 @@ public enum class InactiveGroupVerdict {
  * (`null` when it could not be read; OpenMLS merges the removing commit's
  * tree before it marks the group inactive, so the roster is the one after
  * the removal). [otherOwnDevices]: whether the account's DeviceGroup roster
- * names a device besides this one (`null` when not loaded).
+ * names a device besides this one (`null` when not loaded). On an owner
+ * device a remaining leaf of the account counts as another own device too.
  */
 public fun inactivePublisherGroupVerdict(
     ownerDevice: Boolean,
     ownAccountHasLeaf: Boolean?,
     otherOwnDevices: Boolean?,
 ): InactiveGroupVerdict = when {
+    // Security pass F4 (2026-11-15) - an owner device's leaf is removed only
+    // by another device of the same account (peer gate C-90): a leaf of the
+    // owner account still in the group IS another own device, whatever this
+    // device's DeviceGroup roster (stale after a re-founded DeviceGroup, or
+    // not loaded) says. It waits for that device's Welcome.
+    ownerDevice && ownAccountHasLeaf == true -> InactiveGroupVerdict.WAIT_FOR_WELCOME
     otherOwnDevices == null -> InactiveGroupVerdict.UNDECIDED
     ownerDevice -> if (otherOwnDevices) InactiveGroupVerdict.WAIT_FOR_WELCOME else InactiveGroupVerdict.READER
     ownAccountHasLeaf == true && otherOwnDevices -> InactiveGroupVerdict.WAIT_FOR_WELCOME

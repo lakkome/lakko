@@ -23,6 +23,7 @@ import { claimOrReset } from "../ds/ownership";
 import { boundContactsAccount } from "../contacts/local-store";
 import { publisherDevice } from "./publisher-device";
 import { writeCurrentHead } from "./channel-vault-head";
+import { channelSubscriptionOf } from "./channel-subscription-register";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -172,7 +173,7 @@ export async function freshPublisherKeys(
   // founded. Both live in the DEVICE identity's provider.
   const publisher =
     joinedGroupId === undefined
-      ? await foundPublisherGroup(wasm, identity, channelId)
+      ? await foundOrReuseForNewChannel(wasm, identity, channelId)
       : wasm.PublisherGroup.loadJoined(device, joinedGroupId, channelId);
   if (publisher === undefined) {
     throw new Error("co-publisher: the joined PublisherGroup is not on this device");
@@ -567,6 +568,66 @@ export async function foundPublisherGroup(
     throw err;
   }
   return publisher;
+}
+
+/**
+ * New channel's PublisherGroup (2026-11-14). A New channel that failed after
+ * this device founded the group retries under the same kept channel id
+ * (`claimed-handles.ts`), and the group it founded is still in the device
+ * provider: founding again would refuse (the group exists). So the group this
+ * device holds for the id is reused, through {@link openHeldPublisherGroup},
+ * which claims the journal again when the first claim was never confirmed; a
+ * group that is no longer active is deleted and founded anew. A fresh channel
+ * id holds nothing, and the group is founded. Never founds a second group for
+ * one id.
+ *
+ * lakko-security F5 (2026-11-15): a group is reused or deleted only when its
+ * create never finished. A channel the account knows (`createFinished`: the
+ * account's channel-subscription register names it) is a live channel, maybe
+ * one another owner device removed this device from; founding under its id
+ * would reset its journal, so this refuses ({@link KeptChannelIdLiveError})
+ * and the caller takes a fresh id.
+ */
+export async function foundOrReuseForNewChannel(
+  wasm: Wasm,
+  lineage: WasmIdentity,
+  channelId: Uint8Array,
+  storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
+  owner: string | null = boundContactsAccount(),
+  createFinished: (channelIdHex: string) => boolean = (idHex) => channelSubscriptionOf(idHex) !== undefined,
+): Promise<InstanceType<Wasm["PublisherGroup"]>> {
+  const device = publisherDevice();
+  let held: InstanceType<Wasm["PublisherGroup"]> | undefined;
+  try {
+    held = wasm.PublisherGroup.load(device, lineage.ed25519Seed, channelId);
+  } catch (err) {
+    // Retired v1 state refuses here and cannot be repaired.
+    rethrowAsLegacyChannel(err);
+  }
+  if (held !== undefined && createFinished(bytesToHex(channelId))) {
+    held.free();
+    throw new KeptChannelIdLiveError();
+  }
+  if (held !== undefined) {
+    let active: boolean;
+    try {
+      active = held.isActive();
+      if (!active) held.deleteLocally(device);
+    } finally {
+      held.free();
+    }
+    if (active) return openHeldPublisherGroup(wasm, lineage, channelId, storage, owner);
+  }
+  return foundPublisherGroup(wasm, lineage, channelId, storage, owner);
+}
+
+/** F5: New channel was handed the id of a channel that exists (its create
+ *  finished); nothing is founded or deleted under it. */
+export class KeptChannelIdLiveError extends Error {
+  override name = "KeptChannelIdLiveError";
+  constructor() {
+    super("the kept channel id names a channel that exists");
+  }
 }
 
 /** 2026-11-13 (the trap rule): this device holds no PublisherGroup for the

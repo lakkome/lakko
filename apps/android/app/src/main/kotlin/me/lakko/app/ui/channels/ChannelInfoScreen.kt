@@ -714,9 +714,19 @@ private suspend fun saveChannelType(
     }
     // Section 4.1 — going private: "Everyone subscribed stays". The rows of
     // today are readers on this device's mark (the web type change), so the
-    // let-in pass never removes them for having no ticket.
+    // let-in pass never removes them for having no ticket. Security pass F1
+    // (2026-11-15): this switch, made here, is the one place rows are marked
+    // as readers and the first admission seed is minted when none is held.
     if (wasPublic && !public) {
-        me.lakko.app.channels.ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channel.id)
+        val account = state.boundAccount ?: throw IllegalStateException("no account bound")
+        me.lakko.app.channels.admissionSeedFor(
+            reason = me.lakko.app.channels.AdmissionSeedReason.GO_PRIVATE,
+            held = { me.lakko.app.channels.ChannelAdmissionKeys.current(context, account, channel.id) },
+            mint = { me.lakko.app.channels.ChannelAdmissionKeys.currentOrMint(context, account, channel.id) },
+            markRowsAsReaders = {
+                me.lakko.app.channels.ChannelSubscriberRows.markCurrentRowsAsReaders(context, state, client, channel.id)
+            },
+        )?.second?.fill(0)
     }
     val signed = publisher.withIdentity(persist = false) { identity ->
         ChannelDiscovery.writeHandle(
